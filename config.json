@@ -1,0 +1,156 @@
+{
+  "unet": {
+    "input_channels": 1,
+    "output_channels": 10,
+    "image_size": 64,
+    "num_stages": 4,
+    "base_filters": 64,
+    "blocks_per_stage": 2,
+    "bottleneck_depth": 3,
+    "kernel_size": 3,
+    "dropout_rate": 0.1,
+    "use_batch_norm": true,
+    "activation": "relu",
+    "pooling_type": "max",
+    "upsampling_type": "transpose",
+    "learning_rate": 0.0001,
+    "optimizer_type": "adam",
+    "weight_decay": 0.01,
+    "task": "classification",
+    "use_skip_connections": true
+  },
+  "model": {
+    "type": "UNet",
+    "architecture": "UNet",
+    "embed_dim": 256,
+    "num_layers": 72,
+    "num_heads": 72,
+    "latent_dim": 24,
+    "num_transformer_layers": 8,
+    "num_attention_heads": 4
+  },
+  "vae": {
+    "input_dim": 784,
+    "latent_dim": 512,
+    "encoder_layers": [512, 256],
+    "decoder_layers": [256, 512],
+    "kl_weight": 1.0,
+    "reconstruction_weight": 1.0,
+    "activation": "relu",
+    "dropout_rate": 0.1,
+    "use_batch_norm": true,
+    "use_beta_vae": false,
+    "beta": 1.0,
+    "learning_rate": 0.00005
+  },
+  "llm": {
+    "vocab_size": 100000,
+    "embed_dim": 768,
+    "num_layers": 120,
+    "num_heads": 12,
+    "ffn_dim": 3072,
+    "max_seq_len": 2048,
+    "use_causal_mask": true,
+    "use_rotary_embeddings": true,
+    "attention_dropout": 0.1,
+    "dropout_rate": 0.1,
+    "learning_rate": 0.0003,
+    "temperature": 1.0,
+    "top_p": 0.9,
+    "top_k": 50
+  },
+  "tokenizer": {
+    "type": "BPE",
+    "max_vocab": 100000,
+    "max_sequence_length": 120,
+    "sequence_length": 80,
+    "num_bpe_merges": 0,
+    "special_tokens": [
+      "<PAD>",
+      "<UNK>",
+      "<SEQ>",
+      "<MOD>",
+      "<MAG>",
+      "<NL>"
+    ]
+  },
+  "encoder": {
+    "embedding_dim": 256,
+    "use_positional_encoding": true,
+    "use_special_embeddings": true
+  },
+  "training": {
+    "num_epochs": 100,
+    "learning_rate": 4e-004,
+    "batch_size": 16,
+    "optimizer": "adamW",
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-8,
+    "weight_decay": 0.5,
+    "gradient_clip": 0.4,
+    "warmup_steps": 4000,
+    "lr_decay": {
+      "enabled": true,
+      "strategy": "linear",
+      "min_lr_ratio": 8e-004, 
+      "decay_rate": 6e-1,
+      "decay_steps": 1000
+    }
+  },
+  "dataset": {
+    "dir": "/media/brito/c1e344d3-6474-4b22-9e5a-f0879975fec0/Datasets/flowers102",
+    "text_subdir": "text",
+    "image_subdir": "image",
+    "sound_subdir": "sound",
+    "cache_enabled": true,
+    "lazy_loading": true,
+    "augmentation_ratio": 0.4
+  },
+  "optimization": {
+    "ram_optimized": true,
+    "max_ram_target_gb": 10,
+    "enable_compression": true,
+    "enable_async_preload": true,
+    "enable_prediction": true,
+    "worker_threads": 2,
+    "preload_queue_size": 128,
+    "use_opencl": true,
+    "opencl_platform": 0,
+    "opencl_device": 0,
+    "weight_precision": "uint16",
+    "use_mixed_precision": true
+  },
+  "checkpoints": {
+    "dir": "checkpoints",
+    "save_interval": 10,
+    "max_checkpoints": 5,
+    "save_optimizer_state": true,
+    "save_on_improvement": true,
+    "format": "safetensors"
+  },
+  "inference": {
+    "inference_only": false,
+    "seed": 42
+  },
+  "logging": {
+    "verbose": true,
+    "show_htop_display": true,
+    "log_interval": 100,
+    "save_metrics": true
+  },
+  "visualization": {
+    "enabled": true,
+    "window_width": 1280,
+    "window_height": 720,
+    "window_title": "Model Training",
+    "fps_limit": 120,
+    "show_generated_images": false,
+    "show_training_progress": true,
+    "show_loss_graph": true,
+    "graph_history_size": 2000,
+    "image_grid_cols": 3,
+    "image_grid_rows": 1,
+    "update_interval_ms": 100
+  }
+}

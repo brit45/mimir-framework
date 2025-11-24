@@ -1,0 +1,70 @@
+# ============================================================================
+# Mímir Framework - Git Attributes Configuration
+# ============================================================================
+
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Source code
+*.cpp text diff=cpp
+*.hpp text diff=cpp
+*.h text diff=cpp
+*.c text diff=c
+
+# Scripts
+*.lua text
+*.sh text eol=lf
+*.bash text eol=lf
+*.zsh text eol=lf
+*.py text
+
+# Documentation
+*.md text
+*.txt text
+*.rst text
+
+# Configuration
+*.json text
+*.yaml text
+*.yml text
+*.toml text
+*.ini text
+Makefile text
+
+# Archives (binary)
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.rar binary
+
+# Images (binary)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pgm binary
+*.ppm binary
+*.bmp binary
+
+# Models and datasets (binary)
+*.safetensors binary
+*.h5 binary
+*.hdf5 binary
+*.ckpt binary
+*.pth binary
+*.pt binary
+
+# Compiled binaries
+*.o binary
+*.so binary
+*.a binary
+*.dylib binary
+*.exe binary
+
+# Linguist overrides for GitHub
+*.lua linguist-language=Lua
+*.hpp linguist-language=C++
+docs/*.md linguist-documentation
+scripts/*.lua linguist-vendored=false

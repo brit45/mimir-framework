@@ -1,0 +1,171 @@
+# ============================================================================
+# Mímir Framework - Git Ignore Configuration
+# ============================================================================
+
+# Binaires compilés
+bin/
+*.o
+*.out
+*.exe
+*.so
+*.dylib
+*.a
+
+# Dossiers de build
+build/
+dist/
+
+# Datasets et données
+datasets/
+datasets.old/
+datasets*/
+data/
+*.h5
+*.hdf5
+*.safetensors
+
+# Checkpoints et modèles sauvegardés
+checkpoints/
+checkpoint_*/
+epoch_*/
+*.ckpt
+*.pth
+*.pt
+
+# Outils et environnements virtuels
+tools/
+venv/
+env/
+.venv/
+*.egg-info/
+
+# IDEs et éditeurs
+# VSCode
+.vscode/
+*.code-workspace
+
+# JetBrains (CLion, PyCharm, IntelliJ)
+.idea/
+*.iml
+*.iws
+*.ipr
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.suo
+*.user
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.sw?
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Eclipse
+.project
+.cproject
+.settings/
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+
+# Compilation intermédiaire
+*.d
+*.gch
+*.pch
+
+# Fichiers temporaires
+*.tmp
+*.temp
+*.log
+*.bak
+*.cache
+
+# Fichiers de sortie
+output_*.avi
+generated_*.pgm
+model_epoch_*.txt
+génération.txt
+
+# Core dumps
+core
+core.*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+
+# Python (si utilisé pour des scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+
+# Documentation générée
+docs/output/
+*.pdf
+
+# Archives
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z
+
+# Images générées pendant l'entraînement
+*.pgm
+*.ppm
+*.bmp
+generated_*
+output_*
+
+# Fichiers de configuration locaux
+config_local.json
+.env
+.env.local
+
+# Fichiers de backup
+*.backup
+*~
+
+# Tags et index
+tags
+TAGS
+.tags
+.ctags
+
+# ccls (language server)
+.ccls-cache/
+
+# clangd (language server)
+.clangd/
+compile_commands.json
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile.cmake
+
+# Valgrind
+*.valgrind
+vgcore.*
