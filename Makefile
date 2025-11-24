@@ -7,13 +7,13 @@ FLAGS= -ffp-contract=fast \
 	-fno-trapping-math \
 	-fno-math-errno \
 
-all: bin/unet
+all: bin/mimir
 
-bin/unet: src/*.cpp src/*.hpp src/LuaScripting.cpp src/LuaScripting.hpp
-	@echo "🏗️  Compilation de UNet avec optimisations SIMD AVX2..."
-	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp src/Encoder.cpp src/main.cpp src/Model.cpp src/Sha256.cpp src/stb_image_impl.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp src/LuaScripting.cpp -I./src -I/usr/include/lua5.3 -o bin/unet -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llua5.3 -fopenmp $(FLAGS)
-	@echo "✓ UNet compilé avec SIMD: bin/unet"
-	@ls -lh bin/unet | awk '{print "  Taille:", $$5}'
+bin/mimir: src/*.cpp src/*.hpp src/Models/*.cpp src/Models/*.hpp src/LuaScripting.cpp src/LuaScripting.hpp
+	@echo "🏗️  Compilation de Mímir Framework avec optimisations SIMD AVX2..."
+	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp src/Encoder.cpp src/main.cpp src/Model.cpp src/Sha256.cpp src/stb_image_impl.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp src/LuaScripting.cpp src/Models/UNet.cpp -I./src -I/usr/include/lua5.3 -o bin/mimir -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llua5.3 -fopenmp $(FLAGS)
+	@echo "✓ Mímir Framework compilé avec SIMD: bin/mimir"
+	@ls -lh bin/mimir | awk '{print "  Taille:", $$5}'
 
 
 
@@ -24,7 +24,7 @@ mk-video:
 
 clean:
 	@echo "🧹 Nettoyage des fichiers de compilation..."
-	@rm -f bin/unet
+	@rm -f bin/mimir
 	@rm -f bin/train_conditional_vae
 	@rm -f bin/test_ram_manager
 	@rm -f bin/test_advanced_ram

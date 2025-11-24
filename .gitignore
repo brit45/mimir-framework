@@ -10,6 +10,7 @@ bin/
 *.so
 *.dylib
 *.a
+dataset_cache.json
 
 # Dossiers de build
 build/
