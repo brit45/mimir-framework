@@ -1,4 +1,5 @@
 #include "tensors.hpp"
+#include "DynamicTensorAllocator.hpp"
 #include "include/json.hpp"
 
 #include <cstring>
@@ -11,6 +12,61 @@
 #include <algorithm>
 
 using json = nlohmann::json;
+
+// ============================================================================
+// Implémentations tensor avec allocation dynamique
+// ============================================================================
+
+tensor::tensor(size_t size, bool dynamic) : use_dynamic_alloc(dynamic) {
+    if (dynamic) {
+        auto& allocator = DynamicTensorAllocator::instance();
+        dynamic_handle = allocator.allocateTensor(size, "tensor_data");
+    } else {
+        data.resize(size, 0.0f);
+    }
+}
+
+tensor::~tensor() {
+    if (use_dynamic_alloc && dynamic_handle) {
+        auto& allocator = DynamicTensorAllocator::instance();
+        allocator.freeTensor(
+            static_cast<DynamicTensorAllocator::TensorHandle*>(dynamic_handle));
+        dynamic_handle = nullptr;
+    }
+}
+
+float* tensor::getData() {
+    if (use_dynamic_alloc && dynamic_handle) {
+        auto& allocator = DynamicTensorAllocator::instance();
+        return allocator.getTensorData(
+            static_cast<DynamicTensorAllocator::TensorHandle*>(dynamic_handle));
+    }
+    return data.data();
+}
+
+const float* tensor::getData() const {
+    if (use_dynamic_alloc && dynamic_handle) {
+        auto& allocator = DynamicTensorAllocator::instance();
+        return allocator.getTensorData(
+            static_cast<DynamicTensorAllocator::TensorHandle*>(
+                const_cast<void*>(dynamic_handle)));
+    }
+    return data.data();
+}
+
+size_t tensor::getSize() const {
+    if (use_dynamic_alloc && dynamic_handle) {
+        auto handle = static_cast<DynamicTensorAllocator::TensorHandle*>(
+            const_cast<void*>(dynamic_handle));
+        return handle->size;
+    }
+    return data.size();
+}
+
+// ============================================================================
+// TensorSystem (OpenCL)
+// ============================================================================
+
 
 const char *TensorSystem::weightKernelSource = R"CLC(
 // Approximation rapide de tanh (Padé, 2× plus rapide que tanh natif)
@@ -254,6 +310,7 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
         std::vector<unsigned short> len(n);
         std::vector<unsigned short> out(n);
 
+        #pragma omp parallel for if(n > 2048) schedule(static)
         for (size_t i = 0; i < n; ++i) {
             pos[i].x = tensors[i].Pos.X;
             pos[i].y = tensors[i].Pos.Y;
@@ -304,7 +361,8 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
             return false;
         }
 
-        // copy back
+        // copy back avec OpenMP
+        #pragma omp parallel for if(n > 1024)
         for (size_t i = 0; i < n; ++i) tensors[i].Weight = static_cast<uint16_t>(out[i]);
 
         clReleaseMemObject(posBuf);
@@ -315,7 +373,8 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
         return true;
     }
 
-    // CPU fallback: même math optimisée
+    // CPU fallback: même math optimisée avec OpenMP
+    #pragma omp parallel for schedule(dynamic, 256) if(n > 512)
     for (size_t i = 0; i < n; ++i) {
         const tensor &t = tensors[i];
         

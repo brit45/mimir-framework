@@ -8,9 +8,13 @@ extern "C" {
 #include <string>
 #include <memory>
 #include "Model.hpp"
+#include "Models/ModelArchitectures.hpp"
 #include "Tokenizer.hpp"
 #include "Encoder.hpp"
 #include "include/json.hpp"
+
+// Forward declarations
+class AsyncMonitor;
 
 using json = nlohmann::json;
 
@@ -49,24 +53,121 @@ public:
 private:
     lua_State* L;
     
-    // Fonctions C++ appelables depuis Lua
+    // === Model API ===
     static int lua_createModel(lua_State* L);
     static int lua_buildModel(lua_State* L);
     static int lua_trainModel(lua_State* L);
     static int lua_inferModel(lua_State* L);
     static int lua_saveModel(lua_State* L);
     static int lua_loadModel(lua_State* L);
+    static int lua_allocateParams(lua_State* L);
+    static int lua_initWeights(lua_State* L);
+    static int lua_totalParams(lua_State* L);
+    static int lua_pushLayer(lua_State* L);
+    static int lua_forwardPass(lua_State* L);
+    static int lua_backwardPass(lua_State* L);
+    static int lua_optimizerStep(lua_State* L);
+    static int lua_setHardwareAccel(lua_State* L);
+    static int lua_getHardwareCaps(lua_State* L);
     
-    // Tokenizer
+    // === ModelArchitectures API ===
+    static int lua_buildUNet(lua_State* L);
+    static int lua_buildVAE(lua_State* L);
+    static int lua_buildViT(lua_State* L);
+    static int lua_buildGAN(lua_State* L);
+    static int lua_buildDiffusion(lua_State* L);
+    static int lua_buildTransformer(lua_State* L);
+    static int lua_buildResNet(lua_State* L);
+    static int lua_buildMobileNet(lua_State* L);
+    
+    // === Layer Operations API ===
+    static int lua_computeConv2D(lua_State* L);
+    static int lua_computeLinear(lua_State* L);
+    static int lua_computeMaxPool2D(lua_State* L);
+    static int lua_computeAvgPool2D(lua_State* L);
+    static int lua_computeActivation(lua_State* L);
+    static int lua_computeBatchNorm(lua_State* L);
+    static int lua_computeLayerNorm(lua_State* L);
+    static int lua_computeAttention(lua_State* L);
+    
+    // === HtopDisplay API ===
+    static int lua_htopCreate(lua_State* L);
+    static int lua_htopUpdate(lua_State* L);
+    static int lua_htopRender(lua_State* L);
+    static int lua_htopClear(lua_State* L);
+    static int lua_htopEnable(lua_State* L);
+    
+    // === Visualizer API ===
+    static int lua_vizCreate(lua_State* L);
+    static int lua_vizInitialize(lua_State* L);
+    static int lua_vizIsOpen(lua_State* L);
+    static int lua_vizProcessEvents(lua_State* L);
+    static int lua_vizUpdate(lua_State* L);
+    static int lua_vizAddImage(lua_State* L);
+    static int lua_vizUpdateMetrics(lua_State* L);
+    static int lua_vizAddLossPoint(lua_State* L);
+    static int lua_vizClear(lua_State* L);
+    static int lua_vizSetEnabled(lua_State* L);
+    static int lua_vizSaveLossHistory(lua_State* L);
+    
+    // === Tokenizer API ===
     static int lua_createTokenizer(lua_State* L);
     static int lua_tokenize(lua_State* L);
     static int lua_detokenize(lua_State* L);
+    static int lua_getVocabSize(lua_State* L);
+    static int lua_saveTokenizer(lua_State* L);
+    static int lua_loadTokenizer(lua_State* L);
     
-    // Dataset
+    // Manipulation vocabulaire
+    static int lua_addToken(lua_State* L);
+    static int lua_ensureVocabFromText(lua_State* L);
+    
+    // === Memory Manager API ===
+    static int lua_memoryConfig(lua_State* L);
+    static int lua_memoryGetStats(lua_State* L);
+    static int lua_memoryPrintStats(lua_State* L);
+    static int lua_memoryClear(lua_State* L);
+    static int lua_memoryGetUsage(lua_State* L);
+    static int lua_memorySetLimit(lua_State* L);
+    
+    // === Dynamic Allocator API ===
+    static int lua_allocatorConfigure(lua_State* L);
+    static int lua_allocatorPrintStats(lua_State* L);
+    static int lua_allocatorGetStats(lua_State* L);
+    
+    // === Memory Guard API (strict enforcement) ===
+    static int lua_guardSetLimit(lua_State* L);
+    static int lua_guardGetStats(lua_State* L);
+    static int lua_guardPrintStats(lua_State* L);
+    static int lua_guardReset(lua_State* L);
+    static int lua_tokenizeEnsure(lua_State* L);
+    
+    // Tokens spéciaux
+    static int lua_getPadId(lua_State* L);
+    static int lua_getUnkId(lua_State* L);
+    static int lua_getSeqId(lua_State* L);
+    static int lua_getModId(lua_State* L);
+    static int lua_getMagId(lua_State* L);
+    static int lua_getTokenById(lua_State* L);
+    
+    // BPE
+    static int lua_learnBPEFromCorpus(lua_State* L);
+    static int lua_tokenizeBPE(lua_State* L);
+    static int lua_setMaxSequenceLength(lua_State* L);
+    static int lua_padSequence(lua_State* L);
+    static int lua_batchTokenize(lua_State* L);
+    
+    // Statistiques et analyse
+    static int lua_printVocabStats(lua_State* L);
+    static int lua_getTokenFrequencies(lua_State* L);
+    static int lua_analyzeText(lua_State* L);
+    static int lua_extractKeywords(lua_State* L);
+    
+    // === Dataset API ===
     static int lua_loadDataset(lua_State* L);
     static int lua_prepareSequences(lua_State* L);
     
-    // Utilitaires
+    // === Utilitaires ===
     static int lua_print(lua_State* L);
     static int lua_log(lua_State* L);
     static int lua_readJSON(lua_State* L);
@@ -91,14 +192,21 @@ public:
     std::shared_ptr<Model> currentModel;
     std::shared_ptr<Tokenizer> currentTokenizer;
     std::shared_ptr<Encoder> currentEncoder;
+    
+    // AsyncMonitor pour htop et viz
+    std::shared_ptr<AsyncMonitor> asyncMonitor;
     std::vector<std::vector<int>> currentSequences;
     json currentConfig;
+    
+    // Configuration du modèle
+    std::string modelType;
+    json modelConfig;
     
     // Logs
     std::vector<std::string> logs;
     void addLog(const std::string& msg) {
         logs.push_back(msg);
-        std::cout << "[LUA] " << msg << std::endl;
+        std::cout << msg << std::endl;
     }
     
 private:

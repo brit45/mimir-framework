@@ -10,6 +10,7 @@
 #include "Tokenizer.hpp"
 #include "Encoder.hpp"
 #include "Autograd.hpp"   // Pour la structure Gradients
+#include "HardwareOpt.hpp" // Optimisations hardware avancées
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -134,7 +135,16 @@ public:
 
     size_t totalParamCount() const;
     void allocateParams();
+    void initializeWeights(const std::string &method = "xavier", unsigned int seed = 0);
+    void updateWeightsWithNoise(float learning_rate, float noise_std = 0.01f);
     void forward(std::vector<uint8_t> &) const;
+    
+    // Nouveau forward/backward pass complet
+    std::vector<float> forwardPass(const std::vector<float> &input, bool training = true);
+    Gradients backwardPass(const std::vector<float> &loss_gradient);
+    float computeLoss(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
+    std::vector<float> computeLossGradient(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
+    
     void push(const std::string &name, const std::string &type, size_t params_count);
     void setOutputTarget(const std::vector<uint8_t> &target);
     void applyParamUpdate(float learning_rate);
@@ -163,6 +173,14 @@ public:
     bool saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch);
     bool packToSafetensor(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors) const;
     bool tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, Encoder &outEnc, std::vector<MagicToken> &outMagic);
+    
+    // Nouvelles méthodes pour sauvegarder/charger la structure complète
+    bool saveLayersStructure(const fs::path &filepath) const;
+    bool loadLayersStructure(const fs::path &filepath);
+    bool saveEmbeddings(const fs::path &filepath) const;
+    bool loadEmbeddings(const fs::path &filepath);
+    bool saveParamsData(const fs::path &filepath) const;
+    bool loadParamsData(const fs::path &filepath);
 
     // ============================= 
     //           Helpers
@@ -175,6 +193,86 @@ public:
     }
 
     static inline float sigmoidf(float v) { return 1.0f / (1.0f + std::exp(-v)); }
+    
+    // =============================
+    // Hardware Acceleration
+    // =============================
+    
+    // Détection des capacités CPU au runtime
+    static bool hasAVX2();
+    static bool hasFMA();
+    static bool hasF16C();
+    static bool hasBMI2();
+    
+    bool hasVulkanCompute() const;
+    bool initializeComputeEngine();
+    void shutdownComputeEngine();
+    
+    // =============================
+    // Layer Operations (Hardware/Software Dispatch)
+    // =============================
+    
+    // Structure pour paramètres de layer
+    struct LayerParams {
+        std::vector<float> weights;
+        std::vector<float> bias;
+        int in_features = 0;
+        int out_features = 0;
+        int kernel_size = 3;
+        int stride = 1;
+        int padding = 0;
+        int dilation = 1;
+        int groups = 1;
+        bool use_hardware = true;  // Dynamic dispatch
+    };
+    
+    // Convolution 2D avec dispatch hardware/software
+    static void computeConv2D(const std::vector<float>& input, std::vector<float>& output,
+                             const LayerParams& params, int in_h, int in_w, int in_c, int out_c,
+                             bool use_hardware = true);
+    
+    // Linear/Dense avec dispatch
+    static void computeLinear(const std::vector<float>& input, std::vector<float>& output,
+                             const LayerParams& params, bool use_hardware = true);
+    
+    // Pooling avec dispatch
+    static void computeMaxPool2D(const std::vector<float>& input, std::vector<float>& output,
+                                int in_h, int in_w, int channels, int kernel_size, int stride,
+                                bool use_hardware = true);
+    
+    static void computeAvgPool2D(const std::vector<float>& input, std::vector<float>& output,
+                                int in_h, int in_w, int channels, int kernel_size, int stride,
+                                bool use_hardware = true);
+    
+    // Activation avec dispatch
+    static void computeActivation(std::vector<float>& data, const std::string& activation_type,
+                                 float param = 0.0f, bool use_hardware = true);
+    
+    // Batch Normalization avec dispatch
+    static void computeBatchNorm(std::vector<float>& data, const std::vector<float>& gamma,
+                                const std::vector<float>& beta, const std::vector<float>& running_mean,
+                                const std::vector<float>& running_var, int batch_size, int channels,
+                                int spatial_size, float eps = 1e-5f, bool training = false,
+                                bool use_hardware = true);
+    
+    // Layer Normalization avec dispatch
+    static void computeLayerNorm(std::vector<float>& data, const std::vector<float>& gamma,
+                                const std::vector<float>& beta, int normalized_size,
+                                float eps = 1e-5f, bool use_hardware = true);
+    
+    // Transpose Convolution avec dispatch
+    static void computeConvTranspose2D(const std::vector<float>& input, std::vector<float>& output,
+                                      const LayerParams& params, int in_h, int in_w, int in_c, int out_c,
+                                      bool use_hardware = true);
+    
+    // Attention mechanism (pour transformers)
+    static void computeAttention(const std::vector<float>& query, const std::vector<float>& key,
+                                const std::vector<float>& value, std::vector<float>& output,
+                                int seq_len, int d_model, int num_heads, bool use_hardware = true);
+    
+    // Configuration globale hardware
+    static inline bool global_use_hardware = true;
+    static void setHardwareAcceleration(bool enable) { global_use_hardware = enable; }
 
     static void conv2d_same(const std::vector<float> &in, std::vector<float> &out, int W, int H, const std::vector<float> &kernel, int ksize);
 
@@ -260,6 +358,29 @@ public:
 
     std::vector<tensor> params;
 
+    void setName(std::string name) {
+
+        model_name = name;
+    }
+    
+    // Activations du forward pass (pour le backward)
+    struct ForwardState {
+        std::vector<std::vector<float>> layer_inputs;
+        std::vector<std::vector<float>> layer_outputs;
+        std::vector<std::vector<float>> activations;
+        std::vector<float> final_output;
+        bool is_valid = false;
+        
+        void clear() {
+            layer_inputs.clear();
+            layer_outputs.clear();
+            activations.clear();
+            final_output.clear();
+            is_valid = false;
+        }
+    };
+    ForwardState forward_state;
+
 protected:
     std::vector<LayerDesc> layers;
     int tw = 64, th = 64;
@@ -269,4 +390,5 @@ protected:
     bool hasEncoder = false;
     std::vector<float> lastEncoding;
     double densityFactor = 1.0;
+    std::string model_name;
 };

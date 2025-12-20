@@ -5,54 +5,16 @@
 #include <cstddef>
 #include <cstring>
 #include <algorithm>
+#include "HardwareOpt.hpp"  // Optimisations hardware avancées
 
 namespace SIMD {
 
-// Matrix multiplication optimisée AVX2: C = A @ B
+// Matrix multiplication optimisée avec FMA SATURÉ (utilise HardwareOpt)
 // A: [M x K], B: [K x N], C: [M x N]
 inline void matmul_avx2(float* C, const float* A, const float* B, 
                         size_t M, size_t N, size_t K) {
-    // Zéro init
-    std::memset(C, 0, M * N * sizeof(float));
-    
-    #pragma omp parallel for collapse(2) schedule(dynamic)
-    for (size_t i = 0; i < M; ++i) {
-        for (size_t j = 0; j < N; j += 8) {  // Process 8 floats at once with AVX2
-            // Vérifier qu'on ne dépasse pas
-            size_t limit = std::min(j + 8, N);
-            size_t remaining = limit - j;
-            
-            __m256 sum = _mm256_setzero_ps();
-            
-            for (size_t k = 0; k < K; ++k) {
-                __m256 a_vec = _mm256_set1_ps(A[i * K + k]);
-                
-                if (remaining == 8) {
-                    __m256 b_vec = _mm256_loadu_ps(&B[k * N + j]);
-                    sum = _mm256_fmadd_ps(a_vec, b_vec, sum);
-                } else {
-                    // Traiter les éléments restants
-                    float b_vals[8] = {0};
-                    for (size_t r = 0; r < remaining; ++r) {
-                        b_vals[r] = B[k * N + j + r];
-                    }
-                    __m256 b_vec = _mm256_loadu_ps(b_vals);
-                    sum = _mm256_fmadd_ps(a_vec, b_vec, sum);
-                }
-            }
-            
-            // Store result
-            if (remaining == 8) {
-                _mm256_storeu_ps(&C[i * N + j], sum);
-            } else {
-                float result[8];
-                _mm256_storeu_ps(result, sum);
-                for (size_t r = 0; r < remaining; ++r) {
-                    C[i * N + j + r] = result[r];
-                }
-            }
-        }
-    }
+    // Utiliser la version FMA saturée pour meilleures performances
+    HardwareOpt::matmul_fma_saturated(C, A, B, M, N, K);
 }
 
 // Matrix transpose multiplication optimisée: C = A @ B^T
@@ -96,7 +58,7 @@ inline void matmul_transpose_avx2(float* C, const float* A, const float* B,
 
 // Element-wise operations avec AVX2
 inline void add_vectors_avx2(float* C, const float* A, const float* B, size_t N) {
-    #pragma omp parallel for
+    #pragma omp parallel for if(N > 2048) schedule(static)
     for (size_t i = 0; i < N; i += 8) {
         if (i + 8 <= N) {
             __m256 a = _mm256_loadu_ps(&A[i]);
@@ -113,7 +75,7 @@ inline void add_vectors_avx2(float* C, const float* A, const float* B, size_t N)
 }
 
 inline void mul_vectors_avx2(float* C, const float* A, const float* B, size_t N) {
-    #pragma omp parallel for
+    #pragma omp parallel for if(N > 2048) schedule(static)
     for (size_t i = 0; i < N; i += 8) {
         if (i + 8 <= N) {
             __m256 a = _mm256_loadu_ps(&A[i]);
@@ -133,7 +95,7 @@ inline void gelu_forward_avx2(float* out, const float* in, size_t N) {
     const float c1 = 0.7978845608f;  // sqrt(2/pi)
     const float c2 = 0.044715f;
     
-    #pragma omp parallel for
+    #pragma omp parallel for if(N > 1024) schedule(static)
     for (size_t i = 0; i < N; i += 8) {
         if (i + 8 <= N) {
             __m256 x = _mm256_loadu_ps(&in[i]);
@@ -180,15 +142,16 @@ inline void gelu_forward_avx2(float* out, const float* in, size_t N) {
 
 // Softmax avec AVX2
 inline void softmax_avx2(float* out, const float* in, size_t N) {
-    // Find max for numerical stability
+    // Find max for numerical stability avec OpenMP reduction
     float max_val = in[0];
+    #pragma omp parallel for reduction(max:max_val) if(N > 512)
     for (size_t i = 1; i < N; ++i) {
-        max_val = std::max(max_val, in[i]);
+        if (in[i] > max_val) max_val = in[i];
     }
     
     // Compute exp(x - max)
     float sum = 0.0f;
-    #pragma omp parallel for reduction(+:sum)
+    #pragma omp parallel for reduction(+:sum) if(N > 512)
     for (size_t i = 0; i < N; ++i) {
         out[i] = std::exp(in[i] - max_val);
         sum += out[i];
@@ -196,7 +159,7 @@ inline void softmax_avx2(float* out, const float* in, size_t N) {
     
     // Normalize
     float inv_sum = 1.0f / sum;
-    #pragma omp parallel for
+    #pragma omp parallel for if(N > 1024) schedule(static)
     for (size_t i = 0; i < N; i += 8) {
         if (i + 8 <= N) {
             __m256 vals = _mm256_loadu_ps(&out[i]);

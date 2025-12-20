@@ -2,6 +2,7 @@
 #include <random>
 #include <algorithm>
 #include <cstring>
+#include <omp.h>
 
 Encoder::Encoder(int d, int Size_Vo)
     : dim(d), vocab_size(0)
@@ -18,7 +19,10 @@ void Encoder::initRandom(uint64_t seed)
     std::mt19937 rng(static_cast<uint32_t>(seed ^ 0x9e3779b9u));
     std::uniform_real_distribution<float> dist(-0.02f, 0.02f);
     if (vocab_size == 0) return;
-    for (size_t i = 0; i < token_embeddings.size(); ++i) token_embeddings[i] = dist(rng);
+    // Note: RNG n'est pas thread-safe, on garde séquentiel ici
+    for (size_t i = 0; i < token_embeddings.size(); ++i) {
+        token_embeddings[i] = dist(rng);
+    }
     // init special embeddings
     seq_embedding.assign(dim, 0.0f);
     mod_embedding.assign(dim, 0.0f);
@@ -31,11 +35,14 @@ void Encoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
     size_t old = static_cast<size_t>(vocab_size);
     size_t need = new_vocab_size - old;
     token_embeddings.resize(static_cast<size_t>(new_vocab_size) * static_cast<size_t>(dim));
-    // init new embeddings randomly
+    // init new embeddings randomly (séquentiel pour RNG)
     std::mt19937 rng(static_cast<uint32_t>(seed ^ 0xC0FFEEu));
     std::uniform_real_distribution<float> dist(-0.02f, 0.02f);
-    for (size_t i = old * static_cast<size_t>(dim); i < token_embeddings.size(); ++i)
+    size_t start = old * static_cast<size_t>(dim);
+    size_t end = token_embeddings.size();
+    for (size_t i = start; i < end; ++i) {
         token_embeddings[i] = dist(rng);
+    }
     vocab_size = static_cast<int>(new_vocab_size);
 }
 
@@ -88,13 +95,18 @@ std::vector<float> Encoder::encode(const std::vector<int> &tokens, uint32_t /*se
         if (id < 0) continue;
         if (static_cast<size_t>(id) >= static_cast<size_t>(vocab_size)) continue;
         const float *row = token_embeddings.data() + (static_cast<size_t>(id) * static_cast<size_t>(dim));
-        for (int d = 0; d < dim; ++d) out[static_cast<size_t>(d)] += row[static_cast<size_t>(d)];
+        #pragma omp parallel for if(dim > 128) schedule(static)
+        for (int d = 0; d < dim; ++d) {
+            #pragma omp atomic
+            out[static_cast<size_t>(d)] += row[static_cast<size_t>(d)];
+        }
         ++count;
     }
 
     if (count > 0) {
         float inv = 1.0f / float(count);
-        for (auto &x : out) x *= inv;
+        #pragma omp parallel for if(dim > 128) schedule(static)
+        for (int i = 0; i < dim; ++i) out[i] *= inv;
     }
 
     // add special embeddings (if set)
@@ -120,6 +132,7 @@ void Encoder::trainOnTextTokens(const std::vector<int> &token_ids, const std::ve
         if (id <= 4) continue;
         if (static_cast<size_t>(id) >= static_cast<size_t>(vocab_size)) continue;
         float *row = token_embeddings.data() + (static_cast<size_t>(id) * static_cast<size_t>(dim));
+        #pragma omp parallel for if(dim > 128) schedule(static)
         for (int d = 0; d < dim; ++d) {
             float err = target[static_cast<size_t>(d)] - row[static_cast<size_t>(d)];
             row[static_cast<size_t>(d)] += lr * err;

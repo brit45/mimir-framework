@@ -159,18 +159,8 @@ void Visualizer::addLossPoint(float loss) {
         loss_history.pop_front();
     }
     
-    // Ajouter à l'historique complet
-    LossRecord record;
-    record.step = static_cast<int>(full_loss_history.size());
-    record.epoch = current_epoch;
-    record.batch = current_batch;
-    record.loss = loss;
-    record.lr = current_lr;
-    record.mse = current_mse;
-    full_loss_history.push_back(record);
-    
-    // Sauvegarder automatiquement l'historique après chaque ajout
-    saveLossHistory(loss_log_file);
+    // NE PAS ajouter à full_loss_history ici - c'est déjà fait par updateMetrics()
+    // Cette fonction ne fait que mettre à jour le graphique visuel
 }
 
 void Visualizer::clearImages() {

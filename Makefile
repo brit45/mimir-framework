@@ -3,17 +3,30 @@
 
 FLAGS= -ffp-contract=fast \
 	-funroll-loops \
-	-funsafe-math-optimizations \
 	-fno-trapping-math \
 	-fno-math-errno \
+	-mf16c \
+	-mbmi2 \
+	-DUSE_HUGEPAGES \
 
-all: bin/mimir
+all: bin/mimir bin/model_architectures_demo
 
-bin/mimir: src/*.cpp src/*.hpp src/Models/*.cpp src/Models/*.hpp src/LuaScripting.cpp src/LuaScripting.hpp
-	@echo "🏗️  Compilation de Mímir Framework avec optimisations SIMD AVX2..."
-	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp src/Encoder.cpp src/main.cpp src/Model.cpp src/Sha256.cpp src/stb_image_impl.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp src/LuaScripting.cpp src/Models/UNet.cpp -I./src -I/usr/include/lua5.3 -o bin/mimir -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llua5.3 -fopenmp $(FLAGS)
-	@echo "✓ Mímir Framework compilé avec SIMD: bin/mimir"
+bin/mimir: src/*.cpp src/*.hpp src/LuaScripting.cpp src/LuaScripting.hpp
+	@echo "🏭️  Compilation de Mímir Framework avec optimisations avancées..."
+	@echo "   • FMA saturé (3 ops/cycle)"
+	@echo "   • FP16 storage + F16C"
+	@echo "   • BMI2 pour quantification"
+	@echo "   • HugePages (2MB) + madvise"
+	@echo "   • Architectures modernes prêtes à l'emploi"
+	@echo "   • Compression LZ4 pour gestion mémoire"
+	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp src/Encoder.cpp src/main.cpp src/Model.cpp src/Sha256.cpp src/stb_image_impl.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp src/LuaScripting.cpp -I./src -I/usr/include/lua5.3 -o bin/mimir -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llua5.3 -llz4 -lvulkan -fopenmp $(FLAGS)
+	@echo "✓ Mímir Framework compilé avec hardware opt: bin/mimir"
 	@ls -lh bin/mimir | awk '{print "  Taille:", $$5}'
+
+bin/model_architectures_demo: examples/model_architectures_demo.cpp src/Model.cpp src/Encoder.cpp src/Sha256.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp
+	@echo "🔧 Compilation de l'exemple d'architectures..."
+	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp examples/model_architectures_demo.cpp src/Model.cpp src/Encoder.cpp src/Sha256.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp -I./src -o bin/model_architectures_demo -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llz4 -lvulkan -fopenmp $(FLAGS)
+	@echo "✓ Exemple compilé: bin/model_architectures_demo"
 
 
 
@@ -24,11 +37,7 @@ mk-video:
 
 clean:
 	@echo "🧹 Nettoyage des fichiers de compilation..."
-	@rm -f bin/mimir
-	@rm -f bin/train_conditional_vae
-	@rm -f bin/test_ram_manager
-	@rm -f bin/test_advanced_ram
-	@rm -f bin/advanced_integration
+	@rm -f bin/*
 	@rm -f src/*.o
 	@rm -f *.o
 	@echo "✓ Nettoyage terminé"

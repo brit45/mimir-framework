@@ -57,7 +57,19 @@ std::string Tokenizer::getTokenById(int id) const {
 
 void Tokenizer::ensureSpecialTokens()
 {
-    const std::vector<std::string> specials = {"<PAD>", "<UNK>", "<SEQ>", "<MOD>", "<MAG>"};
+    // Tokens de contrôle
+    const std::vector<std::string> specials = {
+        "<PAD>", "<UNK>", "<SEQ>", "<MOD>", "<MAG>", "<BOS>", "<EOS>",
+        // Ponctuation courante
+        ".", ",", "!", "?", ";", ":", "-", "'", "\"", 
+        "(", ")", "[", "]", "{", "}", 
+        // Symboles courants
+        "+", "-", "*", "/", "=", "<", ">", "&", "|", "~", "@", "#", "$", "%", "^",
+        // Espaces spéciaux
+        "\n", "\t",
+        // Apostrophes françaises courantes
+        "l'", "d'", "qu'", "c'", "j'", "m'", "t'", "s'", "n'"
+    };
     for (const auto &s : specials) addToken(s);
 }
 
@@ -65,27 +77,202 @@ std::vector<std::string> Tokenizer::splitTokens(const std::string &text) const
 {
     std::vector<std::string> out;
     std::string cur;
+    
+    auto isPunctuation = [](unsigned char c) -> bool {
+        return (c >= 33 && c <= 47) ||   // ! " # $ % & ' ( ) * + , - . /
+               (c >= 58 && c <= 64) ||   // : ; < = > ? @
+               (c >= 91 && c <= 96) ||   // [ \\ ] ^ _ `
+               (c >= 123 && c <= 126);   // { | } ~
+    };
+    
+    auto isAccentedChar = [](unsigned char c) -> bool {
+        return c >= 128;  // UTF-8 multi-byte characters (accents, unicode)
+    };
+    
     for (size_t i = 0; i < text.size(); ++i) {
         unsigned char c = static_cast<unsigned char>(text[i]);
-        if (std::isalnum(c) || c == '\'' || c == '-') {
+        
+        // Gérer les caractères UTF-8 multi-byte (accents)
+        if (isAccentedChar(c)) {
             cur.push_back(text[i]);
-        } else {
-            if (!cur.empty()) { out.push_back(cur); cur.clear(); }
-            // skip punctuation/whitespace as separators (we don't emit punctuation tokens)
+            // Continuer à lire les bytes UTF-8 suivants
+            while (i + 1 < text.size() && (static_cast<unsigned char>(text[i+1]) & 0xC0) == 0x80) {
+                cur.push_back(text[++i]);
+            }
+        }
+        // Alphanumeric
+        else if (std::isalnum(c)) {
+            cur.push_back(text[i]);
+        }
+        // Apostrophe contextuelle (l', d', qu', c', j', m', t', s', n')
+        else if (c == '\'' && !cur.empty() && i + 1 < text.size() && std::isalpha(text[i+1])) {
+            // Vérifier si c'est une contraction française
+            std::string lower_cur = cur;
+            std::transform(lower_cur.begin(), lower_cur.end(), lower_cur.begin(), ::tolower);
+            
+            if (lower_cur == "l" || lower_cur == "d" || lower_cur == "qu" || 
+                lower_cur == "c" || lower_cur == "j" || lower_cur == "m" || 
+                lower_cur == "t" || lower_cur == "s" || lower_cur == "n") {
+                // Émettre la contraction comme token séparé
+                out.push_back(cur + "'");
+                cur.clear();
+            } else {
+                // Apostrophe interne (ex: "can't", "it's")
+                cur.push_back(text[i]);
+            }
+        }
+        // Trait d'union interne (ex: "arc-en-ciel", "peut-être")
+        else if (c == '-' && !cur.empty() && i + 1 < text.size() && std::isalpha(text[i+1])) {
+            cur.push_back(text[i]);
+        }
+        // Ponctuation ou whitespace
+        else {
+            // Émettre le mot courant
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+            
+            // Émettre la ponctuation comme token distinct (sauf espaces)
+            if (!std::isspace(c)) {
+                std::string punct(1, static_cast<char>(c));
+                out.push_back(punct);
+            }
         }
     }
+    
     if (!cur.empty()) out.push_back(cur);
     return out;
 }
 
 std::string Tokenizer::normalizeToken(std::string s) const
 {
-    // lower-case
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
-    // trim non-alnum at edges (keep internal apostrophes and hyphens)
-    while (!s.empty() && !std::isalnum(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
-    while (!s.empty() && !std::isalnum(static_cast<unsigned char>(s.back()))) s.pop_back();
-    return s;
+    if (s.empty()) return s;
+    
+    // Détection de ponctuation pure (garder telle quelle)
+    bool isPurePunct = true;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c >= 128) {  // alnum ou UTF-8
+            isPurePunct = false;
+            break;
+        }
+    }
+    if (isPurePunct) return s;  // Ponctuation garde sa casse
+    
+    // Normalisation pour les mots
+    std::string result;
+    result.reserve(s.size());
+    
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        
+        // Caractères UTF-8 (accents) : préserver
+        if (c >= 128) {
+            result.push_back(s[i]);
+            // Copier les bytes UTF-8 suivants
+            while (i + 1 < s.size() && (static_cast<unsigned char>(s[i+1]) & 0xC0) == 0x80) {
+                result.push_back(s[++i]);
+            }
+        }
+        // ASCII lowercase
+        else if (std::isupper(c)) {
+            result.push_back(std::tolower(c));
+        }
+        else {
+            result.push_back(s[i]);
+        }
+    }
+    
+    // Trim ponctuation aux extrémités (mais garder apostrophes/traits d'union internes)
+    auto isEdgePunct = [](unsigned char c) -> bool {
+        return !std::isalnum(c) && c < 128 && c != '\'' && c != '-';
+    };
+    
+    while (!result.empty() && isEdgePunct(static_cast<unsigned char>(result.front()))) {
+        result.erase(result.begin());
+    }
+    while (!result.empty() && isEdgePunct(static_cast<unsigned char>(result.back()))) {
+        result.pop_back();
+    }
+    
+    return result;
+}
+
+std::string Tokenizer::removeAccents(const std::string &text) const
+{
+    // Table de conversion UTF-8 : accents → ASCII
+    static const std::unordered_map<std::string, char> accentMap = {
+        // Minuscules
+        {"à", 'a'}, {"á", 'a'}, {"â", 'a'}, {"ã", 'a'}, {"ä", 'a'}, {"å", 'a'},
+        {"è", 'e'}, {"é", 'e'}, {"ê", 'e'}, {"ë", 'e'},
+        {"ì", 'i'}, {"í", 'i'}, {"î", 'i'}, {"ï", 'i'},
+        {"ò", 'o'}, {"ó", 'o'}, {"ô", 'o'}, {"õ", 'o'}, {"ö", 'o'},
+        {"ù", 'u'}, {"ú", 'u'}, {"û", 'u'}, {"ü", 'u'},
+        {"ç", 'c'}, {"ñ", 'n'}, {"ý", 'y'}, {"ÿ", 'y'},
+        {"æ", 'a'}, {"œ", 'o'},
+        // Majuscules
+        {"À", 'A'}, {"Á", 'A'}, {"Â", 'A'}, {"Ã", 'A'}, {"Ä", 'A'}, {"Å", 'A'},
+        {"È", 'E'}, {"É", 'E'}, {"Ê", 'E'}, {"Ë", 'E'},
+        {"Ì", 'I'}, {"Í", 'I'}, {"Î", 'I'}, {"Ï", 'I'},
+        {"Ò", 'O'}, {"Ó", 'O'}, {"Ô", 'O'}, {"Õ", 'O'}, {"Ö", 'O'},
+        {"Ù", 'U'}, {"Ú", 'U'}, {"Û", 'U'}, {"Ü", 'U'},
+        {"Ç", 'C'}, {"Ñ", 'N'}, {"Ý", 'Y'},
+        {"Æ", 'A'}, {"Œ", 'O'}
+    };
+    
+    std::string result;
+    result.reserve(text.size());
+    
+    for (size_t i = 0; i < text.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        
+        // Caractère UTF-8 (potentiellement accent)
+        if (c >= 128) {
+            // Extraire le caractère UTF-8 complet (2-4 bytes)
+            std::string utf8_char;
+            utf8_char.push_back(text[i]);
+            while (i + 1 < text.size() && (static_cast<unsigned char>(text[i+1]) & 0xC0) == 0x80) {
+                utf8_char.push_back(text[++i]);
+            }
+            
+            // Chercher conversion
+            auto it = accentMap.find(utf8_char);
+            if (it != accentMap.end()) {
+                result.push_back(it->second);
+            } else {
+                result += utf8_char;  // Garder si non trouvé
+            }
+        } else {
+            result.push_back(text[i]);
+        }
+    }
+    
+    return result;
+}
+
+bool Tokenizer::containsAccents(const std::string &text) const
+{
+    for (unsigned char c : text) {
+        if (c >= 128) return true;  // UTF-8 détecté
+    }
+    return false;
+}
+
+std::string Tokenizer::escapePunctuation(const std::string &text) const
+{
+    // Échapper les caractères spéciaux pour regex
+    static const std::string special_chars = ".^$*+?()[{\\|";
+    std::string result;
+    result.reserve(text.size() * 2);
+    
+    for (char c : text) {
+        if (special_chars.find(c) != std::string::npos) {
+            result.push_back('\\');
+        }
+        result.push_back(c);
+    }
+    
+    return result;
 }
 
 std::vector<int> Tokenizer::tokenize(const std::string &text) const
@@ -122,12 +309,47 @@ std::vector<int> Tokenizer::tokenizeEnsure(const std::string &text)
 std::string Tokenizer::decode(const std::vector<int> &ids) const
 {
     std::ostringstream ss;
-    bool first = true;
+    
+    auto isPunctuation = [](const std::string& s) -> bool {
+        if (s.empty()) return false;
+        if (s.size() > 1) return false;  // Multi-char n'est pas ponctuation simple
+        unsigned char c = s[0];
+        return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || 
+               (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
+    };
+    
+    auto needsSpaceBefore = [](const std::string& s) -> bool {
+        return s != "." && s != "," && s != "!" && s != "?" && 
+               s != ";" && s != ":" && s != ")" && s != "]" && 
+               s != "}" && s != "'" && s != "\"" && 
+               !s.empty() && s[0] != '\'';
+    };
+    
+    auto needsSpaceAfter = [](const std::string& s) -> bool {
+        return s != "(" && s != "[" && s != "{" && s != "'" && 
+               s != "\"" && !s.empty() && s.back() != '\'';
+    };
+    
+    std::string prev;
     for (int id : ids) {
-        if (!first) ss << ' ';
-        first = false;
-        ss << getTokenById(id);
+        std::string token = getTokenById(id);
+        
+        // Ajouter espace intelligent
+        if (!prev.empty()) {
+            bool curr_is_punct = isPunctuation(token);
+            bool prev_is_punct = isPunctuation(prev);
+            
+            // Pas d'espace avant ponctuation fermante ou après ouvrante
+            if (!(curr_is_punct && !needsSpaceBefore(token)) &&
+                !(prev_is_punct && !needsSpaceAfter(prev))) {
+                ss << ' ';
+            }
+        }
+        
+        ss << token;
+        prev = token;
     }
+    
     return ss.str();
 }
 

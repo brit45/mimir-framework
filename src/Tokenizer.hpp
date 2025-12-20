@@ -42,6 +42,9 @@ public:
     void ensureSpecialTokens();
     std::vector<std::string> splitTokens(const std::string &text) const;
     std::string normalizeToken(std::string s) const;
+    std::string removeAccents(const std::string &text) const;  // Pour recherche fuzzy
+    bool containsAccents(const std::string &text) const;
+    std::string escapePunctuation(const std::string &text) const;  // Pour regex
 
     // Méthodes améliorées pour FLUX
     void learnBPEFromCorpus(const std::vector<std::string>& corpus, int num_merges = 1000);

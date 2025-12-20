@@ -1,4 +1,9 @@
 #include "LuaScripting.hpp"
+#include "Models/ModelArchitectures.hpp"
+#include "AdvancedRAMManager.hpp"
+#include "MemoryGuard.hpp"
+#include "DynamicTensorAllocator.hpp"
+#include "AsyncMonitor.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -104,9 +109,10 @@ void LuaScripting::setBoolean(const std::string& var_name, bool value) {
 // ============================================================================
 
 void LuaScripting::registerAPI() {
-    // Table "model"
+    // ========== Table "model" ==========
     lua_newtable(L);
     
+    // Gestion basique
     lua_pushcfunction(L, lua_createModel);
     lua_setfield(L, -2, "create");
     
@@ -125,9 +131,97 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_loadModel);
     lua_setfield(L, -2, "load");
     
+    // Gestion des paramètres
+    lua_pushcfunction(L, lua_allocateParams);
+    lua_setfield(L, -2, "allocate_params");
+    
+    lua_pushcfunction(L, lua_initWeights);
+    lua_setfield(L, -2, "init_weights");
+    
+    lua_pushcfunction(L, lua_totalParams);
+    lua_setfield(L, -2, "total_params");
+    
+    lua_pushcfunction(L, lua_pushLayer);
+    lua_setfield(L, -2, "push_layer");
+    
+    // Forward/Backward
+    lua_pushcfunction(L, lua_forwardPass);
+    lua_setfield(L, -2, "forward");
+    
+    lua_pushcfunction(L, lua_backwardPass);
+    lua_setfield(L, -2, "backward");
+    
+    lua_pushcfunction(L, lua_optimizerStep);
+    lua_setfield(L, -2, "optimizer_step");
+    
+    // Hardware
+    lua_pushcfunction(L, lua_setHardwareAccel);
+    lua_setfield(L, -2, "set_hardware");
+    
+    lua_pushcfunction(L, lua_getHardwareCaps);
+    lua_setfield(L, -2, "hardware_caps");
+    
     lua_setglobal(L, "model");
     
-    // Table "tokenizer"
+    // ========== Table "architectures" ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_buildUNet);
+    lua_setfield(L, -2, "unet");
+    
+    lua_pushcfunction(L, lua_buildVAE);
+    lua_setfield(L, -2, "vae");
+    
+    lua_pushcfunction(L, lua_buildViT);
+    lua_setfield(L, -2, "vit");
+    
+    lua_pushcfunction(L, lua_buildGAN);
+    lua_setfield(L, -2, "gan");
+    
+    lua_pushcfunction(L, lua_buildDiffusion);
+    lua_setfield(L, -2, "diffusion");
+    
+    lua_pushcfunction(L, lua_buildTransformer);
+    lua_setfield(L, -2, "transformer");
+    
+    lua_pushcfunction(L, lua_buildResNet);
+    lua_setfield(L, -2, "resnet");
+    
+    lua_pushcfunction(L, lua_buildMobileNet);
+    lua_setfield(L, -2, "mobilenet");
+    
+    lua_setglobal(L, "architectures");
+    
+    // ========== Table "layers" ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_computeConv2D);
+    lua_setfield(L, -2, "conv2d");
+    
+    lua_pushcfunction(L, lua_computeLinear);
+    lua_setfield(L, -2, "linear");
+    
+    lua_pushcfunction(L, lua_computeMaxPool2D);
+    lua_setfield(L, -2, "maxpool2d");
+    
+    lua_pushcfunction(L, lua_computeAvgPool2D);
+    lua_setfield(L, -2, "avgpool2d");
+    
+    lua_pushcfunction(L, lua_computeActivation);
+    lua_setfield(L, -2, "activation");
+    
+    lua_pushcfunction(L, lua_computeBatchNorm);
+    lua_setfield(L, -2, "batchnorm");
+    
+    lua_pushcfunction(L, lua_computeLayerNorm);
+    lua_setfield(L, -2, "layernorm");
+    
+    lua_pushcfunction(L, lua_computeAttention);
+    lua_setfield(L, -2, "attention");
+    
+    lua_setglobal(L, "layers");
+    
+    // ========== Table "tokenizer" ==========
     lua_newtable(L);
     
     lua_pushcfunction(L, lua_createTokenizer);
@@ -139,9 +233,76 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_detokenize);
     lua_setfield(L, -2, "detokenize");
     
+    lua_pushcfunction(L, lua_getVocabSize);
+    lua_setfield(L, -2, "vocab_size");
+    
+    lua_pushcfunction(L, lua_saveTokenizer);
+    lua_setfield(L, -2, "save");
+    
+    lua_pushcfunction(L, lua_loadTokenizer);
+    lua_setfield(L, -2, "load");
+    
+    // Méthodes de manipulation du vocabulaire
+    lua_pushcfunction(L, lua_addToken);
+    lua_setfield(L, -2, "add_token");
+    
+    lua_pushcfunction(L, lua_ensureVocabFromText);
+    lua_setfield(L, -2, "ensure_vocab_from_text");
+    
+    lua_pushcfunction(L, lua_tokenizeEnsure);
+    lua_setfield(L, -2, "tokenize_ensure");
+    
+    // Méthodes d'accès aux tokens spéciaux
+    lua_pushcfunction(L, lua_getPadId);
+    lua_setfield(L, -2, "pad_id");
+    
+    lua_pushcfunction(L, lua_getUnkId);
+    lua_setfield(L, -2, "unk_id");
+    
+    lua_pushcfunction(L, lua_getSeqId);
+    lua_setfield(L, -2, "seq_id");
+    
+    lua_pushcfunction(L, lua_getModId);
+    lua_setfield(L, -2, "mod_id");
+    
+    lua_pushcfunction(L, lua_getMagId);
+    lua_setfield(L, -2, "mag_id");
+    
+    lua_pushcfunction(L, lua_getTokenById);
+    lua_setfield(L, -2, "get_token_by_id");
+    
+    // Méthodes BPE
+    lua_pushcfunction(L, lua_learnBPEFromCorpus);
+    lua_setfield(L, -2, "learn_bpe");
+    
+    lua_pushcfunction(L, lua_tokenizeBPE);
+    lua_setfield(L, -2, "tokenize_bpe");
+    
+    lua_pushcfunction(L, lua_setMaxSequenceLength);
+    lua_setfield(L, -2, "set_max_length");
+    
+    lua_pushcfunction(L, lua_padSequence);
+    lua_setfield(L, -2, "pad_sequence");
+    
+    lua_pushcfunction(L, lua_batchTokenize);
+    lua_setfield(L, -2, "batch_tokenize");
+    
+    // Statistiques et analyse
+    lua_pushcfunction(L, lua_printVocabStats);
+    lua_setfield(L, -2, "print_stats");
+    
+    lua_pushcfunction(L, lua_getTokenFrequencies);
+    lua_setfield(L, -2, "get_frequencies");
+    
+    lua_pushcfunction(L, lua_analyzeText);
+    lua_setfield(L, -2, "analyze_text");
+    
+    lua_pushcfunction(L, lua_extractKeywords);
+    lua_setfield(L, -2, "extract_keywords");
+    
     lua_setglobal(L, "tokenizer");
     
-    // Table "dataset"
+    // ========== Table "dataset" ==========
     lua_newtable(L);
     
     lua_pushcfunction(L, lua_loadDataset);
@@ -152,7 +313,119 @@ void LuaScripting::registerAPI() {
     
     lua_setglobal(L, "dataset");
     
-    // Fonctions utilitaires globales
+    // ========== Table "memory" ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_memoryConfig);
+    lua_setfield(L, -2, "config");
+    
+    lua_pushcfunction(L, lua_memoryGetStats);
+    lua_setfield(L, -2, "get_stats");
+    
+    lua_pushcfunction(L, lua_memoryPrintStats);
+    lua_setfield(L, -2, "print_stats");
+    
+    lua_pushcfunction(L, lua_memoryClear);
+    lua_setfield(L, -2, "clear");
+    
+    lua_pushcfunction(L, lua_memoryGetUsage);
+    lua_setfield(L, -2, "get_usage");
+    
+    lua_pushcfunction(L, lua_memorySetLimit);
+    lua_setfield(L, -2, "set_limit");
+    
+    lua_setglobal(L, "memory");
+    
+    // ========== Table "guard" (strict memory enforcement) ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_guardSetLimit);
+    lua_setfield(L, -2, "set_limit");
+    
+    lua_pushcfunction(L, lua_guardGetStats);
+    lua_setfield(L, -2, "get_stats");
+    
+    lua_pushcfunction(L, lua_guardPrintStats);
+    lua_setfield(L, -2, "print_stats");
+    
+    lua_pushcfunction(L, lua_guardReset);
+    lua_setfield(L, -2, "reset");
+    
+    lua_setglobal(L, "guard");
+    
+    // ========== Table "allocator" (dynamic tensor allocator) ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_allocatorConfigure);
+    lua_setfield(L, -2, "configure");
+    
+    lua_pushcfunction(L, lua_allocatorPrintStats);
+    lua_setfield(L, -2, "print_stats");
+    
+    lua_pushcfunction(L, lua_allocatorGetStats);
+    lua_setfield(L, -2, "get_stats");
+    
+    lua_setglobal(L, "allocator");
+    
+    // ========== Table "htop" (HtopDisplay monitoring) ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_htopCreate);
+    lua_setfield(L, -2, "create");
+    
+    lua_pushcfunction(L, lua_htopUpdate);
+    lua_setfield(L, -2, "update");
+    
+    lua_pushcfunction(L, lua_htopRender);
+    lua_setfield(L, -2, "render");
+    
+    lua_pushcfunction(L, lua_htopClear);
+    lua_setfield(L, -2, "clear");
+    
+    lua_pushcfunction(L, lua_htopEnable);
+    lua_setfield(L, -2, "enable");
+    
+    lua_setglobal(L, "htop");
+    
+    // ========== Table "viz" (Visualizer SFML) ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_vizCreate);
+    lua_setfield(L, -2, "create");
+    
+    lua_pushcfunction(L, lua_vizInitialize);
+    lua_setfield(L, -2, "initialize");
+    
+    lua_pushcfunction(L, lua_vizIsOpen);
+    lua_setfield(L, -2, "is_open");
+    
+    lua_pushcfunction(L, lua_vizProcessEvents);
+    lua_setfield(L, -2, "process_events");
+    
+    lua_pushcfunction(L, lua_vizUpdate);
+    lua_setfield(L, -2, "update");
+    
+    lua_pushcfunction(L, lua_vizAddImage);
+    lua_setfield(L, -2, "add_image");
+    
+    lua_pushcfunction(L, lua_vizUpdateMetrics);
+    lua_setfield(L, -2, "update_metrics");
+    
+    lua_pushcfunction(L, lua_vizAddLossPoint);
+    lua_setfield(L, -2, "add_loss_point");
+    
+    lua_pushcfunction(L, lua_vizClear);
+    lua_setfield(L, -2, "clear");
+    
+    lua_pushcfunction(L, lua_vizSetEnabled);
+    lua_setfield(L, -2, "set_enabled");
+    
+    lua_pushcfunction(L, lua_vizSaveLossHistory);
+    lua_setfield(L, -2, "save_loss_history");
+    
+    lua_setglobal(L, "viz");
+    
+    // ========== Fonctions utilitaires globales ==========
     lua_pushcfunction(L, lua_print);
     lua_setglobal(L, "log");
     
@@ -183,6 +456,10 @@ int LuaScripting::lua_createModel(lua_State* L) {
         // Créer un modèle de base générique
         ctx.currentModel = std::make_shared<Model>();
         
+        // Stocker le type et la config pour build()
+        ctx.modelType = std::string(model_type);
+        ctx.modelConfig = config;
+        
         ctx.addLog("Modèle créé: " + std::string(model_type));
         lua_pushboolean(L, true);
     } catch (const std::exception& e) {
@@ -205,10 +482,216 @@ int LuaScripting::lua_buildModel(lua_State* L) {
     }
     
     try {
-        // Appeler build() du modèle
-        ctx.currentModel->build();
+        // Construire selon le type
+        if (ctx.modelType == "transformer" || ctx.modelType == "encoder" || ctx.modelType == "decoder") {
+            // Transformer / Encoder / Decoder
+            ModelArchitectures::TransformerConfig tfConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("vocab_size")) 
+                    tfConfig.vocab_size = ctx.modelConfig["vocab_size"];
+                if (ctx.modelConfig.contains("embed_dim")) 
+                    tfConfig.d_model = ctx.modelConfig["embed_dim"];
+                if (ctx.modelConfig.contains("num_layers")) 
+                    tfConfig.num_layers = ctx.modelConfig["num_layers"];
+                if (ctx.modelConfig.contains("num_heads")) 
+                    tfConfig.num_heads = ctx.modelConfig["num_heads"];
+                if (ctx.modelConfig.contains("d_ff")) 
+                    tfConfig.d_ff = ctx.modelConfig["d_ff"];
+                if (ctx.modelConfig.contains("max_seq_len")) 
+                    tfConfig.max_seq_len = ctx.modelConfig["max_seq_len"];
+                if (ctx.modelConfig.contains("dropout")) 
+                    tfConfig.dropout = ctx.modelConfig["dropout"];
+            }
+            
+            ModelArchitectures::buildTransformer(*ctx.currentModel, tfConfig);
+        }
+        else if (ctx.modelType == "unet") {
+            // UNet - Segmentation / Image generation
+            ModelArchitectures::UNetConfig unetConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("input_channels"))
+                    unetConfig.input_channels = ctx.modelConfig["input_channels"];
+                if (ctx.modelConfig.contains("output_channels"))
+                    unetConfig.output_channels = ctx.modelConfig["output_channels"];
+                if (ctx.modelConfig.contains("base_channels"))
+                    unetConfig.base_channels = ctx.modelConfig["base_channels"];
+                if (ctx.modelConfig.contains("num_levels"))
+                    unetConfig.num_levels = ctx.modelConfig["num_levels"];
+                if (ctx.modelConfig.contains("blocks_per_level"))
+                    unetConfig.blocks_per_level = ctx.modelConfig["blocks_per_level"];
+                if (ctx.modelConfig.contains("use_attention"))
+                    unetConfig.use_attention = ctx.modelConfig["use_attention"];
+                if (ctx.modelConfig.contains("use_residual"))
+                    unetConfig.use_residual = ctx.modelConfig["use_residual"];
+                if (ctx.modelConfig.contains("dropout"))
+                    unetConfig.dropout = ctx.modelConfig["dropout"];
+            }
+            
+            ModelArchitectures::buildUNet(*ctx.currentModel, unetConfig);
+        }
+        else if (ctx.modelType == "vae") {
+            // VAE - Variational Autoencoder
+            ModelArchitectures::VAEConfig vaeConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("input_dim"))
+                    vaeConfig.input_dim = ctx.modelConfig["input_dim"];
+                if (ctx.modelConfig.contains("latent_dim"))
+                    vaeConfig.latent_dim = ctx.modelConfig["latent_dim"];
+                if (ctx.modelConfig.contains("encoder_hidden") && ctx.modelConfig["encoder_hidden"].is_array()) {
+                    vaeConfig.encoder_hidden.clear();
+                    for (const auto& d : ctx.modelConfig["encoder_hidden"]) {
+                        vaeConfig.encoder_hidden.push_back(d);
+                    }
+                }
+                if (ctx.modelConfig.contains("decoder_hidden") && ctx.modelConfig["decoder_hidden"].is_array()) {
+                    vaeConfig.decoder_hidden.clear();
+                    for (const auto& d : ctx.modelConfig["decoder_hidden"]) {
+                        vaeConfig.decoder_hidden.push_back(d);
+                    }
+                }
+            }
+            
+            ModelArchitectures::buildVAE(*ctx.currentModel, vaeConfig);
+        }
+        else if (ctx.modelType == "vit") {
+            // ViT - Vision Transformer
+            ModelArchitectures::ViTConfig vitConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("image_size"))
+                    vitConfig.image_size = ctx.modelConfig["image_size"];
+                if (ctx.modelConfig.contains("patch_size"))
+                    vitConfig.patch_size = ctx.modelConfig["patch_size"];
+                if (ctx.modelConfig.contains("num_classes"))
+                    vitConfig.num_classes = ctx.modelConfig["num_classes"];
+                if (ctx.modelConfig.contains("embed_dim"))
+                    vitConfig.d_model = ctx.modelConfig["embed_dim"];
+                if (ctx.modelConfig.contains("num_layers"))
+                    vitConfig.num_layers = ctx.modelConfig["num_layers"];
+                if (ctx.modelConfig.contains("num_heads"))
+                    vitConfig.num_heads = ctx.modelConfig["num_heads"];
+                if (ctx.modelConfig.contains("mlp_ratio"))
+                    vitConfig.mlp_ratio = ctx.modelConfig["mlp_ratio"];
+                if (ctx.modelConfig.contains("dropout"))
+                    vitConfig.dropout = ctx.modelConfig["dropout"];
+            }
+            
+            ModelArchitectures::buildViT(*ctx.currentModel, vitConfig);
+        }
+        else if (ctx.modelType == "generator" || ctx.modelType == "gan") {
+            // GAN Generator
+            ModelArchitectures::GANConfig ganConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("latent_dim"))
+                    ganConfig.latent_dim = ctx.modelConfig["latent_dim"];
+                if (ctx.modelConfig.contains("image_channels"))
+                    ganConfig.image_channels = ctx.modelConfig["image_channels"];
+                if (ctx.modelConfig.contains("image_size"))
+                    ganConfig.image_size = ctx.modelConfig["image_size"];
+                if (ctx.modelConfig.contains("gen_channels"))
+                    ganConfig.g_base_channels = ctx.modelConfig["gen_channels"];
+            }
+            
+            ModelArchitectures::buildGenerator(*ctx.currentModel, ganConfig);
+        }
+        else if (ctx.modelType == "discriminator") {
+            // GAN Discriminator
+            ModelArchitectures::GANConfig ganConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("image_channels"))
+                    ganConfig.image_channels = ctx.modelConfig["image_channels"];
+                if (ctx.modelConfig.contains("image_size"))
+                    ganConfig.image_size = ctx.modelConfig["image_size"];
+                if (ctx.modelConfig.contains("disc_channels"))
+                    ganConfig.d_base_channels = ctx.modelConfig["disc_channels"];
+            }
+            
+            ModelArchitectures::buildDiscriminator(*ctx.currentModel, ganConfig);
+        }
+        else if (ctx.modelType == "diffusion") {
+            // Diffusion Model
+            ModelArchitectures::DiffusionConfig diffConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("image_channels"))
+                    diffConfig.image_channels = ctx.modelConfig["image_channels"];
+                if (ctx.modelConfig.contains("image_size"))
+                    diffConfig.image_size = ctx.modelConfig["image_size"];
+                if (ctx.modelConfig.contains("model_channels"))
+                    diffConfig.base_channels = ctx.modelConfig["model_channels"];
+                if (ctx.modelConfig.contains("num_res_blocks"))
+                    diffConfig.num_res_blocks = ctx.modelConfig["num_res_blocks"];
+            }
+            
+            ModelArchitectures::buildDiffusion(*ctx.currentModel, diffConfig);
+        }
+        else if (ctx.modelType == "resnet") {
+            // ResNet
+            ModelArchitectures::ResNetConfig resnetConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("num_classes"))
+                    resnetConfig.num_classes = ctx.modelConfig["num_classes"];
+                if (ctx.modelConfig.contains("base_channels"))
+                    resnetConfig.base_channels = ctx.modelConfig["base_channels"];
+                if (ctx.modelConfig.contains("use_bottleneck"))
+                    resnetConfig.use_bottleneck = ctx.modelConfig["use_bottleneck"];
+                if (ctx.modelConfig.contains("layers") && ctx.modelConfig["layers"].is_array()) {
+                    resnetConfig.layers.clear();
+                    for (const auto& l : ctx.modelConfig["layers"]) {
+                        resnetConfig.layers.push_back(l);
+                    }
+                }
+            }
+            
+            ModelArchitectures::buildResNet(*ctx.currentModel, resnetConfig);
+        }
+        else if (ctx.modelType == "mobilenet") {
+            // MobileNet
+            ModelArchitectures::MobileNetConfig mobileConfig;
+            
+            if (!ctx.modelConfig.empty()) {
+                if (ctx.modelConfig.contains("num_classes"))
+                    mobileConfig.num_classes = ctx.modelConfig["num_classes"];
+                if (ctx.modelConfig.contains("width_mult"))
+                    mobileConfig.width_multiplier = ctx.modelConfig["width_mult"];
+                if (ctx.modelConfig.contains("resolution"))
+                    mobileConfig.resolution = ctx.modelConfig["resolution"];
+            }
+            
+            ModelArchitectures::buildMobileNetV2(*ctx.currentModel, mobileConfig);
+        }
+        else {
+            // Fallback: appeler build() par défaut
+            ctx.currentModel->build();
+        }
         
+        // Allouer et initialiser les paramètres
         size_t params = ctx.currentModel->totalParamCount();
+        if (params > 0) {
+            ctx.currentModel->allocateParams();
+            ctx.currentModel->initializeWeights("he", 0);
+        }
+        
+        // Initialiser l'encoder si un tokenizer est présent
+        if (ctx.currentTokenizer && !ctx.currentEncoder) {
+            int vocab_size = ctx.currentTokenizer->getVocabSize();
+            int embed_dim = 256;  // Default, ou depuis config
+            if (ctx.modelConfig.contains("embed_dim")) {
+                embed_dim = ctx.modelConfig["embed_dim"];
+            }
+            
+            ctx.currentEncoder = std::make_shared<Encoder>(embed_dim, vocab_size);
+            ctx.currentEncoder->initRandom();
+            ctx.currentEncoder->ensureVocabSize(vocab_size);
+            ctx.addLog("Encoder créé: vocab=" + std::to_string(vocab_size) + ", dim=" + std::to_string(embed_dim));
+        }
+        
         ctx.addLog("Modèle construit avec " + std::to_string(params) + " paramètres");
         
         lua_pushboolean(L, true);
@@ -557,7 +1040,12 @@ int LuaScripting::lua_prepareSequences(lua_State* L) {
         // Créer des séquences à partir des items
         ctx.currentSequences.clear();
         
-        for (const auto& item : items) {
+        for (auto& item : items) {
+            // Charger le texte si nécessaire (lazy loading)
+            if (!item.text_file.empty() && !item.text.has_value()) {
+                item.loadText();
+            }
+            
             if (item.text.has_value() && !item.text.value().empty()) {
                 // Tokenize le texte
                 std::vector<int> tokens;
@@ -734,4 +1222,1609 @@ void LuaScripting::jsonToLuaTable(lua_State* L, const json& j) {
             lua_settable(L, -3);
         }
     }
+}
+
+// ============================================================================
+// Nouvelles implémentations - Model API étendue
+// ============================================================================
+
+int LuaScripting::lua_allocateParams(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    try {
+        ctx.currentModel->allocateParams();
+        size_t count = ctx.currentModel->totalParamCount();
+        ctx.addLog("Paramètres alloués: " + std::to_string(count));
+        
+        lua_pushboolean(L, true);
+        lua_pushinteger(L, count);
+        return 2;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_initWeights(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    const char* method = luaL_optstring(L, 1, "he");
+    unsigned int seed = luaL_optinteger(L, 2, 0);
+    
+    try {
+        ctx.currentModel->initializeWeights(method, seed);
+        ctx.addLog("Poids initialisés: méthode=" + std::string(method));
+        
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_totalParams(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    
+    lua_pushinteger(L, ctx.currentModel->totalParamCount());
+    return 1;
+}
+
+int LuaScripting::lua_pushLayer(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    const char* name = luaL_checkstring(L, 1);
+    const char* type = luaL_checkstring(L, 2);
+    size_t params_count = luaL_checkinteger(L, 3);
+    
+    ctx.currentModel->push(name, type, params_count);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_forwardPass(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    // Argument: input (table de floats)
+    luaL_checktype(L, 1, LUA_TTABLE);
+    
+    std::vector<float> input;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        input.push_back(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    try {
+        std::vector<float> output = ctx.currentModel->forwardPass(input, false);
+        
+        // Retourner output comme table
+        lua_newtable(L);
+        for (size_t i = 0; i < output.size(); ++i) {
+            lua_pushnumber(L, output[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_backwardPass(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    // Argument: loss_gradient (table de floats)
+    luaL_checktype(L, 1, LUA_TTABLE);
+    
+    std::vector<float> loss_grad;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        loss_grad.push_back(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    try {
+        Gradients grads = ctx.currentModel->backwardPass(loss_grad);
+        ctx.addLog("Backward pass complété");
+        
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_optimizerStep(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    double lr = luaL_checknumber(L, 1);
+    const char* opt_type = luaL_optstring(L, 2, "adamw");
+    
+    try {
+        Optimizer opt;
+        opt.initial_lr = lr;
+        
+        if (std::string(opt_type) == "sgd") {
+            opt.type = OptimizerType::SGD;
+        } else if (std::string(opt_type) == "adam") {
+            opt.type = OptimizerType::ADAM;
+        } else {
+            opt.type = OptimizerType::ADAMW;
+        }
+        
+        ctx.currentModel->optimizerStep(opt, lr, nullptr);
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_setHardwareAccel(lua_State* L) {
+    bool enable = lua_toboolean(L, 1);
+    Model::setHardwareAcceleration(enable);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_getHardwareCaps(lua_State* L) {
+    lua_newtable(L);
+    
+    lua_pushboolean(L, Model::hasAVX2());
+    lua_setfield(L, -2, "avx2");
+    
+    lua_pushboolean(L, Model::hasFMA());
+    lua_setfield(L, -2, "fma");
+    
+    lua_pushboolean(L, Model::hasF16C());
+    lua_setfield(L, -2, "f16c");
+    
+    lua_pushboolean(L, Model::hasBMI2());
+    lua_setfield(L, -2, "bmi2");
+    
+    return 1;
+}
+
+// ============================================================================
+// ModelArchitectures API
+// ============================================================================
+
+int LuaScripting::lua_buildUNet(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::UNetConfig config;
+    
+    if (lua_istable(L, 1)) {
+        lua_getfield(L, 1, "input_channels");
+        if (lua_isnumber(L, -1)) config.input_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "output_channels");
+        if (lua_isnumber(L, -1)) config.output_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "base_channels");
+        if (lua_isnumber(L, -1)) config.base_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_levels");
+        if (lua_isnumber(L, -1)) config.num_levels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        ModelArchitectures::buildUNet(*ctx.currentModel, config);
+        ctx.addLog("Architecture UNet construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildVAE(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::VAEConfig config;
+    
+    if (lua_istable(L, 1)) {
+        lua_getfield(L, 1, "input_dim");
+        if (lua_isnumber(L, -1)) config.input_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "latent_dim");
+        if (lua_isnumber(L, -1)) config.latent_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        ModelArchitectures::buildVAE(*ctx.currentModel, config);
+        ctx.addLog("Architecture VAE construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildViT(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::ViTConfig config;
+    
+    if (lua_istable(L, 1)) {
+        lua_getfield(L, 1, "image_size");
+        if (lua_isnumber(L, -1)) config.image_size = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "patch_size");
+        if (lua_isnumber(L, -1)) config.patch_size = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_classes");
+        if (lua_isnumber(L, -1)) config.num_classes = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "d_model");
+        if (lua_isnumber(L, -1)) config.d_model = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_layers");
+        if (lua_isnumber(L, -1)) config.num_layers = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        ModelArchitectures::buildViT(*ctx.currentModel, config);
+        ctx.addLog("Architecture ViT construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildGAN(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::GANConfig config;
+    const char* model_type = luaL_optstring(L, 1, "generator");
+    
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "latent_dim");
+        if (lua_isnumber(L, -1)) config.latent_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 2, "image_size");
+        if (lua_isnumber(L, -1)) config.image_size = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        if (std::string(model_type) == "generator") {
+            ModelArchitectures::buildGenerator(*ctx.currentModel, config);
+            ctx.addLog("GAN Generator construit");
+        } else {
+            ModelArchitectures::buildDiscriminator(*ctx.currentModel, config);
+            ctx.addLog("GAN Discriminator construit");
+        }
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildDiffusion(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::DiffusionConfig config;
+    
+    if (lua_istable(L, 1)) {
+        lua_getfield(L, 1, "image_size");
+        if (lua_isnumber(L, -1)) config.image_size = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "base_channels");
+        if (lua_isnumber(L, -1)) config.base_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        ModelArchitectures::buildDiffusion(*ctx.currentModel, config);
+        ctx.addLog("Architecture Diffusion construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildTransformer(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::TransformerConfig config;
+    
+    if (lua_istable(L, 1)) {
+        lua_getfield(L, 1, "vocab_size");
+        if (lua_isnumber(L, -1)) config.vocab_size = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "d_model");
+        if (lua_isnumber(L, -1)) config.d_model = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_layers");
+        if (lua_isnumber(L, -1)) config.num_layers = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_heads");
+        if (lua_isnumber(L, -1)) config.num_heads = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        ModelArchitectures::buildTransformer(*ctx.currentModel, config);
+        ctx.addLog("Architecture Transformer construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildResNet(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::ResNetConfig config;
+    
+    if (lua_istable(L, 1)) {
+        lua_getfield(L, 1, "num_classes");
+        if (lua_isnumber(L, -1)) config.num_classes = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        ModelArchitectures::buildResNet(*ctx.currentModel, config);
+        ctx.addLog("Architecture ResNet construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildMobileNet(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::MobileNetConfig config;
+    
+    if (lua_istable(L, 1)) {
+        lua_getfield(L, 1, "num_classes");
+        if (lua_isnumber(L, -1)) config.num_classes = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "width_multiplier");
+        if (lua_isnumber(L, -1)) config.width_multiplier = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        ModelArchitectures::buildMobileNetV2(*ctx.currentModel, config);
+        ctx.addLog("Architecture MobileNetV2 construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+// ============================================================================
+// Layer Operations API (stubs - implémentation complète optionnelle)
+// ============================================================================
+
+int LuaScripting::lua_computeConv2D(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+int LuaScripting::lua_computeLinear(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+int LuaScripting::lua_computeMaxPool2D(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+int LuaScripting::lua_computeAvgPool2D(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+int LuaScripting::lua_computeActivation(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+int LuaScripting::lua_computeBatchNorm(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+int LuaScripting::lua_computeLayerNorm(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+int LuaScripting::lua_computeAttention(lua_State* L) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
+    return 2;
+}
+
+// ============================================================================
+// Tokenizer API étendue
+// ============================================================================
+
+int LuaScripting::lua_getVocabSize(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    
+    lua_pushinteger(L, ctx.currentTokenizer->getVocabSize());
+    return 1;
+}
+
+int LuaScripting::lua_saveTokenizer(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* filepath = luaL_checkstring(L, 1);
+    
+    try {
+        json j = ctx.currentTokenizer->to_json();
+        std::ofstream f(filepath);
+        f << j.dump(2);
+        
+        ctx.addLog("Tokenizer sauvegardé: " + std::string(filepath));
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_loadTokenizer(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    const char* filepath = luaL_checkstring(L, 1);
+    
+    try {
+        std::ifstream f(filepath);
+        json j;
+        f >> j;
+        
+        ctx.currentTokenizer = std::make_shared<Tokenizer>();
+        ctx.currentTokenizer->from_json(j);
+        
+        ctx.addLog("Tokenizer chargé: " + std::string(filepath));
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+// Extension des méthodes Tokenizer pour l'API Lua
+// À ajouter à la fin de LuaScripting.cpp avant le dernier }
+
+// ============================================================================
+// Tokenizer API - Méthodes étendues
+// ============================================================================
+
+int LuaScripting::lua_addToken(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, -1);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* token = luaL_checkstring(L, 1);
+    int id = ctx.currentTokenizer->addToken(token);
+    
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+int LuaScripting::lua_ensureVocabFromText(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* text = luaL_checkstring(L, 1);
+    ctx.currentTokenizer->ensureVocabFromText(text);
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_tokenizeEnsure(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* text = luaL_checkstring(L, 1);
+    auto tokens = ctx.currentTokenizer->tokenizeEnsure(text);
+    
+    lua_newtable(L);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        lua_pushinteger(L, tokens[i]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    
+    return 1;
+}
+
+int LuaScripting::lua_getPadId(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    
+    lua_pushinteger(L, ctx.currentTokenizer->getPadId());
+    return 1;
+}
+
+int LuaScripting::lua_getUnkId(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, 1);
+        return 1;
+    }
+    
+    lua_pushinteger(L, ctx.currentTokenizer->getUnkId());
+    return 1;
+}
+
+int LuaScripting::lua_getSeqId(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, 2);
+        return 1;
+    }
+    
+    lua_pushinteger(L, ctx.currentTokenizer->getSeqId());
+    return 1;
+}
+
+int LuaScripting::lua_getModId(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, 3);
+        return 1;
+    }
+    
+    lua_pushinteger(L, ctx.currentTokenizer->getModId());
+    return 1;
+}
+
+int LuaScripting::lua_getMagId(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, 4);
+        return 1;
+    }
+    
+    lua_pushinteger(L, ctx.currentTokenizer->getMagId());
+    return 1;
+}
+
+int LuaScripting::lua_getTokenById(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushstring(L, "");
+        return 1;
+    }
+    
+    int id = luaL_checkinteger(L, 1);
+    std::string token = ctx.currentTokenizer->getTokenById(id);
+    
+    lua_pushstring(L, token.c_str());
+    return 1;
+}
+
+int LuaScripting::lua_learnBPEFromCorpus(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    // Lire table de textes
+    luaL_checktype(L, 1, LUA_TTABLE);
+    int num_merges = luaL_optinteger(L, 2, 1000);
+    
+    std::vector<std::string> corpus;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        corpus.push_back(lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    ctx.currentTokenizer->learnBPEFromCorpus(corpus, num_merges);
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_tokenizeBPE(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* text = luaL_checkstring(L, 1);
+    auto tokens = ctx.currentTokenizer->tokenizeBPE(text);
+    
+    lua_newtable(L);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        lua_pushinteger(L, tokens[i]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    
+    return 1;
+}
+
+int LuaScripting::lua_setMaxSequenceLength(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    
+    int max_len = luaL_checkinteger(L, 1);
+    ctx.currentTokenizer->setMaxSequenceLength(max_len);
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_padSequence(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    // Lire table de tokens
+    luaL_checktype(L, 1, LUA_TTABLE);
+    int target_len = luaL_optinteger(L, 2, -1);
+    
+    std::vector<int> tokens;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        tokens.push_back(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    auto padded = ctx.currentTokenizer->padSequence(tokens, target_len);
+    
+    lua_newtable(L);
+    for (size_t i = 0; i < padded.size(); ++i) {
+        lua_pushinteger(L, padded[i]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    
+    return 1;
+}
+
+int LuaScripting::lua_batchTokenize(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    // Lire table de textes
+    luaL_checktype(L, 1, LUA_TTABLE);
+    int max_len = luaL_optinteger(L, 2, 512);
+    
+    std::vector<std::string> texts;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        texts.push_back(lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    auto batch = ctx.currentTokenizer->batchTokenize(texts, max_len);
+    
+    // Retourner table de tables
+    lua_newtable(L);
+    for (size_t i = 0; i < batch.size(); ++i) {
+        lua_newtable(L);
+        for (size_t j = 0; j < batch[i].size(); ++j) {
+            lua_pushinteger(L, batch[i][j]);
+            lua_rawseti(L, -2, j + 1);
+        }
+        lua_rawseti(L, -2, i + 1);
+    }
+    
+    return 1;
+}
+
+int LuaScripting::lua_printVocabStats(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    
+    ctx.currentTokenizer->printVocabStats();
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_getTokenFrequencies(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* text = luaL_checkstring(L, 1);
+    auto freqs = ctx.currentTokenizer->getTokenFrequencies(text);
+    
+    // Retourner table Lua
+    lua_newtable(L);
+    for (const auto& pair : freqs) {
+        lua_pushstring(L, pair.first.c_str());
+        lua_pushinteger(L, pair.second);
+        lua_settable(L, -3);
+    }
+    
+    return 1;
+}
+
+int LuaScripting::lua_analyzeText(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* text = luaL_checkstring(L, 1);
+    auto analysis = ctx.currentTokenizer->analyzeText(text);
+    
+    // Retourner table Lua avec analyse
+    lua_newtable(L);
+    
+    // entities
+    lua_newtable(L);
+    for (size_t i = 0; i < analysis.entities.size(); ++i) {
+        lua_pushstring(L, analysis.entities[i].c_str());
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, "entities");
+    
+    // modifiers
+    lua_newtable(L);
+    for (size_t i = 0; i < analysis.modifiers.size(); ++i) {
+        lua_pushstring(L, analysis.modifiers[i].c_str());
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, "modifiers");
+    
+    // actions
+    lua_newtable(L);
+    for (size_t i = 0; i < analysis.actions.size(); ++i) {
+        lua_pushstring(L, analysis.actions[i].c_str());
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, "actions");
+    
+    // main_subject
+    lua_pushstring(L, analysis.mainSubject.c_str());
+    lua_setfield(L, -2, "main_subject");
+    
+    // context
+    lua_pushstring(L, analysis.context.c_str());
+    lua_setfield(L, -2, "context");
+    
+    // complexity
+    lua_pushinteger(L, analysis.complexity);
+    lua_setfield(L, -2, "complexity");
+    
+    return 1;
+}
+
+// ============================================================================
+// Memory Manager API
+// ============================================================================
+
+int LuaScripting::lua_memoryConfig(lua_State* L) {
+    auto& mgr = AdvancedRAMManager::instance();
+    
+    // Argument: table de configuration
+    if (!lua_istable(L, 1)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Argument 1 doit être une table de configuration");
+        return 2;
+    }
+    
+    AdvancedRAMManager::Config config;
+    
+    // max_ram_gb (en Go)
+    lua_getfield(L, 1, "max_ram_gb");
+    if (lua_isnumber(L, -1)) {
+        double gb = lua_tonumber(L, -1);
+        config.max_ram_bytes = static_cast<size_t>(gb * 1024.0 * 1024.0 * 1024.0);
+    }
+    lua_pop(L, 1);
+    
+    // enable_compression
+    lua_getfield(L, 1, "enable_compression");
+    if (lua_isboolean(L, -1)) {
+        config.enable_compression = lua_toboolean(L, -1);
+    }
+    lua_pop(L, 1);
+    
+    // enable_async_loading
+    lua_getfield(L, 1, "enable_async_loading");
+    if (lua_isboolean(L, -1)) {
+        config.enable_async_loading = lua_toboolean(L, -1);
+    }
+    lua_pop(L, 1);
+    
+    // enable_prediction
+    lua_getfield(L, 1, "enable_prediction");
+    if (lua_isboolean(L, -1)) {
+        config.enable_prediction = lua_toboolean(L, -1);
+    }
+    lua_pop(L, 1);
+    
+    // enable_statistics
+    lua_getfield(L, 1, "enable_statistics");
+    if (lua_isboolean(L, -1)) {
+        config.enable_statistics = lua_toboolean(L, -1);
+    }
+    lua_pop(L, 1);
+    
+    // preload_queue_size
+    lua_getfield(L, 1, "preload_queue_size");
+    if (lua_isnumber(L, -1)) {
+        config.preload_queue_size = static_cast<size_t>(lua_tonumber(L, -1));
+    }
+    lua_pop(L, 1);
+    
+    // worker_threads
+    lua_getfield(L, 1, "worker_threads");
+    if (lua_isnumber(L, -1)) {
+        config.worker_threads = static_cast<size_t>(lua_tonumber(L, -1));
+    }
+    lua_pop(L, 1);
+    
+    // Appliquer la configuration
+    mgr.configure(config);
+    
+    std::cout << "🔧 Gestionnaire de mémoire configuré:" << std::endl;
+    std::cout << "   - Limite RAM: " << (config.max_ram_bytes / 1024 / 1024 / 1024) << " GB" << std::endl;
+    std::cout << "   - Compression: " << (config.enable_compression ? "activée" : "désactivée") << std::endl;
+    std::cout << "   - Chargement async: " << (config.enable_async_loading ? "activé" : "désactivé") << std::endl;
+    std::cout << "   - Prédiction: " << (config.enable_prediction ? "activée" : "désactivée") << std::endl;
+    std::cout << "   - Worker threads: " << config.worker_threads << std::endl;
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_memoryGetStats(lua_State* L) {
+    auto& mgr = AdvancedRAMManager::instance();
+    
+    // Retourner une table avec les statistiques
+    lua_newtable(L);
+    
+    // current_mb
+    size_t current = mgr.getCurrentRAM();
+    lua_pushnumber(L, static_cast<double>(current) / (1024.0 * 1024.0));
+    lua_setfield(L, -2, "current_mb");
+    
+    // peak_mb
+    size_t peak = mgr.getPeakRAM();
+    lua_pushnumber(L, static_cast<double>(peak) / (1024.0 * 1024.0));
+    lua_setfield(L, -2, "peak_mb");
+    
+    // usage_percent
+    float usage = mgr.getUsagePercent();
+    lua_pushnumber(L, static_cast<double>(usage));
+    lua_setfield(L, -2, "usage_percent");
+    
+    return 1;
+}
+
+int LuaScripting::lua_memoryPrintStats(lua_State* L) {
+    auto& mgr = AdvancedRAMManager::instance();
+    mgr.printDetailedStats();
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_memoryClear(lua_State* L) {
+    auto& mgr = AdvancedRAMManager::instance();
+    mgr.clear();
+    
+    std::cout << "🧹 Mémoire effacée" << std::endl;
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_memoryGetUsage(lua_State* L) {
+    auto& mgr = AdvancedRAMManager::instance();
+    
+    // Retourner current_mb, peak_mb, usage_percent
+    size_t current = mgr.getCurrentRAM();
+    size_t peak = mgr.getPeakRAM();
+    float usage = mgr.getUsagePercent();
+    
+    lua_pushnumber(L, static_cast<double>(current) / (1024.0 * 1024.0));
+    lua_pushnumber(L, static_cast<double>(peak) / (1024.0 * 1024.0));
+    lua_pushnumber(L, static_cast<double>(usage));
+    
+    return 3;
+}
+
+int LuaScripting::lua_memorySetLimit(lua_State* L) {
+    auto& mgr = AdvancedRAMManager::instance();
+    
+    // Argument: limite en GB
+    double gb = luaL_checknumber(L, 1);
+    
+    if (gb <= 0) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Limite doit être > 0");
+        return 2;
+    }
+    
+    // Créer une config avec la nouvelle limite
+    AdvancedRAMManager::Config config;
+    config.max_ram_bytes = static_cast<size_t>(gb * 1024.0 * 1024.0 * 1024.0);
+    config.enable_compression = true;
+    config.enable_async_loading = false;
+    config.enable_prediction = false;
+    config.enable_statistics = true;
+    config.worker_threads = 2;
+    
+    mgr.configure(config);
+    
+    std::cout << "💾 Limite RAM définie à " << gb << " GB" << std::endl;
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// ============================================================================
+// Memory Guard API (Strict Enforcement)
+// ============================================================================
+
+int LuaScripting::lua_guardSetLimit(lua_State* L) {
+    auto& guard = MemoryGuard::instance();
+    
+    // Argument: limite en GB
+    double gb = luaL_checknumber(L, 1);
+    
+    if (gb <= 0) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Limite doit être > 0");
+        return 2;
+    }
+    
+    size_t bytes = static_cast<size_t>(gb * 1024.0 * 1024.0 * 1024.0);
+    guard.setLimit(bytes);
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_guardGetStats(lua_State* L) {
+    auto& guard = MemoryGuard::instance();
+    
+    // Retourner une table avec les statistiques
+    lua_newtable(L);
+    
+    // current_mb
+    lua_pushnumber(L, static_cast<double>(guard.getCurrentBytes()) / (1024.0 * 1024.0));
+    lua_setfield(L, -2, "current_mb");
+    
+    // peak_mb
+    lua_pushnumber(L, static_cast<double>(guard.getPeakBytes()) / (1024.0 * 1024.0));
+    lua_setfield(L, -2, "peak_mb");
+    
+    // limit_mb
+    lua_pushnumber(L, static_cast<double>(guard.getLimit()) / (1024.0 * 1024.0));
+    lua_setfield(L, -2, "limit_mb");
+    
+    // usage_percent
+    lua_pushnumber(L, static_cast<double>(guard.getUsagePercent()));
+    lua_setfield(L, -2, "usage_percent");
+    
+    return 1;
+}
+
+int LuaScripting::lua_guardPrintStats(lua_State* L) {
+    auto& guard = MemoryGuard::instance();
+    guard.printStats();
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_guardReset(lua_State* L) {
+    auto& guard = MemoryGuard::instance();
+    guard.reset();
+    
+    std::cout << "🔄 MemoryGuard réinitialisé" << std::endl;
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// ============================================================================
+// Dynamic Tensor Allocator API
+// ============================================================================
+
+int LuaScripting::lua_allocatorConfigure(lua_State* L) {
+    auto& allocator = DynamicTensorAllocator::instance();
+    
+    // Argument: table de configuration
+    if (!lua_istable(L, 1)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Argument 1 doit être une table de configuration");
+        return 2;
+    }
+    
+    // max_ram_gb
+    lua_getfield(L, 1, "max_ram_gb");
+    double max_ram_gb = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 10.0;
+    lua_pop(L, 1);
+    
+    // enable_compression
+    lua_getfield(L, 1, "enable_compression");
+    bool enable_compression = lua_isboolean(L, -1) ? lua_toboolean(L, -1) : true;
+    lua_pop(L, 1);
+    
+    // Configurer
+    allocator.configure(static_cast<size_t>(max_ram_gb), enable_compression);
+    
+    std::cout << "✓ DynamicTensorAllocator configuré" << std::endl;
+    std::cout << "   - Limite: " << max_ram_gb << " GB" << std::endl;
+    std::cout << "   - Compression: " << (enable_compression ? "activée" : "désactivée") << std::endl;
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_allocatorPrintStats(lua_State* L) {
+    auto& allocator = DynamicTensorAllocator::instance();
+    allocator.printStats();
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_allocatorGetStats(lua_State* L) {
+    auto& allocator = DynamicTensorAllocator::instance();
+    
+    // Retourner une table avec les statistiques
+    lua_newtable(L);
+    
+    // tensor_count
+    lua_pushnumber(L, static_cast<double>(allocator.getTensorCount()));
+    lua_setfield(L, -2, "tensor_count");
+    
+    // loaded_count
+    lua_pushnumber(L, static_cast<double>(allocator.getLoadedCount()));
+    lua_setfield(L, -2, "loaded_count");
+    
+    return 1;
+}
+
+// ============================================================================
+// HtopDisplay API
+// ============================================================================
+
+int LuaScripting::lua_htopCreate(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    try {
+        if (!ctx.asyncMonitor) {
+            ctx.asyncMonitor = std::make_shared<AsyncMonitor>();
+        }
+        
+        // Démarrer avec htop activé
+        bool enable_viz = lua_toboolean(L, 1); // Optionnel: activer viz aussi
+        ctx.asyncMonitor->start(true, enable_viz);
+        
+        ctx.addLog("AsyncMonitor démarré (htop enabled)");
+        lua_pushboolean(L, true);
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+    
+    return 1;
+}
+
+int LuaScripting::lua_htopUpdate(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "AsyncMonitor non créé");
+        return 2;
+    }
+    
+    // Arguments: epoch, total_epochs, batch, total_batches, loss, avg_loss, lr,
+    //            batch_time_ms, memory_mb, memory_freed, bps, params, timestep,
+    //            kl, wass, ent, mom, spat, temp, mse
+    AsyncMonitor::Metrics metrics;
+    metrics.epoch = luaL_checkinteger(L, 1);
+    metrics.total_epochs = luaL_checkinteger(L, 2);
+    metrics.batch = luaL_checkinteger(L, 3);
+    metrics.total_batches = luaL_checkinteger(L, 4);
+    metrics.loss = static_cast<float>(luaL_checknumber(L, 5));
+    metrics.avg_loss = static_cast<float>(luaL_checknumber(L, 6));
+    metrics.lr = static_cast<float>(luaL_checknumber(L, 7));
+    metrics.batch_time_ms = luaL_optinteger(L, 8, 0);
+    metrics.memory_mb = static_cast<size_t>(luaL_optinteger(L, 9, 0));
+    metrics.memory_freed = static_cast<size_t>(luaL_optinteger(L, 10, 0));
+    metrics.bps = static_cast<float>(luaL_optnumber(L, 11, 0.0));
+    metrics.params = static_cast<size_t>(luaL_optinteger(L, 12, 0));
+    metrics.timestep = static_cast<float>(luaL_optnumber(L, 13, 0.0));
+    metrics.kl = static_cast<float>(luaL_optnumber(L, 14, 0.0));
+    metrics.wass = static_cast<float>(luaL_optnumber(L, 15, 0.0));
+    metrics.ent = static_cast<float>(luaL_optnumber(L, 16, 0.0));
+    metrics.mom = static_cast<float>(luaL_optnumber(L, 17, 0.0));
+    metrics.spat = static_cast<float>(luaL_optnumber(L, 18, 0.0));
+    metrics.temp = static_cast<float>(luaL_optnumber(L, 19, 0.0));
+    metrics.mse = static_cast<float>(luaL_optnumber(L, 20, 0.0));
+    
+    ctx.asyncMonitor->updateMetrics(metrics);
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_htopRender(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    // Render est automatique dans AsyncMonitor, cette fonction est maintenant no-op
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_htopClear(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "AsyncMonitor non créé");
+        return 2;
+    }
+    
+    auto htop = ctx.asyncMonitor->getHtop();
+    if (htop) {
+        htop->clearScreen();
+    }
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_htopEnable(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "AsyncMonitor non créé");
+        return 2;
+    }
+    
+    // Note: HtopDisplay n'a pas de setEnabled(), on peut juste démarrer/arrêter le monitor
+    bool enabled = lua_toboolean(L, 1);
+    if (!enabled) {
+        ctx.asyncMonitor->stop();
+    }
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// ============================================================================
+// Visualizer API
+// ============================================================================
+
+int LuaScripting::lua_vizCreate(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    // Argument: table de configuration
+    json config;
+    if (lua_istable(L, 1)) {
+        config = luaTableToJson(L, 1);
+    }
+    
+    try {
+        if (!ctx.asyncMonitor) {
+            ctx.asyncMonitor = std::make_shared<AsyncMonitor>();
+        }
+        
+        // Démarrer avec viz activé (et htop désactivé si pas déjà démarré)
+        ctx.asyncMonitor->start(false, true, config);
+        
+        ctx.addLog("AsyncMonitor démarré (visualizer enabled)");
+        lua_pushboolean(L, true);
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+    
+    return 1;
+}
+
+int LuaScripting::lua_vizInitialize(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "AsyncMonitor non créé");
+        return 2;
+    }
+    
+    auto viz = ctx.asyncMonitor->getViz();
+    bool success = viz && viz->isOpen();
+    lua_pushboolean(L, success);
+    return 1;
+}
+
+int LuaScripting::lua_vizIsOpen(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    
+    auto viz = ctx.asyncMonitor->getViz();
+    lua_pushboolean(L, viz && viz->isOpen());
+    return 1;
+}
+
+int LuaScripting::lua_vizProcessEvents(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    // Process events est automatique dans AsyncMonitor, cette fonction est maintenant no-op
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizUpdate(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    // Update est automatique dans AsyncMonitor, cette fonction est maintenant no-op
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizAddImage(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "AsyncMonitor non créé");
+        return 2;
+    }
+    
+    // Arguments: table de pixels (uint8), prompt (string)
+    if (!lua_istable(L, 1)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Argument 1 doit être une table de pixels");
+        return 2;
+    }
+    
+    const char* prompt = luaL_optstring(L, 2, "");
+    
+    // Lire la table de pixels
+    std::vector<uint8_t> pixels;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        if (lua_isnumber(L, -1)) {
+            pixels.push_back(static_cast<uint8_t>(lua_tointeger(L, -1)));
+        }
+        lua_pop(L, 1);
+    }
+    
+    ctx.asyncMonitor->addImage(pixels, prompt);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizUpdateMetrics(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "AsyncMonitor non créé");
+        return 2;
+    }
+    
+    // Arguments: epoch, batch, loss, lr, mse, kl, wass, ent, mom, spat, temp
+    AsyncMonitor::Metrics metrics;
+    metrics.epoch = luaL_checkinteger(L, 1);
+    metrics.batch = luaL_checkinteger(L, 2);
+    metrics.loss = static_cast<float>(luaL_checknumber(L, 3));
+    metrics.lr = static_cast<float>(luaL_checknumber(L, 4));
+    metrics.mse = static_cast<float>(luaL_optnumber(L, 5, 0.0));
+    metrics.kl = static_cast<float>(luaL_optnumber(L, 6, 0.0));
+    metrics.wass = static_cast<float>(luaL_optnumber(L, 7, 0.0));
+    metrics.ent = static_cast<float>(luaL_optnumber(L, 8, 0.0));
+    metrics.mom = static_cast<float>(luaL_optnumber(L, 9, 0.0));
+    metrics.spat = static_cast<float>(luaL_optnumber(L, 10, 0.0));
+    metrics.temp = static_cast<float>(luaL_optnumber(L, 11, 0.0));
+    
+    ctx.asyncMonitor->updateMetrics(metrics);
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizAddLossPoint(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    // AddLossPoint est automatique dans AsyncMonitor via updateMetrics
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizClear(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    
+    auto viz = ctx.asyncMonitor->getViz();
+    if (viz) {
+        viz->clearImages();
+    }
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizSetEnabled(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    
+    // Note: Visualizer n'a pas de setEnabled(), on peut juste démarrer/arrêter le monitor
+    bool enabled = lua_toboolean(L, 1);
+    if (!enabled) {
+        ctx.asyncMonitor->stop();
+    }
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizSaveLossHistory(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "AsyncMonitor non créé");
+        return 2;
+    }
+    
+    const char* filepath = luaL_checkstring(L, 1);
+    auto viz = ctx.asyncMonitor->getViz();
+    if (viz) {
+        viz->saveLossHistory(filepath);
+    }
+    
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_extractKeywords(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentTokenizer) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun tokenizer créé");
+        return 2;
+    }
+    
+    const char* text = luaL_checkstring(L, 1);
+    int topN = luaL_optinteger(L, 2, 5);
+    
+    auto keywords = ctx.currentTokenizer->extractKeywords(text, topN);
+    
+    lua_newtable(L);
+    for (size_t i = 0; i < keywords.size(); ++i) {
+        lua_pushstring(L, keywords[i].c_str());
+        lua_rawseti(L, -2, i + 1);
+    }
+    
+    return 1;
 }

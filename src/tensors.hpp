@@ -4,8 +4,12 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include <memory>
 #define CL_TARGET_OPENCL_VERSION 300 // ou 300 si tu veux explicite 3.0
 #include <CL/cl.h>
+
+// Forward declaration
+class DynamicTensorAllocator;
 
 struct Vector4F {
 
@@ -25,14 +29,29 @@ struct tensor {
     // Extension pour supporter les paramètres float du modèle
     std::vector<float> data;
     
+    // Support allocation dynamique (optionnel)
+    void* dynamic_handle = nullptr;  // Pointeur vers TensorHandle
+    bool use_dynamic_alloc = false;
+    
     // Constructeur par défaut
     tensor() = default;
     
-    // Constructeur avec taille
+    // Constructeur avec taille (allocation classique)
     explicit tensor(size_t size) : data(size, 0.0f) {}
     
     // Constructeur avec données
     explicit tensor(const std::vector<float>& values) : data(values) {}
+    
+    // Constructeur avec allocation dynamique
+    explicit tensor(size_t size, bool dynamic);
+    
+    // Destructeur
+    ~tensor();
+    
+    // Accès aux données (transparent)
+    float* getData();
+    const float* getData() const;
+    size_t getSize() const;
 };
 
 class TensorSystem {

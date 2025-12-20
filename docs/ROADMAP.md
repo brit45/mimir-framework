@@ -1,442 +1,200 @@
-# Roadmap - Mímir
+# Roadmap - Mímir Framework
 
-Plan de développement futur du framework Mímir.
+## 🎯 Vision
 
----
+**Mímir est un framework CPU-only** dont la mission est de démocratiser le deep learning en le rendant accessible à tous, sans nécessiter d'investissement dans du matériel GPU coûteux.
 
-## 🎯 Version Actuelle : 1.0.0
+### Principes Fondamentaux
 
-### ✅ Fonctionnalités Actuelles
-
-- [x] 7 architectures de modèles (Encoder, Decoder, EncDec, AE, UNet, ViT, MultiModal)
-- [x] Système de tenseurs avec OpenCL
-- [x] Optimisations SIMD AVX2
-- [x] Autograd (différentiation automatique basique)
-- [x] 3 optimiseurs (SGD, Adam, AdamW)
-- [x] 5 stratégies de LR decay
-- [x] Tokenizer BPE
-- [x] Visualisation SFML temps réel
-- [x] RAM Manager avancé (compression, LRU, prédiction)
-- [x] API Lua pour scripting
-- [x] Format SafeTensors
-- [x] Layers complets (Conv, Pooling, Norm, Activation)
+1. **CPU-only forever** - Pas de support GPU, jamais
+2. **Accessibilité maximale** - Fonctionner sur tout CPU moderne
+3. **Performance optimale** - Exploiter chaque cycle CPU disponible
+4. **Simplicité** - Minimal dependencies, maximum d'impact
+5. **Coût zéro** - Aucun investissement hardware supplémentaire
 
 ---
 
-## ✅ Complété (v1.0.0) - Décembre 2025
+## 🚀 Roadmap v2.x (CPU-Only Evolution)
 
-### Scripting Lua - Implémentation Complète
-**Priorité : HAUTE** ✅
+### v2.1 - Optimisations CPU Avancées (Q1 2026)
 
-- [x] Implémentation complète de `model.train()` depuis Lua
-  - Boucle d'entraînement configurable
-  - Intégration avec Optimizer (Adam, AdamW, SGD)
-  - Support des séquences batchées
+**Focus**: Exploiter encore plus les capacités CPU
+
+- [ ] **Mixed precision training** (FP16/FP32 automatique)
+  - Réduction mémoire 50%
+  - Speedup 1.5-2× avec F16C
   
-- [x] Implémentation complète de `model.infer()` depuis Lua
-  - Inférence avec tokenization automatique
-  - Forward pass complet
-  - Décodage des résultats
+- [ ] **Gradient clipping et accumulation**
+  - Entraînement stable avec petits batchs
+  - Simulation de grands batchs sur CPU limités
   
-- [x] Implémentation de `model.save()/load()` depuis Lua
-  - Sauvegarde SafeTensors complète
-  - Métadonnées du modèle
-  - Checkpoints atomiques
-
-- [x] Chargement de datasets réels
-  - `dataset.load()` fonctionnel
-  - Support multi-format (images, texte)
-  - Chargement depuis dossiers
+- [ ] **Learning rate schedulers**
+  - Cosine annealing
+  - Linear warmup
+  - Exponential decay
   
-- [x] `dataset.prepare_sequences()`
-  - Batching intelligent
-  - Tokenization automatique
-  - Padding/truncation configurable
+- [ ] **Cache-aware algorithms**
+  - Tiling optimisé pour L1/L2/L3
+  - Minimisation des cache misses
 
-**Priorité : HAUTE** ✅
+### v2.2 - Architectures Étendues (Q2 2026)
 
-- [x] Fichiers `Model.hpp` et `Model.cpp` créés
-- [x] Implémentation de toutes les 7 architectures:
-  - EncoderModel::buildArchitecture() - BERT-like
-  - DecoderModel::buildArchitecture() - GPT-like
-  - EncoderDecoderModel::buildArchitecture() - T5-like
-  - AutoencoderModel::buildArchitecture() - VAE
-  - UNetModel::buildArchitecture() - Segmentation/Génération
-  - VisionTransformerModel::buildArchitecture() - ViT
-  - MultiModalModel::buildArchitecture() - Vision + Language
+- [ ] **CLIP** - Vision-Language (CPU-friendly)
+- [ ] **Whisper** (small) - Speech-to-text sur CPU
+- [ ] **Stable Diffusion** (tiny) - Génération d'images optimisée CPU
+- [ ] **BERT** - NLP encoder
+- [ ] **T5** (small) - Text-to-text transfer
 
-- [x] ModelFactory::create() pour création dynamique
-- [x] Configs structurées pour chaque architecture
-- [x] Méthodes spécialisées (encode, decode, pool, generate, etc.)
+### v2.3 - Multi-Platform CPU (Q3 2026)
 
-### Point d'Entrée Principal
-**Priorité : MOYENNE** ✅
+**Objectif**: Support de tous les CPUs modernes
 
-- [x] `main.cpp` implémenté avec CLI complet
-  - Support `--script` pour exécution Lua
-  - Support `--config` pour chargement JSON
-  - Mode interactif REPL Lua
-  - Gestion des arguments et aide
+- [ ] **ARM Neon optimizations**
+  - Raspberry Pi 4/5
+  - Apple M1/M2/M3
+  - Support mobile ARM
+  
+- [ ] **AVX-512 support** (optionnel)
+  - Pour les serveurs Intel Xeon
+  - Détection automatique
+  
+- [ ] **AMD-specific optimizations**
+  - Tuning pour Zen 3/4
+  
+- [ ] **WebAssembly SIMD**
+  - IA dans le navigateur (CPU-only)
 
-### Scripts Exemples
-**Priorité : MOYENNE** ✅
+### v2.4 - Distributed CPU Training (Q4 2026)
 
-- [x] `scripts/example_training.lua` - Workflow complet
-- [x] `scripts/example_gpt.lua` - Génération de texte
-- [x] Scripts existants mis à jour
+**Objectif**: Utiliser plusieurs machines CPU
+
+- [ ] **MPI support** - Distributed training multi-CPU
+- [ ] **Parameter server** - Architecture master/worker
+- [ ] **Ring AllReduce** - Communication optimisée
+- [ ] **CPU cluster** - Entraînement sur cluster de CPUs pas chers
 
 ---
 
-## 🚧 En Cours (v1.1.0) - Q1 2026
-  - Data augmentation
+## 🎓 v3.0 - Bindings et Outils (2027)
 
-**Priorité : HAUTE**
 
-- [ ] `Model.cpp` : Implémenter les 7 architectures
-  - EncoderModel::buildArchitecture()
-  - DecoderModel::buildArchitecture()
-  - EncoderDecoderModel::buildArchitecture()
-  - AutoencoderModel::buildArchitecture()
-  - UNetModel::buildArchitecture()
-  - VisionTransformerModel::buildArchitecture()
-  - MultiModalModel::buildArchitecture()
+### Outils de Production
+
+- [ ] **Model quantization** (INT8/INT4)
+  - Réduction mémoire 4-8×
+  - Speedup 2-4× sur CPU
+  - Pas de perte significative
+  
+- [ ] **ONNX export**
+  - Interopérabilité
+  - Déploiement CPU partout
+  
+- [ ] **Model pruning**
+  - Réduction taille 50-90%
+  - Speedup inférence
+  
+- [ ] **Knowledge distillation**
+  - Créer des petits modèles depuis grands modèles
+
+### Dataset & Training Tools
+
+- [ ] **Data augmentation** intégrée
+- [ ] **Automatic batching** optimisé CPU
+- [x] **Checkpointing** automatique
+- [ ] **TensorBoard** logging
+- [ ] **Profiling tools** CPU
 
 ---
 
-## 🔮 Planifié (v1.2.0) - Q2 2026
+## ❌ Non-Goals (Ce qui ne sera JAMAIS fait)
 
-### Export & Interopérabilité
-**Priorité : MOYENNE**
+### GPU Support
 
-- [ ] Export ONNX
-  - Conversion modèles Mímir → ONNX
-  - Support opérateurs custom
-  - Optimisation du graphe
-  
-- [ ] Import ONNX
-  - Chargement modèles ONNX
-  - Conversion vers architecture Mímir
-  
-- [ ] Export TorchScript
-  - Compatibilité PyTorch
-  
-- [ ] Import SafeTensors externes
-  - Chargement checkpoints HuggingFace
-  - Mapping automatique d'architecture
+- ❌ **CUDA** - Jamais
+- ❌ **ROCm** - Jamais  
+- ❌ **Metal** - Jamais (sauf si CPU ARM via Neon)
 
-### Multi-GPU
-**Priorité : MOYENNE**
+**Raison**: Mímir est CPU-only par philosophie. L'objectif est l'accessibilité, pas la performance maximale absolue.
 
-- [ ] Data Parallelism
-  - Distribution automatique sur GPU
-  - Synchronisation gradients
-  - Scaling efficace
-  
-- [ ] Model Parallelism
-  - Découpage de modèles larges
-  - Pipeline parallelism
-  
-- [ ] Mixed Precision Training
-  - FP16/BF16 support
-  - Loss scaling automatique
-  - Gradient accumulation
+### Cloud Payant
 
-### Distributed Training
-**Priorité : BASSE**
+- ❌ **Cloud inference services** - Pas de lock-in cloud
+- ❌ **SaaS offerings** - Tout reste local et gratuit
 
-- [ ] Multi-node training
-  - MPI/NCCL backend
-  - Elastic training
-  - Fault tolerance
+### Complexité Inutile
+
+- ❌ **Dependencies lourdes** - On garde minimal
+- ❌ **Framework bloat** - Simplicité avant tout
+- ❌ **Enterprise features** - On reste accessible
 
 ---
 
-## 🌟 Fonctionnalités Avancées (v1.3.0) - Q3 2026
+## 🎯 Use Cases Optimaux pour Mímir
 
-### Quantization
-**Priorité : MOYENNE**
+### ✅ Excellents pour Mímir (CPU-only)
 
-- [ ] Post-Training Quantization (PTQ)
-  - INT8/INT4 quantization
-  - Per-channel/per-tensor
-  
-- [ ] Quantization-Aware Training (QAT)
-  - Fake quantization
-  - Calibration automatique
+1. **Prototypage rapide** - Test d'architectures
+2. **Petits modèles** (<100M params) - Entraînement rapide sur CPU
+3. **Modèles moyens** (100-500M params) - Entraînement overnight
+4. **Inférence locale** - Déploiement sur edge/desktop
+5. **Apprentissage** - Enseignement du deep learning
+6. **Recherche reproductible** - Pas de dépendance GPU
+7. **Fine-tuning** - Adapter des modèles pré-entraînés
 
-### Pruning & Compression
-**Priorité : BASSE**
+### ⚠️ Possibles mais lents
 
-- [ ] Magnitude Pruning
-  - Structured/unstructured
-  - Gradual pruning
-  
-- [ ] Knowledge Distillation
-  - Teacher-student framework
-  - Loss distillation
+1. **Grands modèles** (500M-2B params) - Plusieurs jours d'entraînement
+2. **Vision haute résolution** - Images >512×512
+3. **Très grands batchs** - Limité par RAM CPU
 
-### AutoML
-**Priorité : BASSE**
+### ❌ Non recommandés
 
-- [ ] Neural Architecture Search (NAS)
-  - Search space définition
-  - Stratégies de recherche (random, RL, evolutionary)
-  
-- [ ] Hyperparameter Optimization
-  - Bayesian optimization
-  - Grid/Random search
+1. **Modèles géants** (>2B params) - Utilisez un framework GPU
+2. **Production à large échelle** - Considérez du hardware dédié
+3. **Real-time vidéo** - Préférez GPU ou hardware spécialisé
 
 ---
 
-## 🔬 Recherche & Innovation (v2.0.0) - Q4 2026
+## 💡 Philosophie de Développement
 
-### Architectures Nouvelles
-**Priorité : RECHERCHE**
+### Priorités
 
-- [ ] Mamba/SSM (State Space Models)
-  - Alternative aux Transformers
-  - Linéaire en complexité
-  
-- [ ] Mixture of Experts (MoE)
-  - Sparse activation
-  - Expert routing
-  
-- [ ] Hyena Hierarchy
-  - Long context
-  - Sub-quadratic attention
+1. **Accessibilité** > Performance absolue
+2. **Simplicité** > Features complexes
+3. **CPU optimization** > Support multi-backend
+4. **Local-first** > Cloud-first
+5. **Open source** > Propriétaire
 
-### Optimisations Avancées
-**Priorité : RECHERCHE**
+### Décisions de Design
 
-- [ ] Flash Attention
-  - Memory-efficient attention
-  - IO-aware implementation
-  
-- [ ] Triton Kernels
-  - Kernels GPU custom optimisés
-  - Auto-tuning
-
-### Reinforcement Learning
-**Priorité : RECHERCHE**
-
-- [ ] PPO (Proximal Policy Optimization)
-- [ ] RLHF (RL from Human Feedback)
-- [ ] Environment abstraction
+- **Pas de GPU**: Choix assumé pour rester simple et accessible
+- **C++17**: Moderne mais largement supporté
+- **Minimal dependencies**: Juste Lua, OpenMP, standard library
+- **Header-only quand possible**: Faciliter l'intégration
+- **Documentation extensive**: Rendre accessible aux débutants
 
 ---
 
-## 🛠️ Infrastructure & Outils (Continu)
+## 🤝 Contribution
 
-### Tests
-**Priorité : HAUTE**
+Vous voulez contribuer? Consultez [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-- [ ] Tests unitaires
-  - Layers (Conv, Pooling, etc.)
-  - Activations
-  - Optimizers
-  - Autograd
-  
-- [ ] Tests d'intégration
-  - Entraînement end-to-end
-  - Sauvegarde/chargement
-  - Export ONNX
-  
-- [ ] Benchmarks
-  - Performance CPU/GPU
-  - Comparaison avec PyTorch/TensorFlow
-
-### Documentation
-**Priorité : MOYENNE**
-
-- [x] Documentation complète (INDEX, ARCHITECTURE, APIs)
-- [ ] Tutoriels vidéo
-- [ ] Documentation API auto-générée (Doxygen)
-- [ ] Notebooks Jupyter (via Python bindings)
-
-### CI/CD
-**Priorité : MOYENNE**
-
-- [ ] GitHub Actions
-  - Build automatique
-  - Tests automatiques
-  - Packaging
-  
-- [ ] Docker images
-  - CPU-only
-  - CUDA
-  - ROCm (AMD)
+**Important**: Les contributions ajoutant du support GPU seront poliment refusées. Mímir reste CPU-only par design.
 
 ---
 
-## 🌍 Écosystème (v2.1.0+)
+## 📅 Timeline Résumé
 
-### Python Bindings
-**Priorité : HAUTE**
-
-- [ ] pybind11 wrapper
-  - API Python complète
-  - NumPy integration
-  - PyTorch interop
-  
-- [ ] pip package
-  - Installation simple : `pip install mimir-dl`
-
-### Language Bindings
-**Priorité : BASSE**
-
-- [ ] Rust bindings
-- [ ] Julia bindings
-- [ ] JavaScript (WASM)
-
-### Frameworks Integration
-**Priorité : MOYENNE**
-
-- [ ] PyTorch Lightning
-- [ ] Hugging Face Transformers
-- [ ] ONNX Runtime
+| Version | Date | Focus |
+|---------|------|-------|
+| v2.0 | ✅ Dec 2025 | 8 architectures + API Lua + Optimisations CPU |
+| v2.1 | Q1 2026 | Mixed precision + Schedulers |
+| v2.2 | Q2 2026 | Plus d'architectures (CLIP, Whisper, etc.) |
+| v2.3 | Q3 2026 | ARM Neon + Multi-platform CPU |
+| v2.4 | Q4 2026 | Distributed CPU training (MPI) |
 
 ---
 
-## 📊 Optimisations Performance
+**Mission**: Garder l'IA accessible à tous, sans barrière financière ou technique.
 
-### CPU
-**Priorité : HAUTE**
-
-- [ ] Support ARM Neon (Apple Silicon, ARM servers)
-- [ ] AVX-512 support
-- [ ] Auto-tuning BLAS
-- [ ] Custom allocator (jemalloc, tcmalloc)
-
-### GPU
-**Priorité : HAUTE**
-
-- [ ] CUDA backend natif (alternative à OpenCL)
-  - cuBLAS, cuDNN integration
-  - Tensor Cores (Ampere+)
-  
-- [ ] ROCm support optimisé (AMD)
-- [ ] Metal support (Apple Silicon)
-- [ ] Vulkan compute backend
-
----
-
-## 🎓 Éducation & Communauté
-
-### Ressources Pédagogiques
-**Priorité : MOYENNE**
-
-- [ ] Tutoriels interactifs
-- [ ] Cours vidéo
-- [ ] Notebooks exemples
-- [ ] Blog posts techniques
-
-### Communauté
-**Priorité : BASSE**
-
-- [ ] Forum/Discord
-- [ ] Contributions guidelines
-- [ ] Code of conduct
-- [ ] Monthly releases
-
----
-
-## 🐛 Bugs Connus & Limitations
-
-### À Corriger
-**Priorité : HAUTE**
-
-- [ ] Memory leaks potentiels dans TensorSystem
-- [ ] Thread safety pour LuaContext
-- [ ] Validation des configs JSON incomplète
-
-### Limitations Actuelles
-**Priorité : MOYENNE**
-
-- [ ] Pas de support Windows natif (WSL uniquement)
-- [ ] OpenCL seulement (pas CUDA natif)
-- [ ] Backward pass incomplet pour certaines opérations
-- [ ] Pas de dynamic batching
-
----
-
-## 📅 Timeline
-
-```
-2025 Q4 : v1.0.0 (ACTUEL)
-├── 7 architectures
-├── API Lua basique
-└── Optimisations SIMD
-
-2026 Q1 : v1.1.0
-├── Lua API complète
-└── Tests unitaires
-
-2026 Q2 : v1.2.0
-├── Export ONNX
-├── Multi-GPU
-└── Python bindings
-
-2026 Q3 : v1.3.0
-├── Quantization
-├── AutoML
-└── CI/CD
-
-2026 Q4 : v2.0.0
-├── Architectures nouvelles (Mamba, MoE)
-├── Flash Attention
-└── RLHF
-```
-
----
-
-## 🎯 Objectifs Stratégiques
-
-### Court Terme (6 mois)
-1. **Stabilité** : Compléter les TODOs critiques
-2. **Tests** : Couverture 80%+
-3. **Documentation** : Tutoriels complets
-
-### Moyen Terme (1 an)
-1. **Performance** : Compétitif avec PyTorch/TensorFlow
-2. **Écosystème** : Python bindings production-ready
-3. **Adoption** : 1000+ stars GitHub, 100+ utilisateurs actifs
-
-### Long Terme (2 ans)
-1. **Innovation** : Architectures state-of-the-art
-2. **Industrie** : Adoption en production
-3. **Recherche** : Publications académiques
-
----
-
-## 🤝 Contributions
-
-Les contributions sont bienvenues pour tous les items de la roadmap !
-
-**Priorités pour contributeurs** :
-1. 🔴 Critique : Lua API, Model.cpp, Tests
-2. 🟡 Important : ONNX export, Multi-GPU, Python bindings
-3. 🟢 Nice-to-have : AutoML, Nouvelles architectures
-
-**Comment contribuer** :
-- Voir [CONTRIBUTING.md](CONTRIBUTING.md)
-- Choisir un item de la roadmap
-- Ouvrir une issue/PR
-- Rejoindre les discussions
-
----
-
-## 📝 Notes de Version
-
-### v1.0.0 (24 novembre 2025)
-- 🎉 Première release publique
-- ✨ 7 architectures de modèles
-- ⚡ Optimisations SIMD AVX2
-- 🔧 API Lua basique
-- 📊 Visualisation SFML
-- 💾 Format SafeTensors
-
----
-
-**Mímir** évolue constamment. Cette roadmap est mise à jour trimestriellement.
-
-Dernière mise à jour : 24 novembre 2025
+**Vision**: Un framework CPU-only de référence pour le prototypage, l'apprentissage et le déploiement local d'IA.

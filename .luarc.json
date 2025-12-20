@@ -1,0 +1,54 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime": {
+    "version": "Lua 5.3",
+    "path": [
+      "?.lua",
+      "?/init.lua"
+    ]
+  },
+  "workspace": {
+    "library": [
+      "mimir-api.lua"
+    ],
+    "checkThirdParty": false
+  },
+  "diagnostics": {
+    "globals": [
+      "model",
+      "tokenizer", 
+      "dataset",
+      "allocator",
+      "guard",
+      "memory",
+      "htop",
+      "viz",
+      "log",
+      "read_json",
+      "write_json"
+    ],
+    "disable": [
+      "lowercase-global"
+    ]
+  },
+  "completion": {
+    "enable": true,
+    "callSnippet": "Both",
+    "keywordSnippet": "Both"
+  },
+  "hint": {
+    "enable": true,
+    "paramName": "All",
+    "setType": true
+  },
+  "format": {
+    "enable": true,
+    "defaultConfig": {
+      "indent_style": "tab",
+      "indent_size": "4"
+    }
+  },
+  "telemetry": {
+    "enable": false
+  }
+}

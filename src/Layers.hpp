@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <memory>
 #include <functional>
+#include <immintrin.h>  // AVX2
 
 // ============================================================================
 // Énumérations et structures
@@ -101,14 +102,40 @@ inline float relu(float x) {
 }
 
 inline void relu2d(std::vector<float>& data, int width, int height) {
-    for (auto& val : data) {
-        val = relu(val);
+    size_t size = data.size();
+    size_t i = 0;
+    
+#ifdef __AVX2__
+    __m256 zero = _mm256_setzero_ps();
+    // Traiter 8 floats à la fois avec AVX2
+    for (; i + 8 <= size; i += 8) {
+        __m256 vals = _mm256_loadu_ps(&data[i]);
+        __m256 result = _mm256_max_ps(vals, zero);
+        _mm256_storeu_ps(&data[i], result);
+    }
+#endif
+    
+    // Remaining elements
+    for (; i < size; ++i) {
+        data[i] = relu(data[i]);
     }
 }
 
 inline void relu3d(std::vector<float>& data, int width, int height, int depth) {
-    for (auto& val : data) {
-        val = relu(val);
+    size_t size = data.size();
+    size_t i = 0;
+    
+#ifdef __AVX2__
+    __m256 zero = _mm256_setzero_ps();
+    for (; i + 8 <= size; i += 8) {
+        __m256 vals = _mm256_loadu_ps(&data[i]);
+        __m256 result = _mm256_max_ps(vals, zero);
+        _mm256_storeu_ps(&data[i], result);
+    }
+#endif
+    
+    for (; i < size; ++i) {
+        data[i] = relu(data[i]);
     }
 }
 
@@ -173,20 +200,68 @@ inline float softsign(float x) {
 // Softmax (pour un vecteur)
 inline void softmax(std::vector<float>& logits) {
     if (logits.empty()) return;
+    size_t size = logits.size();
     
-    // Trouver le max pour stabilité numérique
-    float max_val = *std::max_element(logits.begin(), logits.end());
-    
-    // Exp(x - max)
-    float sum = 0.0f;
-    for (auto& val : logits) {
-        val = std::exp(val - max_val);
-        sum += val;
+    // Trouver le max pour stabilité numérique avec AVX2
+    float max_val = logits[0];
+#ifdef __AVX2__
+    if (size >= 8) {
+        __m256 max_vec = _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+        size_t i = 0;
+        for (; i + 8 <= size; i += 8) {
+            __m256 vals = _mm256_loadu_ps(&logits[i]);
+            max_vec = _mm256_max_ps(max_vec, vals);
+        }
+        // Réduction horizontale
+        float temp[8];
+        _mm256_storeu_ps(temp, max_vec);
+        for (int j = 0; j < 8; ++j) max_val = std::max(max_val, temp[j]);
+        for (; i < size; ++i) max_val = std::max(max_val, logits[i]);
+    } else
+#endif
+    {
+        max_val = *std::max_element(logits.begin(), logits.end());
     }
     
-    // Normaliser
-    for (auto& val : logits) {
-        val /= sum;
+    // Exp(x - max) avec AVX2
+    float sum = 0.0f;
+    size_t i = 0;
+#ifdef __AVX2__
+    __m256 max_vec = _mm256_set1_ps(max_val);
+    __m256 sum_vec = _mm256_setzero_ps();
+    for (; i + 8 <= size; i += 8) {
+        __m256 vals = _mm256_loadu_ps(&logits[i]);
+        vals = _mm256_sub_ps(vals, max_vec);
+        // Approximation rapide d'exp avec AVX2 (à améliorer si nécessaire)
+        // Pour l'instant utilisons le fallback scalaire pour exp
+        float temp[8];
+        _mm256_storeu_ps(temp, vals);
+        for (int j = 0; j < 8; ++j) {
+            temp[j] = std::exp(temp[j]);
+            sum += temp[j];
+        }
+        vals = _mm256_loadu_ps(temp);
+        _mm256_storeu_ps(&logits[i], vals);
+    }
+#endif
+    for (; i < size; ++i) {
+        logits[i] = std::exp(logits[i] - max_val);
+        sum += logits[i];
+    }
+    
+    // Normaliser avec AVX2
+    float inv_sum = 1.0f / sum;
+    i = 0;
+#ifdef __AVX2__
+    __m256 inv_vec = _mm256_set1_ps(inv_sum);
+    for (; i + 8 <= size; i += 8) {
+        __m256 vals = _mm256_loadu_ps(&logits[i]);
+        vals = _mm256_mul_ps(vals, inv_vec);
+        _mm256_storeu_ps(&logits[i], vals);
+    }
+#endif
+    for (; i < size; ++i) {
+        logits[i] *= inv_sum;
     }
 }
 
@@ -213,10 +288,62 @@ inline float apply(float x, ActivationType type, float param = 0.0f) {
 inline void apply_inplace(std::vector<float>& data, ActivationType type, float param = 0.0f) {
     if (type == ActivationType::SOFTMAX) {
         softmax(data);
-    } else {
-        for (auto& val : data) {
-            val = apply(val, type, param);
+        return;
+    }
+    
+    size_t size = data.size();
+    size_t i = 0;
+    
+#ifdef __AVX2__
+    // Optimisations AVX2 pour activations simples
+    if (type == ActivationType::RELU) {
+        __m256 zero = _mm256_setzero_ps();
+        for (; i + 8 <= size; i += 8) {
+            __m256 vals = _mm256_loadu_ps(&data[i]);
+            vals = _mm256_max_ps(vals, zero);
+            _mm256_storeu_ps(&data[i], vals);
         }
+    } else if (type == ActivationType::RELU6) {
+        __m256 zero = _mm256_setzero_ps();
+        __m256 six = _mm256_set1_ps(6.0f);
+        for (; i + 8 <= size; i += 8) {
+            __m256 vals = _mm256_loadu_ps(&data[i]);
+            vals = _mm256_max_ps(vals, zero);
+            vals = _mm256_min_ps(vals, six);
+            _mm256_storeu_ps(&data[i], vals);
+        }
+    } else if (type == ActivationType::LEAKY_RELU) {
+        __m256 zero = _mm256_setzero_ps();
+        __m256 alpha = _mm256_set1_ps(param);
+        for (; i + 8 <= size; i += 8) {
+            __m256 vals = _mm256_loadu_ps(&data[i]);
+            __m256 neg_part = _mm256_mul_ps(vals, alpha);
+            __m256 mask = _mm256_cmp_ps(vals, zero, _CMP_GT_OQ);
+            vals = _mm256_blendv_ps(neg_part, vals, mask);
+            _mm256_storeu_ps(&data[i], vals);
+        }
+    } else if (type == ActivationType::TANH) {
+        // TANH approximation rapide avec AVX2
+        __m256 three = _mm256_set1_ps(3.0f);
+        __m256 neg_three = _mm256_set1_ps(-3.0f);
+        __m256 c1 = _mm256_set1_ps(27.0f);
+        __m256 c2 = _mm256_set1_ps(9.0f);
+        for (; i + 8 <= size; i += 8) {
+            __m256 x = _mm256_loadu_ps(&data[i]);
+            // Clipping
+            x = _mm256_min_ps(_mm256_max_ps(x, neg_three), three);
+            __m256 x2 = _mm256_mul_ps(x, x);
+            __m256 num = _mm256_fmadd_ps(x2, x, c1);
+            __m256 den = _mm256_fmadd_ps(c2, x2, c1);
+            x = _mm256_div_ps(_mm256_mul_ps(x, num), den);
+            _mm256_storeu_ps(&data[i], x);
+        }
+    }
+#endif
+    
+    // Fallback scalaire pour éléments restants ou activations non vectorisées
+    for (; i < size; ++i) {
+        data[i] = apply(data[i], type, param);
     }
 }
 

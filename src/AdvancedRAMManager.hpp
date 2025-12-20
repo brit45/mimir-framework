@@ -18,78 +18,72 @@
 #include <optional>
 #include <functional>
 
-// Compression LZ4 (header-only lightweight implementation)
-// Pour une vraie implémentation, utilisez: #include <lz4.h>
-namespace SimpleLZ4 {
-    // Version simplifiée pour démo - remplacer par vraie LZ4 en production
+// Compression LZ4 - Vraie implémentation
+#include <lz4.h>
+
+namespace LZ4Compression {
     inline std::vector<uint8_t> compress(const std::vector<uint8_t>& data) {
-        // Simulation: compression ~50%
-        std::vector<uint8_t> compressed;
-        compressed.reserve(data.size() / 2 + 100);
+        if (data.empty()) return {};
         
-        // Header: taille originale (4 bytes)
-        uint32_t original_size = static_cast<uint32_t>(data.size());
-        compressed.push_back((original_size >> 0) & 0xFF);
-        compressed.push_back((original_size >> 8) & 0xFF);
-        compressed.push_back((original_size >> 16) & 0xFF);
-        compressed.push_back((original_size >> 24) & 0xFF);
+        // Calculer la taille max du buffer compressé
+        int src_size = static_cast<int>(data.size());
+        int max_dst_size = LZ4_compressBound(src_size);
         
-        // Compression RLE simple (Run-Length Encoding)
-        for (size_t i = 0; i < data.size(); ) {
-            uint8_t value = data[i];
-            size_t count = 1;
-            
-            while (i + count < data.size() && 
-                   data[i + count] == value && 
-                   count < 255) {
-                count++;
-            }
-            
-            if (count > 3) {
-                // Run: marker(255) + count + value
-                compressed.push_back(255);
-                compressed.push_back(static_cast<uint8_t>(count));
-                compressed.push_back(value);
-            } else {
-                // Literal: copier tel quel
-                for (size_t j = 0; j < count; j++) {
-                    compressed.push_back(value);
-                }
-            }
-            
-            i += count;
+        // Buffer pour les données compressées
+        std::vector<uint8_t> compressed(max_dst_size + 4); // +4 pour le header
+        
+        // Écrire la taille originale dans le header (4 bytes)
+        compressed[0] = (src_size >> 0) & 0xFF;
+        compressed[1] = (src_size >> 8) & 0xFF;
+        compressed[2] = (src_size >> 16) & 0xFF;
+        compressed[3] = (src_size >> 24) & 0xFF;
+        
+        // Compresser avec LZ4
+        int compressed_size = LZ4_compress_default(
+            reinterpret_cast<const char*>(data.data()),
+            reinterpret_cast<char*>(compressed.data() + 4),
+            src_size,
+            max_dst_size
+        );
+        
+        if (compressed_size <= 0) {
+            // Échec de compression - retourner les données originales
+            return data;
         }
         
+        // Redimensionner au vrai size (header + données compressées)
+        compressed.resize(compressed_size + 4);
         return compressed;
     }
     
     inline std::vector<uint8_t> decompress(const std::vector<uint8_t>& compressed) {
         if (compressed.size() < 4) return {};
         
-        // Lire la taille originale
-        uint32_t original_size = 
-            (uint32_t)compressed[0] |
-            ((uint32_t)compressed[1] << 8) |
-            ((uint32_t)compressed[2] << 16) |
-            ((uint32_t)compressed[3] << 24);
+        // Lire la taille originale depuis le header
+        int original_size = 
+            (int)compressed[0] |
+            ((int)compressed[1] << 8) |
+            ((int)compressed[2] << 16) |
+            ((int)compressed[3] << 24);
         
-        std::vector<uint8_t> decompressed;
-        decompressed.reserve(original_size);
+        if (original_size <= 0 || original_size > 1000000000) { // Max 1GB
+            return {};
+        }
         
-        for (size_t i = 4; i < compressed.size(); ) {
-            if (compressed[i] == 255 && i + 2 < compressed.size()) {
-                // Run
-                uint8_t count = compressed[i + 1];
-                uint8_t value = compressed[i + 2];
-                for (int j = 0; j < count; j++) {
-                    decompressed.push_back(value);
-                }
-                i += 3;
-            } else {
-                // Literal
-                decompressed.push_back(compressed[i]);
-                i++;
-            }
+        // Buffer pour les données décompressées
+        std::vector<uint8_t> decompressed(original_size);
+        
+        // Décompresser
+        int decompressed_size = LZ4_decompress_safe(
+            reinterpret_cast<const char*>(compressed.data() + 4),
+            reinterpret_cast<char*>(decompressed.data()),
+            static_cast<int>(compressed.size() - 4),
+            original_size
+        );
+        
+        if (decompressed_size != original_size) {
+            std::cerr << "⚠️  Erreur décompression LZ4: " << decompressed_size << " vs " << original_size << std::endl;
+            return {};
         }
         
         return decompressed;
@@ -173,8 +167,8 @@ public:
         
         // Compression si activée et bénéfique
         if (compress && config_.enable_compression && data.size() > 1024) {
-            auto compressed = SimpleLZ4::compress(data);
-            float ratio = SimpleLZ4::compressionRatio(data.size(), compressed.size());
+            auto compressed = LZ4Compression::compress(data);
+            float ratio = LZ4Compression::compressionRatio(data.size(), compressed.size());
             
             if (ratio < 0.9f) { // Au moins 10% de gain
                 storage_data = std::move(compressed);
@@ -236,7 +230,7 @@ public:
         // Décompression si nécessaire
         if (info.is_compressed) {
             cache_hits_compressed_++;
-            return SimpleLZ4::decompress(info.data);
+            return LZ4Compression::decompress(info.data);
         } else {
             cache_hits_uncompressed_++;
             return info.data;
