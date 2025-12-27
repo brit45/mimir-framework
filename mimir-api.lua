@@ -1,22 +1,42 @@
 ---@meta
----@version 2.0.0
+---@version 2.1.0
 ---@author <bri45> for "Mímir Framework"
+---@date 27 décembre 2025
 ---@diagnostic disable: missing-return, unused-local, unused-vararg, duplicate-doc-field, redundant-parameter
 
 --=============================================================================
--- Mímir Framework — IDE Stub (EmmyLua)
+-- Mímir Framework v2.1 — IDE Stub (EmmyLua)
 --=============================================================================
 -- Ce fichier est un "stub" destiné aux IDE (LuaLS / EmmyLua / IntelliJ, etc.).
 -- Il documente l'API globale exposée par le binaire `mimir` (bindings C/C++).
 --
+-- ⚠️  IMPORTANT: Ce fichier est synchronisé avec src/LuaScripting.cpp
+--    Toute modification de l'API C++ doit être reflétée ici.
+--
 -- Objectifs :
---  • Autocomplétion, signatures, types, docstrings
---  • Stable : les scripts Lua sont l'API publique ; l'implémentation C/C++ peut évoluer
+--  • Autocomplétion IDE, signatures, types, docstrings
+--  • Stable : les scripts Lua sont l'API publique
+--  • Documentation de référence pour les utilisateurs
+--
+-- Nouveautés v2.1.0 :
+--  • Scripts réorganisés en catégories (demos, examples, tests, etc.)
+--  • Documentation corrigée (33 fixes)
+--  • Synchronisation API validée (114 fonctions)
+--
+-- Historique v2.0.0 :
+--  • MemoryGuard API (limite stricte 10 GB par défaut)
+--  • allocator.configure() pour configuration mémoire (OBLIGATOIRE)
+--  • FluxModel API complète (diffusion text-to-image avec VAE)
+--  • Modes train()/eval() pour tous les modèles
+--  • Support complet 8 architectures (UNet, VAE, ViT, GAN, Diffusion, Transformer, ResNet, MobileNet)
+--  • API htop et viz pour monitoring temps réel
 --
 -- Remarques :
---  • Les fonctions retournent souvent (ok:boolean) ou (ok:boolean, err:string)
---  • Les tables de stats sont des "structs" (tables Lua avec champs nommés)
---  • Les "layers.*" sont actuellement des placeholders (utiliser model.forward())
+--  • Les fonctions retournent souvent (ok:boolean, value) ou (ok:boolean, err:string)
+--  • ⚠️  Toujours appeler allocator.configure() au début des scripts!
+--  • Les tables de stats sont des structs (tables Lua avec champs nommés)
+--  • Les "layers.*" sont des opérations bas niveau (préférer model.forward())
+--  • MemoryGuard: API moderne recommandée (guard: API legacy compatible)
 --=============================================================================
 
 --=============================================================================
@@ -144,6 +164,23 @@
 ---@class MobileNetConfig
 ---@field num_classes? int
 ---@field width_mult? float
+
+---@class FluxConfig
+---@field image_resolution? int @Résolution des images (défaut: 256)
+---@field latent_channels? int @Canaux de l'espace latent (défaut: 4)
+---@field latent_resolution? int @Résolution de l'espace latent (défaut: 32)
+---@field vae_base_channels? int @Canaux de base VAE (défaut: 128)
+---@field vae_channel_mult? int[] @Multiplicateurs de canaux VAE (ex: {1,2,4,4})
+---@field num_res_blocks? int @Nombre de blocs résiduels (défaut: 2)
+---@field vocab_size? int @Taille du vocabulaire (défaut: 50000)
+---@field text_max_length? int @Longueur max du texte (défaut: 77)
+---@field text_embed_dim? int @Dimension embeddings texte (défaut: 768)
+---@field transformer_dim? int @Dimension transformer (défaut: 768)
+---@field num_transformer_blocks? int @Nombre de blocs transformer (défaut: 12)
+---@field num_attention_heads? int @Nombre de têtes attention (défaut: 12)
+---@field mlp_ratio? float @Ratio MLP (défaut: 4.0)
+---@field timestep_embed_dim? int @Dimension embedding timestep (défaut: 256)
+---@field num_diffusion_steps? int @Nombre de steps diffusion (défaut: 1000)
 
 --=============================================================================
 -- Stats / Structs
@@ -276,15 +313,29 @@ function model.total_params() end
 function model.push_layer(name, layer_type, params_count) end
 
 ---Forward pass (si exposé par l'implémentation).
----@param input TokenIds|string|table
----@return boolean ok
+---Mode training activé par défaut pour permettre le backward pass.
+---@param input TokenIds|string|table|float[] @Données d'entrée
+---@param training? bool @Mode training (défaut: true) pour calculer les gradients
+---@return float[]|nil @Sortie du modèle
 ---@return string? err
-function model.forward(input) end
+function model.forward(input, training) end
 
----Backward pass (si exposé par l'implémentation).
+---Backward pass pour calculer les gradients.
+---@param loss_gradient float[] @Gradient de la loss
 ---@return boolean ok
 ---@return string? err
-function model.backward() end
+function model.backward(loss_gradient) end
+
+---Réinitialise tous les gradients à zéro.
+---Important: à appeler avant chaque itération d'entraînement.
+---@return boolean ok
+---@return string? err
+function model.zero_grads() end
+
+---Récupère les gradients actuels de tous les paramètres.
+---@return float[]|nil @Vecteur de tous les gradients
+---@return string? err
+function model.get_gradients() end
 
 ---Step optimiseur (si exposé). Le LR peut être transmis.
 ---@param learning_rate number
@@ -356,6 +407,251 @@ function architectures.resnet(config) end
 ---@return boolean ok
 ---@return string? err
 function architectures.mobilenet(config) end
+
+---Construire un modèle Flux (Diffusion avec VAE et text conditioning).
+---@param config? FluxConfig|table
+---@return boolean ok
+---@return string? err
+function architectures.flux(config) end
+
+--=============================================================================
+-- Module: flux (API Fonctionnelle Flux)
+--=============================================================================
+
+---@class FluxAPI
+local flux = {}
+
+---Générer une image depuis un prompt texte (API simplifiée).
+---Utilise le modèle Flux global configuré.
+---@param prompt string @Prompt texte décrivant l'image à générer
+---@param num_steps? integer @Nombre de steps de diffusion (défaut: 50)
+---@return table? image_data @Pixels de l'image générée (ou nil si erreur)
+---@return string? err @Message d'erreur
+---
+---**Exemple:**
+---```lua
+--- local img, err = flux.generate("A beautiful sunset over mountains", 50)
+--- if img then
+---   print("Image générée avec succès")
+--- else
+---   print("Erreur:", err)
+--- end
+---```
+function flux.generate(prompt, num_steps) end
+
+---Encoder une image en espace latent via le VAE.
+---@param image_path string @Chemin vers l'image à encoder
+---@return table? latent @Représentation latente (ou nil si erreur)
+---@return string? err @Message d'erreur
+---
+---**Exemple:**
+---```lua
+--- local latent, err = flux.encode_image("input.png")
+--- if latent then
+---   print("Image encodée:", #latent, "éléments")
+--- end
+---```
+function flux.encode_image(image_path) end
+
+---Décoder un vecteur latent en image via le VAE.
+---@param latent table @Vecteur latent à décoder
+---@return table? pixels @Pixels de l'image (RGBA, row-major)
+---@return string? err @Message d'erreur
+---
+---**Exemple:**
+---```lua
+--- local pixels, err = flux.decode_latent(latent)
+--- if pixels then
+---   viz.add_image(pixels, width, height, 4)
+--- end
+---```
+function flux.decode_latent(latent) end
+
+---Encoder un prompt texte en embeddings via le text encoder.
+---@param text string @Texte à encoder
+---@return table? embeddings @Embeddings textuels (ou nil si erreur)
+---@return string? err @Message d'erreur
+---
+---**Exemple:**
+---```lua
+--- local embed, err = flux.encode_text("A cat sitting on a chair")
+--- if embed then
+---   print("Texte encodé:", #embed, "dimensions")
+--- end
+---```
+function flux.encode_text(text) end
+
+---Définir le tokenizer pour le text encoder.
+---@param tokenizer_path string @Chemin vers le fichier tokenizer.json
+---@return boolean ok @true si succès
+---@return string? err @Message d'erreur
+---
+---**Exemple:**
+---```lua
+--- local ok, err = flux.set_tokenizer("checkpoints/tokenizer.json")
+--- if not ok then
+---   print("Erreur tokenizer:", err)
+--- end
+---```
+function flux.set_tokenizer(tokenizer_path) end
+
+--=============================================================================
+-- Module: FluxModel (API Orientée Objet Flux)
+--=============================================================================
+
+---@class FluxModelAPI
+local FluxModel = {}
+
+---Créer une nouvelle instance de FluxModel.
+---@param config? FluxConfig|table @Configuration du modèle
+---@return table flux_model @Instance FluxModel
+---@return string? err @Message d'erreur
+---
+---**Exemple:**
+---```lua
+--- local flux_model, err = FluxModel.new({
+---   image_resolution = 256,
+---   latent_channels = 4,
+---   vocab_size = 50000,
+---   text_embed_dim = 768
+--- })
+--- if not flux_model then
+---   print("Erreur:", err)
+--- end
+---```
+function FluxModel.new(config) end
+
+---Activer le mode training (pour entraînement).
+---En mode training: dropout activé, reparametrization trick VAE appliqué.
+---
+---**Exemple:**
+---```lua
+--- FluxModel.train()
+--- -- Entraînement du modèle...
+---```
+function FluxModel.train() end
+
+---Activer le mode evaluation/inference.
+---En mode eval: dropout désactivé, VAE déterministe (pas de bruit).
+---
+---**Exemple:**
+---```lua
+--- FluxModel.eval()
+--- local image = FluxModel.generate("beautiful sunset", 50)
+---```
+function FluxModel.eval() end
+
+---Vérifier si le modèle est en mode training.
+---@return boolean is_training @true si en mode training, false si en eval
+---
+---**Exemple:**
+---```lua
+--- if FluxModel.isTraining() then
+---     print("Mode training activé")
+--- else
+---     print("Mode inference activé")
+--- end
+---```
+function FluxModel.isTraining() end
+
+---Encoder une image vers l'espace latent VAE.
+---@param image number[] @Image RGB aplatie (H×W×3 valeurs entre -1 et 1)
+---@return number[] latent @Vecteur latent compressé (latent_resolution²×latent_channels)
+---
+---**Exemple:**
+---```lua
+--- local image_size = 3 * 256 * 256
+--- local image = {}
+--- for i = 1, image_size do
+---     image[i] = math.random() * 2 - 1  -- [-1, 1]
+--- end
+--- local latent = FluxModel.encodeImage(image)
+--- print("Latent size: " .. #latent)
+---```
+function FluxModel.encodeImage(image) end
+
+---Décoder un vecteur latent vers une image RGB.
+---@param latent number[] @Vecteur latent
+---@return number[] image @Image RGB aplatie (H×W×3 valeurs entre -1 et 1)
+---
+---**Exemple:**
+---```lua
+--- local reconstructed = FluxModel.decodeLatent(latent)
+--- print("Image reconstruite: " .. #reconstructed .. " pixels")
+---```
+function FluxModel.decodeLatent(latent) end
+
+---Tokeniser un prompt texte.
+---@param prompt string @Texte à tokeniser
+---@return integer[] tokens @Séquence de tokens (max text_max_length)
+---
+---**Exemple:**
+---```lua
+--- local tokens = FluxModel.tokenizePrompt("a beautiful mountain landscape")
+--- print("Nombre de tokens: " .. #tokens)
+---```
+function FluxModel.tokenizePrompt(prompt) end
+
+---Encoder un prompt texte en embeddings.
+---@param tokens integer[] @Séquence de tokens
+---@return number[] embeddings @Embeddings texte (text_max_length × text_embed_dim)
+---
+---**Exemple:**
+---```lua
+--- local tokens = FluxModel.tokenizePrompt("cyberpunk city")
+--- local text_emb = FluxModel.encodeText(tokens)
+--- print("Text embedding size: " .. #text_emb)
+---```
+function FluxModel.encodeText(tokens) end
+
+---Prédire le bruit dans un latent bruité (step de diffusion).
+---@param noisy_latent number[] @Latent avec bruit
+---@param text_embedding number[] @Embeddings texte pour conditioning
+---@param timestep integer @Step de diffusion (0 à num_diffusion_steps)
+---@return number[] predicted_noise @Bruit prédit par le modèle
+---
+---**Exemple:**
+---```lua
+--- local noise = FluxModel.predictNoise(noisy_latent, text_emb, 500)
+--- print("Bruit prédit: " .. #noise .. " valeurs")
+---```
+function FluxModel.predictNoise(noisy_latent, text_embedding, timestep) end
+
+---Générer une image depuis un prompt texte (pipeline complet).
+---@param prompt string @Description textuelle de l'image
+---@param num_steps? integer @Nombre de steps de diffusion (défaut: 50)
+---@return number[] image @Image générée RGB (H×W×3)
+---
+---**Exemple:**
+---```lua
+--- FluxModel.eval()  -- Mode inference
+--- local image = FluxModel.generate("a serene lake at sunset", 50)
+--- print("Image générée: " .. #image .. " pixels")
+---```
+function FluxModel.generate(prompt, num_steps) end
+
+---Calculer la loss de diffusion pour l'entraînement.
+---@param image number[] @Image RGB target
+---@param tokens integer[] @Tokens du prompt
+---@return number loss @Valeur de loss
+---
+---**Exemple:**
+---```lua
+--- FluxModel.train()  -- Mode training
+--- local loss = FluxModel.computeDiffusionLoss(image, tokens)
+--- print("Loss: " .. loss)
+---```
+function FluxModel.computeDiffusionLoss(image, tokens) end
+
+---Définir le tokenizer pour les prompts.
+---@param tokenizer_instance any @Instance du tokenizer
+---
+---**Exemple:**
+---```lua
+--- tokenizer.create(50000)
+--- FluxModel.setPromptTokenizer(tokenizer)
+---```
+function FluxModel.setPromptTokenizer(tokenizer_instance) end
 
 --=============================================================================
 -- Module: layers (placeholder / low-level)
@@ -528,6 +824,15 @@ function tokenizer.extract_keywords(text, top_k) end
 -- Module: dataset
 --=============================================================================
 
+---@class DatasetItem
+---@field text_file? string Chemin du fichier texte
+---@field image_file? string Chemin du fichier image
+---@field audio_file? string Chemin du fichier audio
+---@field video_file? string Chemin du fichier vidéo
+---@field text? string Contenu texte (si chargé)
+---@field width? int Largeur de l'image
+---@field height? int Hauteur de l'image
+
 ---@class MimirDatasetAPI
 local dataset = {}
 
@@ -537,6 +842,13 @@ local dataset = {}
 ---@return boolean ok
 ---@return string? err
 function dataset.load(dir) end
+
+---Récupérer un item du dataset par son index (1-based).
+---Retourne une table avec les chemins et métadonnées de l'item.
+---@param index integer Index de l'item (commence à 1)
+---@return DatasetItem|nil item Item du dataset
+---@return string? err Message d'erreur si échec
+function dataset.get(index) end
 
 ---Préparer les séquences (stockées dans le contexte interne).
 ---La séquence length est utilisée ensuite par model.train().
@@ -565,21 +877,23 @@ function memory.get_stats() end
 ---Imprimer stats RAM.
 function memory.print_stats() end
 
----Purger / clear caches.
+---Purger / clear caches mémoire.
+---@return boolean ok
+---@return string? err
 function memory.clear() end
 
----Usage en MB (alias utilitaire).
+---Usage actuel en MB (alias utilitaire).
 ---@return number mb
 function memory.get_usage() end
 
----Définir une limite RAM (MB ou bytes selon impl).
+---Définir une limite RAM (en MB).
 ---@param limit_mb number
 ---@return boolean ok
 ---@return string? err
 function memory.set_limit(limit_mb) end
 
 --=============================================================================
--- Module: guard (MemoryGuard)
+-- Module: guard (MemoryGuard) - API Ancienne
 --=============================================================================
 
 ---@class MimirGuardAPI
@@ -602,17 +916,129 @@ function guard.print_stats() end
 function guard.reset() end
 
 --=============================================================================
+-- Module: MemoryGuard (API Moderne - Recommandée)
+--=============================================================================
+
+---@class MemoryGuardStats
+---@field current_mb float @Utilisation RAM courante en MB
+---@field peak_mb float @Pic d'utilisation en MB
+---@field limit_mb float @Limite configurée en MB
+---@field usage_percent float @Pourcentage d'utilisation
+
+---@class MimirMemoryGuardAPI
+local MemoryGuard = {}
+
+---Définir la limite de mémoire RAM stricte.
+---Accepte des valeurs en bytes (grands nombres) ou en GB (si <= 1000).
+---@param limit number @Limite en bytes ou en GB (si valeur <= 1000)
+---@return boolean ok @true si succès
+---
+---**Exemples:**
+---```lua
+--- -- Définir limite à 10 Go
+--- MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- en bytes
+--- MemoryGuard.setLimit(10)  -- en GB (auto-détecté car < 1000)
+---```
+function MemoryGuard.setLimit(limit) end
+
+---Obtenir la limite de mémoire configurée.
+---@return integer bytes @Limite en bytes
+---
+---**Exemple:**
+---```lua
+--- local limit = MemoryGuard.getLimit()
+--- print(string.format("Limite: %.2f GB", limit / 1024 / 1024 / 1024))
+---```
+function MemoryGuard.getLimit() end
+
+---Obtenir l'utilisation RAM courante.
+---@return integer bytes @RAM utilisée actuellement en bytes
+---
+---**Exemple:**
+---```lua
+--- local current = MemoryGuard.getCurrentUsage()
+--- local limit = MemoryGuard.getLimit()
+--- local percent = (current / limit) * 100
+--- print(string.format("RAM: %.2f%%", percent))
+---```
+function MemoryGuard.getCurrentUsage() end
+
+---Obtenir le pic d'utilisation RAM.
+---@return integer bytes @Pic d'utilisation en bytes depuis le démarrage
+---
+---**Exemple:**
+---```lua
+--- local peak = MemoryGuard.getPeakUsage()
+--- print(string.format("Pic RAM: %.2f GB", peak / 1024 / 1024 / 1024))
+---```
+function MemoryGuard.getPeakUsage() end
+
+---Récupérer toutes les statistiques en une seule fois.
+---@return MemoryGuardStats stats @Structure contenant toutes les stats
+---
+---**Exemple:**
+---```lua
+--- local stats = MemoryGuard.getStats()
+--- print("RAM courante: " .. stats.current_mb .. " MB")
+--- print("Pic: " .. stats.peak_mb .. " MB")
+--- print("Limite: " .. stats.limit_mb .. " MB")
+--- print("Utilisation: " .. stats.usage_percent .. "%")
+---```
+function MemoryGuard.getStats() end
+
+---Afficher les statistiques formatées dans la console.
+---Affiche un tableau détaillé avec toutes les métriques.
+---
+---**Format de sortie:**
+---```
+---╔═══════════════════════════════════════════════════════╗
+---║           MEMORY GUARD - STATISTIQUES                ║
+---╠═══════════════════════════════════════════════════════╣
+---║ Limite:          10240 MB                         ║
+---║ Actuel:           2456 MB                         ║
+---║ Pic:              3892 MB                         ║
+---║ Utilisation:     38.0 %                          ║
+---║ Allocations:      1523                            ║
+---║ Libérations:       892                            ║
+---╠═══════════════════════════════════════════════════════╣
+---║ État:       🔓 ACTIF                             ║
+---╚═══════════════════════════════════════════════════════╝
+---```
+---
+---**Exemple:**
+---```lua
+--- MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
+--- -- ... opérations ...
+--- MemoryGuard.printStats()  -- Affiche le rapport complet
+---```
+function MemoryGuard.printStats() end
+
+---Réinitialiser les compteurs de statistiques.
+---Remet à zéro le pic et les compteurs d'allocations/libérations.
+---La limite configurée est préservée.
+---
+---**Exemple:**
+---```lua
+--- MemoryGuard.reset()
+--- print("✓ Statistiques réinitialisées")
+---```
+function MemoryGuard.reset() end
+
+--=============================================================================
 -- Module: allocator (DynamicTensorAllocator)
 --=============================================================================
 
 ---@class AllocatorConfig
----@field max_ram_gb number
----@field enable_compression boolean
+---@field max_tensors? integer @Nombre max de tenseurs en mémoire
+---@field offload_threshold_mb? float @Seuil de RAM pour offload
+---@field swap_strategy? string @Stratégie de swap (lru, fifo, etc.)
+---@field max_ram_gb? number @Limite RAM globale
+---@field enable_compression? boolean @Activer compression LZ4
 
 ---@class MimirAllocatorAPI
 local allocator = {}
 
----Configurer l'allocator (RAM max + compression LZ4).
+---Configurer l'allocator dynamique (tenseurs, offload, compression).
 ---@param cfg AllocatorConfig|table
 ---@return boolean ok
 ---@return string? err
@@ -630,47 +1056,24 @@ function allocator.get_stats() end
 --=============================================================================
 
 ---@class MimirHtopAPI
-local htop = {}
-
----Créer le monitor async (et option viz).
----@param enable_viz? boolean
+local htop = {} --avec configuration optionnelle.
+---@param config? table @Configuration: {enable_viz: bool, refresh_rate: int, ...}
 ---@return boolean ok
 ---@return string? err
-function htop.create(enable_viz) end
+function htop.create(config) end
 
----Activer/désactiver l'affichage.
+---Activer/désactiver l'affichage htop.
 ---@param enabled boolean
 ---@return boolean ok
 ---@return string? err
 function htop.enable(enabled) end
 
----Mettre à jour les métriques affichées.
----Signature actuelle: (epoch, total_epochs, batch, total_batches, loss, avg_loss, lr,
----                    batch_time_ms?, memory_mb?, memory_freed?, bps?, params?, timestep?,
----                    kl?, wass?, ent?, mom?, spat?, temp?, mse?)
----@param epoch integer
----@param total_epochs integer
----@param batch integer
----@param total_batches integer
----@param loss number
----@param avg_loss number
----@param lr number
----@param batch_time_ms? integer
----@param memory_mb? integer
----@param memory_freed? integer
----@param bps? number
----@param params? integer
----@param timestep? number
----@param kl? number
----@param wass? number
----@param ent? number
----@param mom? number
----@param spat? number
----@param temp? number
----@param mse? number
+---Mettre à jour les métriques affichées dans htop.
+---Les paramètres peuvent être passés via une table HtopMetrics ou individuellement.
+---@param metrics HtopMetrics|table @Structure de métriques ou paramètres individuels
 ---@return boolean ok
 ---@return string? err
-function htop.update(epoch, total_epochs, batch, total_batches, loss, avg_loss, lr,
+function htop.update(metricsatches, loss, avg_loss, lr,
                      batch_time_ms, memory_mb, memory_freed, bps, params, timestep,
                      kl, wass, ent, mom, spat, temp, mse) end
 
@@ -691,49 +1094,48 @@ function htop.clear() end
 ---@class MimirVizAPI
 local viz = {}
 
----Créer la fenêtre / contexte viz (optionnel).
+---Créer la fenêtre visualiseur SFML avec titre et dimensions optionnels.
+---@param title? string @Titre de la fenêtre (défaut: "Mimir Visualizer")
+---@param width? integer @Largeur en pixels (défaut: 1280)
+---@param height? integer @Hauteur en pixels (défaut: 720)
 ---@return boolean ok
 ---@return string? err
-function viz.create() end
+function viz.create(title, width, height) end
 
----Initialiser (si séparé de create()).
+---Initialiser le visualiseur (ouvre la fenêtre SFML).
 ---@return boolean ok
 ---@return string? err
 function viz.initialize() end
 
----Fenêtre ouverte ?
+---Vérifier si la fenêtre est ouverte.
 ---@return boolean open
 function viz.is_open() end
 
----Traitement events (clavier/souris/close).
----@return boolean ok
----@return string? err
+---Traiter les événements fenêtre (fermeture, clavier, souris).
 function viz.process_events() end
 
----Update interne (tick).
----@return boolean ok
----@return string? err
+---Mettre à jour et afficher le rendu de la fenêtre.
 function viz.update() end
 
----Ajouter une image à afficher (chemin vers fichier image).
----@param label string
----@param image_path string
+---Ajouter/afficher une image dans le visualiseur.
+---Les pixels sont fournis sous forme de tableau plat (row-major).
+---@param pixels number[] @Tableau de valeurs pixel [0-255], RGBA ou RGB
+---@param width integer @Largeur de l'image
+---@param height integer @Hauteur de l'image
+---@param channels integer @Nombre de canaux (3=RGB, 4=RGBA)
 ---@return boolean ok
 ---@return string? err
-function viz.add_image(label, image_path) end
+function viz.add_image(pixels, width, height, channels) end
 
----Mettre à jour les métriques affichées dans la viz.
----@param metrics VizMetrics|table
+---Mettre à jour les métriques d'entraînement affichées.
+---@param metrics VizMetrics|table @Métriques: epoch, loss, lr, memory_mb, etc.
 ---@return boolean ok
 ---@return string? err
 function viz.update_metrics(metrics) end
 
----Ajouter un point (loss history).
----@param step integer
----@param loss number
----@return boolean ok
----@return string? err
-function viz.add_loss_point(step, loss) end
+---Ajouter un point à l'historique de loss (pour graphe).
+---@param loss number @Valeur de loss
+function viz.add_loss_point(loss) end
 
 ---Clear viz.
 ---@return boolean ok
@@ -834,6 +1236,14 @@ function Pipeline.resume(dir) end
 --=============================================================================
 ---@type MimirModelAPI
 model = model
+---@type MimirArchitecturesAPI
+architectures = architectures
+---@type FluxAPI
+flux = flux
+---@type FluxModelAPI
+FluxModel = FluxModel
+---@type MimirLayersAPI
+layers = layers
 ---@type MimirTokenizerAPI
 tokenizer = tokenizer
 ---@type MimirDatasetAPI
@@ -842,13 +1252,11 @@ dataset = dataset
 memory = memory
 ---@type MimirGuardAPI
 guard = guard
+---@type MimirMemoryGuardAPI
+MemoryGuard = MemoryGuard
 ---@type MimirAllocatorAPI
 allocator = allocator
 ---@type MimirHtopAPI
 htop = htop
 ---@type MimirVizAPI
 viz = viz
----@type MimirArchitecturesAPI
-architectures = architectures
----@type MimirLayersAPI
-layers = layers

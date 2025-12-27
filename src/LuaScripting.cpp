@@ -154,6 +154,12 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_optimizerStep);
     lua_setfield(L, -2, "optimizer_step");
     
+    lua_pushcfunction(L, lua_zeroGradients);
+    lua_setfield(L, -2, "zero_grads");
+    
+    lua_pushcfunction(L, lua_getGradients);
+    lua_setfield(L, -2, "get_gradients");
+    
     // Hardware
     lua_pushcfunction(L, lua_setHardwareAccel);
     lua_setfield(L, -2, "set_hardware");
@@ -190,7 +196,78 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_buildMobileNet);
     lua_setfield(L, -2, "mobilenet");
     
+    lua_pushcfunction(L, lua_buildFlux);
+    lua_setfield(L, -2, "flux");
+    
     lua_setglobal(L, "architectures");
+    
+    // ========== Table "flux" (Flux-specific operations) ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_fluxGenerate);
+    lua_setfield(L, -2, "generate");
+    
+    lua_pushcfunction(L, lua_fluxEncodeImage);
+    lua_setfield(L, -2, "encode_image");
+    
+    lua_pushcfunction(L, lua_fluxDecodeLatent);
+    lua_setfield(L, -2, "decode_latent");
+    
+    lua_pushcfunction(L, lua_fluxEncodeText);
+    lua_setfield(L, -2, "encode_text");
+    
+    lua_pushcfunction(L, lua_fluxSetPromptTokenizer);
+    lua_setfield(L, -2, "set_tokenizer");
+    
+    lua_setglobal(L, "flux");
+    
+    // ========== Table "FluxModel" (API moderne orientée objet) ==========
+    lua_newtable(L);
+    
+    // Constructeur
+    lua_pushcfunction(L, lua_fluxModelNew);
+    lua_setfield(L, -2, "new");
+    
+    // Modes d'exécution
+    lua_pushcfunction(L, lua_fluxTrain);
+    lua_setfield(L, -2, "train");
+    
+    lua_pushcfunction(L, lua_fluxEval);
+    lua_setfield(L, -2, "eval");
+    
+    lua_pushcfunction(L, lua_fluxIsTraining);
+    lua_setfield(L, -2, "isTraining");
+    
+    // VAE
+    lua_pushcfunction(L, lua_fluxEncodeImage);
+    lua_setfield(L, -2, "encodeImage");
+    
+    lua_pushcfunction(L, lua_fluxDecodeLatent);
+    lua_setfield(L, -2, "decodeLatent");
+    
+    // Text processing
+    lua_pushcfunction(L, lua_fluxTokenizePrompt);
+    lua_setfield(L, -2, "tokenizePrompt");
+    
+    lua_pushcfunction(L, lua_fluxEncodeText);
+    lua_setfield(L, -2, "encodeText");
+    
+    // Diffusion
+    lua_pushcfunction(L, lua_fluxPredictNoise);
+    lua_setfield(L, -2, "predictNoise");
+    
+    lua_pushcfunction(L, lua_fluxGenerate);
+    lua_setfield(L, -2, "generate");
+    
+    // Training
+    lua_pushcfunction(L, lua_fluxComputeDiffusionLoss);
+    lua_setfield(L, -2, "computeDiffusionLoss");
+    
+    // Configuration
+    lua_pushcfunction(L, lua_fluxSetPromptTokenizer);
+    lua_setfield(L, -2, "setPromptTokenizer");
+    
+    lua_setglobal(L, "FluxModel");
     
     // ========== Table "layers" ==========
     lua_newtable(L);
@@ -308,6 +385,9 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_loadDataset);
     lua_setfield(L, -2, "load");
     
+    lua_pushcfunction(L, lua_getDataset);
+    lua_setfield(L, -2, "get");
+    
     lua_pushcfunction(L, lua_prepareSequences);
     lua_setfield(L, -2, "prepare_sequences");
     
@@ -352,6 +432,32 @@ void LuaScripting::registerAPI() {
     lua_setfield(L, -2, "reset");
     
     lua_setglobal(L, "guard");
+    
+    // ========== Table "MemoryGuard" (nom moderne pour guard) ==========
+    lua_newtable(L);
+    
+    lua_pushcfunction(L, lua_guardSetLimit);
+    lua_setfield(L, -2, "setLimit");
+    
+    lua_pushcfunction(L, lua_memoryguardGetCurrentUsage);
+    lua_setfield(L, -2, "getCurrentUsage");
+    
+    lua_pushcfunction(L, lua_memoryguardGetPeakUsage);
+    lua_setfield(L, -2, "getPeakUsage");
+    
+    lua_pushcfunction(L, lua_memoryguardGetLimit);
+    lua_setfield(L, -2, "getLimit");
+    
+    lua_pushcfunction(L, lua_guardGetStats);
+    lua_setfield(L, -2, "getStats");
+    
+    lua_pushcfunction(L, lua_guardPrintStats);
+    lua_setfield(L, -2, "printStats");
+    
+    lua_pushcfunction(L, lua_guardReset);
+    lua_setfield(L, -2, "reset");
+    
+    lua_setglobal(L, "MemoryGuard");
     
     // ========== Table "allocator" (dynamic tensor allocator) ==========
     lua_newtable(L);
@@ -459,6 +565,9 @@ int LuaScripting::lua_createModel(lua_State* L) {
         // Stocker le type et la config pour build()
         ctx.modelType = std::string(model_type);
         ctx.modelConfig = config;
+        
+        // NOUVEAU: Transférer la config au modèle pour accès aux dimensions
+        ctx.currentModel->modelConfig = config;
         
         ctx.addLog("Modèle créé: " + std::string(model_type));
         lua_pushboolean(L, true);
@@ -727,9 +836,56 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             return 2;
         }
         
+        // Instancier l'Optimizer à partir de la configuration
         Optimizer opt;
         opt.initial_lr = lr;
-        opt.type = OptimizerType::ADAMW;
+        
+        // Type d'optimizer depuis la config (défaut: ADAMW)
+        if (ctx.modelConfig.contains("optimizer")) {
+            std::string opt_type = ctx.modelConfig["optimizer"];
+            if (opt_type == "sgd" || opt_type == "SGD") {
+                opt.type = OptimizerType::SGD;
+            } else if (opt_type == "adam" || opt_type == "ADAM") {
+                opt.type = OptimizerType::ADAM;
+            } else if (opt_type == "adamw" || opt_type == "ADAMW") {
+                opt.type = OptimizerType::ADAMW;
+            }
+        } else {
+            opt.type = OptimizerType::ADAMW;  // Défaut
+        }
+        
+        // Paramètres de l'optimizer depuis la config
+        if (ctx.modelConfig.contains("beta1")) {
+            opt.beta1 = ctx.modelConfig["beta1"];
+        }
+        if (ctx.modelConfig.contains("beta2")) {
+            opt.beta2 = ctx.modelConfig["beta2"];
+        }
+        if (ctx.modelConfig.contains("epsilon")) {
+            opt.eps = ctx.modelConfig["epsilon"];
+        }
+        if (ctx.modelConfig.contains("weight_decay")) {
+            opt.weight_decay = ctx.modelConfig["weight_decay"];
+        }
+        
+        // Paramètres de LR decay depuis la config
+        if (ctx.modelConfig.contains("min_lr")) {
+            opt.min_lr = ctx.modelConfig["min_lr"];
+        }
+        if (ctx.modelConfig.contains("decay_rate")) {
+            opt.decay_rate = ctx.modelConfig["decay_rate"];
+        }
+        if (ctx.modelConfig.contains("decay_steps")) {
+            opt.decay_steps = ctx.modelConfig["decay_steps"];
+        }
+        if (ctx.modelConfig.contains("warmup_steps")) {
+            opt.warmup_steps = ctx.modelConfig["warmup_steps"];
+        }
+        
+        ctx.addLog("Optimizer configuré: type=" + std::to_string(static_cast<int>(opt.type)) + 
+                   ", beta1=" + std::to_string(opt.beta1) + 
+                   ", beta2=" + std::to_string(opt.beta2) + 
+                   ", weight_decay=" + std::to_string(opt.weight_decay));
         
         for (int epoch = 0; epoch < epochs; ++epoch) {
             float epoch_loss = 0.0f;
@@ -1002,18 +1158,88 @@ int LuaScripting::lua_loadDataset(lua_State* L) {
             ctx.addLog("✓ " + std::to_string(items.size()) + " items chargés");
         }
         
-        // Stocker dans le contexte (on stocke juste le path pour lazy loading)
+        // Stocker le dataset dans le contexte
+        ctx.currentDataset = std::move(items);
+        
         if (!ctx.currentConfig.contains("dataset")) {
             ctx.currentConfig["dataset"] = json::object();
         }
         ctx.currentConfig["dataset"]["dir"] = dataset_dir;
-        ctx.currentConfig["dataset"]["num_items"] = items.size();
+        ctx.currentConfig["dataset"]["num_items"] = ctx.currentDataset.size();
         
         lua_pushboolean(L, true);
-        lua_pushinteger(L, items.size());
+        lua_pushinteger(L, ctx.currentDataset.size());
         return 2;
     } catch (const std::exception& e) {
         lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_getDataset(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    int index = luaL_checkinteger(L, 1);
+    
+    if (ctx.currentDataset.empty()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun dataset chargé. Utilisez dataset.load() d'abord.");
+        return 2;
+    }
+    
+    if (index < 1 || index > (int)ctx.currentDataset.size()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Index hors limites");
+        return 2;
+    }
+    
+    try {
+        const auto& item = ctx.currentDataset[index - 1]; // Lua est 1-indexed
+        
+        // Créer une table Lua avec les informations de l'item
+        lua_newtable(L);
+        
+        // Ajouter les chemins de fichiers
+        if (!item.text_file.empty()) {
+            lua_pushstring(L, item.text_file.c_str());
+            lua_setfield(L, -2, "text_file");
+        }
+        if (!item.image_file.empty()) {
+            lua_pushstring(L, item.image_file.c_str());
+            lua_setfield(L, -2, "image_file");
+        }
+        if (!item.audio_file.empty()) {
+            lua_pushstring(L, item.audio_file.c_str());
+            lua_setfield(L, -2, "audio_file");
+        }
+        if (!item.video_file.empty()) {
+            lua_pushstring(L, item.video_file.c_str());
+            lua_setfield(L, -2, "video_file");
+        }
+        
+        // Ajouter les dimensions si disponibles
+        if (item.w > 0) {
+            lua_pushinteger(L, item.w);
+            lua_setfield(L, -2, "width");
+        }
+        if (item.h > 0) {
+            lua_pushinteger(L, item.h);
+            lua_setfield(L, -2, "height");
+        }
+        
+        // Charger et ajouter le contenu texte si présent
+        if (!item.text_file.empty() && item.text.has_value()) {
+            lua_pushstring(L, item.text.value().c_str());
+            lua_setfield(L, -2, "text");
+        }
+        
+        // Note: Pour img, audio, video (binaires), on ne les retourne pas directement
+        // car ce sont des vecteurs de bytes. On pourrait ajouter des fonctions dédiées si nécessaire.
+        
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
         lua_pushstring(L, e.what());
         return 2;
     }
@@ -1316,8 +1542,14 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
         return 2;
     }
     
-    // Argument: input (table de floats)
+    // Argument 1: input (table de floats)
     luaL_checktype(L, 1, LUA_TTABLE);
+    
+    // Argument 2 (optionnel): training (bool, défaut: true)
+    bool training = true;
+    if (lua_gettop(L) >= 2 && lua_isboolean(L, 2)) {
+        training = lua_toboolean(L, 2);
+    }
     
     std::vector<float> input;
     lua_pushnil(L);
@@ -1327,7 +1559,7 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
     }
     
     try {
-        std::vector<float> output = ctx.currentModel->forwardPass(input, false);
+        std::vector<float> output = ctx.currentModel->forwardPass(input, training);
         
         // Retourner output comme table
         lua_newtable(L);
@@ -1370,6 +1602,56 @@ int LuaScripting::lua_backwardPass(lua_State* L) {
         return 1;
     } catch (const std::exception& e) {
         lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_zeroGradients(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    try {
+        ctx.currentModel->zeroGradients();
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_getGradients(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    try {
+        Gradients grads = ctx.currentModel->getGradients();
+        
+        // Retourner les gradients comme table (ordonnée par index)
+        lua_newtable(L);
+        size_t lua_idx = 1;
+        
+        // Parcourir tous les indices dans l'ordre
+        for (const auto& [param_idx, grad_value] : grads.param_grads) {
+            lua_pushnumber(L, grad_value);
+            lua_rawseti(L, -2, lua_idx++);
+        }
+        
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
         lua_pushstring(L, e.what());
         return 2;
     }
@@ -1723,6 +2005,651 @@ int LuaScripting::lua_buildMobileNet(lua_State* L) {
     try {
         ModelArchitectures::buildMobileNetV2(*ctx.currentModel, config);
         ctx.addLog("Architecture MobileNetV2 construite");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_buildFlux(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxConfig config;
+    
+    // Lire la configuration depuis la table Lua
+    if (lua_istable(L, 1)) {
+        // Dimensions générales
+        lua_getfield(L, 1, "latent_channels");
+        if (lua_isnumber(L, -1)) config.latent_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "latent_resolution");
+        if (lua_isnumber(L, -1)) config.latent_resolution = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "image_resolution");
+        if (lua_isnumber(L, -1)) config.image_resolution = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        // VAE config
+        lua_getfield(L, 1, "vae_base_channels");
+        if (lua_isnumber(L, -1)) config.vae_base_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "vae_num_res_blocks");
+        if (lua_isnumber(L, -1)) config.vae_num_res_blocks = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        // Text conditioning
+        lua_getfield(L, 1, "text_embed_dim");
+        if (lua_isnumber(L, -1)) config.text_embed_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "text_max_length");
+        if (lua_isnumber(L, -1)) config.text_max_length = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "vocab_size");
+        if (lua_isnumber(L, -1)) config.vocab_size = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        // Transformer blocks
+        lua_getfield(L, 1, "num_transformer_blocks");
+        if (lua_isnumber(L, -1)) config.num_transformer_blocks = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "transformer_dim");
+        if (lua_isnumber(L, -1)) config.transformer_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_attention_heads");
+        if (lua_isnumber(L, -1)) config.num_attention_heads = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        // Diffusion
+        lua_getfield(L, 1, "num_timesteps");
+        if (lua_isnumber(L, -1)) config.num_timesteps = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "beta_start");
+        if (lua_isnumber(L, -1)) config.beta_start = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "beta_end");
+        if (lua_isnumber(L, -1)) config.beta_end = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
+    
+    try {
+        // Tenter de caster en FluxModel
+        ModelArchitectures::FluxModel* flux_model = 
+            dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+        
+        if (flux_model) {
+            flux_model->setConfig(config);
+            flux_model->buildFluxArchitecture();
+            ctx.addLog("Architecture Flux construite (FluxModel natif)");
+        } else {
+            // Sinon utiliser la fonction helper
+            ModelArchitectures::buildFlux(*ctx.currentModel, config);
+            ctx.addLog("Architecture Flux construite (Model générique)");
+        }
+        
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+// ============================================================================
+// Flux-specific Operations
+// ============================================================================
+
+int LuaScripting::lua_fluxGenerate(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    // Tenter de caster en FluxModel
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    // Arguments: prompt (string), num_steps (optional), guidance_scale (optional)
+    const char* prompt = luaL_checkstring(L, 1);
+    int num_steps = luaL_optinteger(L, 2, 50);
+    float guidance_scale = luaL_optnumber(L, 3, 7.5f);
+    
+    try {
+        ctx.addLog("Génération Flux: \"" + std::string(prompt) + 
+                   "\" (steps=" + std::to_string(num_steps) + 
+                   ", guidance=" + std::to_string(guidance_scale) + ")");
+        
+        std::vector<float> image = flux_model->generate(prompt, num_steps, guidance_scale);
+        
+        // Retourner l'image comme table Lua
+        lua_newtable(L);
+        lua_pushinteger(L, flux_model->getImageResolution());
+        lua_setfield(L, -2, "resolution");
+        lua_pushinteger(L, image.size());
+        lua_setfield(L, -2, "size");
+        
+        // Ajouter les données (optionnel, pour petites images)
+        // Pour grandes images, mieux vaut sauvegarder directement
+        
+        ctx.addLog("Génération terminée");
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxEncodeImage(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    // Argument: image data (table de floats)
+    luaL_checktype(L, 1, LUA_TTABLE);
+    
+    std::vector<float> image;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        image.push_back(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    try {
+        std::vector<float> latent = flux_model->encodeImage(image);
+        
+        // Retourner le latent comme table Lua
+        lua_newtable(L);
+        for (size_t i = 0; i < latent.size(); ++i) {
+            lua_pushnumber(L, latent[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxDecodeLatent(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    // Argument: latent data (table de floats)
+    luaL_checktype(L, 1, LUA_TTABLE);
+    
+    std::vector<float> latent;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        latent.push_back(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    try {
+        std::vector<float> image = flux_model->decodeLatent(latent);
+        
+        // Retourner l'image comme table Lua
+        lua_newtable(L);
+        for (size_t i = 0; i < image.size(); ++i) {
+            lua_pushnumber(L, image[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxEncodeText(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    // Argument: text (string) ou tokens (table)
+    std::vector<int> tokens;
+    
+    if (lua_isstring(L, 1)) {
+        const char* text = lua_tostring(L, 1);
+        tokens = flux_model->tokenizePrompt(text);
+    } else if (lua_istable(L, 1)) {
+        lua_pushnil(L);
+        while (lua_next(L, 1) != 0) {
+            tokens.push_back(lua_tointeger(L, -1));
+            lua_pop(L, 1);
+        }
+    } else {
+        lua_pushnil(L);
+        lua_pushstring(L, "Argument invalide: attendu string ou table");
+        return 2;
+    }
+    
+    try {
+        std::vector<float> text_embedding = flux_model->encodeText(tokens);
+        
+        // Retourner l'embedding comme table Lua
+        lua_newtable(L);
+        for (size_t i = 0; i < text_embedding.size(); ++i) {
+            lua_pushnumber(L, text_embedding[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxSetPromptTokenizer(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    // Utiliser le tokenizer du contexte
+    if (!ctx.currentTokenizer) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun tokenizer disponible");
+        return 2;
+    }
+    
+    try {
+        flux_model->setPromptTokenizer(ctx.currentTokenizer);
+        ctx.addLog("Tokenizer assigné au modèle Flux");
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxTrain(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    flux_model->train();
+    ctx.addLog("FluxModel: Mode training activé");
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_fluxEval(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    flux_model->eval();
+    ctx.addLog("FluxModel: Mode evaluation/inference activé");
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_fluxIsTraining(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    
+    lua_pushboolean(L, flux_model->isTraining());
+    return 1;
+}
+
+int LuaScripting::lua_fluxTokenizePrompt(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    const char* prompt = luaL_checkstring(L, 1);
+    
+    try {
+        std::vector<int> tokens = flux_model->tokenizePrompt(prompt);
+        
+        // Retourner les tokens comme table Lua
+        lua_newtable(L);
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            lua_pushinteger(L, tokens[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxPredictNoise(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    // Arguments: noisy_latent (table), text_embedding (table), timestep (int)
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    int timestep = luaL_checkinteger(L, 3);
+    
+    // Extraire noisy_latent
+    std::vector<float> noisy_latent;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        noisy_latent.push_back(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    // Extraire text_embedding
+    std::vector<float> text_embedding;
+    lua_pushnil(L);
+    while (lua_next(L, 2) != 0) {
+        text_embedding.push_back(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    try {
+        std::vector<float> predicted_noise = flux_model->predictNoise(
+            noisy_latent, text_embedding, timestep);
+        
+        // Retourner le bruit prédit comme table Lua
+        lua_newtable(L);
+        for (size_t i = 0; i < predicted_noise.size(); ++i) {
+            lua_pushnumber(L, predicted_noise[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxComputeDiffusionLoss(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    if (!ctx.currentModel) {
+        lua_pushnumber(L, 0.0);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    
+    ModelArchitectures::FluxModel* flux_model = 
+        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
+    
+    if (!flux_model) {
+        lua_pushnumber(L, 0.0);
+        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
+        return 2;
+    }
+    
+    // Arguments: image (table), tokens (table)
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    
+    // Extraire image
+    std::vector<float> image;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        image.push_back(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    // Extraire tokens
+    std::vector<int> tokens;
+    lua_pushnil(L);
+    while (lua_next(L, 2) != 0) {
+        tokens.push_back(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+    }
+    
+    try {
+        float loss = flux_model->computeDiffusionLoss(image, tokens);
+        lua_pushnumber(L, loss);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnumber(L, 0.0);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_fluxModelNew(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    
+    // Argument optionnel: configuration (table)
+    ModelArchitectures::FluxConfig config;
+    
+    if (lua_istable(L, 1)) {
+        // Lire la configuration depuis la table Lua
+        lua_getfield(L, 1, "image_resolution");
+        if (lua_isnumber(L, -1)) config.image_resolution = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "latent_channels");
+        if (lua_isnumber(L, -1)) config.latent_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "latent_resolution");
+        if (lua_isnumber(L, -1)) config.latent_resolution = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "vae_base_channels");
+        if (lua_isnumber(L, -1)) config.vae_base_channels = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_res_blocks");
+        if (lua_isnumber(L, -1)) config.vae_num_res_blocks = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "vocab_size");
+        if (lua_isnumber(L, -1)) config.vocab_size = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "text_max_length");
+        if (lua_isnumber(L, -1)) config.text_max_length = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "text_embed_dim");
+        if (lua_isnumber(L, -1)) config.text_embed_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "transformer_dim");
+        if (lua_isnumber(L, -1)) config.transformer_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_transformer_blocks");
+        if (lua_isnumber(L, -1)) config.num_transformer_blocks = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_attention_heads");
+        if (lua_isnumber(L, -1)) config.num_attention_heads = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "mlp_ratio");
+        if (lua_isnumber(L, -1)) config.mlp_ratio = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "timestep_embed_dim");
+        if (lua_isnumber(L, -1)) config.timestep_embed_dim = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        lua_getfield(L, 1, "num_timesteps");
+        if (lua_isnumber(L, -1)) config.num_timesteps = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        
+        // vae_channel_mult (array)
+        lua_getfield(L, 1, "vae_channel_mult");
+        if (lua_istable(L, -1)) {
+            config.vae_channel_mult.clear();
+            lua_pushnil(L);
+            while (lua_next(L, -2) != 0) {
+                config.vae_channel_mult.push_back(lua_tointeger(L, -1));
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+    
+    try {
+        // Créer un FluxModel natif
+        auto flux_model = std::make_shared<ModelArchitectures::FluxModel>(config);
+        flux_model->setName("FluxModel");
+        flux_model->buildFluxArchitecture();
+        
+        // Stocker dans le contexte
+        ctx.currentModel = flux_model;
+        ctx.addLog("FluxModel natif créé et construit");
+        
         lua_pushboolean(L, true);
         return 1;
     } catch (const std::exception& e) {
@@ -2375,16 +3302,24 @@ int LuaScripting::lua_memorySetLimit(lua_State* L) {
 int LuaScripting::lua_guardSetLimit(lua_State* L) {
     auto& guard = MemoryGuard::instance();
     
-    // Argument: limite en GB
-    double gb = luaL_checknumber(L, 1);
+    // Argument: peut être en GB (float) ou en bytes (très grand nombre)
+    double value = luaL_checknumber(L, 1);
     
-    if (gb <= 0) {
+    if (value <= 0) {
         lua_pushboolean(L, false);
         lua_pushstring(L, "Limite doit être > 0");
         return 2;
     }
     
-    size_t bytes = static_cast<size_t>(gb * 1024.0 * 1024.0 * 1024.0);
+    size_t bytes;
+    // Si la valeur est petite (<= 1000), on assume que c'est en GB
+    if (value <= 1000.0) {
+        bytes = static_cast<size_t>(value * 1024.0 * 1024.0 * 1024.0);
+    } else {
+        // Sinon c'est directement en bytes
+        bytes = static_cast<size_t>(value);
+    }
+    
     guard.setLimit(bytes);
     
     lua_pushboolean(L, true);
@@ -2431,6 +3366,24 @@ int LuaScripting::lua_guardReset(lua_State* L) {
     std::cout << "🔄 MemoryGuard réinitialisé" << std::endl;
     
     lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_memoryguardGetCurrentUsage(lua_State* L) {
+    auto& guard = MemoryGuard::instance();
+    lua_pushnumber(L, static_cast<double>(guard.getCurrentBytes()));
+    return 1;
+}
+
+int LuaScripting::lua_memoryguardGetPeakUsage(lua_State* L) {
+    auto& guard = MemoryGuard::instance();
+    lua_pushnumber(L, static_cast<double>(guard.getPeakBytes()));
+    return 1;
+}
+
+int LuaScripting::lua_memoryguardGetLimit(lua_State* L) {
+    auto& guard = MemoryGuard::instance();
+    lua_pushnumber(L, static_cast<double>(guard.getLimit()));
     return 1;
 }
 

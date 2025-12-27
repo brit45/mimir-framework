@@ -153,9 +153,49 @@ public:
         }
     }
     
+    // =============================
+    // Système de Blocage d'Allocation
+    // =============================
+    
+    void blockAllocations(bool block = true) {
+        allocations_blocked_ = block;
+        if (block) {
+            std::cout << "🔒 AdvancedRAMManager: Allocations BLOQUÉES" << std::endl;
+        } else {
+            std::cout << "🔓 AdvancedRAMManager: Allocations DÉBLOQUÉES" << std::endl;
+        }
+    }
+    
+    bool isBlocked() const { return allocations_blocked_.load(); }
+    
+    void freezeAllocations(bool freeze = true) {
+        freeze_mode_ = freeze;
+        if (freeze) {
+            std::cout << "❄️  AdvancedRAMManager: Mode FREEZE activé" << std::endl;
+        } else {
+            std::cout << "☀️  AdvancedRAMManager: Mode FREEZE désactivé" << std::endl;
+        }
+    }
+    
+    bool isFrozen() const { return freeze_mode_.load(); }
+    
     // Allocation avec compression optionnelle
     bool allocate(const std::string& key, const std::vector<uint8_t>& data, bool compress = true) {
         std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Vérifier si les allocations sont bloquées
+        if (allocations_blocked_.load()) {
+            blocked_attempts_++;
+            std::cerr << "🔒 AdvancedRAMManager: Allocation bloquée pour '" << key << "'" << std::endl;
+            return false;
+        }
+        
+        // Vérifier si en mode freeze
+        if (freeze_mode_.load()) {
+            frozen_attempts_++;
+            std::cerr << "❄️  AdvancedRAMManager: Allocation gelée pour '" << key << "'" << std::endl;
+            return false;
+        }
         
         // Vérifier si déjà alloué
         if (allocations_.find(key) != allocations_.end()) {
@@ -476,6 +516,12 @@ private:
     std::vector<std::thread> worker_threads_;
     std::atomic<bool> async_thread_running_{false};
     std::atomic<bool> stop_workers_{false};
+    
+    // Système de blocage
+    std::atomic<bool> allocations_blocked_{false};
+    std::atomic<bool> freeze_mode_{false};
+    std::atomic<size_t> blocked_attempts_{0};
+    std::atomic<size_t> frozen_attempts_{0};
     
     bool canAllocate(size_t bytes) const {
         return (current_ram_bytes_ + bytes) <= max_ram_bytes_;

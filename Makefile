@@ -19,7 +19,7 @@ bin/mimir: src/*.cpp src/*.hpp src/LuaScripting.cpp src/LuaScripting.hpp
 	@echo "   • HugePages (2MB) + madvise"
 	@echo "   • Architectures modernes prêtes à l'emploi"
 	@echo "   • Compression LZ4 pour gestion mémoire"
-	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp src/Encoder.cpp src/main.cpp src/Model.cpp src/Sha256.cpp src/stb_image_impl.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp src/LuaScripting.cpp -I./src -I/usr/include/lua5.3 -o bin/mimir -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llua5.3 -llz4 -lvulkan -fopenmp $(FLAGS)
+	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp src/Encoder.cpp src/main.cpp src/Model.cpp src/Sha256.cpp src/stb_image_impl.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp src/LuaScripting.cpp src/Models/FluxModel.cpp -I./src -I/usr/include/lua5.3 -o bin/mimir -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llua5.3 -llz4 -lvulkan -fopenmp $(FLAGS)
 	@echo "✓ Mímir Framework compilé avec hardware opt: bin/mimir"
 	@ls -lh bin/mimir | awk '{print "  Taille:", $$5}'
 

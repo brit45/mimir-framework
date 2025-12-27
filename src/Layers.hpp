@@ -8,6 +8,9 @@
 #include <functional>
 #include <immintrin.h>  // AVX2
 
+// Forward declaration
+struct tensor;
+
 // ============================================================================
 // Énumérations et structures
 // ============================================================================
@@ -51,6 +54,30 @@ enum class NormalizationType {
     RMS_NORM
 };
 
+// Type de branche pour les layers avec bifurcations
+enum class BranchType {
+    NONE,              // Pas de branche
+    RESIDUAL,          // Connexion résiduelle (y = F(x) + x)
+    SKIP_CONNECTION,   // Skip connection (concaténation)
+    DENSE_CONNECTION,  // DenseNet-style (concat avec tous les précédents)
+    ATTENTION_BRANCH,  // Branche d'attention parallèle
+    MULTI_SCALE,       // Branches multi-échelles (Inception-style)
+    GATE,              // Gating mechanism (LSTM-style)
+    SPLIT,             // Division en branches parallèles
+    MERGE              // Fusion de plusieurs branches
+};
+
+// Opération de fusion pour les branches
+enum class MergeOperation {
+    ADD,               // Addition élément par élément
+    MULTIPLY,          // Multiplication élément par élément
+    CONCATENATE,       // Concaténation le long du canal
+    MAX,               // Maximum élément par élément
+    AVERAGE,           // Moyenne élément par élément
+    GATED,             // Fusion avec gating
+    ATTENTION_WEIGHTED // Fusion pondérée par attention
+};
+
 // ============================================================================
 // Layer de base
 // ============================================================================
@@ -60,7 +87,10 @@ struct Layer {
     std::string type;
     size_t params_count;
     
-    // Données des paramètres (weights, bias)
+    // NOUVEAU: Pointeur vers le tensor de poids unifié pour ce layer
+    tensor* weight_block = nullptr;  // Tous les poids du layer dans un seul tensor
+    
+    // Données des paramètres (weights, bias) - conservé pour compatibilité
     std::vector<float> weights;
     std::vector<float> bias;
     
@@ -82,12 +112,84 @@ struct Layer {
     int groups = 1;
     bool use_bias = true;
     
+    // Dimensions spatiales pour Conv2D/ConvTranspose2D (dynamiques)
+    int in_channels = 0;
+    int out_channels = 0;
+    int input_height = 0;
+    int input_width = 0;
+    int output_height = 0;
+    int output_width = 0;
+    
     ActivationType activation = ActivationType::NONE;
     float activation_param = 0.0f; // Pour LeakyReLU alpha, ELU alpha, etc.
+    
+    // Configuration des branches (pour les architectures avec skip connections, etc.)
+    BranchType branch_type = BranchType::NONE;
+    MergeOperation merge_op = MergeOperation::ADD;
+    std::vector<int> branch_sources;  // Indices des layers sources pour les branches
+    int branch_target = -1;           // Indice du layer cible pour cette branche
+    bool is_branch_point = false;     // Ce layer est un point de bifurcation
+    bool is_merge_point = false;      // Ce layer est un point de fusion
     
     Layer() = default;
     Layer(const std::string& n, const std::string& t, size_t pc)
         : name(n), type(t), params_count(pc) {}
+    
+    // Accesseur pour récupérer les données du weight_block
+    float* getWeights();
+    const float* getWeights() const;
+    size_t getWeightsSize() const;
+    
+    // Détection automatique du type de branche basé sur le nom du layer
+    void detectBranchType() {
+        if (name.find("residual") != std::string::npos || 
+            name.find("shortcut") != std::string::npos ||
+            name.find("skip") != std::string::npos) {
+            branch_type = BranchType::RESIDUAL;
+            merge_op = MergeOperation::ADD;
+        }
+        else if (name.find("concat") != std::string::npos) {
+            branch_type = BranchType::SKIP_CONNECTION;
+            merge_op = MergeOperation::CONCATENATE;
+        }
+        else if (name.find("dense") != std::string::npos && name.find("connect") != std::string::npos) {
+            branch_type = BranchType::DENSE_CONNECTION;
+            merge_op = MergeOperation::CONCATENATE;
+        }
+        else if (name.find("attention") != std::string::npos && name.find("branch") != std::string::npos) {
+            branch_type = BranchType::ATTENTION_BRANCH;
+            merge_op = MergeOperation::ATTENTION_WEIGHTED;
+        }
+        else if (name.find("inception") != std::string::npos || name.find("multiscale") != std::string::npos) {
+            branch_type = BranchType::MULTI_SCALE;
+            merge_op = MergeOperation::CONCATENATE;
+        }
+        else if (name.find("gate") != std::string::npos) {
+            branch_type = BranchType::GATE;
+            merge_op = MergeOperation::GATED;
+        }
+        else if (name.find("split") != std::string::npos) {
+            branch_type = BranchType::SPLIT;
+            is_branch_point = true;
+        }
+        else if (name.find("merge") != std::string::npos || name.find("fusion") != std::string::npos) {
+            branch_type = BranchType::MERGE;
+            is_merge_point = true;
+            // L'opération de fusion par défaut peut être précisée
+            if (name.find("add") != std::string::npos) {
+                merge_op = MergeOperation::ADD;
+            } else if (name.find("mul") != std::string::npos) {
+                merge_op = MergeOperation::MULTIPLY;
+            } else if (name.find("concat") != std::string::npos) {
+                merge_op = MergeOperation::CONCATENATE;
+            }
+        }
+    }
+    
+    // Détermine si ce layer nécessite un calcul de branche
+    bool requiresBranchComputation() const {
+        return branch_type != BranchType::NONE || is_branch_point || is_merge_point;
+    }
 };
 
 // ============================================================================
@@ -389,17 +491,88 @@ inline void conv1d(const std::vector<float>& input, std::vector<float>& output,
     }
 }
 
-// Convolution 2D
+// Convolution 2D - Vraie implémentation optimisée
 inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
                    const std::vector<float>& kernel, const std::vector<float>& bias,
                    int in_height, int in_width, int in_channels, int out_channels,
                    int kernel_size, int stride = 1, int padding = 0, int dilation = 1) {
     
+    // Calcul des dimensions de sortie
     int out_height = (in_height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     int out_width = (in_width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     
     output.resize(out_height * out_width * out_channels, 0.0f);
     
+    #ifdef __AVX2__
+    // Version SIMD optimisée
+    #pragma omp parallel for collapse(2) if(out_channels * out_height * out_width > 1024)
+    for (int oc = 0; oc < out_channels; ++oc) {
+        for (int oh = 0; oh < out_height; ++oh) {
+            for (int ow = 0; ow < out_width; ++ow) {
+                __m256 acc = _mm256_setzero_ps();
+                
+                for (int ic = 0; ic < in_channels; ++ic) {
+                    for (int kh = 0; kh < kernel_size; ++kh) {
+                        int ih = oh * stride - padding + kh * dilation;
+                        if (ih < 0 || ih >= in_height) continue;
+                        
+                        int kw = 0;
+                        // Boucle vectorisée par 8
+                        for (; kw + 7 < kernel_size; kw += 8) {
+                            int iw_base = ow * stride - padding + kw * dilation;
+                            
+                            // Charger 8 valeurs d'entrée
+                            float in_vals[8];
+                            for (int i = 0; i < 8; ++i) {
+                                int iw = iw_base + i * dilation;
+                                in_vals[i] = (iw >= 0 && iw < in_width) ? 
+                                    input[(ic * in_height + ih) * in_width + iw] : 0.0f;
+                            }
+                            __m256 in_vec = _mm256_loadu_ps(in_vals);
+                            
+                            // Charger 8 poids du kernel
+                            int kernel_base = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
+                            __m256 k_vec = _mm256_loadu_ps(&kernel[kernel_base]);
+                            
+                            // FMA: acc += in_vec * k_vec
+                            acc = _mm256_fmadd_ps(in_vec, k_vec, acc);
+                        }
+                        
+                        // Reste (non vectorisé)
+                        for (; kw < kernel_size; ++kw) {
+                            int iw = ow * stride - padding + kw * dilation;
+                            if (iw >= 0 && iw < in_width) {
+                                int in_idx = (ic * in_height + ih) * in_width + iw;
+                                int kernel_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
+                                float prod = input[in_idx] * kernel[kernel_idx];
+                                acc = _mm256_add_ps(acc, _mm256_set1_ps(prod));
+                            }
+                        }
+                    }
+                }
+                
+                // Réduction horizontale de l'accumulateur
+                __m128 sum_high = _mm256_extractf128_ps(acc, 1);
+                __m128 sum_low = _mm256_castps256_ps128(acc);
+                __m128 sum = _mm_add_ps(sum_low, sum_high);
+                __m128 shuf = _mm_movehdup_ps(sum);
+                __m128 sums = _mm_add_ps(sum, shuf);
+                shuf = _mm_movehl_ps(shuf, sums);
+                sums = _mm_add_ss(sums, shuf);
+                float result = _mm_cvtss_f32(sums);
+                
+                // Ajout du bias
+                if (!bias.empty()) {
+                    result += bias[oc];
+                }
+                
+                output[(oc * out_height + oh) * out_width + ow] = result;
+            }
+        }
+    }
+    #else
+    // Version CPU standard optimisée
+    #pragma omp parallel for collapse(2) if(out_channels * out_height * out_width > 1024)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -407,11 +580,13 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
                 
                 for (int ic = 0; ic < in_channels; ++ic) {
                     for (int kh = 0; kh < kernel_size; ++kh) {
+                        int ih = oh * stride - padding + kh * dilation;
+                        if (ih < 0 || ih >= in_height) continue;
+                        
                         for (int kw = 0; kw < kernel_size; ++kw) {
-                            int ih = oh * stride - padding + kh * dilation;
                             int iw = ow * stride - padding + kw * dilation;
                             
-                            if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
+                            if (iw >= 0 && iw < in_width) {
                                 int in_idx = (ic * in_height + ih) * in_width + iw;
                                 int kernel_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
                                 sum += input[in_idx] * kernel[kernel_idx];
@@ -428,6 +603,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
             }
         }
     }
+    #endif
 }
 
 // Convolution 3D

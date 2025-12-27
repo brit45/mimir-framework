@@ -521,3 +521,11 @@ inline void buildMobileNetV2(Model& model, const MobileNetConfig& config) {
 }
 
 } // namespace ModelArchitectures
+
+// ============================================================================
+// FLUX - Modern diffusion model with VAE and text conditioning
+// ============================================================================
+
+// Include FluxModel (outside namespace to avoid nested namespace issue)
+#include "FluxModel.hpp"
+

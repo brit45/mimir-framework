@@ -5,6 +5,154 @@ Toutes les modifications notables du Mímir Framework sont documentées ici.
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [2.1.0] - 2025-12-27
+
+### 🗂️ Organisation et Qualité
+
+Cette version se concentre sur l'organisation du projet et l'amélioration de la qualité de la documentation.
+
+#### Ajouté
+- **`scripts/README.md`** - Documentation complète de l'organisation des scripts
+  - Structure organisée en 6 catégories
+  - 40 scripts classés: demos (10), examples (5), tests (19), benchmarks (2), training (3), templates (1)
+  - Documentation d'utilisation avec exemples
+  - Statistiques et références croisées
+
+- **`tools/README.md`** - Documentation des outils de validation
+  - 3 scripts bash pour validation API
+  - Exemples d'utilisation complets
+  - Intégration CI/CD possible
+
+#### Modifié
+- **Structure `scripts/`** - Réorganisation complète
+  - Création de sous-dossiers thématiques: `demos/`, `examples/`, `tests/`, `benchmarks/`, `training/`, `templates/`
+  - Migration de 40 scripts vers leur catégorie appropriée
+  - Navigation facilitée et découverte intuitive
+
+- **Documentation** - Corrections et synchronisation
+  - 33 corrections de liens cassés (8 fichiers)
+  - Mise à jour architecture count: 8 → 9 (ajout Flux)
+  - Mise à jour fonction count: 117 → 114 (compte exact)
+  - Table des matières complétée dans API Complete
+
+#### Synchronisation
+- **API Lua** - Synchronisation 100% confirmée
+  - `mimir-api.lua` ↔ `src/LuaScripting.cpp`
+  - 114 fonctions validées sur 13 modules
+  - Scripts de validation créés et testés
+  - EmmyLua annotations complètes
+
+#### Qualité
+- 📁 **Meilleure organisation** des ressources projet
+- 🔗 **Documentation navigable** sans liens cassés
+- ✅ **Validation automatisée** de la synchronisation API
+- 📊 **Statistiques exactes** partout dans la documentation
+
+## [2.0.0-doc] - 2025-12-22
+
+### 📚 Documentation - Mise à Jour Majeure de l'API Lua
+
+Cette version apporte une refonte complète de la documentation de l'API Lua avec une couverture exhaustive de toutes les fonctionnalités du framework.
+
+#### Ajouté
+- **`docs/LUA_API_COMPLETE.md`** (50K+) - Documentation exhaustive complète
+  - 11 modules documentés en détail (80+ fonctions)
+  - Architecture générale et workflow standard
+  - 13 sections couvrant tous les aspects de l'API
+  - 4 exemples complets annotés et testables
+  - Structures de données (HtopMetrics, VizMetrics, MemoryStats, etc.)
+  - Notes de performance et optimisations
+  - Best practices et guide de debugging
+  
+- **`docs/LUA_API_REFERENCE_QUICK.md`** (15K) - Référence rapide pratique
+  - Tables de référence pour tous les modules
+  - Workflow standard simplifié
+  - Fonctions essentielles (quick reference)
+  - Configurations types pour chaque architecture
+  - 8 exemples rapides prêts à l'emploi
+  - Section debugging et gestion d'erreurs
+  
+- **`docs/API_UPDATE_SUMMARY.md`** - Résumé technique de la mise à jour
+  - Statistiques avant/après détaillées
+  - Liste exhaustive des changements
+  - Impact sur le développement
+  - Vérifications de cohérence
+
+#### Modifié
+- **`mimir-api.lua`** - Stub IDE complètement refondu (40 → 80+ fonctions)
+  - 6 nouveaux modules: `memory`, `guard`, `allocator`, `htop`, `viz`, globales
+  - Module `tokenizer` étendu: 6 → 20+ fonctions
+  - Annotations EmmyLua complètes (`@class`, `@param`, `@return`, `@alias`)
+  - Documentation inline pour autocomplétion IDE
+  - Types stricts pour validation statique
+  
+- **`docs/INDEX.md`** - Section "API Lua" restructurée
+  - Table complète des 11 modules
+  - Compteurs de fonctions actualisés
+  - Liens vers nouvelles documentations
+  
+- **`README.md`** - Section "Documentation" refaite
+  - Nouvelle sous-section "API Lua Complète"
+  - Description détaillée des 11 modules
+  - Liens vers documentation exhaustive
+  - Statistiques: 80+ fonctions organisées
+
+#### Modules Nouvellement Documentés
+
+**memory (AdvancedRAMManager)** - 6 fonctions:
+- `config(cfg)`, `get_stats()`, `print_stats()`, `clear()`, `get_usage()`, `set_limit(limit_mb)`
+
+**guard (MemoryGuard)** - 4 fonctions:
+- `set_limit(limit_mb)`, `get_stats()`, `print_stats()`, `reset()`
+
+**allocator (DynamicTensorAllocator)** - 3 fonctions:
+- `configure(config)`, `print_stats()`, `get_stats()`
+
+**htop (HtopDisplay)** - 5 fonctions:
+- `create(config)`, `enable(enabled)`, `update(metrics)`, `render()`, `clear()`
+
+**viz (Visualizer SFML)** - 11 fonctions:
+- `create(title, width, height)`, `initialize()`, `is_open()`, `process_events()`, `update()`
+- `add_image(pixels, w, h, ch)`, `update_metrics(metrics)`, `add_loss_point(loss)`
+- `clear()`, `set_enabled(enabled)`, `save_loss_history(path)`
+
+**Fonctions globales** - 3 fonctions:
+- `log(message)`, `read_json(filepath)`, `write_json(filepath, data)`
+
+**tokenizer (extension)** - 14 nouvelles fonctions:
+- Vocabulaire: `add_token()`, `ensure_vocab_from_text()`, `tokenize_ensure()`
+- IDs spéciaux: `pad_id()`, `unk_id()`, `seq_id()`, `mod_id()`, `mag_id()`, `get_token_by_id()`
+- BPE: `learn_bpe()`, `tokenize_bpe()`, `set_max_length()`, `pad_sequence()`, `batch_tokenize()`
+- Analyse: `print_stats()`, `get_frequencies()`, `analyze_text()`, `extract_keywords()`
+
+#### Impact Mesurable
+
+| Métrique | Avant | Après | Amélioration |
+|----------|-------|-------|--------------|
+| Fonctions documentées | 40 | 80+ | +100% |
+| Modules | 5 | 11 | +120% |
+| Documentation (lignes) | ~15K | ~65K+ | +333% |
+| Exemples complets | 2 | 8 | +300% |
+| Structures données | 2 | 7 | +250% |
+
+#### Bénéfices
+- 🎯 **Autocomplétion IDE complète** via annotations EmmyLua
+- 📚 **Documentation à 3 niveaux**: Quick reference, Complète, Legacy
+- 🔍 **Découverte facilitée** de l'API via exploration IDE
+- ⏱️ **Gain de temps** pour les nouveaux utilisateurs
+- 🤝 **Collaboration améliorée** avec documentation standardisée
+- ✅ **Cohérence garantie** avec implémentation C++ (vérifiée)
+
+#### Vérifications
+- ✅ Cohérence complète avec `LuaScripting.cpp` / `LuaScripting.hpp`
+- ✅ Toutes les fonctions `lua_setfield()` documentées
+- ✅ Signatures vérifiées contre implémentations
+- ✅ Retours `(ok, err)` standardisés
+- ✅ Types Lua corrects (table, string, number, boolean)
+- ✅ Tous les exemples testables
+
+---
+
 ## [2.0.0] - 2025-12-19
 
 ### 🎯 Philosophy

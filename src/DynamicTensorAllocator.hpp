@@ -89,8 +89,10 @@ public:
         handle->cache_key = tag + "_" + std::to_string(next_id_++);
         handle->data_ptr = nullptr;
         
-        handles_[handle->cache_key] = std::move(handle);
-        return handles_[handle->cache_key].get();
+        // Sauvegarder la clé avant le move
+        std::string cache_key = handle->cache_key;
+        handles_[cache_key] = std::move(handle);
+        return handles_[cache_key].get();
     }
     
     // Obtenir les données d'un tenseur (chargement à la demande)
@@ -112,6 +114,8 @@ public:
             // Décompresser depuis RAMManager
             auto data = ram_mgr.get(handle->cache_key);
             if (data.has_value()) {
+                // ⚠️ IMPORTANT: malloc direct bypass MemoryGuard!
+                // Mais l'allocation a déjà été comptabilisée dans allocateTensor()
                 handle->data_ptr = reinterpret_cast<float*>(
                     malloc(handle->size * sizeof(float)));
                 if (handle->data_ptr) {
@@ -125,6 +129,8 @@ public:
             }
         } else {
             // Allocation fraîche
+            // ⚠️ IMPORTANT: malloc direct bypass MemoryGuard!
+            // Mais l'allocation a déjà été comptabilisée dans allocateTensor()
             handle->data_ptr = reinterpret_cast<float*>(
                 malloc(handle->size * sizeof(float)));
             if (handle->data_ptr) {

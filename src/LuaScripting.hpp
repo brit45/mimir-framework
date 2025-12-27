@@ -67,6 +67,8 @@ private:
     static int lua_forwardPass(lua_State* L);
     static int lua_backwardPass(lua_State* L);
     static int lua_optimizerStep(lua_State* L);
+    static int lua_zeroGradients(lua_State* L);
+    static int lua_getGradients(lua_State* L);
     static int lua_setHardwareAccel(lua_State* L);
     static int lua_getHardwareCaps(lua_State* L);
     
@@ -79,6 +81,21 @@ private:
     static int lua_buildTransformer(lua_State* L);
     static int lua_buildResNet(lua_State* L);
     static int lua_buildMobileNet(lua_State* L);
+    static int lua_buildFlux(lua_State* L);
+    
+    // === Flux-specific API ===
+    static int lua_fluxGenerate(lua_State* L);
+    static int lua_fluxEncodeImage(lua_State* L);
+    static int lua_fluxDecodeLatent(lua_State* L);
+    static int lua_fluxEncodeText(lua_State* L);
+    static int lua_fluxSetPromptTokenizer(lua_State* L);
+    static int lua_fluxTrain(lua_State* L);
+    static int lua_fluxEval(lua_State* L);
+    static int lua_fluxIsTraining(lua_State* L);
+    static int lua_fluxTokenizePrompt(lua_State* L);
+    static int lua_fluxPredictNoise(lua_State* L);
+    static int lua_fluxComputeDiffusionLoss(lua_State* L);
+    static int lua_fluxModelNew(lua_State* L);
     
     // === Layer Operations API ===
     static int lua_computeConv2D(lua_State* L);
@@ -140,6 +157,12 @@ private:
     static int lua_guardGetStats(lua_State* L);
     static int lua_guardPrintStats(lua_State* L);
     static int lua_guardReset(lua_State* L);
+    
+    // === MemoryGuard helper functions ===
+    static int lua_memoryguardGetCurrentUsage(lua_State* L);
+    static int lua_memoryguardGetPeakUsage(lua_State* L);
+    static int lua_memoryguardGetLimit(lua_State* L);
+    
     static int lua_tokenizeEnsure(lua_State* L);
     
     // Tokens spéciaux
@@ -165,6 +188,7 @@ private:
     
     // === Dataset API ===
     static int lua_loadDataset(lua_State* L);
+    static int lua_getDataset(lua_State* L);
     static int lua_prepareSequences(lua_State* L);
     
     // === Utilitaires ===
@@ -197,6 +221,9 @@ public:
     std::shared_ptr<AsyncMonitor> asyncMonitor;
     std::vector<std::vector<int>> currentSequences;
     json currentConfig;
+    
+    // Dataset stocké
+    std::vector<DatasetItem> currentDataset;
     
     // Configuration du modèle
     std::string modelType;

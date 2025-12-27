@@ -5,6 +5,9 @@
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
+#include <chrono>
+#include <iomanip>
 
 /**
  * MemoryGuard - Garde-fou strict pour limiter l'allocation RAM
@@ -26,8 +29,74 @@ public:
     
     size_t getLimit() const { return max_bytes_; }
     
+    // =============================
+    // Système de Blocage d'Allocation
+    // =============================
+    
+    // Bloquer toutes les nouvelles allocations
+    void blockAllocations(bool block = true) {
+        allocations_blocked_ = block;
+        if (block) {
+            std::cout << "🔒 MemoryGuard: Allocations BLOQUÉES" << std::endl;
+            std::cout << "   Aucune nouvelle allocation ne sera autorisée" << std::endl;
+        } else {
+            std::cout << "🔓 MemoryGuard: Allocations DÉBLOQUÉES" << std::endl;
+        }
+    }
+    
+    // Vérifier si les allocations sont bloquées
+    bool isBlocked() const { return allocations_blocked_.load(); }
+    
+    // Bloquer temporairement avec timeout automatique
+    void blockTemporary(size_t milliseconds) {
+        blockAllocations(true);
+        
+        // Créer un thread pour débloquer après timeout
+        std::thread([this, milliseconds]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+            blockAllocations(false);
+        }).detach();
+    }
+    
+    // Mode freeze: bloquer nouvelles allocations mais autoriser les libérations
+    void freezeAllocations(bool freeze = true) {
+        freeze_mode_ = freeze;
+        if (freeze) {
+            std::cout << "❄️  MemoryGuard: Mode FREEZE activé" << std::endl;
+            std::cout << "   Nouvelles allocations bloquées, libérations autorisées" << std::endl;
+        } else {
+            std::cout << "☀️  MemoryGuard: Mode FREEZE désactivé" << std::endl;
+        }
+    }
+    
+    bool isFrozen() const { return freeze_mode_.load(); }
+    
     // Vérifier et enregistrer une allocation
     bool requestAllocation(size_t bytes, const std::string& tag = "") {
+        // Vérifier si les allocations sont bloquées
+        if (allocations_blocked_.load()) {
+            blocked_attempts_++;
+            std::cerr << "🔒 MemoryGuard: ALLOCATION BLOQUÉE (blocage actif)" << std::endl;
+            std::cerr << "   Tentative #" << blocked_attempts_ << std::endl;
+            std::cerr << "   Demandé: " << (bytes / 1024 / 1024) << " MB" << std::endl;
+            if (!tag.empty()) {
+                std::cerr << "   Tag: " << tag << std::endl;
+            }
+            return false;
+        }
+        
+        // Vérifier si en mode freeze
+        if (freeze_mode_.load()) {
+            frozen_attempts_++;
+            std::cerr << "❄️  MemoryGuard: ALLOCATION GELÉE (mode freeze)" << std::endl;
+            std::cerr << "   Tentative #" << frozen_attempts_ << std::endl;
+            std::cerr << "   Demandé: " << (bytes / 1024 / 1024) << " MB" << std::endl;
+            if (!tag.empty()) {
+                std::cerr << "   Tag: " << tag << std::endl;
+            }
+            return false;
+        }
+        
         size_t current = current_bytes_.load();
         size_t new_total = current + bytes;
         
@@ -93,6 +162,20 @@ public:
                   << "                              ║" << std::endl;
         std::cout << "║ Libérations:" << std::setw(9) << deallocations_count_ 
                   << "                              ║" << std::endl;
+        std::cout << "╠═══════════════════════════════════════════════════════╣" << std::endl;
+        std::cout << "║ État:       " << (allocations_blocked_ ? "🔒 BLOQUÉ  " : "🔓 ACTIF   ")
+                  << "                          ║" << std::endl;
+        if (freeze_mode_) {
+            std::cout << "║ Mode:       ❄️  FREEZE                               ║" << std::endl;
+        }
+        if (blocked_attempts_ > 0) {
+            std::cout << "║ Tentatives bloquées: " << std::setw(9) << blocked_attempts_ 
+                      << "                       ║" << std::endl;
+        }
+        if (frozen_attempts_ > 0) {
+            std::cout << "║ Tentatives gelées:   " << std::setw(9) << frozen_attempts_ 
+                      << "                       ║" << std::endl;
+        }
         std::cout << "╚═══════════════════════════════════════════════════════╝" << std::endl;
     }
     
@@ -112,6 +195,12 @@ private:
     std::atomic<size_t> max_bytes_{10ULL * 1024 * 1024 * 1024}; // 10 GB par défaut
     std::atomic<size_t> allocations_count_{0};
     std::atomic<size_t> deallocations_count_{0};
+    
+    // Système de blocage
+    std::atomic<bool> allocations_blocked_{false};
+    std::atomic<bool> freeze_mode_{false};
+    std::atomic<size_t> blocked_attempts_{0};
+    std::atomic<size_t> frozen_attempts_{0};
 };
 
 #endif // __MEMORY_GUARD_HPP__

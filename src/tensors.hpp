@@ -45,6 +45,18 @@ struct tensor {
     // Constructeur avec allocation dynamique
     explicit tensor(size_t size, bool dynamic);
     
+    // Copy constructor (désactivé pour éviter double-free)
+    tensor(const tensor& other) = delete;
+    
+    // Move constructor
+    tensor(tensor&& other) noexcept;
+    
+    // Copy assignment (désactivé pour éviter double-free)
+    tensor& operator=(const tensor& other) = delete;
+    
+    // Move assignment
+    tensor& operator=(tensor&& other) noexcept;
+    
     // Destructeur
     ~tensor();
     

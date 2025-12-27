@@ -16,6 +16,27 @@
 #include <algorithm>
 #include <random>
 #include <cpuid.h>
+#include <atomic>
+#include <mutex>
+
+// ============================================================================
+// Implémentation des méthodes Layer
+// ============================================================================
+
+float* Layer::getWeights() {
+    if (weight_block) return weight_block->getData();
+    return weights.data();
+}
+
+const float* Layer::getWeights() const {
+    if (weight_block) return weight_block->getData();
+    return weights.data();
+}
+
+size_t Layer::getWeightsSize() const {
+    if (weight_block) return weight_block->getSize();
+    return weights.size();
+}
 
 // ============================================================================
 // Détection des capacités CPU au runtime
@@ -116,14 +137,27 @@ bool Model::hasVulkanCompute() const {
 }
 
 bool Model::initializeComputeEngine() {
-    if (g_compute_engine) return g_compute_available; // Déjà initialisé
+    // Pattern init_once thread-safe avec atomic
+    static std::atomic<bool> initialized{false};
+    static std::mutex init_mutex;
+    
+    if (initialized.load(std::memory_order_acquire)) {
+        return g_compute_available;
+    }
+    
+    std::lock_guard<std::mutex> lock(init_mutex);
+    
+    // Double-check après lock
+    if (initialized.load(std::memory_order_relaxed)) {
+        return g_compute_available;
+    }
     
     try {
         g_compute_engine = std::make_unique<VulkanCompute::ComputeEngine>();
         g_compute_available = g_compute_engine->initialize();
         
         if (g_compute_available) {
-            std::cout << "✓ Hardware acceleration enabled (Vulkan Compute)" << std::endl;
+            std::cout << "✓ Vulkan Compute initialized" << std::endl;
         } else {
             std::cout << "⚠ Vulkan Compute initialization failed, using CPU fallback" << std::endl;
             g_compute_engine.reset();
@@ -134,6 +168,7 @@ bool Model::initializeComputeEngine() {
         g_compute_engine.reset();
     }
     
+    initialized.store(true, std::memory_order_release);
     return g_compute_available;
 }
 
@@ -145,17 +180,87 @@ void Model::shutdownComputeEngine() {
     }
 }
 
+void Model::zeroGradients() {
+    // Réinitialiser tous les gradients des layers à zéro
+    for (auto& layer : layers) {
+        std::fill(layer.grad_weights.begin(), layer.grad_weights.end(), 0.0f);
+        std::fill(layer.grad_bias.begin(), layer.grad_bias.end(), 0.0f);
+    }
+    
+    // Réinitialiser l'état du forward pour le prochain backward
+    forward_state.clear();
+}
+
+Gradients Model::getGradients() const {
+    Gradients grads;
+    
+    // Collecter tous les gradients des layers
+    size_t param_idx = 0;
+    for (const auto& layer : layers) {
+        // Ajouter les gradients de poids
+        for (const auto& grad : layer.grad_weights) {
+            grads.param_grads[param_idx++] = grad;
+        }
+        
+        // Ajouter les gradients de biais
+        for (const auto& grad : layer.grad_bias) {
+            grads.param_grads[param_idx++] = grad;
+        }
+    }
+    
+    return grads;
+}
+
 // === méthodes utilitaires simples (déjà présentes) ===
 void Model::setDensity(double d) { densityFactor = (d > 0.0 ? d : 1.0); }
 double Model::getDensity() const { return densityFactor; }
 
 void Model::push(const std::string &name, const std::string &type, size_t params_count) {
-    layers.push_back({name, type, params_count});
+    Layer layer(name, type, params_count);
+    
+    // Si des dimensions sont configurées dans modelConfig, les appliquer
+    if (modelConfig.contains("in_channels")) {
+        layer.in_channels = modelConfig["in_channels"];
+    }
+    if (modelConfig.contains("out_channels")) {
+        layer.out_channels = modelConfig["out_channels"];
+    }
+    if (modelConfig.contains("height")) {
+        layer.input_height = modelConfig["height"];
+    }
+    if (modelConfig.contains("width")) {
+        layer.input_width = modelConfig["width"];
+    }
+    if (modelConfig.contains("kernel")) {
+        layer.kernel_size = modelConfig["kernel"];
+    }
+    if (modelConfig.contains("stride")) {
+        layer.stride = modelConfig["stride"];
+    }
+    if (modelConfig.contains("padding")) {
+        layer.padding = modelConfig["padding"];
+    }
+    
+    // Calculer les dimensions de sortie pour Conv2D
+    if ((type == "Conv2d" || type == "ConvTranspose2d") && layer.kernel_size > 0) {
+        if (type == "Conv2d") {
+            layer.output_height = (layer.input_height + 2 * layer.padding - layer.kernel_size) / layer.stride + 1;
+            layer.output_width = (layer.input_width + 2 * layer.padding - layer.kernel_size) / layer.stride + 1;
+        } else { // ConvTranspose2d
+            layer.output_height = (layer.input_height - 1) * layer.stride - 2 * layer.padding + layer.kernel_size;
+            layer.output_width = (layer.input_width - 1) * layer.stride - 2 * layer.padding + layer.kernel_size;
+        }
+    }
+    
+    // Détecter automatiquement le type de branche basé sur le nom du layer
+    layer.detectBranchType();
+    
+    layers.push_back(layer);
 }
 
 size_t Model::totalParamCount() const {
     size_t s = 0;
-    for (const auto &L : layers) s += L.paramsCount;
+    for (const auto &L : layers) s += L.params_count;
     return s;
 }
 
@@ -164,77 +269,102 @@ void Model::allocateParams() {
     
     auto& allocator = DynamicTensorAllocator::instance();
     
-    std::cout << "📦 Allocation dynamique de " << tot << " tenseurs..." << std::endl;
+    std::cout << "📦 Allocation de " << layers.size() << " blocs de poids (" << tot << " paramètres au total)..." << std::endl;
     
+    // NOUVEAU: Allouer un tensor par layer au lieu d'un tensor par paramètre
+    layer_weight_blocks.clear();
+    layer_weight_blocks.resize(layers.size());
+    
+    for (size_t i = 0; i < layers.size(); ++i) {
+        size_t layer_param_count = layers[i].params_count;
+        
+        if (layer_param_count > 0) {
+            // ⚠️ CRITIQUE: Allocation dynamique via MemoryGuard (passe par DynamicTensorAllocator)
+            // Le flag 'true' force l'allocation à passer par requestAllocation()
+            layer_weight_blocks[i] = tensor(layer_param_count, true);
+            
+            // Lier le tensor au layer
+            layers[i].weight_block = &layer_weight_blocks[i];
+            
+            std::cout << "  Layer " << i << " (" << layers[i].name << "): " 
+                      << layer_param_count << " paramètres dans 1 tensor" << std::endl;
+        }
+    }
+    
+#ifdef MIMIR_ENABLE_LEGACY_PARAMS
+    // ⚠️ ATTENTION: Cette structure legacy consomme énormément de RAM!
+    // std::vector<tensor> avec des millions d'entrées = explosion mémoire
+    // Cette allocation ne passe PAS par MemoryGuard
+    // TODO: Supprimer complètement en production
+    std::cout << "⚠️  LEGACY: Allocation structure params (" << tot << " tensors)..." << std::endl;
     params.clear();
     params.resize(tot);
-    
-    // Utiliser l'allocation dynamique avec compression
     for (size_t i = 0; i < tot; ++i) {
         params[i].Weight = 0;
         params[i].Value = 0;
-        // Les données seront allouées à la demande via DynamicTensorAllocator
     }
+    std::cout << "⚠️  Structure legacy allouée (désactiver avec -DMIMIR_ENABLE_LEGACY_PARAMS=OFF)" << std::endl;
+#else
+    // Structure legacy désactivée pour économiser la RAM
+    params.clear();
+#endif
     
-    std::cout << "✓ Tenseurs créés (allocation à la demande activée)" << std::endl;
+    std::cout << "✓ " << layers.size() << " blocs de poids créés (1 tensor par layer)" << std::endl;
 }
 
 void Model::initializeWeights(const std::string &method, unsigned int seed) {
-    if (params.empty()) {
-        std::cerr << "⚠️  Cannot initialize weights: params not allocated" << std::endl;
+    if (layer_weight_blocks.empty()) {
+        std::cerr << "⚠️  Cannot initialize weights: weight blocks not allocated" << std::endl;
         return;
     }
     
     auto& allocator = DynamicTensorAllocator::instance();
     std::mt19937 gen(seed == 0 ? std::random_device{}() : seed);
     
-    std::cout << "🎲 Initializing weights using " << method << " method (dynamic allocation)..." << std::endl;
+    std::cout << "🎲 Initializing weights using " << method << " method (bloc par layer)..." << std::endl;
     
-    size_t offset = 0;
-    size_t layer_idx = 0;
-    for (const auto &layer : layers) {
-        if (layer.paramsCount == 0) continue;
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        const auto &layer = layers[layer_idx];
+        
+        if (layer.params_count == 0 || !layer.weight_block) continue;
         
         // Afficher progression tous les 10 layers
         if (layer_idx % 10 == 0) {
             std::cout << "  Initializing layer " << layer_idx << "/" << layers.size() 
                       << " (" << layer.name << ")..." << std::endl;
         }
-        layer_idx++;
         
-        // Estimation fan_in/fan_out depuis paramsCount
-        // Pour layer typique: params = fan_in * fan_out + fan_out (bias)
-        // Approximation: fan_in ≈ fan_out ≈ sqrt(paramsCount)
-        int fan_estimate = static_cast<int>(std::sqrt(static_cast<float>(layer.paramsCount)));
-        int fan_in = std::max(fan_estimate, 32);   // Min 32 pour éviter std trop élevé
+        // Estimation fan_in/fan_out depuis params_count
+        int fan_estimate = static_cast<int>(std::sqrt(static_cast<float>(layer.params_count)));
+        int fan_in = std::max(fan_estimate, 32);
         int fan_out = std::max(fan_estimate, 32);
         
         float std_dev = 0.01f;
         
         if (method == "xavier" || method == "glorot") {
-            // Xavier/Glorot: std = sqrt(2 / (fan_in + fan_out))
             std_dev = std::sqrt(2.0f / (fan_in + fan_out));
         }
         else if (method == "he" || method == "kaiming") {
-            // He/Kaiming (optimal pour ReLU/GELU): std = sqrt(2 / fan_in)
-            // Multiplier par 1.5 pour réseaux profonds (évite vanishing gradients)
             std_dev = 1.5f * std::sqrt(2.0f / fan_in);
         }
         else if (method == "normal") {
-            std_dev = 0.05f;  // Augmenté de 0.02 → 0.05
+            std_dev = 0.05f;
         }
         
         std::normal_distribution<float> dist(0.0f, std_dev);
         
-        // Estimer nombre de bias (typiquement ~1-5% des params)
-        size_t num_weights = layer.paramsCount;
-        size_t estimated_bias = fan_out;  // Approximation: 1 bias par neurone de sortie
+        // Estimer nombre de bias
+        size_t num_weights = layer.params_count;
+        size_t estimated_bias = fan_out;
         if (estimated_bias > num_weights / 10) {
-            estimated_bias = num_weights / 10;  // Cap à 10% des params
+            estimated_bias = num_weights / 10;
         }
         size_t num_pure_weights = num_weights - estimated_bias;
         
-        for (size_t i = 0; i < num_weights && (offset + i) < params.size(); ++i) {
+        // NOUVEAU: Initialiser directement le weight_block du layer
+        float* weights_data = layer.weight_block->getData();
+        
+        for (size_t i = 0; i < num_weights; ++i) {
             float value;
             
             // Bias initialisé à 0, weights normalement
@@ -247,22 +377,11 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
             // Clip direct sans tanh (préserve magnitude)
             value = std::clamp(value, -3.0f, 3.0f);  // ±3σ capture 99.7%
             
-            // Convertir [-3, 3] → [0, 1] → uint16
-            float normalized = (value + 3.0f) / 6.0f;  // [-3,3] → [0,1]
-            params[offset + i].Weight = static_cast<uint16_t>(normalized * 65535.0f);
-            
-            // Initialiser aussi les données float si présentes
-            if (!params[offset + i].data.empty()) {
-                for (auto &d : params[offset + i].data) {
-                    d = (i >= num_pure_weights) ? 0.0f : dist(gen);
-                }
-            }
+            weights_data[i] = value;
         }
-        
-        offset += layer.paramsCount;
     }
     
-    std::cout << "✓ Weights initialized (" << params.size() << " parameters)" << std::endl;
+    std::cout << "✓ Weights initialized (" << layers.size() << " layers, " << totalParamCount() << " parameters)" << std::endl;
 }
 
 void Model::updateWeightsWithNoise(float learning_rate, float noise_std) {
@@ -419,8 +538,8 @@ void Model::applyParamUpdate(float learning_rate) {
 
 // Multi-optimizer step (SGD, Adam, AdamW)
 void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* gradients) {
-    size_t n = params.size();
-    if (n == 0) return;
+    // NOUVEAU: Utiliser les weight_blocks au lieu de params
+    if (layer_weight_blocks.empty()) return;
     
     // Utiliser le LR decay si configuré, sinon utiliser le learning_rate fourni
     float effective_lr = learning_rate;
@@ -428,183 +547,87 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
         effective_lr = opt.getCurrentLR();
     }
     
-    switch (opt.type) {
-        case OptimizerType::SGD: {
-            // Stochastic Gradient Descent (CORRIGÉ)
-            // Fallback gradient: L = 0.5 * (pred - target)^2 → dL/dw = (pred - target)
-            for (size_t i = 0; i < n; ++i) {
-                float grad;
-                if (gradients) {
-                    grad = gradients->get(i);
-                } else {
-                    // Fallback: gradient MSE = (current - target)
-                    float target = static_cast<float>(params[i].Value) / 255.0f;
-                    float current = static_cast<float>(params[i].Weight) / 65535.0f;
-                    grad = current - target; // CORRIGÉ: signe correct
+    opt.step += 1;
+    
+    // NOUVEAU: Appliquer l'optimiseur sur chaque weight_block du layer
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        auto &layer = layers[layer_idx];
+        
+        if (!layer.weight_block || layer.params_count == 0) continue;
+        if (layer.grad_weights.empty()) continue;
+        
+        float* weights = layer.weight_block->getData();
+        size_t weight_count = layer.getWeightsSize();
+        
+        // S'assurer que les états Adam ont la bonne taille
+        opt.ensure(weight_count);
+        
+        switch (opt.type) {
+            case OptimizerType::SGD: {
+                // SGD simple
+                for (size_t i = 0; i < weight_count && i < layer.grad_weights.size(); ++i) {
+                    float grad = layer.grad_weights[i];
+                    weights[i] -= effective_lr * grad;
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
                 }
-                
-                float current = static_cast<float>(params[i].Weight) / 65535.0f;
-                float updated = current - effective_lr * grad;
-                updated = std::clamp(updated, 0.0f, 1.0f);
-                params[i].Weight = static_cast<uint16_t>(std::lround(updated * 65535.0f));
+                break;
             }
-            break;
+            
+            case OptimizerType::ADAM: {
+                // Adam standard
+                const float b1 = opt.beta1, b2 = opt.beta2;
+                float bias_correction1 = 1.0f - std::pow(b1, static_cast<float>(opt.step));
+                float bias_correction2 = 1.0f - std::pow(b2, static_cast<float>(opt.step));
+                if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
+                if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
+                
+                for (size_t i = 0; i < weight_count && i < layer.grad_weights.size(); ++i) {
+                    float grad = layer.grad_weights[i];
+                    
+                    opt.m[i] = b1 * opt.m[i] + (1.0f - b1) * grad;
+                    opt.v[i] = b2 * opt.v[i] + (1.0f - b2) * grad * grad;
+                    
+                    float m_hat = opt.m[i] / bias_correction1;
+                    float v_hat = opt.v[i] / bias_correction2;
+                    
+                    float denom = std::sqrt(v_hat) + opt.eps;
+                    weights[i] -= effective_lr * (m_hat / denom);
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
+            
+            case OptimizerType::ADAMW: {
+                // AdamW avec weight decay découplé
+                const float b1 = opt.beta1, b2 = opt.beta2;
+                float bias_correction1 = 1.0f - std::pow(b1, static_cast<float>(opt.step));
+                float bias_correction2 = 1.0f - std::pow(b2, static_cast<float>(opt.step));
+                if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
+                if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
+                
+                for (size_t i = 0; i < weight_count && i < layer.grad_weights.size(); ++i) {
+                    float grad = layer.grad_weights[i];
+                    float current = weights[i];
+                    
+                    opt.m[i] = b1 * opt.m[i] + (1.0f - b1) * grad;
+                    opt.v[i] = b2 * opt.v[i] + (1.0f - b2) * grad * grad;
+                    
+                    float m_hat = opt.m[i] / bias_correction1;
+                    float v_hat = opt.v[i] / bias_correction2;
+                    
+                    float denom = std::sqrt(v_hat) + opt.eps;
+                    float weight_decay_term = opt.weight_decay * current;
+                    float adam_update = effective_lr * (m_hat / denom);
+                    
+                    weights[i] = current - adam_update - effective_lr * weight_decay_term;
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
         }
         
-        case OptimizerType::ADAM: {
-            // Adam optimizer avec optimisations AVX2
-            opt.ensure(n);
-            opt.step += 1;
-            
-            const float b1 = opt.beta1, b2 = opt.beta2;
-            float bias_correction1 = 1.0f - std::pow(b1, static_cast<float>(opt.step));
-            float bias_correction2 = 1.0f - std::pow(b2, static_cast<float>(opt.step));
-            if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
-            if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
-            
-            // === OPTIMISATION AVX2: Vectorisation de la mise à jour Adam ===
-            const __m256 b1_vec = _mm256_set1_ps(b1);
-            const __m256 b2_vec = _mm256_set1_ps(b2);
-            const __m256 one_minus_b1 = _mm256_set1_ps(1.0f - b1);
-            const __m256 one_minus_b2 = _mm256_set1_ps(1.0f - b2);
-            const __m256 bc1_vec = _mm256_set1_ps(bias_correction1);
-            const __m256 bc2_vec = _mm256_set1_ps(bias_correction2);
-            const __m256 eps_vec = _mm256_set1_ps(opt.eps);
-            const __m256 lr_vec = _mm256_set1_ps(effective_lr);
-            
-            // Vectorized loop
-            size_t i = 0;
-            for (; i + 8 <= n; i += 8) {
-                // Extraire gradients (vectorisé)
-                __m256 grad_vec;
-                if (gradients) {
-                    float grad_buffer[8];
-                    for (int j = 0; j < 8; ++j) {
-                        grad_buffer[j] = gradients->get(i + j);
-                    }
-                    grad_vec = _mm256_loadu_ps(grad_buffer);
-                } else {
-                    float grad_buffer[8];
-                    for (int j = 0; j < 8; ++j) {
-                        float target = static_cast<float>(params[i + j].Value) / 255.0f;
-                        float current = static_cast<float>(params[i + j].Weight) / 65535.0f;
-                        grad_buffer[j] = target - current;
-                    }
-                    grad_vec = _mm256_loadu_ps(grad_buffer);
-                }
-                
-                // Charger m et v
-                __m256 m_vec = _mm256_loadu_ps(&opt.m[i]);
-                __m256 v_vec = _mm256_loadu_ps(&opt.v[i]);
-                
-                // m = b1 * m + (1-b1) * grad
-                m_vec = _mm256_fmadd_ps(b1_vec, m_vec, _mm256_mul_ps(one_minus_b1, grad_vec));
-                
-                // v = b2 * v + (1-b2) * grad^2
-                __m256 grad_sq = _mm256_mul_ps(grad_vec, grad_vec);
-                v_vec = _mm256_fmadd_ps(b2_vec, v_vec, _mm256_mul_ps(one_minus_b2, grad_sq));
-                
-                // m_hat = m / bias_correction1
-                __m256 m_hat = _mm256_div_ps(m_vec, bc1_vec);
-                
-                // v_hat = v / bias_correction2
-                __m256 v_hat = _mm256_div_ps(v_vec, bc2_vec);
-                
-                // denom = sqrt(v_hat) + eps
-                __m256 denom = _mm256_add_ps(_mm256_sqrt_ps(v_hat), eps_vec);
-                
-                // delta = lr * (m_hat / denom)
-                __m256 delta = _mm256_mul_ps(lr_vec, _mm256_div_ps(m_hat, denom));
-                
-                // Sauvegarder m et v
-                _mm256_storeu_ps(&opt.m[i], m_vec);
-                _mm256_storeu_ps(&opt.v[i], v_vec);
-                
-                // Mise à jour des poids (scalar car conversion uint16)
-                float delta_arr[8];
-                _mm256_storeu_ps(delta_arr, delta);
-                for (int j = 0; j < 8; ++j) {
-                    // Convertir uint16 → float dans la plage correcte [-3, 3]
-                    float current = (static_cast<float>(params[i + j].Weight) / 65535.0f) * 6.0f - 3.0f;
-                    float updated = current - delta_arr[j];
-                    updated = std::clamp(updated, -3.0f, 3.0f);
-                    // Convertir back: [-3, 3] → [0, 1] → uint16
-                    float normalized = (updated + 3.0f) / 6.0f;
-                    params[i + j].Weight = static_cast<uint16_t>(std::lround(normalized * 65535.0f));
-                }
-            }
-            
-            // Remaining elements (scalar)
-            for (; i < n; ++i) {
-                float grad;
-                if (gradients) {
-                    grad = gradients->get(i);
-                } else {
-                    float target = static_cast<float>(params[i].Value) / 255.0f;
-                    float current = (static_cast<float>(params[i].Weight) / 65535.0f) * 6.0f - 3.0f;
-                    grad = (target * 6.0f - 3.0f) - current;
-                }
-                
-                opt.m[i] = b1 * opt.m[i] + (1.0f - b1) * grad;
-                opt.v[i] = b2 * opt.v[i] + (1.0f - b2) * (grad * grad);
-                float m_hat = opt.m[i] / bias_correction1;
-                float v_hat = opt.v[i] / bias_correction2;
-                float denom = std::sqrt(v_hat) + opt.eps;
-                float delta = effective_lr * (m_hat / denom);
-                
-                // Conversion correcte uint16 ↔ float
-                float current = (static_cast<float>(params[i].Weight) / 65535.0f) * 6.0f - 3.0f;
-                float updated = current - delta;
-                updated = std::clamp(updated, -3.0f, 3.0f);
-                float normalized = (updated + 3.0f) / 6.0f;
-                params[i].Weight = static_cast<uint16_t>(std::lround(normalized * 65535.0f));
-            }
-            break;
-        }
-        
-        case OptimizerType::ADAMW: {
-            // AdamW optimizer (Adam with decoupled weight decay)
-            opt.ensure(n);
-            opt.step += 1;
-            
-            const float b1 = opt.beta1, b2 = opt.beta2;
-            float bias_correction1 = 1.0f - std::pow(b1, static_cast<float>(opt.step));
-            float bias_correction2 = 1.0f - std::pow(b2, static_cast<float>(opt.step));
-            if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
-            if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
-            
-            for (size_t i = 0; i < n; ++i) {
-                float grad;
-                if (gradients) {
-                    grad = gradients->get(i);
-                } else {
-                    float target = static_cast<float>(params[i].Value) / 255.0f;
-                    float current = (static_cast<float>(params[i].Weight) / 65535.0f) * 6.0f - 3.0f;
-                    grad = (target * 6.0f - 3.0f) - current;
-                }
-                
-                opt.m[i] = b1 * opt.m[i] + (1.0f - b1) * grad;
-                opt.v[i] = b2 * opt.v[i] + (1.0f - b2) * (grad * grad);
-                float m_hat = opt.m[i] / bias_correction1;
-                float v_hat = opt.v[i] / bias_correction2;
-                float denom = std::sqrt(v_hat) + opt.eps;
-                
-                // Conversion correcte uint16 → float [-3, 3]
-                float current = (static_cast<float>(params[i].Weight) / 65535.0f) * 6.0f - 3.0f;
-                
-                // AdamW: Weight decay appliqué directement aux poids (découplé du gradient)
-                float weight_decay_term = opt.weight_decay * current;
-                float adam_update = effective_lr * (m_hat / denom);
-                
-                float updated = current - adam_update - effective_lr * weight_decay_term;
-                updated = std::clamp(updated, -3.0f, 3.0f);
-                
-                // Conversion back: [-3, 3] → [0, 1] → uint16
-                float normalized = (updated + 3.0f) / 6.0f;
-                params[i].Weight = static_cast<uint16_t>(std::lround(normalized * 65535.0f));
-            }
-            break;
-        }
+        // Réinitialiser les gradients après application
+        std::fill(layer.grad_weights.begin(), layer.grad_weights.end(), 0.0f);
     }
 }
 
@@ -676,7 +699,7 @@ static void sanitize_id2token_json(json &tokj) {
             for (char &c : s) {
                 if (static_cast<unsigned char>(c) <= 0x1F) { // control chars
                     changed = true;
-                    c = '<NL>'; // replace with space to avoid embedded newlines
+                    c = ' '; // replace with space to avoid embedded newlines
                 }
             }
             if (changed) el = s;
@@ -1006,78 +1029,11 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
 void Model::computeConv2D(const std::vector<float>& input, std::vector<float>& output,
                          const LayerParams& params, int in_h, int in_w, int in_c, int out_c,
                          bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    int out_h = (in_h + 2 * params.padding - params.dilation * (params.kernel_size - 1) - 1) / params.stride + 1;
-    int out_w = (in_w + 2 * params.padding - params.dilation * (params.kernel_size - 1) - 1) / params.stride + 1;
-    
-    if (use_hardware && hasFMA()) {
-        // Version hardware optimisée avec FMA saturé
-        output.resize(out_h * out_w * out_c, 0.0f);
-        
-        #pragma omp parallel for collapse(3)
-        for (int oc = 0; oc < out_c; ++oc) {
-            for (int oh = 0; oh < out_h; ++oh) {
-                for (int ow = 0; ow < out_w; ++ow) {
-                    __m256 acc0 = _mm256_setzero_ps();
-                    __m256 acc1 = _mm256_setzero_ps();
-                    __m256 acc2 = _mm256_setzero_ps();
-                    
-                    int kernel_idx = 0;
-                    for (int ic = 0; ic < in_c; ++ic) {
-                        for (int kh = 0; kh < params.kernel_size; ++kh) {
-                            for (int kw = 0; kw < params.kernel_size; kw += 3) {
-                                int ih = oh * params.stride - params.padding + kh * params.dilation;
-                                int iw = ow * params.stride - params.padding + kw * params.dilation;
-                                
-                                if (ih >= 0 && ih < in_h) {
-                                    // Charger 3 valeurs pour saturer FMA (3 ops/cycle)
-                                    if (kw < params.kernel_size && iw >= 0 && iw < in_w) {
-                                        int in_idx = (ic * in_h + ih) * in_w + iw;
-                                        __m256 in_val = _mm256_set1_ps(input[in_idx]);
-                                        __m256 k_val = _mm256_set1_ps(params.weights[((oc * in_c + ic) * params.kernel_size + kh) * params.kernel_size + kw]);
-                                        acc0 = _mm256_fmadd_ps(in_val, k_val, acc0);
-                                    }
-                                    if (kw + 1 < params.kernel_size && iw + 1 >= 0 && iw + 1 < in_w) {
-                                        int in_idx = (ic * in_h + ih) * in_w + iw + 1;
-                                        __m256 in_val = _mm256_set1_ps(input[in_idx]);
-                                        __m256 k_val = _mm256_set1_ps(params.weights[((oc * in_c + ic) * params.kernel_size + kh) * params.kernel_size + kw + 1]);
-                                        acc1 = _mm256_fmadd_ps(in_val, k_val, acc1);
-                                    }
-                                    if (kw + 2 < params.kernel_size && iw + 2 >= 0 && iw + 2 < in_w) {
-                                        int in_idx = (ic * in_h + ih) * in_w + iw + 2;
-                                        __m256 in_val = _mm256_set1_ps(input[in_idx]);
-                                        __m256 k_val = _mm256_set1_ps(params.weights[((oc * in_c + ic) * params.kernel_size + kh) * params.kernel_size + kw + 2]);
-                                        acc2 = _mm256_fmadd_ps(in_val, k_val, acc2);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Somme horizontale des 3 accumulateurs
-                    __m256 total = _mm256_add_ps(acc0, _mm256_add_ps(acc1, acc2));
-                    __m128 sum_high = _mm256_extractf128_ps(total, 1);
-                    __m128 sum_low = _mm256_castps256_ps128(total);
-                    __m128 sum128 = _mm_add_ps(sum_low, sum_high);
-                    __m128 shuf = _mm_movehdup_ps(sum128);
-                    __m128 sums = _mm_add_ps(sum128, shuf);
-                    shuf = _mm_movehl_ps(shuf, sums);
-                    sums = _mm_add_ss(sums, shuf);
-                    
-                    float sum = _mm_cvtss_f32(sums);
-                    if (!params.bias.empty()) sum += params.bias[oc];
-                    
-                    output[(oc * out_h + oh) * out_w + ow] = sum;
-                }
-            }
-        }
-    } else {
-        // Version software (CPU)
-        Conv::conv2d(input, output, params.weights, params.bias,
-                    in_h, in_w, in_c, out_c, params.kernel_size,
-                    params.stride, params.padding, params.dilation);
-    }
+    // Utilise directement l'implémentation optimisée de Conv::conv2d
+    // qui gère automatiquement SIMD et CPU selon la compilation
+    Conv::conv2d(input, output, params.weights, params.bias,
+                in_h, in_w, in_c, out_c, params.kernel_size,
+                params.stride, params.padding, params.dilation);
 }
 
 void Model::computeLinear(const std::vector<float>& input, std::vector<float>& output,
@@ -1537,6 +1493,281 @@ void Model::buildAudioBranch(const MagicToken & /*tok*/) { /* noop */ }
 void Model::buildImageBranch(const MagicToken & /*tok*/) { /* noop */ }
 void Model::buildVideoBranch(const MagicToken & /*tok*/) { /* noop */ }
 
+// ============================= 
+// Branch Operations Implementation
+// =============================
+
+void Model::computeBranchMerge(const std::vector<float>& branch1, 
+                               const std::vector<float>& branch2,
+                               std::vector<float>& output,
+                               MergeOperation merge_op,
+                               bool use_hardware) {
+    use_hardware = use_hardware && global_use_hardware && hasAVX2();
+    
+    size_t size = branch1.size();
+    output.resize(size);
+    
+    switch (merge_op) {
+        case MergeOperation::ADD: {
+            if (use_hardware) {
+                #ifdef __AVX2__
+                size_t i = 0;
+                for (; i + 8 <= size; i += 8) {
+                    __m256 a = _mm256_loadu_ps(&branch1[i]);
+                    __m256 b = _mm256_loadu_ps(&branch2[i]);
+                    __m256 result = _mm256_add_ps(a, b);
+                    _mm256_storeu_ps(&output[i], result);
+                }
+                // Éléments restants
+                for (; i < size; ++i) {
+                    output[i] = branch1[i] + branch2[i];
+                }
+                #else
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = branch1[i] + branch2[i];
+                }
+                #endif
+            } else {
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = branch1[i] + branch2[i];
+                }
+            }
+            break;
+        }
+        
+        case MergeOperation::MULTIPLY: {
+            if (use_hardware) {
+                #ifdef __AVX2__
+                size_t i = 0;
+                for (; i + 8 <= size; i += 8) {
+                    __m256 a = _mm256_loadu_ps(&branch1[i]);
+                    __m256 b = _mm256_loadu_ps(&branch2[i]);
+                    __m256 result = _mm256_mul_ps(a, b);
+                    _mm256_storeu_ps(&output[i], result);
+                }
+                for (; i < size; ++i) {
+                    output[i] = branch1[i] * branch2[i];
+                }
+                #else
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = branch1[i] * branch2[i];
+                }
+                #endif
+            } else {
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = branch1[i] * branch2[i];
+                }
+            }
+            break;
+        }
+        
+        case MergeOperation::MAX: {
+            if (use_hardware) {
+                #ifdef __AVX2__
+                size_t i = 0;
+                for (; i + 8 <= size; i += 8) {
+                    __m256 a = _mm256_loadu_ps(&branch1[i]);
+                    __m256 b = _mm256_loadu_ps(&branch2[i]);
+                    __m256 result = _mm256_max_ps(a, b);
+                    _mm256_storeu_ps(&output[i], result);
+                }
+                for (; i < size; ++i) {
+                    output[i] = std::max(branch1[i], branch2[i]);
+                }
+                #else
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = std::max(branch1[i], branch2[i]);
+                }
+                #endif
+            } else {
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = std::max(branch1[i], branch2[i]);
+                }
+            }
+            break;
+        }
+        
+        case MergeOperation::AVERAGE: {
+            if (use_hardware) {
+                #ifdef __AVX2__
+                __m256 half = _mm256_set1_ps(0.5f);
+                size_t i = 0;
+                for (; i + 8 <= size; i += 8) {
+                    __m256 a = _mm256_loadu_ps(&branch1[i]);
+                    __m256 b = _mm256_loadu_ps(&branch2[i]);
+                    __m256 sum = _mm256_add_ps(a, b);
+                    __m256 result = _mm256_mul_ps(sum, half);
+                    _mm256_storeu_ps(&output[i], result);
+                }
+                for (; i < size; ++i) {
+                    output[i] = (branch1[i] + branch2[i]) * 0.5f;
+                }
+                #else
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = (branch1[i] + branch2[i]) * 0.5f;
+                }
+                #endif
+            } else {
+                for (size_t i = 0; i < size; ++i) {
+                    output[i] = (branch1[i] + branch2[i]) * 0.5f;
+                }
+            }
+            break;
+        }
+        
+        case MergeOperation::CONCATENATE: {
+            // Concaténation simple
+            output.resize(branch1.size() + branch2.size());
+            std::copy(branch1.begin(), branch1.end(), output.begin());
+            std::copy(branch2.begin(), branch2.end(), output.begin() + branch1.size());
+            break;
+        }
+        
+        default: {
+            // Par défaut, addition
+            std::copy(branch1.begin(), branch1.end(), output.begin());
+            for (size_t i = 0; i < size; ++i) {
+                output[i] += branch2[i];
+            }
+            break;
+        }
+    }
+}
+
+void Model::computeBranchSplit(const std::vector<float>& input,
+                               std::vector<std::vector<float>>& outputs,
+                               const std::vector<int>& split_sizes) {
+    outputs.resize(split_sizes.size());
+    size_t offset = 0;
+    
+    for (size_t i = 0; i < split_sizes.size(); ++i) {
+        outputs[i].resize(split_sizes[i]);
+        std::copy(input.begin() + offset, 
+                  input.begin() + offset + split_sizes[i], 
+                  outputs[i].begin());
+        offset += split_sizes[i];
+    }
+}
+
+void Model::detectAndSetupBranches() {
+    // Parcourir tous les layers et détecter automatiquement les types de branches
+    for (auto& layer : layers) {
+        layer.detectBranchType();
+    }
+    
+    // Analyser la structure pour identifier les connexions entre branches
+    for (size_t i = 0; i < layers.size(); ++i) {
+        auto& layer = layers[i];
+        
+        // Si c'est un layer résiduel, chercher le layer source
+        if (layer.branch_type == BranchType::RESIDUAL) {
+            // Par convention, le shortcut se connecte généralement plusieurs layers en arrière
+            // Chercher un layer avec un nom similaire mais sans "shortcut" ou "residual"
+            std::string base_name = layer.name;
+            size_t pos = base_name.find("_shortcut");
+            if (pos == std::string::npos) {
+                pos = base_name.find("_residual");
+            }
+            
+            if (pos != std::string::npos) {
+                base_name = base_name.substr(0, pos);
+                
+                // Chercher le layer de base correspondant
+                for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
+                    if (layers[j].name.find(base_name) != std::string::npos && 
+                        j != static_cast<int>(i)) {
+                        layer.branch_sources.push_back(j);
+                        layers[j].is_branch_point = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    std::cout << "✓ Détection des branches terminée. Trouvé:" << std::endl;
+    for (size_t i = 0; i < layers.size(); ++i) {
+        if (layers[i].requiresBranchComputation()) {
+            std::cout << "  - Layer " << i << " (" << layers[i].name << "): ";
+            if (layers[i].branch_type == BranchType::RESIDUAL) {
+                std::cout << "RESIDUAL";
+            } else if (layers[i].branch_type == BranchType::SKIP_CONNECTION) {
+                std::cout << "SKIP_CONNECTION";
+            } else if (layers[i].is_branch_point) {
+                std::cout << "BRANCH_POINT";
+            } else if (layers[i].is_merge_point) {
+                std::cout << "MERGE_POINT";
+            }
+            std::cout << std::endl;
+        }
+    }
+}
+
+void Model::executeBranchComputation(int layer_idx, 
+                                    std::vector<std::vector<float>>& layer_outputs,
+                                    bool training) {
+    if (layer_idx < 0 || layer_idx >= static_cast<int>(layers.size())) {
+        return;
+    }
+    
+    auto& layer = layers[layer_idx];
+    
+    if (!layer.requiresBranchComputation()) {
+        return;
+    }
+    
+    // Si c'est un point de fusion (residual, skip connection, etc.)
+    if (layer.branch_type == BranchType::RESIDUAL && !layer.branch_sources.empty()) {
+        // Récupérer la sortie du layer source
+        int source_idx = layer.branch_sources[0];
+        if (source_idx >= 0 && source_idx < static_cast<int>(layer_outputs.size())) {
+            // Fusionner avec l'opération spécifiée
+            std::vector<float> merged_output;
+            computeBranchMerge(layer_outputs[layer_idx], 
+                             layer_outputs[source_idx],
+                             merged_output,
+                             layer.merge_op,
+                             true);
+            layer_outputs[layer_idx] = std::move(merged_output);
+        }
+    }
+    else if (layer.branch_type == BranchType::SPLIT) {
+        // Pour les splits, on doit diviser la sortie
+        // Ceci sera géré au niveau du forward pass principal
+    }
+}
+
+void Model::backpropThroughBranch(int layer_idx,
+                                 const std::vector<float>& grad_output,
+                                 std::vector<std::vector<float>>& layer_gradients) {
+    if (layer_idx < 0 || layer_idx >= static_cast<int>(layers.size())) {
+        return;
+    }
+    
+    auto& layer = layers[layer_idx];
+    
+    if (!layer.requiresBranchComputation()) {
+        return;
+    }
+    
+    // Backprop à travers les connexions de branche
+    if (layer.branch_type == BranchType::RESIDUAL && !layer.branch_sources.empty()) {
+        // Pour une connexion résiduelle, le gradient se propage vers les deux branches
+        int source_idx = layer.branch_sources[0];
+        if (source_idx >= 0 && source_idx < static_cast<int>(layer_gradients.size())) {
+            // Le gradient du résidual se propage tel quel vers la branche source
+            if (layer_gradients[source_idx].empty()) {
+                layer_gradients[source_idx] = grad_output;
+            } else {
+                // Accumuler les gradients
+                for (size_t i = 0; i < grad_output.size() && i < layer_gradients[source_idx].size(); ++i) {
+                    layer_gradients[source_idx][i] += grad_output[i];
+                }
+            }
+        }
+    }
+}
+
 // === Forward/Backward Pass Complet ===
 
 std::vector<float> Model::forwardPass(const std::vector<float> &input, bool training) {
@@ -1552,7 +1783,6 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
     }
     
     std::vector<float> x = input;
-    size_t param_offset = 0;
     
     if (training) {
         forward_state.layer_inputs.reserve(layers.size());
@@ -1563,6 +1793,12 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
     // Pré-allouer un buffer de sortie réutilisable
     std::vector<float> layer_output;
     layer_output.reserve(x.size());
+    
+    // Stocker les sorties de tous les layers pour gérer les branches
+    std::vector<std::vector<float>> all_layer_outputs;
+    if (training) {
+        all_layer_outputs.reserve(layers.size());
+    }
     
     // Forward pass à travers chaque layer
     for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
@@ -1575,18 +1811,30 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
         layer_output.clear(); // Réutiliser au lieu de réallouer
         
         // === DISPATCH HARDWARE ACCELERATED vs CPU ===
-        bool use_gpu = g_compute_available && layer.paramsCount > 10000; // Seuil pour GPU
+        bool use_gpu = g_compute_available && layer.params_count > 10000; // Seuil pour GPU
         
         // Traitement selon le type de layer
         if (layer.type == "Conv2d" || layer.type == "ConvTranspose2d") {
             // VRAIE convolution 2D avec kernel spatial
-            const int kernel_size = 3;
-            const int in_channels = 64; // À adapter selon couche
-            const int out_channels = 64;
-            const int height = 64, width = 64;
-            const int stride = 1, padding = 1;
+            const int kernel_size = layer.kernel_size > 0 ? layer.kernel_size : 3;
+            const int in_channels = layer.in_channels > 0 ? layer.in_channels : 64;
+            const int out_channels = layer.out_channels > 0 ? layer.out_channels : 64;
+            const int height = layer.input_height > 0 ? layer.input_height : 64;
+            const int width = layer.input_width > 0 ? layer.input_width : 64;
+            const int stride = layer.stride > 0 ? layer.stride : 1;
+            const int padding = layer.padding;
             
-            const size_t output_size = out_channels * height * width;
+            // Calculer les dimensions de sortie
+            int out_height, out_width;
+            if (layer.type == "Conv2d") {
+                out_height = (height + 2 * padding - kernel_size) / stride + 1;
+                out_width = (width + 2 * padding - kernel_size) / stride + 1;
+            } else { // ConvTranspose2d
+                out_height = (height - 1) * stride - 2 * padding + kernel_size;
+                out_width = (width - 1) * stride - 2 * padding + kernel_size;
+            }
+            
+            const size_t output_size = out_channels * out_height * out_width;
             if (layer_output.capacity() < output_size) {
                 layer_output.reserve(output_size);
             }
@@ -1603,11 +1851,14 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
             
             if (!use_gpu) {
                 // === CPU PATH: Convolution parallélisée OpenMP ===
+                // NOUVEAU: Récupérer les poids depuis le weight_block du layer
+                const float* layer_weights = layer.getWeights();
+                
                 // Convolution 2D complète (parallélisée - FORCÉE)
                 #pragma omp parallel for schedule(dynamic)
                 for (int oc = 0; oc < out_channels; ++oc) {
-                    for (int oh = 0; oh < height; ++oh) {
-                        for (int ow = 0; ow < width; ++ow) {
+                    for (int oh = 0; oh < out_height; ++oh) {
+                        for (int ow = 0; ow < out_width; ++ow) {
                             float sum = 0.0f;
                             
                             for (int ic = 0; ic < in_channels; ++ic) {
@@ -1621,9 +1872,8 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
                                             int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
                                             
                                             if (in_idx < static_cast<int>(x.size()) && 
-                                                (param_offset + w_idx) < params.size()) {
-                                                float weight = static_cast<float>(params[param_offset + w_idx].Weight) / 65535.0f;
-                                                weight = weight * 2.0f - 1.0f;
+                                                w_idx < static_cast<int>(layer.getWeightsSize())) {
+                                                float weight = layer_weights[w_idx];
                                                 sum += x[in_idx] * weight;
                                             }
                                         }
@@ -1631,7 +1881,7 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
                                 }
                             }
                             
-                            int out_idx = oc * (height * width) + oh * width + ow;
+                            int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
                             layer_output[out_idx] = sum;
                         }
                     }
@@ -1657,13 +1907,16 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
             var /= x.size();
             float std = std::sqrt(var + 1e-5f);
             
+            // NOUVEAU: Récupérer gamma depuis le weight_block
+            const float* layer_weights = layer.getWeights();
+            
             // Normaliser
             for (size_t i = 0; i < layer_output.size(); ++i) {
                 layer_output[i] = (layer_output[i] - mean) / std;
                 
                 // Appliquer gamma et beta si disponibles
-                if (param_offset + i < params.size()) {
-                    float gamma = static_cast<float>(params[param_offset + i].Weight) / 32767.5f;
+                if (i < layer.getWeightsSize()) {
+                    float gamma = layer_weights[i];
                     layer_output[i] *= gamma;
                 }
             }
@@ -1696,12 +1949,22 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
             }
         }
         
+        // Stocker la sortie de ce layer pour les branches
+        if (training) {
+            all_layer_outputs.push_back(x);
+        }
+        
+        // Exécuter les calculs de branche si nécessaire
+        if (layer.requiresBranchComputation() && training) {
+            executeBranchComputation(layer_idx, all_layer_outputs, training);
+            // Mettre à jour x avec la sortie fusionnée
+            x = all_layer_outputs[layer_idx];
+        }
+        
         if (training) {
             forward_state.layer_outputs.push_back(layer_output);
             forward_state.activations.push_back(x);
         }
-        
-        param_offset += layer.paramsCount;
     }
     
     if (training) {
@@ -1719,22 +1982,15 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
         return grads;
     }
     
-    if (layers.empty() || params.empty()) {
+    if (layers.empty() || layer_weight_blocks.empty()) {
         return grads;
     }
     
     std::vector<float> grad = loss_gradient;
-    size_t param_offset = 0;
-    
-    // Calculer l'offset total des paramètres
-    for (const auto &layer : layers) {
-        param_offset += layer.paramsCount;
-    }
     
     // Backward pass à travers chaque layer (en ordre inverse)
     for (int layer_idx = layers.size() - 1; layer_idx >= 0; --layer_idx) {
-        const auto &layer = layers[layer_idx];
-        param_offset -= layer.paramsCount;
+        auto &layer = layers[layer_idx];
         
         const auto &layer_input = forward_state.layer_inputs[layer_idx];
         const auto &layer_output = forward_state.layer_outputs[layer_idx];
@@ -1752,12 +2008,20 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 }
             }
             
+            // NOUVEAU: Récupérer les poids et gradients depuis le weight_block
+            const float* layer_weights = layer.getWeights();
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.resize(layer.getWeightsSize(), 0.0f);
+            }
+            
             // Backward Conv : VRAIS gradients avec convolution transposée
-            int kernel_size = 3;
-            int in_channels = 64;
-            int out_channels = 64;
-            int height = 64, width = 64;
-            int stride = 1, padding = 1;
+            int kernel_size = layer.kernel_size > 0 ? layer.kernel_size : 3;
+            int in_channels = layer.in_channels > 0 ? layer.in_channels : 64;
+            int out_channels = layer.out_channels > 0 ? layer.out_channels : 64;
+            int height = layer.input_height > 0 ? layer.input_height : 64;
+            int width = layer.input_width > 0 ? layer.input_width : 64;
+            int stride = layer.stride > 0 ? layer.stride : 1;
+            int padding = layer.padding;
             
             // Gradient des poids: dL/dW = grad_output ⊗ input (parallélisé sur oc)
             #pragma omp parallel for schedule(dynamic) collapse(2)
@@ -1785,9 +2049,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                             }
                             
                             int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
-                            if ((param_offset + w_idx) < params.size()) {
+                            if (w_idx < static_cast<int>(layer.grad_weights.size())) {
                                 #pragma omp critical
-                                grads.add(param_offset + w_idx, grad_weight);
+                                layer.grad_weights[w_idx] += grad_weight;
                             }
                         }
                     }
@@ -1816,9 +2080,8 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                                         int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
                                         
                                         if (out_idx < static_cast<int>(grad_pre_relu.size()) &&
-                                            (param_offset + w_idx) < params.size()) {
-                                            float weight = static_cast<float>(params[param_offset + w_idx].Weight) / 65535.0f;
-                                            weight = weight * 2.0f - 1.0f;
+                                            w_idx < static_cast<int>(layer.getWeightsSize())) {
+                                            float weight = layer_weights[w_idx];
                                             grad_sum += grad_pre_relu[out_idx] * weight;
                                         }
                                     }
@@ -1837,8 +2100,13 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             grad = grad_input;
             
         } else if (layer.type == "BatchNorm2d") {
+            // NOUVEAU: Récupérer les poids et gradients depuis le weight_block
+            const float* layer_weights = layer.getWeights();
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.resize(layer.getWeightsSize(), 0.0f);
+            }
+            
             // Backward BatchNorm avec formule compacte standard (CORRIGÉ)
-            // Formule: dx = (1/N) * gamma * invstd * (N*dY - sum(dY) - (x-mean)*invstd^2*sum(dY*(x-mean)))
             int channels = 64; // À adapter
             int height = 64, width = 64;
             int spatial_size = height * width;
@@ -1871,10 +2139,10 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 var /= spatial_size;
                 float invstd = 1.0f / std::sqrt(var + eps);
                 
-                // Récupérer gamma (scale parameter) depuis params
+                // Récupérer gamma (scale parameter) depuis weight_block
                 float gamma = 1.0f;
-                if ((param_offset + c * 2) < params.size()) {
-                    gamma = static_cast<float>(params[param_offset + c * 2].Weight) / 32767.5f;
+                if (c * 2 < static_cast<int>(layer.getWeightsSize())) {
+                    gamma = layer_weights[c * 2];
                 }
                 
                 // Gradient gamma: sum(dY * x_normalized)
@@ -1889,9 +2157,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                         }
                     }
                 }
-                if ((param_offset + c * 2) < params.size()) {
+                if (c * 2 < static_cast<int>(layer.grad_weights.size())) {
                     #pragma omp critical
-                    grads.add(param_offset + c * 2, grad_gamma);
+                    layer.grad_weights[c * 2] += grad_gamma;
                 }
                 
                 // Gradient beta: sum(dY)
@@ -1904,9 +2172,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                         }
                     }
                 }
-                if ((param_offset + c * 2 + 1) < params.size()) {
+                if (c * 2 + 1 < static_cast<int>(layer.grad_weights.size())) {
                     #pragma omp critical
-                    grads.add(param_offset + c * 2 + 1, grad_beta);
+                    layer.grad_weights[c * 2 + 1] += grad_beta;
                 }
                 
                 // Calculer sum(dY) et sum(dY * (x - mean))
@@ -2235,7 +2503,7 @@ bool Model::saveLayersStructure(const fs::path &filepath) const {
             json layer_obj;
             layer_obj["name"] = layer.name;
             layer_obj["type"] = layer.type;
-            layer_obj["params_count"] = layer.paramsCount;
+            layer_obj["params_count"] = layer.params_count;
             layers_json.push_back(layer_obj);
         }
         
@@ -2272,10 +2540,10 @@ bool Model::loadLayersStructure(const fs::path &filepath) {
         
         layers.clear();
         for (const auto &layer_obj : root["layers"]) {
-            LayerDesc layer;
+            Layer layer;
             layer.name = layer_obj.value("name", "");
             layer.type = layer_obj.value("type", "");
-            layer.paramsCount = layer_obj.value("params_count", 0);
+            layer.params_count = layer_obj.value("params_count", 0);
             layers.push_back(layer);
         }
         
@@ -2406,7 +2674,13 @@ bool Model::loadParamsData(const fs::path &filepath) {
             throw std::runtime_error("❌ MemoryGuard: Impossible d'allouer la structure params");
         }
         
+#ifdef MIMIR_ENABLE_LEGACY_PARAMS
+        // ⚠️ LEGACY: Allocation potentiellement massive
         params.resize(num_tensors);
+#else
+        // Structure legacy désactivée
+        params.clear();
+#endif
         
         auto& allocator = DynamicTensorAllocator::instance();
         std::cout << "📦 Chargement dynamique de " << num_tensors << " tenseurs..." << std::endl;

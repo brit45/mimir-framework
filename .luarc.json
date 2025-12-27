@@ -9,23 +9,29 @@
   },
   "workspace": {
     "library": [
-      "mimir-api.lua"
+      "${workspaceFolder}/mimir-api.lua"
     ],
     "checkThirdParty": false
   },
   "diagnostics": {
     "globals": [
       "model",
-      "tokenizer", 
+      "architectures",
+      "flux",
+      "FluxModel",
+      "layers",
+      "tokenizer",
       "dataset",
-      "allocator",
-      "guard",
       "memory",
+      "guard",
+      "MemoryGuard",
+      "allocator",
       "htop",
       "viz",
       "log",
       "read_json",
-      "write_json"
+      "write_json",
+      "Pipeline"
     ],
     "disable": [
       "lowercase-global"

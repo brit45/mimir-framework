@@ -11,17 +11,10 @@
 #include "Encoder.hpp"
 #include "Autograd.hpp"   // Pour la structure Gradients
 #include "HardwareOpt.hpp" // Optimisations hardware avancées
+#include "Layers.hpp"      // Pour la structure Layer
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
-
-// -------------------- Types utilitaires manquants --------------------
-// Minimal LayerDesc used by Model
-struct LayerDesc {
-    std::string name;
-    std::string type;
-    size_t paramsCount = 0;
-};
 
 // LR Decay strategies
 enum class LRDecayStrategy {
@@ -142,6 +135,8 @@ public:
     // Nouveau forward/backward pass complet
     std::vector<float> forwardPass(const std::vector<float> &input, bool training = true);
     Gradients backwardPass(const std::vector<float> &loss_gradient);
+    void zeroGradients();  // Réinitialise tous les gradients à zéro
+    Gradients getGradients() const;  // Récupère les gradients actuels
     float computeLoss(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
     std::vector<float> computeLossGradient(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
     
@@ -270,9 +265,39 @@ public:
                                 const std::vector<float>& value, std::vector<float>& output,
                                 int seq_len, int d_model, int num_heads, bool use_hardware = true);
     
+    // =============================
+    // Branch Operations (pour résiduals, skip connections, etc.)
+    // =============================
+    
+    // Calcul des opérations de branche avec dispatch automatique
+    static void computeBranchMerge(const std::vector<float>& branch1, 
+                                   const std::vector<float>& branch2,
+                                   std::vector<float>& output,
+                                   MergeOperation merge_op,
+                                   bool use_hardware = true);
+    
+    // Split d'un tensor en plusieurs branches
+    static void computeBranchSplit(const std::vector<float>& input,
+                                   std::vector<std::vector<float>>& outputs,
+                                   const std::vector<int>& split_sizes);
+    
+    // Détection et exécution automatique des branches pendant forward/backward
+    void detectAndSetupBranches();
+    void executeBranchComputation(int layer_idx, 
+                                  std::vector<std::vector<float>>& layer_outputs,
+                                  bool training = false);
+    
+    // Gestion des gradients pour les branches pendant le backward pass
+    void backpropThroughBranch(int layer_idx,
+                              const std::vector<float>& grad_output,
+                              std::vector<std::vector<float>>& layer_gradients);
+    
     // Configuration globale hardware
     static inline bool global_use_hardware = true;
     static void setHardwareAcceleration(bool enable) { global_use_hardware = enable; }
+
+    // Configuration du modèle (pour dimensionnement dynamique des layers)
+    json modelConfig;
 
     static void conv2d_same(const std::vector<float> &in, std::vector<float> &out, int W, int H, const std::vector<float> &kernel, int ksize);
 
@@ -356,7 +381,12 @@ public:
             v = gamma * ((v - float(mean)) * inv_std) + beta;
     }
 
-    std::vector<tensor> params;
+    // ANCIEN: std::vector<tensor> params;  // 1 paramètre = 1 tensor
+    // NOUVEAU: Chaque layer a son propre bloc de poids (weight_block)
+    std::vector<tensor> layer_weight_blocks;  // 1 tensor = tous les poids d'un layer
+    
+    // Rétrocompatibilité: accès aux paramètres via une interface unifiée
+    std::vector<tensor> params;  // Conservé temporairement pour transition
 
     void setName(std::string name) {
 
@@ -382,7 +412,7 @@ public:
     ForwardState forward_state;
 
 protected:
-    std::vector<LayerDesc> layers;
+    std::vector<Layer> layers;
     int tw = 64, th = 64;
     Tokenizer tokenizer;
     Encoder encoder;

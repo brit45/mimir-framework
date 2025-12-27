@@ -19,12 +19,73 @@ using json = nlohmann::json;
 
 tensor::tensor(size_t size, bool dynamic) : use_dynamic_alloc(dynamic) {
     if (dynamic) {
+        // 🔑 ALLOCATION DYNAMIQUE LAZY
+        // Crée le handle mais n'alloue pas immédiatement la mémoire
+        // La mémoire sera allouée lors du premier getData() (lazy loading)
+        // Cela permet de ne pas comptabiliser la RAM avant utilisation réelle
         auto& allocator = DynamicTensorAllocator::instance();
         dynamic_handle = allocator.allocateTensor(size, "tensor_data");
+        
+        if (!dynamic_handle) {
+            // 🛑 PANIC OOM: Impossible d'allouer même le handle
+            std::cerr << "\n\u274c\u274c\u274c PANIC: OUT OF MEMORY \u274c\u274c\u274c" << std::endl;
+            std::cerr << "⛔ Impossible d'allouer tensor de " << (size * sizeof(float) / 1024 / 1024) << " MB" << std::endl;
+            std::cerr << "⛔ MemoryGuard a refusé l'allocation - limite atteinte" << std::endl;
+            std::cerr << "\n🚨 ARRÊT CONTRÔLÉ POUR ÉVITER CRASH OS\n" << std::endl;
+            
+            // Afficher stats avant de quitter
+            auto& guard = MemoryGuard::instance();
+            guard.printStats();
+            
+            // Arrêt contrôlé (pas de throw pour éviter corruption)
+            std::cerr << "\n⚠️  Le programme va s'arrêter proprement pour protéger l'OS..." << std::endl;
+            std::exit(1);
+        }
     } else {
+        // Allocation classique std::vector (non contrôlée par MemoryGuard)
+        // ⚠️ Utiliser dynamic=true en production pour contrôle strict!
         data.resize(size, 0.0f);
     }
 }
+
+tensor::tensor(tensor&& other) noexcept
+    : Weight(other.Weight)
+    , Pos(other.Pos)
+    , Value(other.Value)
+    , Length(other.Length)
+    , data(std::move(other.data))
+    , dynamic_handle(other.dynamic_handle)
+    , use_dynamic_alloc(other.use_dynamic_alloc)
+{
+    other.dynamic_handle = nullptr;
+    other.use_dynamic_alloc = false;
+}
+
+tensor& tensor::operator=(tensor&& other) noexcept {
+    if (this != &other) {
+        // Libérer les ressources existantes
+        if (use_dynamic_alloc && dynamic_handle) {
+            auto& allocator = DynamicTensorAllocator::instance();
+            allocator.freeTensor(
+                static_cast<DynamicTensorAllocator::TensorHandle*>(dynamic_handle));
+        }
+        
+        // Transférer les ressources
+        Weight = other.Weight;
+        Pos = other.Pos;
+        Value = other.Value;
+        Length = other.Length;
+        data = std::move(other.data);
+        dynamic_handle = other.dynamic_handle;
+        use_dynamic_alloc = other.use_dynamic_alloc;
+        
+        // Invalider l'autre
+        other.dynamic_handle = nullptr;
+        other.use_dynamic_alloc = false;
+    }
+    return *this;
+}
+
 
 tensor::~tensor() {
     if (use_dynamic_alloc && dynamic_handle) {
@@ -590,12 +651,13 @@ bool load_safetensors(const std::string &fname, std::vector<std::string>& names,
                     ((unsigned char)data[byte_idx + 1] << 8)
                 );
             }
-            tensor t;
+            // Créer tensor in-place pour éviter copie
+            params.emplace_back();
+            tensor& t = params.back();
             t.Weight = w;
             t.Value = 0;
             t.Length = 0;
             t.Pos = Vector4F{0.0f,0.0f,0.0f,0.0f};
-            params.push_back(t);
             byte_idx += 2;
         }
     }

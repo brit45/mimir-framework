@@ -9,16 +9,13 @@
     return ::testing::AssertionFailure() << a << " != " << b;
 }
 
-// Test 1: LayerDesc structure
-TEST(ModelTest, LayerDesc) {
-    LayerDesc desc;
-    desc.name = "layer1";
-    desc.type = "linear";
-    desc.paramsCount = 100;
+// Test 1: Layer structure (anciennement LayerDesc)
+TEST(ModelTest, Layer) {
+    Layer layer("layer1", "linear", 100);
     
-    EXPECT_EQ(desc.name, "layer1");
-    EXPECT_EQ(desc.type, "linear");
-    EXPECT_EQ(desc.paramsCount, 100);
+    EXPECT_EQ(layer.name, "layer1");
+    EXPECT_EQ(layer.type, "linear");
+    EXPECT_EQ(layer.params_count, 100);
 }
 
 // Test 2: Optimizer construction

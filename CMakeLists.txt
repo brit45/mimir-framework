@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(Mimir VERSION 2.0 LANGUAGES CXX)
+project(Mimir VERSION 2.1 LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet
@@ -17,6 +17,10 @@ option(ENABLE_VULKAN "Enable Vulkan Compute acceleration" ON)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
 option(BUILD_TESTS "Build test executables" ON)
 option(BUILD_EXAMPLES "Build example executables" ON)
+
+# 🛡️ SÉCURITÉ MÉMOIRE: Legacy params structure (désactivé par défaut)
+# ⚠️  Activer seulement pour debug/compatibilité - consomme énormément de RAM!
+option(MIMIR_ENABLE_LEGACY_PARAMS "Enable legacy params structure (high RAM usage)" OFF)
 
 # Type de build par défaut
 if(NOT CMAKE_BUILD_TYPE)
@@ -152,6 +156,7 @@ set(MIMIR_SOURCES
     src/LuaScripting.cpp
     src/LuaScripting_TokenizerExt.cpp
     src/stb_image_impl.cpp
+    src/Models/FluxModel.cpp
 )
 
 set(MIMIR_HEADERS
@@ -174,6 +179,7 @@ set(MIMIR_HEADERS
     src/AsyncMonitor.hpp
     src/HtopDisplay.hpp
     src/Models/ModelArchitectures.hpp
+    src/Models/FluxModel.hpp
     src/stb_image.h
 )
 
@@ -190,6 +196,14 @@ target_include_directories(mimir_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/include
 )
+
+# 🛡️ Appliquer la macro MIMIR_ENABLE_LEGACY_PARAMS si activée
+if(MIMIR_ENABLE_LEGACY_PARAMS)
+    target_compile_definitions(mimir_core PRIVATE MIMIR_ENABLE_LEGACY_PARAMS)
+    message(WARNING "⚠️  Legacy params structure ENABLED - High RAM usage!")
+else()
+    message(STATUS "✅ Legacy params structure DISABLED (recommended for production)")
+endif()
 
 # Lier les dépendances
 target_link_libraries(mimir_core PUBLIC

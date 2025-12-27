@@ -1,8 +1,8 @@
-# Mímir Framework v2.0
+# Mímir Framework v2.1
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.1.0-blue)
 ![C++17](https://img.shields.io/badge/C++-17-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![OpenMP](https://img.shields.io/badge/OpenMP-enabled-red)
@@ -16,7 +16,15 @@
 
 ---
 
-## 🆕 Nouveautés v2.0
+## 🆕 Nouveautés v2.1
+
+### 🗂️ Organisation et Qualité (v2.1.0)
+- **Scripts réorganisés** en 6 catégories (demos, examples, tests, benchmarks, training, templates)
+- **Documentation corrigée** (33 fixes de liens cassés)
+- **Synchronisation API** validée à 100% (114 fonctions, 13 modules)
+- **Outils de validation** créés (3 scripts bash)
+
+## 📜 Historique v2.0
 
 ### 🧵 Threading Asynchrone
 - **HtopDisplay** et **Visualizer** s'exécutent dans des threads séparés
@@ -30,11 +38,49 @@
 - Fallback automatique vers CPU si GPU indisponible
 - **Gain potentiel**: ~100x sur layers éligibles
 
-### 💾 Gestion Mémoire Avancée
+### 💾 Gestion Mémoire Avancée (v2.0 - Sécurisée)
+- **Limite stricte de 10 GB** appliquée par MemoryGuard (protection OS)
 - Allocation dynamique avec compression **LZ4** réelle (~50% économie)
+- **Panic OOM contrôlé** : arrêt propre sans crash OS
 - Éviction LRU automatique quand limite atteinte
 - Lazy loading transparent via `getData()`
 - Thread-safe avec protection mutex
+- **Structure legacy désactivée** : économie massive de RAM
+
+---
+
+## 🛡️ Sécurité Mémoire (v2.0)
+
+**Mímir v2.0 garantit une utilisation mémoire sécurisée avec protection OOM intégrée.**
+
+### 🔒 Garanties
+
+✅ **Limite stricte de 10 GB** - Aucune allocation ne peut dépasser cette limite  
+✅ **Panic OOM contrôlé** - Arrêt propre avec logs clairs, pas de crash OS  
+✅ **Toutes allocations contrôlées** - Poids, images, tenseurs dynamiques  
+✅ **Compression LZ4 automatique** - ~50% d'économie sur tenseurs inactifs  
+✅ **Protection double-free** - Constructeurs copy/move sécurisés  
+
+### 📝 Configuration Obligatoire
+
+**Toujours commencer vos scripts par :**
+
+```lua
+allocator.configure({
+    max_ram_gb = 10.0,              -- Limite stricte
+    enable_compression = true       -- Compression LZ4
+})
+```
+
+**❌ Sans cette configuration, la limite de 10 GB n'est pas garantie !**
+
+### 📚 Documentation
+
+- **[docs/MEMORY_BEST_PRACTICES.md](docs/MEMORY_BEST_PRACTICES.md)** - Guide complet des bonnes pratiques
+- **[MEMORY_SAFETY_FIXES.md](MEMORY_SAFETY_FIXES.md)** - Détails techniques des correctifs
+- **[scripts/template_new_model.lua](scripts/template_new_model.lua)** - Template pour vos modèles
+
+---
 
 ## 🎯 Vue d'ensemble
 
@@ -93,7 +139,13 @@ Mímir est un framework de deep learning **CPU-only** moderne écrit en C++17, c
 ### 🎨 API Lua complète
 
 ```lua
--- Créer un Transformer en 10 lignes
+-- ✅ Toujours configurer l'allocateur en premier!
+allocator.configure({
+    max_ram_gb = 10.0,
+    enable_compression = true
+})
+
+-- Créer un Transformer en quelques lignes
 model.create("gpt")
 architectures.transformer({
     vocab_size = 50000,
@@ -152,39 +204,42 @@ make VERBOSE=1          # Afficher les commandes complètes
 -- my_first_model_v2.lua
 print("🚀 Mon premier modèle Transformer v2.0")
 
--- Configuration mémoire avec compression LZ4
+-- ⚠️ IMPORTANT: Toujours configurer l'allocateur en premier!
 allocator.configure({
-    max_ram_gb = 10.0,
-    enable_compression = true,
-    compression_threshold_mb = 100
+    max_ram_gb = 10.0,              -- Limite stricte (protection OOM)
+    enable_compression = true       -- Compression LZ4 (~50% économie)
 })
 
 -- Monitoring asynchrone (non-bloquant)
 htop.create()
 
--- Vérifier l'accélération GPU
+-- Vérifier l'accélération hardware
 local hw = model.hardware_caps()
-if model.has_vulkan_compute() then
-    print("✓ Accélération GPU activée (Vulkan Compute)")
-else
-    print("⚠ Mode CPU uniquement")
+if hw.avx2 or hw.fma then
+    model.set_hardware(true)
+    print("✓ Accélération hardware activée")
 end
 
--- Créer le modèle
+-- Créer le modèle avec config réaliste
 model.create("my_transformer")
 architectures.transformer({
-    vocab_size = 10000,
-    d_model = 512,
-    num_layers = 6,
+    vocab_size = 30000,     -- Valeur raisonnable
+    d_model = 512,          -- Dimension modérée
+    num_layers = 6,         -- 6 couches OK pour 10 GB
     num_heads = 8
 })
 
--- Allouer et initialiser
+-- Allouer et VÉRIFIER le succès
 local success, params = model.allocate_params()
-print(string.format("Paramètres: %d (%.1f MB)", 
-    params, params * 2 / 1024 / 1024))
+if not success then
+    print("❌ Erreur: modèle trop grand pour 10 GB!")
+    os.exit(1)
+end
 
-model.init_weights("he", 42)
+print(string.format("✓ Paramètres: %d (%.1f MB)", 
+    params, params * 4 / 1024 / 1024))
+
+model.init_weights("xavier", 42)
 
 -- Entraînement avec monitoring asynchrone
 for epoch = 1, 10 do
@@ -435,12 +490,34 @@ architectures.mobilenet({
 | **[THREADING_AND_COMPUTE.md](docs/THREADING_AND_COMPUTE.md)** | 🧵 Threading asynchrone et accélération GPU |
 | **[LUA_IDE_SETUP.md](docs/LUA_IDE_SETUP.md)** | 💡 Configuration IDE et autocomplétion Lua |
 
+### 📘 API Lua Complète
+
+| Document | Description | Taille |
+|----------|-------------|--------|
+| **[LUA_API_COMPLETE.md](docs/LUA_API_COMPLETE.md)** | 📖 **Documentation exhaustive v2.0** - Référence complète de toute l'API | 50K+ |
+| **[LUA_API_REFERENCE_QUICK.md](docs/LUA_API_REFERENCE_QUICK.md)** | ⚡ **Référence rapide** - Exemples et guide pratique | 15K |
+| **[LUA_API.md](docs/LUA_API.md)** | 📗 API Lua (legacy) | 14K |
+| **[mimir-api.lua](mimir-api.lua)** | 💡 Stub IDE avec annotations EmmyLua pour autocomplétion | 6K |
+
+**80+ fonctions exposées** organisées en 11 modules:
+- `model.*` (15 fonctions) - Gestion modèle, training, inférence
+- `architectures.*` (8 fonctions) - UNet, VAE, ViT, GAN, Diffusion, Transformer, ResNet, MobileNet
+- `tokenizer.*` (20+ fonctions) - Tokenization, BPE, vocabulaire, analyse
+- `dataset.*` (2 fonctions) - Chargement et préparation données
+- `memory.*` (6 fonctions) - Gestion RAM avancée
+- `guard.*` (4 fonctions) - Enforcement strict limites mémoire
+- `allocator.*` (3 fonctions) - Allocation dynamique tenseurs
+- `htop.*` (5 fonctions) - Monitoring temps réel terminal
+- `viz.*` (11 fonctions) - Visualisation graphique SFML
+- `layers.*` (8 fonctions) - Opérations de couches
+- Fonctions globales: `log()`, `read_json()`, `write_json()`
+
 ### Guides principaux
 
 - **[Quickstart](docs/QUICKSTART.md)** - Premier modèle en 5 minutes
 - **[Installation](docs/INSTALLATION.md)** - Guide d'installation détaillé
-- **[API Lua](docs/LUA_API.md)** - Référence complète de l'API Lua
 - **[Model Architectures](docs/MODEL_ARCHITECTURES.md)** - Détails des architectures
+- **[Index Complet](docs/INDEX.md)** - Navigation complète de la documentation
 
 ### Références techniques
 
@@ -460,17 +537,8 @@ architectures.mobilenet({
 
 | Fichier | Utilisation |
 |---------|-------------|
-| `mimir-api.lua` | Définitions LSP pour autocomplétion IDE |
-| `.luarc.json` | Configuration Lua Language Server |
-
-### Documentation API
-
-- **[API Lua Complète](docs/LUA_API.md)** - 60+ fonctions exposées
-  - `model.*` - Gestion du modèle (18 fonctions)
-  - `architectures.*` - Construction d'architectures (8 fonctions)
-  - `layers.*` - Opérations de layers (8 fonctions)
-  - `tokenizer.*` - Tokenization (6 fonctions)
-  - `dataset.*` - Chargement de données (2 fonctions)
+| `mimir-api.lua` | Stub EmmyLua avec annotations complètes pour autocomplétion IDE |
+| `.luarc.json` | Configuration Lua Language Server (VS Code, Neovim, etc.) |
 
 ## 🔧 API Lua - Référence rapide
 

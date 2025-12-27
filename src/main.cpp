@@ -4,6 +4,7 @@
 #include "Helpers.hpp"
 #include "HtopDisplay.hpp"
 #include "Visualizer.hpp"
+#include "MemorySafety.hpp"
 #include "include/json.hpp"
 #include <iostream>
 #include <fstream>
@@ -217,6 +218,12 @@ int main(int argc, char **argv)
     std::cout << "║       Mímir Framework v2.0             ║\n";
     std::cout << "║     Deep Learning Architectures        ║\n";
     std::cout << "╚════════════════════════════════════════╝\n\n";
+    
+    // 🛡️ SÉCURITÉ MÉMOIRE: Vérification au démarrage
+    std::cout << "🛡️  Vérification de la sécurité mémoire...\n";
+    MemorySafety::validateLegacyDisabled();
+    MemorySafety::runMemoryIntegrityTest();
+    std::cout << "\n";
     
 #ifdef _OPENMP
     int num_threads = omp_get_max_threads();
