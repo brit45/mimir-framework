@@ -7,6 +7,7 @@
 #include <memory>
 #include <functional>
 #include <immintrin.h>  // AVX2
+#include "LayerTypes.hpp"  // Enum central des types de layers
 
 // Forward declaration
 struct tensor;
@@ -84,7 +85,8 @@ enum class MergeOperation {
 
 struct Layer {
     std::string name;
-    std::string type;
+    std::string type;  // String type for backward compat
+    LayerType type_enum = LayerType::UNKNOWN;  // Enum type (NEW)
     size_t params_count;
     
     // NOUVEAU: Pointeur vers le tensor de poids unifié pour ce layer
@@ -102,23 +104,103 @@ struct Layer {
     std::vector<float> running_mean;
     std::vector<float> running_var;
     
-    // Configuration
-    int in_features = 0;
-    int out_features = 0;
-    int kernel_size = 0;
-    int stride = 1;
-    int padding = 0;
-    int dilation = 1;
-    int groups = 1;
-    bool use_bias = true;
+    // ========================================================================
+    // PARAMETRES UNIVERSELS (tous les layers)
+    // ========================================================================
     
-    // Dimensions spatiales pour Conv2D/ConvTranspose2D (dynamiques)
-    int in_channels = 0;
-    int out_channels = 0;
+    // === Dimensions de base ===
+    int in_features = 0;          // Linear, Embedding
+    int out_features = 0;         // Linear
+    int in_channels = 0;          // Conv, Norm
+    int out_channels = 0;         // Conv
+    
+    // === Dimensions spatiales (pour 2D) ===
     int input_height = 0;
     int input_width = 0;
     int output_height = 0;
     int output_width = 0;
+    
+    // === Convolution / Pooling ===
+    int kernel_size = 0;          // Kernel unique (carré)
+    int kernel_h = 0;             // Kernel height (rectangulaire)
+    int kernel_w = 0;             // Kernel width
+    int stride = 1;               // Stride unique
+    int stride_h = 1;             // Stride height
+    int stride_w = 1;             // Stride width
+    int padding = 0;              // Padding unique
+    int pad_h = 0;                // Padding height
+    int pad_w = 0;                // Padding width
+    int dilation = 1;             // Dilation
+    int dilation_h = 1;
+    int dilation_w = 1;
+    int groups = 1;               // Grouped convolution
+    
+    // === Normalization ===
+    float eps = 1e-5f;            // Epsilon pour stabilité numérique
+    int num_groups = 1;           // GroupNorm
+    float momentum = 0.1f;        // BatchNorm momentum
+    bool affine = true;           // Affine transform (gamma/beta)
+    bool track_running_stats = true;  // BatchNorm stats tracking
+    
+    // === Dropout ===
+    float dropout_p = 0.5f;       // Dropout probability
+    
+    // === Embedding ===
+    int vocab_size = 0;           // Embedding vocabulary size
+    int embed_dim = 0;            // Embedding dimension
+    int padding_idx = -1;         // Padding index for embedding
+    
+    // === Softmax / LogSoftmax ===
+    int axis = -1;                // Axis pour softmax (default: dernier)
+    bool use_mask = false;        // Causal mask pour attention
+    
+    // === Reshape / View ===
+    std::vector<int> target_shape;  // Shape cible pour reshape
+    std::vector<int> shape;         // Shape actuel (pour permute, etc.)
+    std::vector<int> permute_dims;  // Ordre des dimensions pour permute [0,2,1]
+    
+    // === Concat / Split ===
+    int concat_axis = 1;               // Axis de concatenation (default: channels)
+    int num_splits = 2;                // Nombre de splits (splits égaux si split_sizes vide)
+    std::vector<int> split_sizes;      // Tailles explicites de chaque split (si vide: splits égaux)
+    int split_axis = 0;                // Axis de split (default: 0 = batch dimension)
+    
+    // === Upsample ===
+    float scale_h = 2.0f;         // Scale factor height
+    float scale_w = 2.0f;         // Scale factor width
+    int out_h = 0;                // Output height explicit
+    int out_w = 0;                // Output width explicit
+    
+    // === Attention ===
+    int num_heads = 8;            // Multi-head attention
+    int head_dim = 64;            // Dimension par head
+    int seq_len = 0;              // Sequence length pour attention
+    bool causal = false;          // Causal mask
+    
+    // === Activation ===
+    float alpha = 0.01f;          // LeakyReLU alpha
+    float negative_slope = 0.01f; // Alias pour alpha
+    float leaky_relu_alpha = 0.01f;  // LeakyReLU alpha (explicit)
+    
+    // === Shape Operations (Strict Mode) ===
+    int squeeze_dim = -1;         // Dimension à squeeze (-1 = auto)
+    int unsqueeze_dim = -1;       // Dimension où unsqueeze
+    int num_chunks = 2;           // Nombre de chunks pour Chunk operation
+    int stack_axis = 0;           // Axis pour Stack operation
+    
+    // === Bias ===
+    bool use_bias = true;
+    
+    // ========================================================================
+    // MULTI-INPUT / TENSOR ROUTING (Nouveau système)
+    // ========================================================================
+    
+    std::vector<std::string> inputs;   // Noms des tensors d'entrée (vide = {"x"} par défaut)
+    std::string output = "x";          // Nom du tensor de sortie (default "x")
+    
+    // ========================================================================
+    // CONFIGURATION DES BRANCHES
+    // ========================================================================
     
     ActivationType activation = ActivationType::NONE;
     float activation_param = 0.0f; // Pour LeakyReLU alpha, ELU alpha, etc.
@@ -132,13 +214,27 @@ struct Layer {
     bool is_merge_point = false;      // Ce layer est un point de fusion
     
     Layer() = default;
+    
     Layer(const std::string& n, const std::string& t, size_t pc)
-        : name(n), type(t), params_count(pc) {}
+        : name(n), type(t), params_count(pc) {
+        // Convertir string -> enum automatiquement
+        std::string normalized = LayerRegistry::normalize_type(t);
+        type_enum = LayerRegistry::string_to_type(normalized);
+        type = normalized;  // Stocker le type normalisé
+    }
     
     // Accesseur pour récupérer les données du weight_block
     float* getWeights();
     const float* getWeights() const;
     size_t getWeightsSize() const;
+    
+    // Helper: obtenir kernel effectif (kernel_size prend priorité)
+    int get_kernel_h() const { return kernel_h > 0 ? kernel_h : (kernel_size > 0 ? kernel_size : 3); }
+    int get_kernel_w() const { return kernel_w > 0 ? kernel_w : (kernel_size > 0 ? kernel_size : 3); }
+    int get_stride_h() const { return stride_h > 0 ? stride_h : stride; }
+    int get_stride_w() const { return stride_w > 0 ? stride_w : stride; }
+    int get_pad_h() const { return pad_h > 0 ? pad_h : padding; }
+    int get_pad_w() const { return pad_w > 0 ? pad_w : padding; }
     
     // Détection automatique du type de branche basé sur le nom du layer
     void detectBranchType() {

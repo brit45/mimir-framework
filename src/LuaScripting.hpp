@@ -60,10 +60,18 @@ private:
     static int lua_inferModel(lua_State* L);
     static int lua_saveModel(lua_State* L);
     static int lua_loadModel(lua_State* L);
+    
+    // === New Serialization API ===
+    static int lua_saveCheckpoint(lua_State* L);    // Serialization API v2.3
+    static int lua_loadCheckpoint(lua_State* L);    // Serialization API v2.3
+    static int lua_detectFormat(lua_State* L);      // Serialization API v2.3
+    static int lua_saveEnhancedDebugJson(lua_State* L);  // Enhanced Debug JSON v1.1.0
+    
     static int lua_allocateParams(lua_State* L);
     static int lua_initWeights(lua_State* L);
     static int lua_totalParams(lua_State* L);
     static int lua_pushLayer(lua_State* L);
+    static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
     static int lua_backwardPass(lua_State* L);
     static int lua_optimizerStep(lua_State* L);

@@ -5,7 +5,7 @@ log("========================================")
 
 -- 0. Configuration allocateur (OBLIGATOIRE!)
 log("\n[0] Configuration système...")
-allocator.configure({
+Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
 })
@@ -140,7 +140,7 @@ log("✓ Fonction d'encodage de texte disponible")
 -- 8. Sauvegarder le modèle
 log("\n[8] Sauvegarde du modèle...")
 local save_path = "checkpoints/flux_test/"
-local save_success = model.save(save_path)
+local save_success = Mimir.Serialization.save(save_path, "safetensors")
 
 if save_success then
     log("✓ Modèle sauvegardé: " .. save_path)
@@ -150,7 +150,7 @@ end
 
 -- 9. Statistiques mémoire
 log("\n[9] Statistiques mémoire...")
-memory.print_stats()
+Memory.printStats()
 
 -- Résumé
 log("\n========================================")

@@ -39,7 +39,7 @@ log("  Mémoire:    " .. string.format("%.2f", params * 4 / 1024 / 1024) .. " MB
 log("  Mémoire:    " .. string.format("%.2f", params * 2 / 1024 / 1024) .. " MB (float16)")
 
 log("\n💾 Test de sérialisation...")
-model.save("/tmp/test_params_checkpoint")
+Mimir.Serialization.save("/tmp/test_params_checkpoint.safetensors", "safetensors")
 log("✓ Checkpoint sauvegardé")
 
 -- Vérifier la taille

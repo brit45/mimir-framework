@@ -9,31 +9,31 @@ Ce guide vous aide à migrer vos scripts Lua existants vers la nouvelle API asyn
 #### ❌ Avant (v1.x - Synchrone, Bloquant)
 
 ```lua
-htop.create()
+Mimir.Htop.create()
 
 for epoch = 1, 10 do
     for batch = 1, 100 do
         -- ... training ...
         
-        htop.update(epoch, 10, batch, 100, loss, avg_loss, lr, ...)
-        htop.render()  -- ⚠️ BLOQUANT! Ralentit le training
+        Mimir.Htop.update(epoch, 10, batch, 100, loss, avg_loss, lr, ...)
+        Mimir.Htop.render()  -- ⚠️ BLOQUANT! Ralentit le training
     end
 end
 ```
 
-**Problème**: `htop.render()` bloque le thread principal pendant ~50ms → **20% de perte de performance**
+**Problème**: `Mimir.Htop.render()` bloque le thread principal pendant ~50ms → **20% de perte de performance**
 
 #### ✅ Après (v2.0 - Asynchrone, Non-Bloquant)
 
 ```lua
-htop.create()  -- Démarre un thread séparé
+Mimir.Htop.create()  -- Démarre un thread séparé
 
 for epoch = 1, 10 do
     for batch = 1, 100 do
         -- ... training ...
         
-        htop.update(epoch, 10, batch, 100, loss, avg_loss, lr, ...)
-        -- ✓ PAS BESOIN de htop.render()! C'est automatique
+        Mimir.Htop.update(epoch, 10, batch, 100, loss, avg_loss, lr, ...)
+        -- ✓ PAS BESOIN de Mimir.Htop.render()! C'est automatique
     end
 end
 ```
@@ -44,13 +44,13 @@ end
 
 **Option 1 - Supprimer les appels `render()`**:
 ```bash
-# Supprimer tous les htop.render() dans vos scripts
-sed -i 's/htop\.render()/-- htop.render() -- NO-OP en v2.0/g' *.lua
+# Supprimer tous les Mimir.Htop.render() dans vos scripts
+sed -i 's/htop\.render()/-- Mimir.Htop.render() -- NO-OP en v2.0/g' *.lua
 ```
 
 **Option 2 - Garder pour compatibilité** (recommandé):
 ```lua
-htop.render()  -- NO-OP en v2.0, conservé pour compatibilité
+Mimir.Htop.render()  -- NO-OP en v2.0, conservé pour compatibilité
 ```
 
 ### 2. Visualizer - Rendu Asynchrone
@@ -58,33 +58,33 @@ htop.render()  -- NO-OP en v2.0, conservé pour compatibilité
 #### ❌ Avant (v1.x)
 
 ```lua
-viz.create(config)
-viz.initialize()
+Mimir.Viz.create(config)
+Mimir.Viz.initialize()
 
-while viz.is_open() do
-    viz.process_events()  -- ⚠️ Bloque le thread
+while Mimir.Viz.is_open() do
+    Mimir.Viz.process_events()  -- ⚠️ Bloque le thread
     
     -- Training
-    viz.update_metrics(epoch, batch, loss, lr)
-    viz.add_image(pixels, prompt)
+    Mimir.Viz.update_metrics(epoch, batch, loss, lr)
+    Mimir.Viz.add_image(pixels, prompt)
     
-    viz.update()  -- ⚠️ Bloque le thread
+    Mimir.Viz.update()  -- ⚠️ Bloque le thread
 end
 ```
 
 #### ✅ Après (v2.0)
 
 ```lua
-viz.create(config)  -- Démarre un thread séparé
--- viz.initialize() n'est plus nécessaire (automatique)
+Mimir.Viz.create(config)  -- Démarre un thread séparé
+-- Mimir.Viz.initialize() n'est plus nécessaire (automatique)
 
 for epoch = 1, 10 do
     for batch = 1, 100 do
         -- Training
-        viz.update_metrics(epoch, batch, loss, lr)
-        viz.add_image(pixels, prompt)
+        Mimir.Viz.update_metrics(epoch, batch, loss, lr)
+        Mimir.Viz.add_image(pixels, prompt)
         
-        -- ✓ PAS BESOIN de viz.process_events() ni viz.update()!
+        -- ✓ PAS BESOIN de Mimir.Viz.process_events() ni Mimir.Viz.update()!
         -- C'est automatique dans le thread séparé
     end
 end
@@ -95,8 +95,8 @@ end
 ```bash
 # Remplacer la boucle while par une boucle for
 sed -i 's/while viz\.is_open() do/for epoch = 1, total_epochs do/g' *.lua
-sed -i 's/viz\.process_events()/-- viz.process_events() -- NO-OP en v2.0/g' *.lua
-sed -i 's/viz\.update()/-- viz.update() -- NO-OP en v2.0/g' *.lua
+sed -i 's/viz\.process_events()/-- Mimir.Viz.process_events() -- NO-OP en v2.0/g' *.lua
+sed -i 's/viz\.update()/-- Mimir.Viz.update() -- NO-OP en v2.0/g' *.lua
 ```
 
 ### 3. Gestion Mémoire - DynamicTensorAllocator
@@ -113,7 +113,7 @@ memory.config({
 #### ✅ Après (v2.0)
 
 ```lua
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true,
     compression_threshold_mb = 100  -- Nouveau paramètre
@@ -128,8 +128,8 @@ allocator.configure({
 #### Migration Automatique
 
 ```bash
-sed -i 's/memory\.config(/allocator.configure(/g' *.lua
-sed -i 's/memory\.print_stats()/allocator.print_stats()/g' *.lua
+sed -i 's/memory\.config(/Mimir.Allocator.configure(/g' *.lua
+sed -i 's/memory\.print_stats()/Mimir.Allocator.print_stats()/g' *.lua
 ```
 
 ### 4. Accélération GPU (Nouveau)
@@ -160,15 +160,15 @@ cp my_script.lua my_script_v1.lua.bak
 **Rechercher et remplacer**:
 ```bash
 # HtopDisplay
-sed -i 's/htop\.render()/-- htop.render()/g' my_script.lua
+sed -i 's/htop\.render()/-- Mimir.Htop.render()/g' my_script.lua
 
 # Visualizer
-sed -i 's/viz\.process_events()/-- viz.process_events()/g' my_script.lua
-sed -i 's/viz\.update()/-- viz.update()/g' my_script.lua
+sed -i 's/viz\.process_events()/-- Mimir.Viz.process_events()/g' my_script.lua
+sed -i 's/viz\.update()/-- Mimir.Viz.update()/g' my_script.lua
 
 # Memory → Allocator
-sed -i 's/memory\.config(/allocator.configure(/g' my_script.lua
-sed -i 's/memory\.print_stats()/allocator.print_stats()/g' my_script.lua
+sed -i 's/memory\.config(/Mimir.Allocator.configure(/g' my_script.lua
+sed -i 's/memory\.print_stats()/Mimir.Allocator.print_stats()/g' my_script.lua
 ```
 
 ### Étape 3: Tester
@@ -199,10 +199,10 @@ end
 
 Ces fonctions existent encore pour compatibilité mais ne font plus rien:
 
-- `htop.render()` → Rendu automatique dans le thread
-- `viz.process_events()` → Traitement automatique
-- `viz.update()` → Mise à jour automatique
-- `viz.initialize()` → Initialisation automatique
+- `Mimir.Htop.render()` → Rendu automatique dans le thread
+- `Mimir.Viz.process_events()` → Traitement automatique
+- `Mimir.Viz.update()` → Mise à jour automatique
+- `Mimir.Viz.initialize()` → Initialisation automatique
 
 **Vous pouvez garder ces appels** dans vos scripts, ils n'auront aucun impact négatif.
 
@@ -212,9 +212,9 @@ Ces fonctions ont été renommées:
 
 | v1.x | v2.0 | Migration |
 |------|------|-----------|
-| `memory.config()` | `allocator.configure()` | Renommer |
-| `memory.print_stats()` | `allocator.print_stats()` | Renommer |
-| `memory.get_stats()` | `allocator.get_stats()` | Renommer |
+| `memory.config()` | `Mimir.Allocator.configure()` | Renommer |
+| `memory.print_stats()` | `Mimir.Allocator.print_stats()` | Renommer |
+| `memory.get_stats()` | `Mimir.Allocator.get_stats()` | Renommer |
 
 ## Exemple de Migration Complète
 
@@ -230,28 +230,28 @@ memory.config({
 })
 
 -- Monitoring
-htop.create()
+Mimir.Htop.create()
 
 -- Visualizer
-viz.create({enabled = true})
-viz.initialize()
+Mimir.Viz.create({enabled = true})
+Mimir.Viz.initialize()
 
 -- Training
 model.create("encoder")
 model.build()
 
-while viz.is_open() do
-    viz.process_events()
+while Mimir.Viz.is_open() do
+    Mimir.Viz.process_events()
     
     for epoch = 1, 10 do
         for batch = 1, 100 do
             -- ... training ...
             
-            htop.update(epoch, 10, batch, 100, loss, avg_loss, lr)
-            htop.render()  -- BLOQUANT!
+            Mimir.Htop.update(epoch, 10, batch, 100, loss, avg_loss, lr)
+            Mimir.Htop.render()  -- BLOQUANT!
             
-            viz.update_metrics(epoch, batch, loss, lr)
-            viz.update()  -- BLOQUANT!
+            Mimir.Viz.update_metrics(epoch, batch, loss, lr)
+            Mimir.Viz.update()  -- BLOQUANT!
         end
     end
 end
@@ -265,18 +265,18 @@ memory.print_stats()
 #!/usr/bin/env lua5.3
 
 -- Configuration mémoire (nouveau nom)
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true,
     compression_threshold_mb = 100  -- Nouveau paramètre
 })
 
 -- Monitoring asynchrone
-htop.create()
+Mimir.Htop.create()
 
 -- Visualizer asynchrone
-viz.create({enabled = true})
--- viz.initialize() n'est plus nécessaire
+Mimir.Viz.create({enabled = true})
+-- Mimir.Viz.initialize() n'est plus nécessaire
 
 -- Vérifier le GPU
 if model.has_vulkan_compute() then
@@ -292,26 +292,26 @@ for epoch = 1, 10 do
         -- ... training (GPU automatique si disponible) ...
         
         -- Mise à jour asynchrone (non-bloquant)
-        htop.update(epoch, 10, batch, 100, loss, avg_loss, lr)
-        -- Pas besoin de htop.render()!
+        Mimir.Htop.update(epoch, 10, batch, 100, loss, avg_loss, lr)
+        -- Pas besoin de Mimir.Htop.render()!
         
-        viz.update_metrics(epoch, batch, loss, lr)
-        -- Pas besoin de viz.update()!
+        Mimir.Viz.update_metrics(epoch, batch, loss, lr)
+        -- Pas besoin de Mimir.Viz.update()!
     end
 end
 
-allocator.print_stats()  -- Nouveau nom
+Mimir.Allocator.print_stats()  -- Nouveau nom
 ```
 
 ## Dépannage
 
 ### Erreur: "memory.config not found"
 
-**Solution**: Remplacer par `allocator.configure()`
+**Solution**: Remplacer par `Mimir.Allocator.configure()`
 
 ### Monitoring ne s'affiche pas
 
-**Solution**: Vérifier que vous avez appelé `htop.create()` au début du script
+**Solution**: Vérifier que vous avez appelé `Mimir.Htop.create()` au début du script
 
 ### "Vulkan not available"
 
@@ -345,9 +345,9 @@ Si > 250ms/batch → Problème (devrait être ~200ms en v2.0)
 - DynamicTensorAllocator avec lazy loading
 
 **Modifications**:
-- `memory.*` → `allocator.*`
-- `htop.render()` → NO-OP (automatique)
-- `viz.process_events()/update()` → NO-OP (automatique)
+- `memory.*` → `Mimir.Allocator.*`
+- `Mimir.Htop.render()` → NO-OP (automatique)
+- `Mimir.Viz.process_events()/update()` → NO-OP (automatique)
 
 **Gains de Performance**:
 - +20% sur training complet (threading)

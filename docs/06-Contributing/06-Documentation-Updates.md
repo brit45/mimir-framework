@@ -32,7 +32,7 @@ Mettre à jour toute la documentation et les scripts Lua pour refléter les bonn
    - ✅ Garanties explicites (limite 10 GB, panic OOM, etc.)
    - ✅ Configuration obligatoire mise en avant
    - ✅ Liens vers documentation détaillée
-   - ✅ Exemples mis à jour avec `allocator.configure()`
+   - ✅ Exemples mis à jour avec `Mimir.Allocator.configure()`
    - ✅ Section API Lua corrigée
 
 3. **[MEMORY_SAFETY_FIXES.md](../../MEMORY_SAFETY_FIXES.md)**
@@ -127,7 +127,7 @@ Tous les scripts suivants ont été mis à jour avec :
 --  1. CONFIGURATION SYSTÈME (TOUJOURS EN PREMIER!)
 -- ══════════════════════════════════════════════════════════════
 
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
 })
@@ -143,7 +143,7 @@ end
 
 local config = { ... }  -- Config réaliste!
 model.create("name", config)
-architectures.xxx(config)
+Mimir.Architectures.xxx(config)
 
 -- ══════════════════════════════════════════════════════════════
 --  3. ALLOCATION (VÉRIFIER LE SUCCÈS!)

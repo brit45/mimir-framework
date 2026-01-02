@@ -38,6 +38,10 @@ class Encoder
         int vocab_size;
         std::vector<float> token_embeddings;
 
+        // Serialization (RawFolder + SafeTensors metadata)
+        json to_json() const;
+        void from_json(const json &j);
+
     private:
         // special embeddings handled separately
         std::vector<float> seq_embedding;

@@ -215,7 +215,7 @@ void demoArchitecture(const std::string& arch_name) {
 int main(int argc, char **argv)
 {
     std::cout << "╔════════════════════════════════════════╗\n";
-    std::cout << "║       Mímir Framework v2.0             ║\n";
+    std::cout << "║       Mímir Framework v2.3.0           ║\n";
     std::cout << "║     Deep Learning Architectures        ║\n";
     std::cout << "╚════════════════════════════════════════╝\n\n";
     

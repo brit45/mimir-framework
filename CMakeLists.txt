@@ -154,9 +154,15 @@ set(MIMIR_SOURCES
     src/tensors.cpp
     src/Sha256.cpp
     src/LuaScripting.cpp
-    src/LuaScripting_TokenizerExt.cpp
     src/stb_image_impl.cpp
     src/Models/FluxModel.cpp
+    src/Models/VAEModel.cpp
+    src/Serialization/Serialization.cpp
+    src/Serialization/SafeTensorsWriter.cpp
+    src/Serialization/SafeTensorsReader.cpp
+    src/Serialization/RawCheckpointWriter.cpp
+    src/Serialization/RawCheckpointReader.cpp
+    src/Serialization/DebugJsonDump.cpp
 )
 
 set(MIMIR_HEADERS
@@ -178,8 +184,17 @@ set(MIMIR_HEADERS
     src/MemoryGuard.hpp
     src/AsyncMonitor.hpp
     src/HtopDisplay.hpp
+    src/RuntimeAllocator.hpp
+    src/LayerOpsExt.hpp
     src/Models/ModelArchitectures.hpp
     src/Models/FluxModel.hpp
+    src/Models/VAEModel.hpp
+    src/Serialization/Serialization.hpp
+    src/Serialization/SafeTensorsWriter.hpp
+    src/Serialization/SafeTensorsReader.hpp
+    src/Serialization/RawCheckpointWriter.hpp
+    src/Serialization/RawCheckpointReader.hpp
+    src/Serialization/DebugJsonDump.hpp
     src/stb_image.h
 )
 
@@ -300,6 +315,7 @@ if(BUILD_TESTS)
     add_mimir_test(test_autograd tests/test_autograd.cpp)
     add_mimir_test(test_model tests/test_model.cpp)
     add_mimir_test(test_hardware tests/test_hardware.cpp)
+    add_mimir_test(test_serialization tests/test_serialization.cpp)
     
     # Tests legacy dans tools/ (sans gtest)
     if(EXISTS "${CMAKE_SOURCE_DIR}/tools/test_base_models.cpp")

@@ -1,10 +1,10 @@
 -- ╔═══════════════════════════════════════════════════════════════╗
--- ║  Test des Fonctionnalités de Gradients                      ║
+-- ║  Test des Fonctionnalités de Gradients                        ║
 -- ╚═══════════════════════════════════════════════════════════════╝
 
-print("╔═══════════════════════════════════════════════════════════════╗")
-print("║   Test Gradients & Vulkan Init Once                        ║")
-print("╚═══════════════════════════════════════════════════════════════╝\n")
+log("╔═══════════════════════════════════════════════════════════════╗")
+log("║   Test Gradients & Vulkan Init Once                           ║")
+log("╚═══════════════════════════════════════════════════════════════╝\n")
 
 -- Configuration
 local config = {
@@ -17,38 +17,38 @@ local config = {
     padding = 1
 }
 
-print("📋 Configuration du modèle:")
-print(string.format("   • Input: %dx%dx%d", config.height, config.width, config.in_channels))
-print(string.format("   • Output: %d channels", config.out_channels))
-print("")
+log("📋 Configuration du modèle:")
+log(string.format("   • Input: %dx%dx%d", config.height, config.width, config.in_channels))
+log(string.format("   • Output: %d channels", config.out_channels))
+log("")
 
 -- Créer le modèle
 model.create("test_gradients", config)
-print("✓ Modèle créé")
+log("✓ Modèle créé")
 
 -- Ajouter une couche Conv2D
 local num_params = (config.kernel * config.kernel * config.in_channels * config.out_channels) 
                    + config.out_channels
 model.push_layer("conv1", "Conv2d", num_params)
-print("✓ Couche Conv2D ajoutée (" .. num_params .. " paramètres)")
+log("✓ Couche Conv2D ajoutée (" .. num_params .. " paramètres)")
 
 -- Allouer et initialiser
 model.allocate_params()
 model.init_weights("xavier_uniform")
-print("✓ Paramètres initialisés\n")
+log("✓ Paramètres initialisés\n")
 
 -- Test 1: Vulkan Init Once
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  Test 1: Vulkan Init Once")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("  Test 1: Vulkan Init Once")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 -- Créer plusieurs modèles pour vérifier que Vulkan n'est initialisé qu'une fois
 for i = 1, 3 do
     local test_model_name = "test_model_" .. i
     model.create(test_model_name, config)
-    print(string.format("   Model %d créé (Vulkan devrait déjà être initialisé)", i))
+    log(string.format("   Model %d créé (Vulkan devrait déjà être initialisé)", i))
 end
-print("✓ Vulkan init_once fonctionne (pas de réinitialisation)\n")
+log("✓ Vulkan init_once fonctionne (pas de réinitialisation)\n")
 
 -- Revenir au modèle de test
 model.create("test_gradients", config)
@@ -57,9 +57,9 @@ model.allocate_params()
 model.init_weights("xavier_uniform")
 
 -- Test 2: Forward Pass
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  Test 2: Forward Pass")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("  Test 2: Forward Pass")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 local input_size = config.height * config.width * config.in_channels
 local input = {}
@@ -69,17 +69,17 @@ end
 
 local output = model.forward(input)
 if output then
-    print(string.format("   ✓ Forward pass OK - Output size: %d", #output))
+    log(string.format("   ✓ Forward pass OK - Output size: %d", #output))
 else
-    print("   ❌ Forward pass échoué")
+    log("   ❌ Forward pass échoué")
     return
 end
-print("")
+log("")
 
 -- Test 3: Backward Pass
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  Test 3: Backward Pass")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("  Test 3: Backward Pass")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 local grad_output = {}
 for i = 1, #output do
@@ -88,21 +88,21 @@ end
 
 local ok = model.backward(grad_output)
 if ok then
-    print("   ✓ Backward pass OK")
+    log("   ✓ Backward pass OK")
 else
-    print("   ❌ Backward pass échoué")
+    log("   ❌ Backward pass échoué")
     return
 end
-print("")
+log("")
 
 -- Test 4: Récupérer les gradients
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  Test 4: Récupération des Gradients")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("  Test 4: Récupération des Gradients")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 local grads = model.get_gradients()
 if grads then
-    print(string.format("   ✓ Gradients récupérés - %d valeurs", #grads))
+    log(string.format("   ✓ Gradients récupérés - %d valeurs", #grads))
     
     -- Calculer la norme des gradients
     local grad_norm = 0
@@ -110,27 +110,27 @@ if grads then
         grad_norm = grad_norm + g * g
     end
     grad_norm = math.sqrt(grad_norm)
-    print(string.format("   • Gradient norm: %.6f", grad_norm))
+    log(string.format("   • Gradient norm: %.6f", grad_norm))
     
     -- Afficher quelques valeurs
-    print("   • Premiers gradients:")
+    log("   • Premiers gradients:")
     for i = 1, math.min(5, #grads) do
-        print(string.format("     grad[%d] = %.6f", i, grads[i]))
+        log(string.format("     grad[%d] = %.6f", i, grads[i]))
     end
 else
-    print("   ❌ Échec de récupération des gradients")
+    log("   ❌ Échec de récupération des gradients")
     return
 end
-print("")
+log("")
 
 -- Test 5: Zero Gradients
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  Test 5: Zero Gradients")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("  Test 5: Zero Gradients")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 ok = model.zero_grads()
 if ok then
-    print("   ✓ Gradients réinitialisés à zéro")
+    log("   ✓ Gradients réinitialisés à zéro")
     
     -- Vérifier que les gradients sont bien à zéro
     local grads_after = model.get_gradients()
@@ -145,21 +145,21 @@ if ok then
         end
         
         if all_zero then
-            print("   ✓ Tous les gradients sont à zéro")
+            log("   ✓ Tous les gradients sont à zéro")
         else
-            print(string.format("   ⚠ Certains gradients non nuls (max: %.6f)", max_val))
+            log(string.format("   ⚠ Certains gradients non nuls (max: %.6f)", max_val))
         end
     end
 else
-    print("   ❌ Échec de réinitialisation des gradients")
+    log("   ❌ Échec de réinitialisation des gradients")
     return
 end
-print("")
+log("")
 
 -- Test 6: Boucle d'entraînement complète
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  Test 6: Boucle d'Entraînement Complète")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("  Test 6: Boucle d'Entraînement Complète")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 for iter = 1, 3 do
     -- 1. Zero gradients
@@ -183,23 +183,23 @@ for iter = 1, 3 do
             norm = norm + g * g
         end
         norm = math.sqrt(norm)
-        print(string.format("   Iteration %d: gradient norm = %.6f", iter, norm))
+        log(string.format("   Iteration %d: gradient norm = %.6f", iter, norm))
     else
-        print(string.format("   ❌ Iteration %d: échec récupération gradients", iter))
+        log(string.format("   ❌ Iteration %d: échec récupération gradients", iter))
     end
 end
 
-print("\n✓ Boucle d'entraînement complète testée\n")
+log("\n✓ Boucle d'entraînement complète testée\n")
 
 -- Résumé
-print("╔═══════════════════════════════════════════════════════════════╗")
-print("║   ✅ Tous les tests de gradients réussis!                  ║")
-print("╚═══════════════════════════════════════════════════════════════╝")
-print("")
-print("Fonctionnalités validées:")
-print("  ✓ Vulkan init_once (pas de réinitialisation)")
-print("  ✓ Forward pass")
-print("  ✓ Backward pass")
-print("  ✓ model.get_gradients()")
-print("  ✓ model.zero_grads()")
-print("  ✓ Boucle d'entraînement complète")
+log("╔═══════════════════════════════════════════════════════════════╗")
+log("║   ✅ Tous les tests de gradients réussis!                  ║")
+log("╚═══════════════════════════════════════════════════════════════╝")
+log("")
+log("Fonctionnalités validées:")
+log("  ✓ Vulkan init_once (pas de réinitialisation)")
+log("  ✓ Forward pass")
+log("  ✓ Backward pass")
+log("  ✓ model.get_gradients()")
+log("  ✓ model.zero_grads()")
+log("  ✓ Boucle d'entraînement complète")

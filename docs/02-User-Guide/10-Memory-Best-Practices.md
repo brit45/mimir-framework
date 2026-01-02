@@ -12,7 +12,7 @@ Ce document explique comment utiliser correctement le système de gestion mémoi
 Mímir impose une **limite stricte de 10 GB de RAM** pour protéger votre système contre les crashs OOM. Cette limite est appliquée par **MemoryGuard** qui refuse toute allocation dépassant le budget.
 
 ### Allocation Dynamique par Défaut
-Depuis v2.0, **toutes les allocations de poids de modèle utilisent l'allocation dynamique** qui passe par MemoryGuard. Cela garantit :
+Depuis v2.0, **toutes les allocations de poids de modèle utilisent l'allocation dynamique** qui passe par Mimir.MemoryGuard. Cela garantit :
 - ✅ Contrôle strict de la consommation mémoire
 - ✅ Refus propre des allocations impossibles
 - ✅ Panic OOM contrôlé (pas de crash OS)
@@ -27,7 +27,7 @@ Depuis v2.0, **toutes les allocations de poids de modèle utilisent l'allocation
 
 ```lua
 -- ✅ BON: Configuration au début du script
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,              -- Limite stricte (recommandé: 10 GB)
     enable_compression = true       -- Compression LZ4 pour économiser la RAM
 })
@@ -35,8 +35,8 @@ allocator.configure({
 
 ```lua
 -- ❌ MAUVAIS: Pas de configuration = limite par défaut non garantie
-model.create("my_model")
-model.allocate_params()  -- Peut dépasser la RAM disponible!
+Mimir.Model.create("my_model")
+Mimir.Model.allocate_params()  -- Peut dépasser la RAM disponible!
 ```
 
 ### 2. Vérifier le Hardware Disponible
@@ -89,7 +89,7 @@ local bad_config = {
 -- ══════════════════════════════════════════════════════════
 
 -- Configurer l'allocateur mémoire
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
 })
@@ -114,19 +114,19 @@ local config = {
     max_seq_len = 512
 }
 
-model.create("my_model", config)
+Mimir.Model.create("my_model", config)
 print("✓ Modèle créé")
 
 -- Ajouter des layers si nécessaire
-model.push_layer("embed", "Embedding", config.vocab_size * config.d_model)
-model.push_layer("fc", "Linear", config.d_model * config.d_model)
+Mimir.Model.push_layer("embed", "Embedding", config.vocab_size * config.d_model)
+Mimir.Model.push_layer("fc", "Linear", config.d_model * config.d_model)
 -- ...
 
 -- ══════════════════════════════════════════════════════════
 --  3. ALLOCATION DES PARAMÈTRES (VÉRIFIER LE SUCCÈS!)
 -- ══════════════════════════════════════════════════════════
 
-local success, param_count = model.allocate_params()
+local success, param_count = Mimir.Model.allocate_params()
 
 if not success then
     print("❌ ERREUR: Impossible d'allouer les paramètres!")
@@ -141,7 +141,7 @@ print(string.format("✓ Paramètres alloués: %d", param_count))
 --  4. INITIALISATION
 -- ══════════════════════════════════════════════════════════
 
-success = model.init_weights("xavier")
+success = Mimir.Model.init_weights("xavier")
 if not success then
     print("❌ Échec de l'initialisation des poids")
     os.exit(1)
@@ -162,7 +162,7 @@ print("✓ Poids initialisés")
 ### Transformer / GPT
 
 ```lua
-allocator.configure({max_ram_gb = 10.0, enable_compression = true})
+Mimir.Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
 
 local config = {
     vocab_size = 50000,       -- 50k tokens OK
@@ -173,15 +173,15 @@ local config = {
     dropout = 0.1
 }
 
-model.create("gpt")
-architectures.transformer(config)
-model.allocate_params()  -- ~200 M params = ~800 MB OK pour 10 GB
+Mimir.Model.create("gpt")
+Mimir.Architectures.transformer(config)
+Mimir.Model.allocate_params()  -- ~200 M params = ~800 MB OK pour 10 GB
 ```
 
 ### Vision (ResNet, UNet, ViT)
 
 ```lua
-allocator.configure({max_ram_gb = 10.0, enable_compression = true})
+Mimir.Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
 
 -- ResNet-50
 local resnet_config = {
@@ -190,7 +190,7 @@ local resnet_config = {
     channels = 3,
     use_pretrained = false
 }
-architectures.resnet(resnet_config)  -- ~25M params = ~100 MB OK
+Mimir.Architectures.resnet(resnet_config)  -- ~25M params = ~100 MB OK
 
 -- UNet pour segmentation
 local unet_config = {
@@ -198,13 +198,13 @@ local unet_config = {
     out_channels = 1,
     features = {64, 128, 256, 512}  -- Progression raisonnable
 }
-architectures.unet(unet_config)  -- ~30M params OK
+Mimir.Architectures.unet(unet_config)  -- ~30M params OK
 ```
 
 ### Diffusion Models
 
 ```lua
-allocator.configure({max_ram_gb = 10.0, enable_compression = true})
+Mimir.Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
 
 local diffusion_config = {
     image_size = 256,          -- 256x256 OK (512x512 = beaucoup plus!)
@@ -214,7 +214,7 @@ local diffusion_config = {
     num_res_blocks = 2
 }
 
-architectures.diffusion(diffusion_config)
+Mimir.Architectures.diffusion(diffusion_config)
 ```
 
 ---
@@ -225,8 +225,8 @@ architectures.diffusion(diffusion_config)
 
 ```lua
 -- MAUVAIS!
-model.create("my_model")
-model.allocate_params()  -- Pas de limite définie!
+Mimir.Model.create("my_model")
+Mimir.Model.allocate_params()  -- Pas de limite définie!
 ```
 
 **Impact**: Pas de protection contre les dépassements mémoire, crash OS possible.
@@ -235,14 +235,14 @@ model.allocate_params()  -- Pas de limite définie!
 
 ```lua
 -- MAUVAIS!
-model.allocate_params()  -- On ignore le retour
-model.init_weights()     -- Crash si allocation a échoué!
+Mimir.Model.allocate_params()  -- On ignore le retour
+Mimir.Model.init_weights()     -- Crash si allocation a échoué!
 ```
 
 **Solution**:
 ```lua
 -- BON!
-local success = model.allocate_params()
+local success = Mimir.Model.allocate_params()
 if not success then
     print("Allocation impossible, modèle trop grand")
     os.exit(1)
@@ -268,13 +268,13 @@ local config = {
 
 ```lua
 -- MAUVAIS!
-model.create("model1")
-architectures.transformer({d_model = 1024, num_layers = 12})
-model.allocate_params()
+Mimir.Model.create("model1")
+Mimir.Architectures.transformer({d_model = 1024, num_layers = 12})
+Mimir.Model.allocate_params()
 
-model.create("model2")  -- Le premier est toujours en mémoire!
-architectures.transformer({d_model = 1024, num_layers = 12})
-model.allocate_params()  -- Risque de dépasser 10 GB!
+Mimir.Model.create("model2")  -- Le premier est toujours en mémoire!
+Mimir.Architectures.transformer({d_model = 1024, num_layers = 12})
+Mimir.Model.allocate_params()  -- Risque de dépasser 10 GB!
 ```
 
 **Solution**: Libérer explicitement ou limiter la taille de chaque modèle.
@@ -376,7 +376,7 @@ Mímir affiche un message clair :
 
 ## ✨ Checklist Avant d'Exécuter un Script
 
-- [ ] `allocator.configure()` appelé au début
+- [ ] `Mimir.Allocator.configure()` appelé au début
 - [ ] `max_ram_gb` défini (recommandé: 10.0)
 - [ ] `enable_compression = true`
 - [ ] Configuration du modèle réaliste

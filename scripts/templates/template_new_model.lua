@@ -1,12 +1,43 @@
 #!/usr/bin/env lua
 -- ══════════════════════════════════════════════════════════════
---  TEMPLATE SCRIPT - Mímir Framework v2.0
+--  TEMPLATE SCRIPT - Mímir Framework v2.3.0
 --  Utilisez ce template pour créer vos propres modèles
+--  
+--  📚 Synchronisé avec mimir-api.lua (16 modules, 115+ fonctions)
+--  🆕 Support multi-input, branches, skip connections
 -- ══════════════════════════════════════════════════════════════
 
-log("\n╔════════════════════════════════════════════════════════╗")
-log("║      Template Script - Mímir Framework v2.0           ║")
-log("╚════════════════════════════════════════════════════════╝\n")
+---@type string Tag de run (sert aux chemins de sauvegarde, logs, etc.)
+local RUN_TAG = "my_model"
+
+---@type ModelType Type du modèle à construire (doit correspondre à l'API)
+local MODEL_TYPE = "transformer"
+
+---@type ModelConfig Configuration du modèle
+local CONFIG = {
+    -- OPTION 1: Transformer/GPT
+    vocab_size = 30000,        -- 30k tokens (raisonnable)
+    embed_dim = 512,           -- Dimension modérée (anciennement d_model)
+    num_layers = 6,            -- 6 couches OK
+    num_heads = 8,
+    d_ff = 2048,               -- Dimension FFN (4x embed_dim)
+    max_seq_len = 512,
+    dropout = 0.1,
+    
+    -- OPTION 2: Vision (décommenter si besoin)
+    -- image_channels = 3,
+    -- image_size = 224,
+    -- num_classes = 1000,
+    
+    -- Training
+    batch_size = 32,
+    learning_rate = 0.001,
+    epochs = 10
+}
+
+log("╔════════════════════════════════════════════════════════╗")
+log("║      Template Script - Mímir Framework v2.3.0          ║")
+log("╚════════════════════════════════════════════════════════╝")
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 1: CONFIGURATION SYSTÈME (OBLIGATOIRE!)
@@ -16,16 +47,34 @@ log("━━━━━━━━━━━━━━━━━━━━━━━━━
 log("  1. Configuration Système")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
--- ⚠️ CRITIQUE: Toujours configurer l'allocateur en premier!
--- Cela active la limite stricte de 10 GB et la protection contre les crashs OOM
-allocator.configure({
-    max_ram_gb = 10.0,              -- Limite stricte (ne pas dépasser!)
-    enable_compression = true       -- Compression LZ4 (~50% économie RAM)
+-- ⚠️ CRITIQUE: Toujours configurer l'allocateur et MemoryGuard en premier!
+-- API moderne: MemoryGuard avec limite stricte
+---@class MimirMemoryGuardAPI
+local ok_guard = Mimir.MemoryGuard.setLimit(10)  -- 10 GB (valeur < 1000 = GB, sinon bytes)
+if not ok_guard then
+    log("❌ ERREUR: MemoryGuard.setLimit() a échoué")
+    os.exit(1)
+end
+log("✓ MemoryGuard configuré (limite: 10 GB)")
+
+-- Allocateur dynamique pour tensors
+---@type boolean, string?
+local ok, err = Mimir.Allocator.configure({
+    max_ram_gb = 10.0,              -- Limite stricte (coordonnée avec MemoryGuard)
+    enable_compression = true,      -- Compression LZ4 (~50% économie RAM)
+    max_tensors = 10000,           -- Nombre max de tensors
+    offload_threshold_mb = 8000    -- Offload au-delà de 8 GB
 })
-log("✓ Allocateur configuré (limite: 10 GB, compression LZ4)")
+
+if not ok then
+    log("❌ ERREUR: Configuration allocateur échouée: " .. (err or "unknown"))
+    os.exit(1)
+end
+log("✓ Allocateur configuré (compression LZ4, offload enabled)")
 
 -- Vérifier et activer l'accélération hardware
-local hw = model.hardware_caps()
+---@type HardwareCaps
+local hw = Mimir.Model.hardware_caps()
 log("\n🔧 Capacités Hardware:")
 log(string.format("  • AVX2:  %s", hw.avx2 and "✓" or "✗"))
 log(string.format("  • FMA:   %s", hw.fma and "✓" or "✗"))
@@ -33,49 +82,35 @@ log(string.format("  • F16C:  %s", hw.f16c and "✓" or "✗"))
 log(string.format("  • BMI2:  %s", hw.bmi2 and "✓" or "✗"))
 
 if hw.avx2 or hw.fma then
-    model.set_hardware(true)
-    log("\n✓ Accélération hardware activée\n")
+    local ok_hw, err_hw = Mimir.Model.set_hardware("auto")  -- "auto", "cpu", "opencl", "vulkan"
+    if ok_hw then
+        log("\n✓ Accélération hardware activée (mode: auto)\n")
+    else
+        log("\n⚠️  Accélération hardware non activée: " .. (err_hw or "unknown"))
+    end
 end
 
 -- ══════════════════════════════════════════════════════════════
---  ÉTAPE 2: CONFIGURATION DU MODÈLE
+--  ÉTAPE 2: CHOIX DE L'ARCHITECTURE
 -- ══════════════════════════════════════════════════════════════
 
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-log("  2. Configuration du Modèle")
+log("  2. Choix de l'Architecture")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 -- 💡 CONSEIL: Utilisez des valeurs raisonnables pour rester sous 10 GB
 -- Exemples de configs qui rentrent dans 10 GB:
---   • Transformer: d_model=512, num_layers=6-8
+--   • Transformer: embed_dim=512, num_layers=6-8
 --   • ResNet-50: ~25M params
 --   • UNet: base_channels=64-128
---   • Diffusion: image_size=256
-
-local config = {
-    -- OPTION 1: Transformer/GPT
-    vocab_size = 30000,        -- 30k tokens (raisonnable)
-    d_model = 512,             -- Dimension modérée
-    num_layers = 6,            -- 6 couches OK
-    num_heads = 8,
-    max_seq_len = 512,
-    dropout = 0.1,
-    
-    -- OPTION 2: Vision (décommenter si besoin)
-    -- image_size = 224,
-    -- channels = 3,
-    -- num_classes = 1000,
-    
-    -- Training
-    batch_size = 32,
-    learning_rate = 0.001,
-    epochs = 10
-}
+--   • Diffusion: image_resolution=256
 
 log("Configuration choisie:")
-log(string.format("  • vocab_size: %d", config.vocab_size))
-log(string.format("  • d_model: %d", config.d_model))
-log(string.format("  • num_layers: %d", config.num_layers))
+log(string.format("  • vocab_size: %d", CONFIG.vocab_size))
+log(string.format("  • embed_dim: %d", CONFIG.embed_dim))
+log(string.format("  • num_layers: %d", CONFIG.num_layers))
+log(string.format("  • num_heads: %d", CONFIG.num_heads))
+log(string.format("  • d_ff: %d", CONFIG.d_ff))
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 3: CRÉATION DU MODÈLE
@@ -85,22 +120,25 @@ log("\n━━━━━━━━━━━━━━━━━━━━━━━━�
 log("  3. Création du Modèle")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-local model_name = "my_model"
-model.create(model_name, config)
-log("✓ Modèle '" .. model_name .. "' créé")
+---@type boolean, string?
+local ok_create, err_create = Mimir.Model.create(MODEL_TYPE, CONFIG)
+if not ok_create then
+    log("❌ ERREUR: Création du modèle échouée: " .. (err_create or "unknown"))
+    os.exit(1)
+end
+log("✓ Modèle créé (type='" .. MODEL_TYPE .. "')")
 
--- Construire l'architecture (choisir une option)
--- OPTION 1: Transformer
-architectures.transformer(config)
-log("✓ Architecture Transformer construite")
-
--- OPTION 2: ResNet (décommenter si besoin)
--- architectures.resnet(config)
--- log("✓ Architecture ResNet construite")
-
--- OPTION 3: UNet (décommenter si besoin)
--- architectures.unet(config)
--- log("✓ Architecture UNet construite")
+-- Construire l'architecture à partir de (MODEL_TYPE + CONFIG)
+---@type boolean, integer?, string?
+local ok_build, params_built, err_build = Mimir.Model.build()
+if not ok_build then
+    log("❌ ERREUR: Construction du modèle échouée: " .. (err_build or "unknown"))
+    os.exit(1)
+end
+log("✓ Architecture construite avec succès")
+if params_built then
+    log(string.format("  Paramètres (scalars): %d (%.2fM)", params_built, params_built / 1e6))
+end
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 4: ALLOCATION DES PARAMÈTRES (VÉRIFIER LE SUCCÈS!)
@@ -110,25 +148,37 @@ log("\n━━━━━━━━━━━━━━━━━━━━━━━━�
 log("  4. Allocation des Paramètres")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-local success, param_count = model.allocate_params()
+---@type boolean, string?
+local ok_alloc, err_alloc = Mimir.Model.allocate_params()
 
 -- ⚠️ TOUJOURS vérifier le succès!
-if not success then
+if not ok_alloc then
     log("❌ ERREUR: Impossible d'allouer les paramètres!")
-    log("⚠️  La limite de 10 GB a été atteinte")
+    log("⚠️  Raison: " .. (err_alloc or "La limite de 10 GB a été atteinte"))
     log("\n💡 Solutions possibles:")
-    log("  1. Réduire d_model (ex: 512 → 256)")
+    log("  1. Réduire embed_dim (ex: 512 → 256)")
     log("  2. Réduire num_layers (ex: 6 → 4)")
     log("  3. Réduire vocab_size (ex: 30000 → 20000)")
     log("  4. Choisir une architecture plus petite")
+    Mimir.MemoryGuard.printStats()  -- Afficher les stats mémoire
     os.exit(1)
 end
 
+-- Récupérer le nombre total de paramètres
+---@type integer
+local param_count = Mimir.Model.total_params()
+
 -- Calcul de la mémoire utilisée
 local memory_mb = param_count * 4 / (1024 * 1024)
-log(string.format("✓ Paramètres alloués: %d", param_count))
+log(string.format("✓ Paramètres alloués: %d (%.2fM)", param_count, param_count / 1e6))
 log(string.format("  Mémoire utilisée: %.2f MB", memory_mb))
 log(string.format("  Compression LZ4: ~%.2f MB en RAM", memory_mb * 0.5))
+
+-- Afficher les stats MemoryGuard
+---@type MemoryGuardStats
+local mem_stats = Mimir.MemoryGuard.getStats()
+log(string.format("  MemoryGuard: %.2f MB / %.2f MB (%.1f%%)", 
+    mem_stats.current_mb, mem_stats.limit_mb, mem_stats.usage_percent))
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 5: INITIALISATION DES POIDS
@@ -138,45 +188,93 @@ log("\n━━━━━━━━━━━━━━━━━━━━━━━━�
 log("  5. Initialisation des Poids")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
--- Méthodes disponibles: "xavier", "he", "uniform"
-success = model.init_weights("xavier", 42)  -- seed = 42 pour reproductibilité
+-- Méthodes disponibles: "xavier" | "he" | "normal" | "uniform" | "zeros"
+---@type WeightInit
+local init_method = "xavier"  -- Valeur supportée par l'API
+local seed = 42  -- Pour reproductibilité
 
-if not success then
-    log("❌ Échec de l'initialisation des poids")
+---@type boolean, string?
+local ok_init, err_init = Mimir.Model.init_weights(init_method, seed)
+
+if not ok_init then
+    log("❌ Échec de l'initialisation des poids: " .. (err_init or "unknown"))
     os.exit(1)
 end
 
-log("✓ Poids initialisés (méthode: xavier, seed: 42)")
+log(string.format("✓ Poids initialisés (méthode: %s, seed: %d)", init_method, seed))
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 6: TOKENIZER (SI MODÈLE NLP)
 -- ══════════════════════════════════════════════════════════════
 
 log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-log("  6. Tokenizer (optionnel)")
+log("  6. Tokenizer (optionnel pour NLP)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-tokenizer.create(config.vocab_size)
-tokenizer.add_token("[PAD]")
-tokenizer.add_token("[UNK]")
-tokenizer.add_token("[CLS]")
-tokenizer.add_token("[SEP]")
-log("✓ Tokenizer créé (vocab_size: " .. config.vocab_size .. ")")
+---@type boolean
+local ok_tok = Mimir.Tokenizer.create(CONFIG.vocab_size)
+if not ok_tok then
+    log("❌ Échec de la création du tokenizer")
+    os.exit(1)
+end
+
+-- Ajouter les tokens spéciaux
+Mimir.Tokenizer.add_token("[PAD]")
+Mimir.Tokenizer.add_token("[UNK]")
+Mimir.Tokenizer.add_token("[CLS]")
+Mimir.Tokenizer.add_token("[SEP]")
+Mimir.Tokenizer.add_token("[MASK]")  -- Pour masked language modeling
+
+-- Configurer la longueur max des séquences
+Mimir.Tokenizer.set_max_length(CONFIG.max_seq_len)
+
+log(string.format("✓ Tokenizer créé (vocab_size: %d)", CONFIG.vocab_size))
+log(string.format("  Tokens spéciaux: PAD=%d, UNK=%d, CLS/SEQ=%d",
+    Mimir.Tokenizer.pad_id(), Mimir.Tokenizer.unk_id(), Mimir.Tokenizer.seq_id()))
+
+-- Exemple d'utilisation (décommenter si besoin)
+-- local test_text = "Hello world, this is a test."
+-- local tokens = Mimir.Tokenizer.tokenize(test_text)
+-- log("Test tokenization: " .. #tokens .. " tokens")
+-- local decoded = Mimir.Tokenizer.detokenize(tokens)
+-- log("Decoded: " .. decoded)
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 7: DATASET (SI TRAINING)
 -- ══════════════════════════════════════════════════════════════
 
 log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-log("  7. Dataset (optionnel)")
+log("  7. Dataset (optionnel pour training)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 -- Charger un dataset (décommenter si besoin)
--- dataset.load("path/to/dataset")
--- dataset.prepare_sequences(config.max_seq_len)
+-- local dataset_path = "data/my_dataset"
+-- local ok_ds, err_ds = Mimir.Dataset.load(dataset_path)
+-- if not ok_ds then
+--     log("❌ Échec du chargement du dataset: " .. (err_ds or "unknown"))
+--     os.exit(1)
+-- end
+--
+-- -- Préparer les séquences pour le training
+-- local ok_prep, err_prep = Mimir.Dataset.prepare_sequences(CONFIG.max_seq_len)
+-- if not ok_prep then
+--     log("❌ Échec de la préparation des séquences: " .. (err_prep or "unknown"))
+--     os.exit(1)
+-- end
+--
+-- -- Exemple d'accès aux items
+-- ---@type DatasetItem|nil, string?
+-- local item, err_item = Mimir.Dataset.get(1)  -- Premier item (indices 1-based)
+-- if item then
+--     log("  Premier item:")
+--     if item.text_file then log("    text_file: " .. item.text_file) end
+--     if item.image_file then log("    image_file: " .. item.image_file) end
+--     if item.width then log(string.format("    dimensions: %dx%d", item.width, item.height)) end
+-- end
+--
 -- log("✓ Dataset chargé et préparé")
 
-log("⚠️  Dataset non configuré (à ajouter selon vos besoins)")
+log("⚠️  Dataset non configuré (décommentez le code ci-dessus si besoin)")
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 8: TRAINING / INFERENCE
@@ -186,27 +284,131 @@ log("\n━━━━━━━━━━━━━━━━━━━━━━━━�
 log("  8. Training / Inference")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-log("💡 Votre code d'entraînement ou d'inférence ici...")
-log("\nExemple de boucle de training:")
-log("  for epoch = 1, config.epochs do")
-log("    loss = model.train_step(batch)")
-log("    log('Epoch ' .. epoch .. ', Loss: ' .. loss)")
-log("  end")
+-- Exemple de boucle de training manuelle
+--[[
+local function compute_loss(predictions, targets)
+    -- Implémenter votre fonction de loss (MSE, CrossEntropy, etc.)
+    local loss = 0.0
+    for i = 1, #predictions do
+        local diff = predictions[i] - targets[i]
+        loss = loss + diff * diff
+    end
+    return loss / #predictions
+end
+
+local function training_loop()
+    log("\n🚀 Démarrage du training...")
+    
+    for epoch = 1, CONFIG.epochs do
+        local total_loss = 0.0
+        local num_batches = 100  -- À adapter selon votre dataset
+        
+        for batch = 1, num_batches do
+            -- 1. Préparer les données d'entrée (exemple)
+            ---@type float[]
+            local input_data = {}  -- Charger depuis dataset
+            for i = 1, 512 do input_data[i] = math.random() end
+            
+            -- 2. Zero gradients
+            Mimir.Model.zero_grads()
+            
+            -- 3. Forward pass (training mode)
+            ---@type float[]|nil, string?
+            local predictions, err_fwd = Mimir.Model.forward(input_data, true)
+            if not predictions then
+                log("❌ Forward pass échoué: " .. (err_fwd or "unknown"))
+                break
+            end
+            
+            -- 4. Calculer la loss
+            local targets = {}  -- Vos targets
+            for i = 1, #predictions do targets[i] = math.random() end
+            local loss = compute_loss(predictions, targets)
+            total_loss = total_loss + loss
+            
+            -- 5. Calculer les gradients de loss
+            local loss_gradient = {}
+            for i = 1, #predictions do
+                loss_gradient[i] = 2.0 * (predictions[i] - targets[i]) / #predictions
+            end
+            
+            -- 6. Backward pass
+            local ok_bwd, err_bwd = Mimir.Model.backward(loss_gradient)
+            if not ok_bwd then
+                log("❌ Backward pass échoué: " .. (err_bwd or "unknown"))
+                break
+            end
+            
+            -- 7. Optimizer step
+            local ok_opt, err_opt = Mimir.Model.optimizer_step(CONFIG.learning_rate)
+            if not ok_opt then
+                log("❌ Optimizer step échoué: " .. (err_opt or "unknown"))
+                break
+            end
+        end
+        
+        local avg_loss = total_loss / num_batches
+        log(string.format("epoch=%d | loss=%.6f", epoch, avg_loss))
+        
+        -- Afficher les stats mémoire périodiquement
+        if epoch % 10 == 0 then
+            local stats = Mimir.MemoryGuard.getStats()
+            log(string.format("  RAM: %.2f MB / %.2f MB (%.1f%%)",
+                stats.current_mb, stats.limit_mb, stats.usage_percent))
+        end
+    end
+    
+    log("\n✅ Training terminé!")
+end
+
+-- Décommenter pour lancer le training
+-- training_loop()
+]]
+
+log("💡 Template de boucle de training prêt (décommentez le code ci-dessus)")
+log("\nAPI disponible:")
+log("  • Mimir.Model.forward(input, training?) → predictions")
+log("  • Mimir.Model.backward(loss_gradient) → ok")
+log("  • Mimir.Model.zero_grads() → ok")
+log("  • Mimir.Model.optimizer_step(lr) → ok")
+log("  • Mimir.Model.get_gradients() → gradients")
+log("  • Mimir.Serialization.save(path, format, options) → ok")
+log("  • Mimir.Serialization.load(path, format, options) → ok")
 
 -- ══════════════════════════════════════════════════════════════
---  ÉTAPE 9: SAUVEGARDE (OPTIONNEL)
+--  ÉTAPE 9: SAUVEGARDE (NOUVELLE API v2.3.0)
 -- ══════════════════════════════════════════════════════════════
 
 log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-log("  9. Sauvegarde")
+log("  9. Sauvegarde (Serialization API v2.3)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
--- Sauvegarder le modèle (décommenter si besoin)
--- local checkpoint_path = "checkpoints/" .. model_name .. ".bin"
--- model.save(checkpoint_path)
--- log("✓ Modèle sauvegardé: " .. checkpoint_path)
+-- Sauvegarder le modèle avec la nouvelle API (décommenter si besoin)
+-- local checkpoint_path = "checkpoints/" .. RUN_TAG .. "_epoch_" .. CONFIG.epochs .. ".safetensors"
+-- 
+-- -- Format SafeTensors (production, compatible HuggingFace)
+-- local ok_save, err_save = Mimir.Serialization.save(checkpoint_path, "safetensors", {
+--     save_tokenizer = true,
+--     save_encoder = true,
+--     save_optimizer = false
+-- })
+-- 
+-- if not ok_save then
+--     log("❌ Échec de la sauvegarde: " .. (err_save or "unknown"))
+-- else
+--     log("✓ Modèle sauvegardé: " .. checkpoint_path)
+--     log("  Format: SafeTensors (compatible PyTorch/HuggingFace)")
+-- end
+--
+-- -- Alternative: RawFolder (debug avec checksums SHA256)
+-- -- local checkpoint_dir = "checkpoints/" .. RUN_TAG .. "_debug/"
+-- -- Mimir.Serialization.save(checkpoint_dir, "raw_folder")
+--
+-- -- Alternative: DebugJson (inspection avec statistiques)
+-- -- Mimir.Serialization.save("debug/" .. RUN_TAG .. ".json", "debug_json")
 
-log("⚠️  Sauvegarde non configurée (à ajouter si nécessaire)")
+log("⚠️  Sauvegarde non configurée (décommentez le code ci-dessus si besoin)")
+log("📚 Voir docs/03-API-Reference/SAVE_LOAD.md pour plus d'informations")
 
 -- ══════════════════════════════════════════════════════════════
 --  RÉSUMÉ FINAL
@@ -216,21 +418,36 @@ log("\n╔═══════════════════════�
 log("║                    RÉSUMÉ                              ║")
 log("╚════════════════════════════════════════════════════════╝\n")
 
-log("✅ Modèle créé avec succès!")
-log(string.format("  • Nom: %s", model_name))
-log(string.format("  • Paramètres: %d", param_count))
+log("✅ Modèle configuré avec succès!")
+log(string.format("  • Tag: %s", RUN_TAG))
+log(string.format("  • Type: %s", MODEL_TYPE))
+log(string.format("  • Paramètres: %d (%.2fM)", param_count, param_count / 1e6))
 log(string.format("  • Mémoire: %.2f MB (%.2f MB avec compression)", memory_mb, memory_mb * 0.5))
-log(string.format("  • Limite RAM: 10 GB"))
-log(string.format("  • Utilisation: %.1f%%", (memory_mb / (10 * 1024)) * 100))
+
+-- Stats MemoryGuard finales
+Mimir.MemoryGuard.printStats()
+
+-- Stats Allocator
+log("\n📊 Stats Allocator:")
+Mimir.Allocator.print_stats()
 
 log("\n💡 Prochaines étapes:")
-log("  1. Ajouter votre code de training/inference (étape 8)")
-log("  2. Charger un dataset si nécessaire (étape 7)")
-log("  3. Sauvegarder le modèle après training (étape 9)")
+log("  1. Implémenter votre boucle de training (étape 8)")
+log("  2. Charger et préparer un dataset (étape 7)")
+log("  3. Tester avec forward/backward sur données synthétiques")
+log("  4. Sauvegarder les checkpoints (étape 9)")
 
 log("\n📚 Documentation:")
-log("  • docs/MEMORY_BEST_PRACTICES.md - Bonnes pratiques mémoire")
-log("  • MEMORY_SAFETY_FIXES.md - Détails des correctifs")
-log("  • README.md - Documentation générale")
+log("  • mimir-api.lua - Référence API complète (16 modules)")
+log("  • docs/MULTI_INPUT_SUPPORT.md - Multi-input et branches")
+log("  • docs/02-User-Guide/ - Guides utilisateur")
+log("  • docs/03-API-Reference/ - Documentation API")
+log("  • README.md - Vue d'ensemble")
 
-log("\n✨ Bon apprentissage avec Mímir Framework! ✨\n")
+log("\n🆕 Nouveautés v2.3.0:")
+log("  • Mode Strict activé (0 pass-through)")
+log("  • Support multi-input avec Mimir.Model.set_layer_io()")
+log("  • Résidual & skip connections")
+log("  • 115+ fonctions API documentées")
+
+log("\n✨ Bon apprentissage avec Mímir Framework v2.3.0! ✨\n")

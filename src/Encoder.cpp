@@ -2,8 +2,50 @@
 #include <random>
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 #include <omp.h>
+json Encoder::to_json() const {
+    json j;
+    j["dim"] = dim;
+    j["vocab_size"] = vocab_size;
+    j["token_embeddings"] = token_embeddings;
+    if (!seq_embedding.empty()) j["seq_embedding"] = seq_embedding;
+    if (!mod_embedding.empty()) j["mod_embedding"] = mod_embedding;
+    if (!mag_embedding.empty()) j["mag_embedding"] = mag_embedding;
+    return j;
+}
 
+void Encoder::from_json(const json &j) {
+    if (j.contains("dim")) dim = j["dim"].get<int>();
+    if (j.contains("vocab_size")) vocab_size = j["vocab_size"].get<int>();
+
+    if (j.contains("token_embeddings") && j["token_embeddings"].is_array()) {
+        token_embeddings = j["token_embeddings"].get<std::vector<float>>();
+    }
+
+    if (j.contains("seq_embedding") && j["seq_embedding"].is_array()) {
+        seq_embedding = j["seq_embedding"].get<std::vector<float>>();
+    }
+    if (j.contains("mod_embedding") && j["mod_embedding"].is_array()) {
+        mod_embedding = j["mod_embedding"].get<std::vector<float>>();
+    }
+    if (j.contains("mag_embedding") && j["mag_embedding"].is_array()) {
+        mag_embedding = j["mag_embedding"].get<std::vector<float>>();
+    }
+
+    // Cohérence minimale
+    if (dim <= 0) throw std::runtime_error("Encoder::from_json: invalid dim");
+    if (vocab_size < 0) throw std::runtime_error("Encoder::from_json: invalid vocab_size");
+    if (!token_embeddings.empty()) {
+        size_t expected = static_cast<size_t>(std::max(0, vocab_size)) * static_cast<size_t>(dim);
+        if (expected > 0 && token_embeddings.size() != expected) {
+            // Tolérance: si vocab_size n'était pas fiable, on l'infère.
+            if (token_embeddings.size() % static_cast<size_t>(dim) == 0) {
+                vocab_size = static_cast<int>(token_embeddings.size() / static_cast<size_t>(dim));
+            }
+        }
+    }
+}
 Encoder::Encoder(int d, int Size_Vo)
     : dim(d), vocab_size(0)
 {

@@ -343,25 +343,25 @@ model.load(filepath: string) -> (success: bool)
 
 ```lua
 -- Constructeurs d'architectures
-architectures.unet(config: table) -> (success: bool)
-architectures.vae(config: table) -> (success: bool)
-architectures.vit(config: table) -> (success: bool)
-architectures.gan(type: string, config: table) -> (success: bool)
-architectures.diffusion(config: table) -> (success: bool)
-architectures.transformer(config: table) -> (success: bool)
-architectures.resnet(config: table) -> (success: bool)
-architectures.mobilenet(config: table) -> (success: bool)
+Mimir.Architectures.unet(config: table) -> (success: bool)
+Mimir.Architectures.vae(config: table) -> (success: bool)
+Mimir.Architectures.vit(config: table) -> (success: bool)
+Mimir.Architectures.gan(type: string, config: table) -> (success: bool)
+Mimir.Architectures.diffusion(config: table) -> (success: bool)
+Mimir.Architectures.transformer(config: table) -> (success: bool)
+Mimir.Architectures.resnet(config: table) -> (success: bool)
+Mimir.Architectures.mobilenet(config: table) -> (success: bool)
 ```
 
 #### 3. tokenizer (6 fonctions)
 
 ```lua
-tokenizer.create(vocab_size: number) -> (success: bool)
-tokenizer.tokenize(text: string) -> (tokens: table)
-tokenizer.detokenize(tokens: table) -> (text: string)
-tokenizer.vocab_size() -> (size: number)
-tokenizer.save(filepath: string) -> (success: bool)
-tokenizer.load(filepath: string) -> (success: bool)
+Mimir.Tokenizer.create(vocab_size: number) -> (success: bool)
+Mimir.Tokenizer.tokenize(text: string) -> (tokens: table)
+Mimir.Tokenizer.detokenize(tokens: table) -> (text: string)
+Mimir.Tokenizer.vocab_size() -> (size: number)
+Mimir.Tokenizer.save(filepath: string) -> (success: bool)
+Mimir.Tokenizer.load(filepath: string) -> (success: bool)
 ```
 
 #### 4. layers (8 fonctions - stubs)

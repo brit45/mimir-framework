@@ -109,13 +109,19 @@ function DatasetKnowledge:find_continuation(prompt, max_words)
         if #result >= 2 then
             local bigram = result[#result - 1] .. " " .. last_word
             if self.ngrams[bigram] and #self.ngrams[bigram] > 0 then
-                candidates = self.ngrams[bigram]
+                -- Copier la table au lieu d'assigner la référence
+                for _, v in ipairs(self.ngrams[bigram]) do
+                    table.insert(candidates, v)
+                end
             end
         end
         
         -- Sinon bigrammes
         if #candidates == 0 and self.word_transitions[last_word] then
-            candidates = self.word_transitions[last_word]
+            -- Copier la table au lieu d'assigner la référence
+            for _, v in ipairs(self.word_transitions[last_word]) do
+                table.insert(candidates, v)
+            end
         end
         
         -- Sinon chercher dans les séquences
@@ -126,7 +132,8 @@ function DatasetKnowledge:find_continuation(prompt, max_words)
                     local pattern = last_word .. "%s+(%S+)"
                     local next_word = seq:lower():match(pattern)
                     if next_word then
-                        table.insert(candidates, next_word:gsub("[%p]", ""))
+                        local cleaned = next_word:gsub("[%p]", "")
+                        table.insert(candidates, cleaned)
                     end
                 end
             end
@@ -153,7 +160,7 @@ local dataset_knowledge = nil
 
 log("\n🔧 Configuration de l'allocateur dynamique RAM...")
 
-allocator.configure({
+Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
 })
@@ -1034,11 +1041,16 @@ start_time = os.clock()
 os.execute("mkdir -p '" .. config.checkpoint_dir .. "'")
 
 -- Sauvegarder le modèle
-local success = model.save(config.checkpoint_dir)
+local checkpoint_file = config.checkpoint_dir .. "/model_llm"
+local success = Mimir.Serialization.save(checkpoint_file, "raw_folder", {
+    save_optimizer = true,
+    save_tokenizer = true,
+    save_encoder = false
+})
 if not success then
     log("⚠️  Erreur lors de la sauvegarde du modèle")
 else
-    log("✓ Modèle sauvegardé")
+    log("✓ Modèle sauvegardé: " .. checkpoint_file)
 end
 
 -- Sauvegarder le tokenizer
@@ -1158,7 +1170,7 @@ log("  • Learning rate schedule: warmup + cosine decay")
 log("  • Optimiseur AdamW (intégré dans model.train())")
 
 log("\n💡 Prochaines étapes:")
-log("  1. Charger le modèle: model.load('" .. config.checkpoint_dir .. "')")
+log("  1. Charger le modèle: Mimir.Serialization.load('" .. config.checkpoint_dir .. "/model.safetensors')")
 log("  2. Charger le tokenizer: tokenizer.load('" .. config.checkpoint_dir .. "/tokenizer.json')")
 log("  3. Augmenter epochs pour meilleure convergence (--epochs=30)")
 log("  4. Essayer architecture plus grande (--long)")

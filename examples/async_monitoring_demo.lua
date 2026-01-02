@@ -17,7 +17,7 @@ print("=== Mímir Framework v2.0 - Exemple Threading Asynchrone ===\n")
 
 -- Configuration mémoire avec compression LZ4
 print("📊 Configuration de l'allocateur mémoire...")
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true,
     compression_threshold_mb = 100,
@@ -26,10 +26,10 @@ allocator.configure({
 
 -- Démarrer le monitoring asynchrone
 print("🚀 Démarrage du monitoring asynchrone (htop)...")
-htop.create()  -- Lance un thread séparé, non-bloquant
+Mimir.Htop.create()  -- Lance un thread séparé, non-bloquant
 
 print("📦 Création du modèle...")
-model.create("encoder", {
+Mimir.Model.create("encoder", {
     vocab_size = 50000,
     embed_dim = 512,
     num_layers = 6,
@@ -37,12 +37,12 @@ model.create("encoder", {
     d_ff = 2048
 })
 
-model.build()
-model.allocate_params()
-model.init_weights("he", 42)
+Mimir.Model.build()
+Mimir.Model.allocate_params()
+Mimir.Model.init_weights("he", 42)
 
 -- Vérifier l'accélération GPU
-if model.has_vulkan_compute() then
+if Mimir.Model.has_vulkan_compute() then
     print("✓ Accélération GPU activée (Vulkan Compute)")
 else
     print("⚠ Mode CPU uniquement (Vulkan non disponible)")
@@ -83,7 +83,7 @@ for epoch = 1, total_epochs do
         local memory_mb = 3500 + math.random() * 500
         local memory_freed = math.random() * 100
         local bps = 1.0 / batch_time
-        local params = model.total_params()
+        local params = Mimir.Model.total_params()
         
         -- Métriques avancées simulées
         local kl = 0.05 + math.random() * 0.02
@@ -93,7 +93,7 @@ for epoch = 1, total_epochs do
         
         -- ⚡ MISE À JOUR ASYNCHRONE (thread-safe, non-bloquant)
         -- Le rendu se fait automatiquement dans le thread séparé toutes les 100ms
-        htop.update(
+        Mimir.Htop.update(
             epoch, total_epochs,
             batch, batches_per_epoch,
             loss, avg_loss, lr,
@@ -104,7 +104,7 @@ for epoch = 1, total_epochs do
             kl, wass, ent, 0.0, 0.0, 0.0, mse  -- mom, spat, temp
         )
         
-        -- ✅ PAS BESOIN de htop.render()!
+        -- ✅ PAS BESOIN de Mimir.Htop.render()!
         -- Le rendu est automatique et n'impacte pas les performances du training
         
         -- Petit délai pour simuler le training (sans ce délai, la boucle serait trop rapide)
@@ -118,9 +118,9 @@ print("\n✓ Entraînement terminé!")
 
 -- Statistiques finales
 print("\n📊 Statistiques mémoire:")
-allocator.print_stats()
+Mimir.Allocator.print_stats()
 
-local stats = allocator.get_stats()
+local stats = Mimir.Allocator.get_stats()
 print(string.format([[
   - Tensors alloués: %d
   - Tensors compressés: %d

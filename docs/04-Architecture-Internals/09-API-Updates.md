@@ -23,17 +23,17 @@ API complète pour la gestion stricte de la RAM avec limite configurable (par d�
 MemoryGuard = {}
 
 -- Configuration
-MemoryGuard.setLimit(limit)      -- Définir limite (bytes ou GB)
-MemoryGuard.getLimit()           -- Obtenir limite configurée
+Mimir.MemoryGuard.setLimit(limit)      -- Définir limite (bytes ou GB)
+Mimir.MemoryGuard.getLimit()           -- Obtenir limite configurée
 
 -- Monitoring
-MemoryGuard.getCurrentUsage()    -- RAM courante (bytes)
-MemoryGuard.getPeakUsage()       -- Pic d'utilisation (bytes)
+Mimir.MemoryGuard.getCurrentUsage()    -- RAM courante (bytes)
+Mimir.MemoryGuard.getPeakUsage()       -- Pic d'utilisation (bytes)
 
 -- Statistiques
-MemoryGuard.getStats()           -- Table complète de stats
-MemoryGuard.printStats()         -- Affichage formaté
-MemoryGuard.reset()              -- Reset compteurs
+Mimir.MemoryGuard.getStats()           -- Table complète de stats
+Mimir.MemoryGuard.printStats()         -- Affichage formaté
+Mimir.MemoryGuard.reset()              -- Reset compteurs
 ```
 
 #### Type de Retour
@@ -52,8 +52,8 @@ Chaque fonction inclut maintenant des exemples d'utilisation complets dans la do
 
 ```lua
 -- Exemple intégré dans le stub
-MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- 10 GB
-local usage = MemoryGuard.getCurrentUsage()
+Mimir.MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- 10 GB
+local usage = Mimir.MemoryGuard.getCurrentUsage()
 print(string.format("RAM: %.2f GB", usage / 1e9))
 ```
 
@@ -118,7 +118,7 @@ FluxModel.setPromptTokenizer(...) -- Définir tokenizer
 
 ```lua
 ---@class MimirArchitecturesAPI
-architectures.flux(config)  -- Construire un modèle Flux
+Mimir.Architectures.flux(config)  -- Construire un modèle Flux
 ```
 
 ---
@@ -179,17 +179,17 @@ FluxModel = FluxModel
 
 Avec ce stub mis à jour, les IDEs supportant EmmyLua/LuaLS offrent maintenant :
 
-1. **Autocomplétion complète** pour `MemoryGuard.*` et `FluxModel.*`
+1. **Autocomplétion complète** pour `Mimir.MemoryGuard.*` et `FluxModel.*`
 2. **Tooltips détaillés** avec exemples et types
 3. **Vérification de types** pour les paramètres
 4. **Navigation** vers les définitions
 
 ### Exemple d'Autocomplétion
 
-Quand vous tapez `MemoryGuard.` dans votre IDE :
+Quand vous tapez `Mimir.MemoryGuard.` dans votre IDE :
 
 ```
-MemoryGuard.
+Mimir.MemoryGuard.
 ├─ setLimit(limit: number)
 ├─ getLimit() → integer
 ├─ getCurrentUsage() → integer
@@ -201,10 +201,10 @@ MemoryGuard.
 
 ### Exemple de Tooltip
 
-Hover sur `MemoryGuard.setLimit()` affiche :
+Hover sur `Mimir.MemoryGuard.setLimit()` affiche :
 
 ```
-function MemoryGuard.setLimit(limit: number) → boolean
+function Mimir.MemoryGuard.setLimit(limit: number) → boolean
 
 Définir la limite de mémoire RAM stricte.
 Accepte des valeurs en bytes (grands nombres) ou en GB (si <= 1000).
@@ -214,8 +214,8 @@ Accepte des valeurs en bytes (grands nombres) ou en GB (si <= 1000).
 
 Exemples:
   -- Définir limite à 10 Go
-  MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- en bytes
-  MemoryGuard.setLimit(10)  -- en GB (auto-détecté car < 1000)
+  Mimir.MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- en bytes
+  Mimir.MemoryGuard.setLimit(10)  -- en GB (auto-détecté car < 1000)
 ```
 
 ---
@@ -266,7 +266,7 @@ Ce stub est synchronisé avec :
 Pour valider le stub dans votre IDE :
 
 1. **Ouvrir** un script Lua dans le projet
-2. **Taper** `MemoryGuard.` 
+2. **Taper** `Mimir.MemoryGuard.` 
 3. **Vérifier** que l'autocomplétion propose toutes les fonctions
 4. **Hover** sur une fonction pour voir la documentation
 5. **Tester** les exemples fournis

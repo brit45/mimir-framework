@@ -50,12 +50,12 @@ function Pipeline.Transformer(config)
         log("🏗️  Construction du pipeline Transformer...")
         
         -- Créer tokenizer
-        tokenizer.create(self.config.vocab_size)
+        Mimir.Tokenizer.create(self.config.vocab_size)
         self.tokenizer = true
         
         -- Créer modèle
-        model.create(self.config.model_type, self.config)
-        local ok, params = model.build()
+        Mimir.Model.create(self.config.model_type, self.config)
+        local ok, params = Mimir.Model.build()
         
         if ok then
             self.model = true
@@ -75,11 +75,11 @@ function Pipeline.Transformer(config)
         log("🎓 Entraînement du modèle...")
         
         -- Charger dataset
-        dataset.load(dataset_path)
-        dataset.prepare_sequences(self.config.max_seq_len)
+        Mimir.Dataset.load(dataset_path)
+        Mimir.Dataset.prepare_sequences(self.config.max_seq_len)
         
         -- Entraîner
-        model.train(epochs or 10, lr or 0.0003)
+        Mimir.Model.train(epochs or 10, lr or 0.0003)
         
         self.trained = true
         log("✓ Entraînement terminé")
@@ -91,7 +91,7 @@ function Pipeline.Transformer(config)
             log("⚠️  Modèle non entraîné, génération peut être aléatoire")
         end
         
-        return model.infer(prompt)
+        return Mimir.Model.infer(prompt)
     end
     
     pipe.save = function(self, path)
@@ -99,7 +99,7 @@ function Pipeline.Transformer(config)
             return false, "Modèle non construit"
         end
         
-        model.save(path)
+        Mimir.Serialization.save(path, "safetensors")
         log("✓ Pipeline sauvegardé: " .. path)
         return true
     end
@@ -131,8 +131,8 @@ function Pipeline.UNet(config)
     pipe.build = function(self)
         log("🏗️  Construction du pipeline UNet...")
         
-        model.create("unet", self.config)
-        local ok, params = model.build()
+        Mimir.Model.create("unet", self.config)
+        local ok, params = Mimir.Model.build()
         
         if ok then
             self.model = true
@@ -150,8 +150,8 @@ function Pipeline.UNet(config)
         end
         
         log("🎓 Entraînement UNet...")
-        dataset.load(dataset_path)
-        model.train(epochs or 50, lr or 0.001)
+        Mimir.Dataset.load(dataset_path)
+        Mimir.Model.train(epochs or 50, lr or 0.001)
         
         self.trained = true
         return true
@@ -163,11 +163,11 @@ function Pipeline.UNet(config)
         end
         
         -- Inférence pour segmentation
-        return model.infer(image_path)
+        return Mimir.Model.infer(image_path)
     end
     
     pipe.save = function(self, path)
-        model.save(path)
+        Mimir.Serialization.save(path, "safetensors")
         return true
     end
     
@@ -194,8 +194,8 @@ function Pipeline.VAE(config)
     pipe.build = function(self)
         log("🏗️  Construction du pipeline VAE...")
         
-        model.create("vae", self.config)
-        local ok, params = model.build()
+        Mimir.Model.create("vae", self.config)
+        local ok, params = Mimir.Model.build()
         
         if ok then
             self.model = true
@@ -208,8 +208,8 @@ function Pipeline.VAE(config)
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement VAE...")
-        dataset.load(dataset_path)
-        model.train(epochs or 100, lr or 0.001)
+        Mimir.Dataset.load(dataset_path)
+        Mimir.Model.train(epochs or 100, lr or 0.001)
         
         self.trained = true
         return true
@@ -217,12 +217,12 @@ function Pipeline.VAE(config)
     
     pipe.encode = function(self, input)
         -- Encoder vers espace latent
-        return model.forward(input)
+        return Mimir.Model.forward(input)
     end
     
     pipe.decode = function(self, latent)
         -- Décoder depuis espace latent
-        return model.infer(latent)
+        return Mimir.Model.infer(latent)
     end
     
     pipe.generate = function(self, num_samples)
@@ -230,7 +230,7 @@ function Pipeline.VAE(config)
         log("🎨 Génération de " .. num_samples .. " échantillons...")
         local samples = {}
         for i = 1, num_samples do
-            table.insert(samples, model.infer(nil))
+            table.insert(samples, Mimir.Model.infer(nil))
         end
         return samples
     end
@@ -262,8 +262,8 @@ function Pipeline.ViT(config)
     pipe.build = function(self)
         log("🏗️  Construction du pipeline ViT...")
         
-        model.create("vit", self.config)
-        local ok, params = model.build()
+        Mimir.Model.create("vit", self.config)
+        local ok, params = Mimir.Model.build()
         
         if ok then
             self.model = true
@@ -276,15 +276,15 @@ function Pipeline.ViT(config)
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement ViT...")
-        dataset.load(dataset_path)
-        model.train(epochs or 300, lr or 0.001)
+        Mimir.Dataset.load(dataset_path)
+        Mimir.Model.train(epochs or 300, lr or 0.001)
         
         self.trained = true
         return true
     end
     
     pipe.classify = function(self, image_path)
-        return model.infer(image_path)
+        return Mimir.Model.infer(image_path)
     end
     
     return pipe
@@ -312,8 +312,8 @@ function Pipeline.GAN(config)
         log("🏗️  Construction du pipeline GAN...")
         
         -- Construire générateur
-        model.create("generator", self.config)
-        local ok_gen, params_gen = model.build()
+        Mimir.Model.create("generator", self.config)
+        local ok_gen, params_gen = Mimir.Model.build()
         
         if ok_gen then
             self.generator = true
@@ -321,8 +321,8 @@ function Pipeline.GAN(config)
         end
         
         -- Construire discriminateur
-        model.create("discriminator", self.config)
-        local ok_disc, params_disc = model.build()
+        Mimir.Model.create("discriminator", self.config)
+        local ok_disc, params_disc = Mimir.Model.build()
         
         if ok_disc then
             self.discriminator = true
@@ -335,7 +335,7 @@ function Pipeline.GAN(config)
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement GAN (adversarial)...")
-        dataset.load(dataset_path)
+        Mimir.Dataset.load(dataset_path)
         
         -- Entraînement adversarial
         for epoch = 1, epochs do
@@ -352,7 +352,7 @@ function Pipeline.GAN(config)
         log("🎨 Génération de " .. num_samples .. " images...")
         local images = {}
         for i = 1, num_samples do
-            table.insert(images, model.infer(nil))
+            table.insert(images, Mimir.Model.infer(nil))
         end
         return images
     end
@@ -382,8 +382,8 @@ function Pipeline.Diffusion(config)
     pipe.build = function(self)
         log("🏗️  Construction du pipeline Diffusion...")
         
-        model.create("diffusion", self.config)
-        local ok, params = model.build()
+        Mimir.Model.create("diffusion", self.config)
+        local ok, params = Mimir.Model.build()
         
         if ok then
             self.model = true
@@ -396,8 +396,8 @@ function Pipeline.Diffusion(config)
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement Diffusion...")
-        dataset.load(dataset_path)
-        model.train(epochs or 1000, lr or 0.0001)
+        Mimir.Dataset.load(dataset_path)
+        Mimir.Model.train(epochs or 1000, lr or 0.0001)
         
         self.trained = true
         return true
@@ -408,7 +408,7 @@ function Pipeline.Diffusion(config)
         log("  Prompt: " .. (prompt or "none"))
         log("  Steps: " .. (num_steps or self.config.timesteps))
         
-        return model.infer(prompt)
+        return Mimir.Model.infer(prompt)
     end
     
     return pipe
@@ -434,8 +434,8 @@ function Pipeline.ResNet(config)
     pipe.build = function(self)
         log("🏗️  Construction du pipeline ResNet...")
         
-        model.create("resnet", self.config)
-        local ok, params = model.build()
+        Mimir.Model.create("resnet", self.config)
+        local ok, params = Mimir.Model.build()
         
         if ok then
             self.model = true
@@ -448,15 +448,15 @@ function Pipeline.ResNet(config)
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement ResNet...")
-        dataset.load(dataset_path)
-        model.train(epochs or 90, lr or 0.1)
+        Mimir.Dataset.load(dataset_path)
+        Mimir.Model.train(epochs or 90, lr or 0.1)
         
         self.trained = true
         return true
     end
     
     pipe.classify = function(self, image_path)
-        return model.infer(image_path)
+        return Mimir.Model.infer(image_path)
     end
     
     return pipe
@@ -481,8 +481,8 @@ function Pipeline.MobileNet(config)
     pipe.build = function(self)
         log("🏗️  Construction du pipeline MobileNet...")
         
-        model.create("mobilenet", self.config)
-        local ok, params = model.build()
+        Mimir.Model.create("mobilenet", self.config)
+        local ok, params = Mimir.Model.build()
         
         if ok then
             self.model = true
@@ -496,15 +496,15 @@ function Pipeline.MobileNet(config)
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement MobileNet...")
-        dataset.load(dataset_path)
-        model.train(epochs or 150, lr or 0.045)
+        Mimir.Dataset.load(dataset_path)
+        Mimir.Model.train(epochs or 150, lr or 0.045)
         
         self.trained = true
         return true
     end
     
     pipe.classify = function(self, image_path)
-        return model.infer(image_path)
+        return Mimir.Model.infer(image_path)
     end
     
     return pipe

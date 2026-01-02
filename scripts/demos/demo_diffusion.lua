@@ -10,7 +10,7 @@ log("=" .. string.rep("=", 78))
 -- Configuration système (OBLIGATOIRE!)
 log("\n🔧 Configuration...")
 -- ⚠️ Toujours configurer l'allocateur au début pour activer la limite de 10 GB
-allocator.configure({max_ram_gb = 10.0, enable_compression = true})
+Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
 model.set_hardware(true)
 log("✓ Allocateur configuré (limite: 10 GB, compression LZ4)")
 log("✓ Accélération hardware activée")
@@ -114,7 +114,7 @@ log("  • Latent Diffusion: Travaille dans l'espace latent")
 -- Sauvegarder
 log("\n💾 Sauvegarde du modèle...")
 os.execute("mkdir -p checkpoints")
-model.save("checkpoints/diffusion_demo")
+Mimir.Serialization.save("checkpoints/diffusion_demo.safetensors", "safetensors")
 log("✓ Modèle sauvegardé")
 
 log("\n✓ Demo Diffusion terminé!")

@@ -490,7 +490,7 @@ Model + Tokenizer + MagicTokens
          ↓
     Création tmpdir (.tmp)
          ↓
-    ├─ tokenizer.json (avec sanitize_id2token)
+    ├─ Mimir.Tokenizer.json (avec sanitize_id2token)
     ├─ metadata.json (timestamp, epoch, magic_tokens)
     └─ weights.u16 (paramètres little-endian)
          ↓

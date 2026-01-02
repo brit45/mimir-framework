@@ -1,9 +1,8 @@
 # Gestion des Données
 
 > **⚠️ AVERTISSEMENT**  
-> Cette documentation peut contenir des inexactitudes sur l'API dataset.  
+> Cette documentation peut contenir des inexactitudes sur l'API Mimir.Dataset.  
 > **Référez-vous aux scripts dans `scripts/` pour des exemples vérifiés.**  
-> Voir [VERIFICATION_REPORT.md](../VERIFICATION_REPORT.md) pour les détails.
 
 Guide de préparation et gestion des datasets dans Mímir Framework.
 
@@ -58,7 +57,7 @@ local dataset = {
 ### Depuis JSON
 
 ```lua
-local dataset = dataset.loadFromJson("data.json")
+local dataset = Mimir.Dataset.loadFromJson("data.json")
 print("Dataset size:", #dataset)
 ```
 
@@ -66,10 +65,10 @@ print("Dataset size:", #dataset)
 
 ```lua
 -- Pour NLP
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
-local dataset = dataset.loadText("corpus.txt", tokenizer)
+local dataset = Mimir.Dataset.loadText("corpus.txt", tokenizer)
 -- Crée paires (input, target) pour language modeling
 ```
 
@@ -104,7 +103,7 @@ function normalize_dataset(dataset, min_val, max_val)
 end
 
 -- Usage
-local dataset = dataset.loadFromJson("raw_data.json")
+local dataset = Mimir.Dataset.loadFromJson("raw_data.json")
 dataset = normalize_dataset(dataset, 0, 255)  -- Images 0-255 → 0-1
 ```
 
@@ -132,7 +131,7 @@ function split_dataset(dataset, train_ratio, val_ratio)
 end
 
 -- Usage
-local dataset = dataset.loadFromJson("all_data.json")
+local dataset = Mimir.Dataset.loadFromJson("all_data.json")
 local train, val, test = split_dataset(dataset, 0.8, 0.1)
 print("Train:", #train, "Val:", #val, "Test:", #test)
 ```
@@ -149,7 +148,7 @@ function shuffle_dataset(dataset)
 end
 
 -- Usage
-local dataset = dataset.loadFromJson("data.json")
+local dataset = Mimir.Dataset.loadFromJson("data.json")
 dataset = shuffle_dataset(dataset)
 ```
 
@@ -220,7 +219,7 @@ function create_batches(dataset, batch_size)
 end
 
 -- Usage
-local dataset = dataset.loadFromJson("data.json")
+local dataset = Mimir.Dataset.loadFromJson("data.json")
 local batches = create_batches(dataset, 32)
 print("Nombre de batches:", #batches)
 
@@ -295,7 +294,7 @@ local dataset = load_mnist_dataset("train-images.idx", "train-labels.idx")
 dataset = shuffle_dataset(dataset)
 local train, val = split_dataset(dataset, 0.9, 0.1)
 
-model.train(model, train, 10)
+Mimir.Model.train(model, train, 10)
 ```
 
 ### Dataset NLP
@@ -307,7 +306,7 @@ function prepare_nlp_dataset(texts, labels, tokenizer, max_length)
     
     for i, text in ipairs(texts) do
         -- Tokenize
-        local ids = tokenizer.encode(tokenizer, text, {
+        local ids = Mimir.Tokenizer.encode(tokenizer, text, {
             max_length = max_length,
             padding = "max_length",
             truncation = true
@@ -329,14 +328,14 @@ function prepare_nlp_dataset(texts, labels, tokenizer, max_length)
 end
 
 -- Usage
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
 local texts = load_texts("reviews.txt")
 local labels = load_labels("labels.txt")
 
 local dataset = prepare_nlp_dataset(texts, labels, tokenizer, 128)
-model.train(model, dataset, 20)
+Mimir.Model.train(model, dataset, 20)
 ```
 
 ---

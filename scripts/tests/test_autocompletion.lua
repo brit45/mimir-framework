@@ -11,7 +11,7 @@
 ]]
 
 -- Configuration mémoire (doit être la première chose)
-allocator.configure({
+Allocator.configure({
   max_ram_gb = 10.0,
   enable_compression = true,
   offload_threshold_mb = 6000
@@ -22,7 +22,7 @@ model.create("transformer", {vocab_size = 50000})
 model.build()
 model.train(10, 3e-4)
 model.infer("Hello world")
-model.save("checkpoint/")
+Mimir.Serialization.save("checkpoint/.safetensors", "safetensors")
 model.total_params()
 
 -- Test module architectures (9 fonctions)
@@ -59,13 +59,13 @@ dataset.prepare_sequences(512)
 dataset.get(0)
 
 -- Test module memory (6 fonctions)
-memory.set_limit(8000)
-memory.get_stats()
-memory.print_stats()
+Memory.setLimit(8000)
+Memory.getStats()
+Memory.printStats()
 
 -- Test module guard (4 fonctions - API ancienne)
-guard.set_limit(8000)
-guard.get_stats()
+MemoryGuard.setLimit(8000)
+MemoryGuard.getStats()
 
 -- Test module MemoryGuard (7 fonctions - API moderne recommandée)
 MemoryGuard.setLimit(10)
@@ -75,8 +75,8 @@ MemoryGuard.getStats()
 MemoryGuard.printStats()
 
 -- Test module allocator (3 fonctions)
-allocator.print_stats()
-allocator.get_stats()
+Allocator.printStats()
+Allocator.getStats()
 
 -- Test module htop (5 fonctions)
 htop.create({enable_viz = false})

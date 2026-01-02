@@ -104,16 +104,16 @@ local cfg = {
 }
 
 -- Créer le modèle
-model.create("my_cnn", cfg)
+Mimir.Model.create("my_cnn", cfg)
 
 -- Ajouter Conv2D
 local params = (3*3*3*64) + 64
-model.push_layer("conv1", "Conv2d", params)
+Mimir.Model.push_layer("conv1", "Conv2d", params)
 
 -- Initialiser et utiliser
-model.allocate_params()
-model.init_weights("xavier_uniform")
-local output = model.forward(input)
+Mimir.Model.allocate_params()
+Mimir.Model.init_weights("xavier_uniform")
+local output = Mimir.Model.forward(input)
 ```
 
 ## 🎯 Validation

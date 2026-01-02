@@ -39,6 +39,16 @@ public:
         float spat = 0.0f;
         float temp = 0.0f;
         float mse = 0.0f;
+        float grad_norm = 0.0f;
+        float grad_max = 0.0f;
+
+        // Optimizer (for display/debug)
+        int opt_type = 0;          // 0=SGD, 1=ADAM, 2=ADAMW
+        int opt_step = 0;
+        float opt_beta1 = 0.0f;
+        float opt_beta2 = 0.0f;
+        float opt_eps = 0.0f;
+        float opt_weight_decay = 0.0f;
     };
     
     AsyncMonitor() : running_(false), update_interval_ms_(100) {}
@@ -145,7 +155,11 @@ private:
                     local_metrics.timestep, local_metrics.kl,
                     local_metrics.wass, local_metrics.ent,
                     local_metrics.mom, local_metrics.spat,
-                    local_metrics.temp, local_metrics.mse
+                    local_metrics.temp, local_metrics.mse,
+                    local_metrics.grad_norm, local_metrics.grad_max,
+                    local_metrics.opt_type, local_metrics.opt_step,
+                    local_metrics.opt_beta1, local_metrics.opt_beta2,
+                    local_metrics.opt_eps, local_metrics.opt_weight_decay
                 );
                 htop_->render();
             }

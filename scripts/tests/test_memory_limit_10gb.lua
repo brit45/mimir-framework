@@ -1,17 +1,34 @@
 -- Test de la limite mémoire à 10 Go avec FluxModel
 print("=== Test Limite Mémoire 10 Go ===\n")
 
--- Configuration de la limite mémoire à 10 Go
-print("🛡️  Configuration MemoryGuard: Limite 10 Go")
-MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- 10 GB en bytes
+-- Bonne pratique: configurer l'allocateur tôt (configure aussi la limite du guard)
+local MAX_RAM_GB = 10
+print("🛡️  Configuration Allocator/MemoryGuard: Limite " .. MAX_RAM_GB .. " Go")
+do
+    local ok, err = Mimir.Allocator.configure({
+        max_ram_gb = MAX_RAM_GB,
+        enable_compression = true,
+        swap_strategy = "lru",
+    })
+    if ok == false then
+        print("❌ Allocator.configure failed: " .. tostring(err))
+        os.exit(1)
+    end
+end
 print("")
 
 -- Vérifier la limite
 local limit = MemoryGuard.getLimit()
 print("✓ Limite configurée: " .. string.format("%.2f", limit / 1024 / 1024 / 1024) .. " GB")
 
--- Créer un modèle Flux via l'API model (minuscule)
-local my_model = model.create("FluxModel-Test")
+-- Créer un modèle Flux via l'API model
+do
+    local ok, err = model.create("FluxModel-Test")
+    if ok == false then
+        print("❌ model.create failed: " .. tostring(err))
+        os.exit(1)
+    end
+end
 
 -- Configuration Flux
 local config = {
@@ -34,7 +51,11 @@ local config = {
 
 -- Construire le modèle Flux
 print("\n📦 Construction du modèle Flux...")
-model.build_architecture("flux", config)
+local ok_arch, err_arch = architectures.flux(config)
+if ok_arch == false then
+    print("❌ architectures.flux failed: " .. tostring(err_arch))
+    os.exit(1)
+end
 print("✓ Modèle construit")
 
 -- Vérifier l'utilisation mémoire après construction
@@ -65,7 +86,11 @@ for i = 1, input_size do
     test_input[i] = math.random() * 2 - 1
 end
 
-local output = model.forward_pass(test_input)
+local output, forward_err = model.forward(test_input, false)
+if output == nil then
+    print("❌ model.forward failed: " .. tostring(forward_err))
+    os.exit(1)
+end
 print("✓ Forward pass réussi")
 print("   Output size: " .. #output)
 

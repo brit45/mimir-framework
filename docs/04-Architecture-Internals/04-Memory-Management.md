@@ -10,15 +10,15 @@ Le système de gestion mémoire de Mímir Framework est maintenant configuré po
 
 ```lua
 -- Configuration limite
-MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- 10 GB
+Mimir.MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- 10 GB
 
 -- Monitoring
-local current = MemoryGuard.getCurrentUsage()  -- Bytes
-local peak = MemoryGuard.getPeakUsage()        -- Bytes
-local limit = MemoryGuard.getLimit()           -- Bytes
+local current = Mimir.MemoryGuard.getCurrentUsage()  -- Bytes
+local peak = Mimir.MemoryGuard.getPeakUsage()        -- Bytes
+local limit = Mimir.MemoryGuard.getLimit()           -- Bytes
 
 -- Statistiques
-MemoryGuard.printStats()
+Mimir.MemoryGuard.printStats()
 ```
 
 ### Nouvelles Fonctions C++
@@ -33,13 +33,13 @@ int lua_memoryguardGetLimit(lua_State* L);
 ### Table Lua `MemoryGuard`
 
 Accessible globalement dans tous les scripts Lua :
-- `MemoryGuard.setLimit(bytes)` - Définir la limite
-- `MemoryGuard.getCurrentUsage()` - RAM courante
-- `MemoryGuard.getPeakUsage()` - Pic d'utilisation
-- `MemoryGuard.getLimit()` - Limite configurée
-- `MemoryGuard.getStats()` - Statistiques détaillées
-- `MemoryGuard.printStats()` - Affichage formaté
-- `MemoryGuard.reset()` - Réinitialiser compteurs
+- `Mimir.MemoryGuard.setLimit(bytes)` - Définir la limite
+- `Mimir.MemoryGuard.getCurrentUsage()` - RAM courante
+- `Mimir.MemoryGuard.getPeakUsage()` - Pic d'utilisation
+- `Mimir.MemoryGuard.getLimit()` - Limite configurée
+- `Mimir.MemoryGuard.getStats()` - Statistiques détaillées
+- `Mimir.MemoryGuard.printStats()` - Affichage formaté
+- `Mimir.MemoryGuard.reset()` - Réinitialiser compteurs
 
 ## 📊 Scripts de Test
 
@@ -109,30 +109,30 @@ make -j4
 
 ```lua
 -- Configurer la limite
-MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
+Mimir.MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
 
 -- Votre code...
 local my_model = model.create("MonModele")
 
 -- Vérifier
-local usage = MemoryGuard.getCurrentUsage()
+local usage = Mimir.MemoryGuard.getCurrentUsage()
 print("RAM: " .. string.format("%.2f GB", usage / 1e9))
 ```
 
 ### Code C++ Minimal
 
 ```cpp
-#include "MemoryGuard.hpp"
+#include "Mimir.MemoryGuard.hpp"
 
 int main() {
     // Configurer
     auto& guard = MemoryGuard::instance();
-    guard.setLimit(10ULL * 1024 * 1024 * 1024);
+    Mimir.Mimir.MemoryGuard.setLimit(10ULL * 1024 * 1024 * 1024);
     
     // Votre code...
     
     // Vérifier
-    guard.printStats();
+    Mimir.Mimir.MemoryGuard.printStats();
     return 0;
 }
 ```
@@ -196,7 +196,7 @@ DynamicTensorAllocator
 ### Exemple de Protection
 
 ```lua
-MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
+Mimir.MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
 
 -- Si allocation dépasserait 10 GB
 -- → Refusée automatiquement
@@ -210,21 +210,21 @@ MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
 
 ```lua
 -- Configuration initiale
-MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
+Mimir.MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)
 
 for epoch = 1, num_epochs do
     -- Entraînement...
     
     -- Vérifier toutes les 10 époques
     if epoch % 10 == 0 then
-        local mem = MemoryGuard.getCurrentUsage()
+        local mem = Mimir.MemoryGuard.getCurrentUsage()
         print("Epoch " .. epoch .. " - RAM: " .. 
               string.format("%.2f GB", mem / 1e9))
     end
 end
 
 -- Rapport final
-MemoryGuard.printStats()
+Mimir.MemoryGuard.printStats()
 ```
 
 ### Dans un Serveur d'Inférence
@@ -271,7 +271,7 @@ while (running) {
 ### "Allocation bloquée"
 ```lua
 -- Vérifier status
-if MemoryGuard.isBlocked() then
+if Mimir.MemoryGuard.isBlocked() then
     print("Allocations bloquées!")
 end
 ```
@@ -279,8 +279,8 @@ end
 ### "Limite dépassée"
 ```lua
 -- Analyser
-local peak = MemoryGuard.getPeakUsage()
-local limit = MemoryGuard.getLimit()
+local peak = Mimir.MemoryGuard.getPeakUsage()
+local limit = Mimir.MemoryGuard.getLimit()
 print("Dépassement: " .. (peak - limit) / 1e9 .. " GB")
 ```
 

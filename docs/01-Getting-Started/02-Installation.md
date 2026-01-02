@@ -263,7 +263,7 @@ cat > test_install.lua << 'EOF'
 log("=== Test Installation Mímir ===")
 log("Lua: OK")
 
-tokenizer.create(1000)
+Mimir.Tokenizer.create(1000)
 log("Tokenizer: OK")
 
 local config = {
@@ -505,7 +505,7 @@ log("=== Benchmark Mímir ===")
 
 local start = os.clock()
 
-tokenizer.create(10000)
+Mimir.Tokenizer.create(10000)
 local config = {
     num_layers = 6,
     d_model = 512,

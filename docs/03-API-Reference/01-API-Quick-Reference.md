@@ -1,33 +1,46 @@
 # Mímir Framework - Référence Rapide API Lua
 
-**Version:** 2.1.0  
-**Dernière mise à jour:** Décembre 2025  
-**Synchronisé avec:** src/LuaScripting.cpp  
+**Version:** 2.3.0  
+**Dernière mise à jour:** 28 Décembre 2025  
+**Synchronisé avec:** mimir-api.lua (EmmyLua stub)  
 
 Guide de référence rapide pour l'API Lua du framework Mímir.
 
-> ⚠️ **Important:** Toujours appeler `allocator.configure()` avant d'utiliser le framework.
+> ⚠️ **Important:** Toujours appeler `Mimir.Mimir.Allocator.configure()` avant d'utiliser le framework.
+> 💡 **Syntaxe Recommandée:** Utiliser `Mimir.Module.*` pour bénéficier de l'autocompletion IDE (annotations EmmyLua dans `mimir-api.lua`).
+
+## 🆕 Nouveautés v2.3.0
+
+### Multi-Input / Branch Support
+- ✅ **TensorStore System** - Routage de tensors nommés pour architectures complexes
+- ✅ **model.set_layer_io()** - Configuration des entrées/sorties des layers
+- ✅ **Residual connections** - Support skip connections (ResNet, DenseNet, U-Net)
+- ✅ **Operations multi-input** - Add, Multiply, Concat, MatMul, Split fonctionnelles
 
 ---
 
-## Modules Disponibles (13 modules, 114 fonctions)
+## Modules Disponibles (16 modules, 122+ fonctions)
 
 | Module | Fonctions | Description |
 |--------|-----------|-------------|
-| `model` | 17 | Gestion du modèle (create, build, train, infer, save/load) |
-| `architectures` | 9 | Builders pour architectures pré-définies |
-| `flux` | 5 | API Flux pour génération d'images guidée par texte |
-| `FluxModel` | 12 | Classe FluxModel (orientée objet) |
-| `layers` | 8 | Opérations de couches (placeholders) |
-| `tokenizer` | 24 | Tokenization, BPE, analyse vocabulaire |
-| `dataset` | 3 | Chargement et préparation données |
-| `memory` | 6 | Gestion avancée RAM (AdvancedRAMManager) |
-| `guard` | 4 | Enforcement strict limites (API ancienne) |
-| `MemoryGuard` | 7 | Enforcement strict limites (API moderne) |
-| `allocator` | 3 | Allocation dynamique tenseurs avec compression |
-| `htop` | 5 | Monitoring temps réel style htop (terminal) |
-| `viz` | 11 | Visualisation graphique SFML (images, métriques, loss) |
+| `Mimir.Model` | 18 🆕 | Gestion du modèle + multi-input support |
+| `Mimir.Architectures` | 9 | Builders pour architectures pré-définies |
+| `Mimir.Flux` | 5 | API Flux pour génération d'images guidée par texte |
+| `Mimir.FluxModel` | 12 | Classe FluxModel (orientée objet) |
+| `Mimir.Layers` | 8 | Opérations de couches (placeholders) |
+| `Mimir.Tokenizer` | 24 | Tokenization, BPE, analyse vocabulaire |
+| `Mimir.Dataset` | 3 | Chargement et préparation données |
+| `Mimir.Memory` | 6 | Gestion avancée RAM (AdvancedRAMManager) |
+| `Mimir.MemoryGuard` | 7 | Enforcement strict limites (API moderne) |
+| `Mimir.Allocator` | 3 | Allocation dynamique tenseurs avec compression |
+| `Mimir.Serialization` | 12 | Sauvegarde/chargement (SafeTensors, RawFolder, DebugJson) |
+| `Mimir.Htop` | 5 | Monitoring temps réel style htop (terminal) |
+| `Mimir.Viz` | 11 | Visualisation graphique SFML (images, métriques, loss) |
+| `Mimir.Hardware` | 2 | Détection capacités hardware |
+| `Mimir.Checkpoint` | 2 | API checkpoint (legacy) |
 | **Globales** | 3 | `log()`, `read_json()`, `write_json()` |
+
+> **Note:** Les globales (`model.*`, `Mimir.Memory.*`, etc.) restent disponibles pour compatibilité, mais **utilisez `Mimir.*` pour l'autocompletion**.
 
 ---
 
@@ -35,32 +48,32 @@ Guide de référence rapide pour l'API Lua du framework Mímir.
 
 ```lua
 -- 1. Setup mémoire
-memory.set_limit(8000)
-allocator.configure({max_tensors = 1000, enable_compression = true})
+Mimir.Mimir.Memory.set_limit(8000)
+Mimir.Mimir.Allocator.configure({max_tensors = 1000, enable_compression = true})
 
 -- 2. Tokenizer
-tokenizer.create(50000)
-tokenizer.ensure_vocab_from_text(corpus_text)
+Mimir.Mimir.Tokenizer.create(50000)
+Mimir.Mimir.Tokenizer.ensure_vocab_from_text(corpus_text)
 
 -- 3. Dataset
-dataset.load("data/corpus")
-dataset.prepare_sequences(512)
+Mimir.Mimir.Dataset.load("data/corpus")
+Mimir.Mimir.Dataset.prepare_sequences(512)
 
 -- 4. Modèle
-model.create("transformer", {vocab_size = 50000, embed_dim = 512, num_layers = 6})
-model.build()
-model.init_weights("xavier")
+Mimir.Model.create("transformer", {vocab_size = 50000, embed_dim = 512, num_layers = 6})
+Mimir.Model.build()
+Mimir.Model.init_weights("xavier")
 
 -- 5. Monitoring
-htop.create()
-htop.enable(true)
+Mimir.Mimir.Htop.create()
+Mimir.Mimir.Htop.enable(true)
 
 -- 6. Entraînement
-model.train(10, 3e-4)
+Mimir.Model.train(10, 3e-4)
 
 -- 7. Sauvegarde
-model.save("checkpoints/run1")
-tokenizer.save("checkpoints/tokenizer.json")
+Mimir.Serialization.save_safetensors("checkpoints/run1.safetensors")
+Mimir.Mimir.Tokenizer.save("checkpoints/Mimir.Tokenizer.json")
 ```
 
 ---
@@ -70,44 +83,59 @@ tokenizer.save("checkpoints/tokenizer.json")
 ### Model
 
 ```lua
-model.create(type, config)          -- Créer modèle
-model.build()                       -- Construire (allouer mémoire)
-model.train(epochs, lr)             -- Entraîner
-model.infer(prompt)                 -- Génération
-model.save(dir)                     -- Sauvegarder
-model.load(dir)                     -- Charger
-model.total_params()                -- Nombre paramètres
-model.init_weights(method, seed)    -- Initialiser poids
-model.hardware_caps()               -- Capacités CPU
+Mimir.Model.create(type, config)          -- Créer modèle
+Mimir.Model.build()                       -- Construire (allouer mémoire)
+Mimir.Model.train(epochs, lr)             -- Entraîner
+Mimir.Model.infer(prompt)                 -- Génération
+Mimir.Model.total_params()                -- Nombre paramètres
+Mimir.Model.init_weights(method, seed)    -- Initialiser poids
+Mimir.Model.hardware_caps()               -- Capacités CPU
+
+-- 🆕 Multi-input support
+Mimir.Model.set_layer_io(name, inputs, output)  -- Config entrées/sorties layer
+
+-- Serialization (remplace model.save/load)
+Mimir.Serialization.save_safetensors(path)    -- Sauvegarder (SafeTensors)
+Mimir.Serialization.load_safetensors(path)    -- Charger (SafeTensors)
+```
+
+**Exemple Multi-Input (Residual Connection):**
+```lua
+-- Créer skip connection (x + conv_output)
+Mimir.Model.push_layer("conv1", "Conv2d", 64*64*3*3)
+Mimir.Model.set_layer_io("conv1", {"x"}, "skip")  -- Sauver output comme "skip"
+
+model.push_layer("add", "Add", 0)
+model.set_layer_io("add", {"x", "skip"}, "x")  -- Add(x, skip) → x
 ```
 
 ### Architectures
 
 ```lua
-architectures.transformer(config)   -- Transformer GPT-like
-architectures.unet(config)          -- U-Net
-architectures.vae(config)           -- VAE
-architectures.vit(config)           -- Vision Transformer
-architectures.gan(config)           -- GAN
-architectures.diffusion(config)     -- Diffusion model
-architectures.resnet(config)        -- ResNet
-architectures.mobilenet(config)     -- MobileNet
+Mimir.Architectures.transformer(config)   -- Transformer GPT-like
+Mimir.Architectures.unet(config)          -- U-Net
+Mimir.Architectures.vae(config)           -- VAE
+Mimir.Architectures.vit(config)           -- Vision Transformer
+Mimir.Architectures.gan(config)           -- GAN
+Mimir.Architectures.diffusion(config)     -- Diffusion model
+Mimir.Architectures.resnet(config)        -- ResNet
+Mimir.Architectures.mobilenet(config)     -- MobileNet
 ```
 
 ### Flux (API Fonctionnelle)
 
 ```lua
-flux.generate(prompt, steps)           -- Générer image depuis prompt
-flux.encode_image(img_path)            -- Encoder image → latent
-flux.decode_latent(latent)             -- Décoder latent → image
-flux.encode_text(text)                 -- Encoder texte → embeddings
-flux.set_tokenizer(tok_path)           -- Définir tokenizer
+Mimir.Flux.generate(prompt, steps)           -- Générer image depuis prompt
+Mimir.Flux.encode_image(img_path)            -- Encoder image → latent
+Mimir.Flux.decode_latent(latent)             -- Décoder latent → image
+Mimir.Flux.encode_text(text)                 -- Encoder texte → embeddings
+Mimir.Flux.set_tokenizer(tok_path)           -- Définir tokenizer
 ```
 
 ### FluxModel (API Orientée Objet)
 
 ```lua
-local flux_model = FluxModel.new(config)     -- Créer instance
+local flux_model = Mimir.FluxModel.new(config)     -- Créer instance
 flux_model.train()                            -- Mode entraînement
 flux_model.eval()                             -- Mode évaluation
 flux_model.isTraining()                       -- Vérifier mode
@@ -124,90 +152,90 @@ flux_model.setPromptTokenizer(tok_path)       -- Définir tokenizer
 ### Tokenizer (24 fonctions)
 
 ```lua
-tokenizer.create(max_vocab)                  -- Créer
-tokenizer.tokenize(text)                     -- Tokeniser
-tokenizer.detokenize(tokens)                 -- Dé-tokeniser
-tokenizer.vocab_size()                       -- Taille vocab
-tokenizer.add_token(token)                   -- Ajouter token
-tokenizer.ensure_vocab_from_text(text)       -- Étendre vocab
-tokenizer.tokenize_ensure(text)              -- Tokeniser + étendre
-tokenizer.learn_bpe(corpus_path, size)       -- Apprendre BPE
-tokenizer.tokenize_bpe(text)                 -- Tokeniser BPE
-tokenizer.set_max_length(max_len)            -- Longueur max
-tokenizer.pad_sequence(tokens, len, pad)     -- Padder séquence
-tokenizer.batch_tokenize(texts)              -- Tokeniser batch
-tokenizer.pad_id()                           -- ID padding
-tokenizer.unk_id()                           -- ID unknown
-tokenizer.seq_id()                           -- ID sequence
-tokenizer.mod_id()                           -- ID modifier
-tokenizer.mag_id()                           -- ID magnitude
-tokenizer.get_token_by_id(id)                -- Récupérer token
-tokenizer.print_stats()                      -- Afficher stats
-tokenizer.get_frequencies()                  -- Fréquences tokens
-tokenizer.analyze_text(text)                 -- Analyser texte
-tokenizer.extract_keywords(text, count)      -- Extraire mots-clés
-tokenizer.pad_sequence(tokens, len)          -- Padding
-tokenizer.batch_tokenize(texts)              -- Batch tokenization
-tokenizer.extract_keywords(text, top_k)      -- Extraction keywords
-tokenizer.save(path)                         -- Sauvegarder
-tokenizer.load(path)                         -- Charger
+Mimir.Tokenizer.create(max_vocab)                  -- Créer
+Mimir.Tokenizer.tokenize(text)                     -- Tokeniser
+Mimir.Tokenizer.detokenize(tokens)                 -- Dé-tokeniser
+Mimir.Tokenizer.vocab_size()                       -- Taille vocab
+Mimir.Tokenizer.add_token(token)                   -- Ajouter token
+Mimir.Tokenizer.ensure_vocab_from_text(text)       -- Étendre vocab
+Mimir.Tokenizer.tokenize_ensure(text)              -- Tokeniser + étendre
+Mimir.Tokenizer.learn_bpe(corpus_path, size)       -- Apprendre BPE
+Mimir.Tokenizer.tokenize_bpe(text)                 -- Tokeniser BPE
+Mimir.Tokenizer.set_max_length(max_len)            -- Longueur max
+Mimir.Tokenizer.pad_sequence(tokens, len, pad)     -- Padder séquence
+Mimir.Tokenizer.batch_tokenize(texts)              -- Tokeniser batch
+Mimir.Tokenizer.pad_id()                           -- ID padding
+Mimir.Tokenizer.unk_id()                           -- ID unknown
+Mimir.Tokenizer.seq_id()                           -- ID sequence
+Mimir.Tokenizer.mod_id()                           -- ID modifier
+Mimir.Tokenizer.mag_id()                           -- ID magnitude
+Mimir.Tokenizer.get_token_by_id(id)                -- Récupérer token
+Mimir.Tokenizer.print_stats()                      -- Afficher stats
+Mimir.Tokenizer.get_frequencies()                  -- Fréquences tokens
+Mimir.Tokenizer.analyze_text(text)                 -- Analyser texte
+Mimir.Tokenizer.extract_keywords(text, count)      -- Extraire mots-clés
+Mimir.Tokenizer.pad_sequence(tokens, len)          -- Padding
+Mimir.Tokenizer.batch_tokenize(texts)              -- Batch tokenization
+Mimir.Tokenizer.extract_keywords(text, top_k)      -- Extraction keywords
+Mimir.Tokenizer.save(path)                         -- Sauvegarder
+Mimir.Tokenizer.load(path)                         -- Charger
 ```
 
 **Tokens spéciaux:**
 ```lua
-tokenizer.pad_id()   -- Padding
-tokenizer.unk_id()   -- Unknown
-tokenizer.seq_id()   -- Sequence
-tokenizer.mod_id()   -- Modulation
-tokenizer.mag_id()   -- Magnitude
+Mimir.Tokenizer.pad_id()   -- Padding
+Mimir.Tokenizer.unk_id()   -- Unknown
+Mimir.Tokenizer.seq_id()   -- Sequence
+Mimir.Tokenizer.mod_id()   -- Modulation
+Mimir.Tokenizer.mag_id()   -- Magnitude
 ```
 
 ### Dataset
 
 ```lua
-dataset.load(dir)                  -- Charger dataset
-dataset.prepare_sequences(max_len) -- Préparer séquences
+Mimir.Dataset.load(dir)                  -- Charger dataset
+Mimir.Dataset.prepare_sequences(max_len) -- Préparer séquences
 ```
 
 ### Memory
 
 ```lua
-memory.config(cfg)         -- Configurer
-memory.get_stats()         -- Stats (current_mb, peak_mb, usage_percent)
-memory.print_stats()       -- Afficher stats
-memory.clear()             -- Libérer caches
-memory.get_usage()         -- Usage actuel (MB)
-memory.set_limit(limit_mb) -- Définir limite
+Mimir.Memory.config(cfg)         -- Configurer
+Mimir.Memory.get_stats()         -- Stats (current_mb, peak_mb, usage_percent)
+Mimir.Memory.print_stats()       -- Afficher stats
+Mimir.Memory.clear()             -- Libérer caches
+Mimir.Memory.get_usage()         -- Usage actuel (MB)
+Mimir.Memory.set_limit(limit_mb) -- Définir limite
 ```
 
 ### Guard (enforcement strict)
 
 ```lua
-guard.set_limit(limit_mb)  -- Limite stricte
-guard.get_stats()          -- Stats (current_mb, peak_mb, limit_mb, usage_percent)
-guard.print_stats()        -- Afficher stats
-guard.reset()              -- Reset compteurs
+Mimir.Mimir.MemoryGuard.set_limit(limit_mb)  -- Limite stricte
+Mimir.Mimir.MemoryGuard.get_stats()          -- Stats (current_mb, peak_mb, limit_mb, usage_percent)
+Mimir.Mimir.MemoryGuard.print_stats()        -- Afficher stats
+Mimir.Mimir.MemoryGuard.reset()              -- Reset compteurs
 ```
 
 ### Allocator
 
 ```lua
-allocator.configure({
+Mimir.Allocator.configure({
   max_tensors = 1000,
   offload_threshold_mb = 6000,
   enable_compression = true,
   max_ram_gb = 8
 })
-allocator.print_stats()    -- Afficher stats
-allocator.get_stats()      -- Stats (tensor_count, loaded_count)
+Mimir.Allocator.print_stats()    -- Afficher stats
+Mimir.Allocator.get_stats()      -- Stats (tensor_count, loaded_count)
 ```
 
 ### Htop (monitoring)
 
 ```lua
-htop.create(config)        -- Créer monitor
-htop.enable(enabled)       -- Activer/désactiver
-htop.update({              -- Mettre à jour métriques
+Mimir.Htop.create(config)        -- Créer monitor
+Mimir.Htop.enable(enabled)       -- Activer/désactiver
+Mimir.Htop.update({              -- Mettre à jour métriques
   epoch = 1,
   total_epochs = 10,
   batch = 10,
@@ -217,24 +245,24 @@ htop.update({              -- Mettre à jour métriques
   lr = 3e-4,
   memory_mb = 5000
 })
-htop.render()              -- Forcer render
-htop.clear()               -- Clear affichage
+Mimir.Htop.render()              -- Forcer render
+Mimir.Htop.clear()               -- Clear affichage
 ```
 
 ### Viz (visualisation)
 
 ```lua
-viz.create(title, width, height)   -- Créer fenêtre
-viz.initialize()                   -- Initialiser
-viz.is_open()                      -- Fenêtre ouverte?
-viz.process_events()               -- Traiter événements
-viz.update()                       -- Update render
-viz.add_image(pixels, w, h, ch)    -- Afficher image
-viz.update_metrics(metrics)        -- Update métriques
-viz.add_loss_point(loss)           -- Ajouter point loss
-viz.clear()                        -- Clear viz
-viz.set_enabled(enabled)           -- Activer/désactiver
-viz.save_loss_history(path)        -- Sauvegarder historique
+Mimir.Viz.create(title, width, height)   -- Créer fenêtre
+Mimir.Viz.initialize()                   -- Initialiser
+Mimir.Viz.is_open()                      -- Fenêtre ouverte?
+Mimir.Viz.process_events()               -- Traiter événements
+Mimir.Viz.update()                       -- Update render
+Mimir.Viz.add_image(pixels, w, h, ch)    -- Afficher image
+Mimir.Viz.update_metrics(metrics)        -- Update métriques
+Mimir.Viz.add_loss_point(loss)           -- Ajouter point loss
+Mimir.Viz.clear()                        -- Clear viz
+Mimir.Viz.set_enabled(enabled)           -- Activer/désactiver
+Mimir.Viz.save_loss_history(path)        -- Sauvegarder historique
 ```
 
 ### Fonctions Globales
@@ -464,41 +492,41 @@ write_json(filepath, data)   -- Écrire JSON
 ### Entraînement Simple
 
 ```lua
-memory.set_limit(8000)
-tokenizer.create(50000)
-tokenizer.ensure_vocab_from_text(corpus)
-dataset.load("data/train")
-dataset.prepare_sequences(512)
-model.create("transformer", {vocab_size = 50000, embed_dim = 512})
-model.build()
-model.train(10, 3e-4)
-model.save("checkpoints/final")
+Mimir.Memory.set_limit(8000)
+Mimir.Tokenizer.create(50000)
+Mimir.Tokenizer.ensure_vocab_from_text(corpus)
+Mimir.Dataset.load("data/train")
+Mimir.Dataset.prepare_sequences(512)
+Mimir.Model.create("transformer", {vocab_size = 50000, embed_dim = 512})
+Mimir.Model.build()
+Mimir.Model.train(10, 3e-4)
+Mimir.Model.save("checkpoints/final")
 ```
 
 ### Inférence
 
 ```lua
-tokenizer.load("checkpoints/tokenizer.json")
-model.load("checkpoints/final")
-local output = model.infer("Once upon a time")
+Mimir.Tokenizer.load("checkpoints/Mimir.Tokenizer.json")
+Mimir.Model.load("checkpoints/final")
+local output = Mimir.Model.infer("Once upon a time")
 print(output)
 ```
 
 ### Monitoring Complet
 
 ```lua
-htop.create()
-htop.enable(true)
-viz.create("Training", 1280, 720)
-viz.initialize()
+Mimir.Htop.create()
+Mimir.Htop.enable(true)
+Mimir.Viz.create("Training", 1280, 720)
+Mimir.Viz.initialize()
 
 -- Dans boucle d'entraînement:
-htop.update({epoch = e, batch = b, loss = l, ...})
-viz.update_metrics({epoch = e, loss = l})
-viz.add_loss_point(l)
-if viz.is_open() then
-  viz.process_events()
-  viz.update()
+Mimir.Htop.update({epoch = e, batch = b, loss = l, ...})
+Mimir.Viz.update_metrics({epoch = e, loss = l})
+Mimir.Viz.add_loss_point(l)
+if Mimir.Viz.is_open() then
+  Mimir.Viz.process_events()
+  Mimir.Viz.update()
 end
 ```
 
@@ -508,12 +536,12 @@ end
 
 ```lua
 -- Afficher infos mémoire
-memory.print_stats()
-guard.print_stats()
-allocator.print_stats()
+Mimir.Memory.print_stats()
+Mimir.Mimir.MemoryGuard.print_stats()
+Mimir.Allocator.print_stats()
 
 -- Afficher infos tokenizer
-tokenizer.print_stats()
+Mimir.Tokenizer.print_stats()
 
 -- Logger custom
 log("Mon message de debug")
@@ -531,7 +559,7 @@ log("FMA: " .. tostring(caps.fma))
 Toutes les fonctions retournant `(ok, err)` peuvent être gérées ainsi:
 
 ```lua
-local ok, err = model.train(10, 3e-4)
+local ok, err = Mimir.Model.train(10, 3e-4)
 if not ok then
   log("Erreur entraînement: " .. (err or "unknown"))
   os.exit(1)
@@ -541,7 +569,7 @@ end
 Pour les fonctions retournant directement une valeur:
 
 ```lua
-local output = model.infer(prompt)
+local output = Mimir.Model.infer(prompt)
 if not output then
   log("Erreur inférence")
 end
@@ -551,11 +579,11 @@ end
 
 ## Best Practices
 
-1. **Toujours définir une limite mémoire** : `memory.set_limit()` ou `guard.set_limit()`
+1. **Toujours définir une limite mémoire** : `Mimir.Memory.set_limit()` ou `Mimir.Mimir.MemoryGuard.set_limit()`
 2. **Configurer l'allocateur** : Active compression et offload pour grands modèles
 3. **Sauvegarder régulièrement** : Checkpoints toutes les N epochs
 4. **Monitoring** : Utilise htop ou viz pour suivre progression
-5. **Clear périodique** : `memory.clear()` entre epochs si nécessaire
+5. **Clear périodique** : `Mimir.Memory.clear()` entre epochs si nécessaire
 6. **Hardware detection** : Vérifie `model.hardware_caps()` pour optimisations
 
 ---

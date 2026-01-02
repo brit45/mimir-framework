@@ -6,7 +6,7 @@
 -- Uses ONLY official API from mimir-api.lua:
 --   dataset.load, dataset.prepare_sequences
 --   model.create, architectures.vae, model.build, model.train
---   model.save, model.set_hardware (optional), allocator.configure (optional)
+--   model.save, model.set_hardware (optional), Allocator.configure (optional)
 -- ============================================================================
 
 log("╔═══════════════════════════════════════════════════════════════╗")
@@ -22,7 +22,7 @@ log("\n🔧 Runtime setup...")
 -- model.set_hardware("auto")
 
 -- Optional: allocator (if you want strict RAM cap)
--- allocator.configure({ max_ram_gb = 8.0, enable_compression = true })
+-- Allocator.configure({ max_ram_gb = 8.0, enable_compression = true })
 
 -- ---------------------------------------------------------------------------
 -- Dataset
@@ -119,9 +119,9 @@ log("✅ Training done")
 local out_dir = "checkpoints/vae_simple"
 log("\n💾 Saving: " .. out_dir)
 
-ok, err = model.save(out_dir)
+ok, err = Mimir.Serialization.save(out_dir .. ".safetensors", "safetensors")
 if not ok then
-  error("model.save failed: " .. tostring(err))
+  error("Mimir.Serialization.save failed: " .. tostring(err))
 end
 log("✓ Saved")
 

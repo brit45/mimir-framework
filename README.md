@@ -1,24 +1,47 @@
-# Mímir Framework v2.1
+# Mímir Framework v2.3
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-2.1.0-blue)
+![Version](https://img.shields.io/badge/version-2.3.0-blue)
 ![C++17](https://img.shields.io/badge/C++-17-orange)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-GPL--2.0-green)
 ![OpenMP](https://img.shields.io/badge/OpenMP-enabled-red)
 ![Vulkan](https://img.shields.io/badge/Vulkan-Compute-purple)
 
-**Framework de Deep Learning haute performance en C++17 avec optimisations hardware avancées, API Lua complète et monitoring asynchrone**
+**Framework de Deep Learning haute performance en C++17 avec optimisations hardware avancées, API Lua complète et sérialisation moderne**
 
-[Documentation](#-documentation) • [Installation](#-installation) • [Quickstart](#-quickstart) • [v2.0 Features](#-nouveautés-v20)
+[Documentation](#-documentation) • [Installation](#-installation) • [Quickstart](#-quickstart) • [État Technique](TECHNICAL_STATUS.md)
 
 </div>
 
 ---
 
-## 🆕 Nouveautés v2.1
+## 🆕 Nouveautés v2.3
 
-### 🗂️ Organisation et Qualité (v2.1.0)
+### 💾 Sérialisation Moderne (v2.3.0)
+- **3 formats de checkpoint** : SafeTensors (production), RawFolder (debug), DebugJson (inspection)
+- **Compatibilité HuggingFace** : Import/export SafeTensors pour PyTorch/TensorFlow
+- **Code legacy retiré** : Suppression complète de l'ancienne API de sauvegarde
+- **Architecture optimisée** : `layer_weight_blocks` (un tenseur par couche) au lieu de `params` (un tenseur par paramètre)
+- **Checksums SHA256** : Validation d'intégrité dans RawFolder format
+- **Metadata enrichie** : Version, timestamps, statistiques dans tous les formats
+
+**📚 [Voir docs/SAVE_LOAD.md](docs/SAVE_LOAD.md) pour le guide complet**  
+**📚 [Voir LEGACY_CLEANUP_COMPLETE.md](LEGACY_CLEANUP_COMPLETE.md) pour les détails du cleanup**
+
+### ⚡ Système Unifié des Layers (v2.1.0)
+- **Architecture refactorisée** : enum-based dispatch (10-40x plus rapide vs if/else)
+- **67 layer types** définis avec validation startup
+- **19 layers fonctionnels** : Conv2d, Linear, ReLU, GELU, SiLU, LayerNorm, etc.
+- **Optimisations AVX2** : Linear (2.6x), ReLU (5.2x speedup)
+- **OpenMP parallelization** : scale ~8-10x sur 12 threads
+- **Type-safe** : enum types au lieu de strings
+- **Erreurs explicites** : pas de silent fallback
+- **Documentation complète** : 5 guides (1600+ lignes)
+
+**📚 [Voir MISSION_COMPLETE.md](MISSION_COMPLETE.md) pour les détails**
+
+### 🗂️ Organisation et Qualité
 - **Scripts réorganisés** en 6 catégories (demos, examples, tests, benchmarks, training, templates)
 - **Documentation corrigée** (33 fixes de liens cassés)
 - **Synchronisation API** validée à 100% (114 fonctions, 13 modules)
@@ -51,7 +74,7 @@
 
 ## 🛡️ Sécurité Mémoire (v2.0)
 
-**Mímir v2.0 garantit une utilisation mémoire sécurisée avec protection OOM intégrée.**
+**Mímir v2.0+ garantit une utilisation mémoire sécurisée avec protection OOM intégrée.**
 
 ### 🔒 Garanties
 
@@ -66,7 +89,7 @@
 **Toujours commencer vos scripts par :**
 
 ```lua
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,              -- Limite stricte
     enable_compression = true       -- Compression LZ4
 })
@@ -76,9 +99,9 @@ allocator.configure({
 
 ### 📚 Documentation
 
-- **[docs/MEMORY_BEST_PRACTICES.md](docs/MEMORY_BEST_PRACTICES.md)** - Guide complet des bonnes pratiques
-- **[MEMORY_SAFETY_FIXES.md](MEMORY_SAFETY_FIXES.md)** - Détails techniques des correctifs
-- **[scripts/template_new_model.lua](scripts/template_new_model.lua)** - Template pour vos modèles
+- **[docs/02-User-Guide/10-Memory-Best-Practices.md](docs/02-User-Guide/10-Memory-Best-Practices.md)** - Guide complet des bonnes pratiques
+- **[TECHNICAL_STATUS.md](TECHNICAL_STATUS.md)** - État technique détaillé du projet
+- **[scripts/templates/template_new_model.lua](scripts/templates/template_new_model.lua)** - Template pour vos modèles
 
 ---
 
@@ -119,6 +142,33 @@ Mímir est un framework de deep learning **CPU-only** moderne écrit en C++17, c
 | **ResNet** | ResNet-50 avec bottleneck blocks | Classification d'images (backbone) |
 | **MobileNet** | MobileNetV2 (inverted residuals) | Classification sur mobile/embarqué |
 
+### 💾 Sérialisation et Checkpointing
+
+**3 formats adaptés à chaque besoin :**
+
+```lua
+-- SafeTensors (production, compatible HuggingFace)
+Mimir.Serialization.save(model, "model.safetensors", "SAFETENSORS")
+
+-- RawFolder (debug, checksums SHA256)
+Mimir.Serialization.save(model, "checkpoint/", "RAWFOLDER")
+
+-- DebugJson (inspection, statistiques)
+Mimir.Serialization.save(model, "debug.json", "DEBUGJSON")
+
+-- Chargement (détection automatique du format)
+Mimir.Serialization.load(model, "model.safetensors")
+```
+
+**Caractéristiques :**
+- ✅ Interopérabilité Python (SafeTensors)
+- ✅ Checksums SHA256 (RawFolder)
+- ✅ Metadata enrichie (version, timestamps)
+- ✅ Validation d'intégrité
+- ✅ Optimisé pour la performance (850 MB/s write, 1200 MB/s read)
+
+**📚 [Guide complet : docs/SAVE_LOAD.md](docs/SAVE_LOAD.md)**
+
 ### ⚡ Optimisations CPU avancées
 
 **Mímir exploite au maximum les capacités des CPU modernes** pour rivaliser avec les performances GPU dans de nombreux cas d'usage.
@@ -140,22 +190,24 @@ Mímir est un framework de deep learning **CPU-only** moderne écrit en C++17, c
 
 ```lua
 -- ✅ Toujours configurer l'allocateur en premier!
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
 })
 
 -- Créer un Transformer en quelques lignes
-model.create("gpt")
+Mimir.Model.create("gpt")
 architectures.transformer({
     vocab_size = 50000,
     d_model = 768,
     num_layers = 12,
     num_heads = 12
 })
-model.allocate_params()
-model.init_weights("he", 42)
--- ~117M paramètres prêts!
+Mimir.Model.allocate_params()
+Mimir.Model.init_weights("he", 42)
+
+-- Sauvegarder avec le nouveau système
+Mimir.Serialization.save(model, "gpt_model.safetensors", "SAFETENSORS")
 ```
 
 ## 📦 Installation
@@ -164,19 +216,19 @@ model.init_weights("he", 42)
 
 ```bash
 # Ubuntu/Debian
-sudo apt-get install -y g++ make liblua5.3-dev
+sudo apt-get install -y g++ make liblua5.3-dev libsfml-dev liblz4-dev
 
 # ArchLinux
-sudo pacman -S gcc make lua53
+sudo pacman -S gcc make lua53 sfml lz4
 
 # macOS
-brew install gcc lua
+brew install gcc lua sfml lz4
 ```
 
 **Minimum requis**:
 - GCC 7+ ou Clang 6+ (support C++17)
 - CPU moderne avec AVX2 (Intel Haswell 2013+, AMD Excavator 2015+)
-- 4GB RAM minimum
+- 4GB RAM minimum (10GB recommandé)
 - **Aucun GPU requis** - Fonctionne sur n'importe quel ordinateur moderne
 
 ### Compilation
@@ -187,25 +239,26 @@ cd mimir-framework
 make -j$(nproc)
 ```
 
-**Résultat**: `bin/mimir` (1.4MB optimisé)
+**Résultat**: `bin/mimir` (2.2MB optimisé avec sérialisation)
 
 **Options de compilation**:
 ```bash
 make clean              # Nettoyer
-make DEBUG=1            # Build debug (symboles + asserts)
-make VERBOSE=1          # Afficher les commandes complètes
+make test              # Build et exécute les tests
+make DEBUG=1           # Build debug (symboles + asserts)
+make VERBOSE=1         # Afficher les commandes complètes
 ```
 
 ## 🚀 Quickstart
 
-### Option 1: Script Lua v2.0 (Asynchrone)
+### Script Lua avec Sérialisation v2.3
 
 ```lua
--- my_first_model_v2.lua
-print("🚀 Mon premier modèle Transformer v2.0")
+-- my_first_model_v2.3.lua
+print("🚀 Mon premier modèle Transformer v2.3")
 
 -- ⚠️ IMPORTANT: Toujours configurer l'allocateur en premier!
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,              -- Limite stricte (protection OOM)
     enable_compression = true       -- Compression LZ4 (~50% économie)
 })
@@ -221,7 +274,7 @@ if hw.avx2 or hw.fma then
 end
 
 -- Créer le modèle avec config réaliste
-model.create("my_transformer")
+Mimir.Model.create("my_transformer")
 architectures.transformer({
     vocab_size = 30000,     -- Valeur raisonnable
     d_model = 512,          -- Dimension modérée
@@ -230,7 +283,7 @@ architectures.transformer({
 })
 
 -- Allouer et VÉRIFIER le succès
-local success, params = model.allocate_params()
+local success, params = Mimir.Model.allocate_params()
 if not success then
     print("❌ Erreur: modèle trop grand pour 10 GB!")
     os.exit(1)
@@ -239,103 +292,52 @@ end
 print(string.format("✓ Paramètres: %d (%.1f MB)", 
     params, params * 4 / 1024 / 1024))
 
-model.init_weights("xavier", 42)
+Mimir.Model.init_weights("xavier", 42)
 
 -- Entraînement avec monitoring asynchrone
 for epoch = 1, 10 do
     for batch = 1, 100 do
         -- Forward/Backward (GPU automatique si disponible)
-        local output = model.forward(input)
+        local output = Mimir.Model.forward(input)
         local loss = model.compute_loss(output, target)
-        model.backward(loss_grad)
-        model.optimizer_step(optimizer, lr)
+        Mimir.Model.backward(loss_grad)
+        Mimir.Model.optimizer_step(optimizer, lr)
         
         -- Mise à jour monitoring (thread-safe, non-bloquant)
         htop.update(epoch, 10, batch, 100, loss, avg_loss, lr)
-        -- PAS BESOIN de htop.render() - c'est automatique!
     end
+    
+    -- Sauvegarder avec le nouveau système (v2.3)
+    Mimir.Serialization.save(model, 
+        string.format("checkpoints/model_epoch%d.safetensors", epoch),
+        "SAFETENSORS")
 end
 
 -- Statistiques finales
-allocator.print_stats()
-model.save("checkpoints/my_model")
+Mimir.Allocator.print_stats()
+print("✅ Entraînement terminé!")
 ```
 
 **Exécution**:
 ```bash
-bin/mimir --lua my_first_model_v2.lua
+bin/mimir --lua my_first_model_v2.3.lua
 ```
 
-### Option 2: Script Lua v1.x (Compatibilité)
+### Charger un Modèle Existant
 
 ```lua
--- my_first_model.lua (ancien style, toujours supporté)
-print("🚀 Mon premier modèle Transformer")
+-- load_and_infer.lua
+Mimir.Allocator.configure({ max_ram_gb = 10.0, enable_compression = true })
 
--- Créer le modèle
-model.create("my_transformer")
-architectures.transformer({
-    vocab_size = 10000,
-    d_model = 512,
-    num_layers = 6,
-    num_heads = 8
-})
+Mimir.Model.create("my_transformer")
 
--- Allouer et initialiser
-local success, params = model.allocate_params()
-print(string.format("Paramètres: %d (%.1f MB)", 
-    params, params * 4 / 1024 / 1024))
+-- Charger depuis SafeTensors
+Mimir.Serialization.load(model, "checkpoints/model_epoch10.safetensors")
 
-model.init_weights("he", 42)
-
--- Tokenizer
-tokenizer.create(10000)
-local tokens = tokenizer.tokenize("Hello world")
-print("Tokens:", table.concat(tokens, ", "))
-
--- Forward pass
-local output = model.forward(tokens)
-print(string.format("Output shape: %d", #output))
-
--- Sauvegarder
-model.save("checkpoints/my_model.safetensors")
-print("✅ Modèle sauvegardé!")
-```
-
-**Exécuter**:
-```bash
-./bin/mimir --lua my_first_model.lua
-```
-
-### Option 2: Démo C++
-
-```bash
-# Tester une architecture
-./bin/mimir --demo transformer
-./bin/mimir --demo unet
-./bin/mimir --demo vit
-
-# Afficher l'aide
-./bin/mimir --help
-```
-
-### Option 3: Configuration JSON
-
-```json
-{
-    "architecture": "transformer",
-    "transformer": {
-        "vocab_size": 50000,
-        "d_model": 768,
-        "num_layers": 12,
-        "num_heads": 12,
-        "max_seq_len": 2048
-    }
-}
-```
-
-```bash
-./bin/mimir --config config.json
+-- Inférence
+local input_tokens = tokenizer.tokenize("Hello world")
+local output = Mimir.Model.forward(input_tokens)
+print("Génération:", tokenizer.decode(output))
 ```
 
 ## 🏗️ Architectures
@@ -504,9 +506,9 @@ architectures.mobilenet({
 - `architectures.*` (8 fonctions) - UNet, VAE, ViT, GAN, Diffusion, Transformer, ResNet, MobileNet
 - `tokenizer.*` (20+ fonctions) - Tokenization, BPE, vocabulaire, analyse
 - `dataset.*` (2 fonctions) - Chargement et préparation données
-- `memory.*` (6 fonctions) - Gestion RAM avancée
+- `Mimir.Memory.*` (6 fonctions) - Gestion RAM avancée
 - `guard.*` (4 fonctions) - Enforcement strict limites mémoire
-- `allocator.*` (3 fonctions) - Allocation dynamique tenseurs
+- `Mimir.Allocator.*` (3 fonctions) - Allocation dynamique tenseurs
 - `htop.*` (5 fonctions) - Monitoring temps réel terminal
 - `viz.*` (11 fonctions) - Visualisation graphique SFML
 - `layers.*` (8 fonctions) - Opérations de couches
@@ -545,14 +547,14 @@ architectures.mobilenet({
 ### Model API
 
 ```lua
-model.create(name)                           -- Créer un modèle
-model.allocate_params()                      -- Allouer mémoire
-model.init_weights(method, seed)             -- Initialiser poids (he/xavier/normal)
-model.total_params()                         -- Nombre de paramètres
-model.push_layer(name, type, params)         -- Ajouter un layer manuellement
-model.forward(input)                         -- Forward pass
-model.backward(loss_gradient)                -- Backward pass
-model.optimizer_step(lr, type)               -- Optimisation (sgd/adam/adamw)
+Mimir.Model.create(name)                           -- Créer un modèle
+Mimir.Model.allocate_params()                      -- Allouer mémoire
+Mimir.Model.init_weights(method, seed)             -- Initialiser poids (he/xavier/normal)
+Mimir.Model.total_params()                         -- Nombre de paramètres
+Mimir.Model.push_layer(name, type, params)         -- Ajouter un layer manuellement
+Mimir.Model.forward(input)                         -- Forward pass
+Mimir.Model.backward(loss_gradient)                -- Backward pass
+Mimir.Model.optimizer_step(lr, type)               -- Optimisation (sgd/adam/adamw)
 model.set_hardware(enable)                   -- Activer/désactiver hardware
 model.hardware_caps()                        -- Capacités hardware
 model.save(filepath)                         -- Sauvegarder
@@ -597,10 +599,10 @@ write_json(filepath, data)                   -- Écrire JSON
 
 ```lua
 -- Créer ResNet-50
-model.create("resnet50")
+Mimir.Model.create("resnet50")
 architectures.resnet({num_classes = 1000})
-model.allocate_params()
-model.init_weights("he")
+Mimir.Model.allocate_params()
+Mimir.Model.init_weights("he")
 
 -- Forward pass (batch de 1 image 224×224×3)
 local image = {} -- 224*224*3 = 150528 valeurs
@@ -608,7 +610,7 @@ for i = 1, 150528 do
     image[i] = math.random() -- Données aléatoires
 end
 
-local logits = model.forward(image)
+local logits = Mimir.Model.forward(image)
 print("Prédictions:", #logits) -- 1000 classes
 ```
 
@@ -616,7 +618,7 @@ print("Prédictions:", #logits) -- 1000 classes
 
 ```lua
 -- Créer GPT-style model
-model.create("gpt")
+Mimir.Model.create("gpt")
 architectures.transformer({
     vocab_size = 50000,
     d_model = 768,
@@ -624,8 +626,8 @@ architectures.transformer({
     num_heads = 12,
     causal = true
 })
-model.allocate_params()
-model.init_weights("xavier")
+Mimir.Model.allocate_params()
+Mimir.Model.init_weights("xavier")
 
 -- Tokenizer
 tokenizer.create(50000)
@@ -634,7 +636,7 @@ local tokens = tokenizer.tokenize(prompt)
 
 -- Générer 50 tokens
 for i = 1, 50 do
-    local output = model.forward(tokens)
+    local output = Mimir.Model.forward(tokens)
     local next_token = output[#output] -- Dernier token
     table.insert(tokens, math.floor(next_token))
 end
@@ -647,29 +649,29 @@ print("Texte généré:", generated)
 
 ```lua
 -- Créer UNet pour segmentation médicale
-model.create("medical_unet")
+Mimir.Model.create("medical_unet")
 architectures.unet({
     input_channels = 1,    -- Grayscale
     output_channels = 1,   -- Mask binaire
     base_channels = 32,
     num_levels = 4
 })
-model.allocate_params()
-model.init_weights("he")
+Mimir.Model.allocate_params()
+Mimir.Model.init_weights("he")
 
 -- Training loop (pseudo-code)
 for epoch = 1, 100 do
     -- Forward
-    local prediction = model.forward(image)
+    local prediction = Mimir.Model.forward(image)
     
     -- Compute loss (BCE)
     local loss_grad = {} -- Calculer gradient
     
     -- Backward
-    model.backward(loss_grad)
+    Mimir.Model.backward(loss_grad)
     
     -- Optimizer step
-    model.optimizer_step(0.0001, "adamw")
+    Mimir.Model.optimizer_step(0.0001, "adamw")
     
     if epoch % 10 == 0 then
         model.save(string.format("checkpoints/epoch_%d.safetensors", epoch))

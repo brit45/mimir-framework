@@ -143,7 +143,9 @@ public:
     size_t getCurrentBytes() const { return current_bytes_.load(); }
     size_t getPeakBytes() const { return peak_bytes_.load(); }
     float getUsagePercent() const {
-        return 100.0f * static_cast<float>(current_bytes_) / static_cast<float>(max_bytes_);
+        size_t max = max_bytes_.load();
+        if (max == 0) return 0.0f;  // Éviter division par zéro
+        return 100.0f * static_cast<float>(current_bytes_.load()) / static_cast<float>(max);
     }
     
     void printStats() const {

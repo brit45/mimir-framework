@@ -43,7 +43,7 @@ local config = {
     
     -- Dataset
     dataset = {
-        path = "datasets/images_with_captions/",
+        path = "../tensor/datasets.old",
         image_size = 512,
         augmentation = true
     },
@@ -126,7 +126,7 @@ local dataset_success, num_items = dataset.load(config.dataset.path)
 if not dataset_success then
     log("✗ Erreur: impossible de charger le dataset")
     log("Veuillez créer un dataset avec des images et légendes dans:")
-    log("  " .. config.dataset.path)
+    log("  " .. config.dataset)
     log("")
     log("Format attendu:")
     log("  datasets/images_with_captions/")
@@ -150,7 +150,7 @@ log("✓ Données préparées")
 
 -- 5. Configuration de la mémoire
 log("\n[5] Configuration mémoire...")
-memory.config({
+Memory.config({
     max_memory_mb = 8192,  -- 8 GB
     enable_pooling = true,
     enable_compression = true
@@ -215,7 +215,7 @@ end
 log("\n========================================")
 log("STATISTIQUES FINALES")
 log("========================================")
-memory.print_stats()
+Memory.printStats()
 log("")
 log("Modèle entraîné et sauvegardé!")
 log("Pour utiliser le modèle:")

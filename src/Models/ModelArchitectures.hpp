@@ -6,6 +6,8 @@
 #include <string>
 #include <memory>
 
+#include "VAEModel.hpp"
+
 // ============================================================================
 // Configuration des architectures modernes
 // ============================================================================
@@ -87,44 +89,17 @@ inline void buildUNet(Model& model, const UNetConfig& config) {
 // VAE - Variational Autoencoder
 // ============================================================================
 
-struct VAEConfig {
-    int input_dim = 784;          // 28*28 pour MNIST
-    int latent_dim = 128;
-    std::vector<int> encoder_hidden = {512, 256};
-    std::vector<int> decoder_hidden = {256, 512};
-    ActivationType activation = ActivationType::RELU;
-    bool use_batchnorm = false;
-};
+using VAEConfig = VAEModel::Config;
 
 inline void buildVAE(Model& model, const VAEConfig& config) {
-    // Encoder
-    int prev_dim = config.input_dim;
-    for (size_t i = 0; i < config.encoder_hidden.size(); ++i) {
-        model.push("encoder_fc" + std::to_string(i), "Linear", 
-                  prev_dim * config.encoder_hidden[i] + config.encoder_hidden[i]);
-        if (config.use_batchnorm) {
-            model.push("encoder_bn" + std::to_string(i), "BatchNorm", config.encoder_hidden[i] * 2);
-        }
-        prev_dim = config.encoder_hidden[i];
+    // Si le modèle est un VAEModel, on le configure directement.
+    if (auto* vae = dynamic_cast<VAEModel*>(&model)) {
+        vae->buildFromConfig(config);
+        return;
     }
-    
-    // Latent space (mu et logvar)
-    model.push("latent_mu", "Linear", prev_dim * config.latent_dim + config.latent_dim);
-    model.push("latent_logvar", "Linear", prev_dim * config.latent_dim + config.latent_dim);
-    
-    // Decoder
-    prev_dim = config.latent_dim;
-    for (size_t i = 0; i < config.decoder_hidden.size(); ++i) {
-        model.push("decoder_fc" + std::to_string(i), "Linear",
-                  prev_dim * config.decoder_hidden[i] + config.decoder_hidden[i]);
-        if (config.use_batchnorm) {
-            model.push("decoder_bn" + std::to_string(i), "BatchNorm", config.decoder_hidden[i] * 2);
-        }
-        prev_dim = config.decoder_hidden[i];
-    }
-    
-    // Output
-    model.push("decoder_output", "Linear", prev_dim * config.input_dim + config.input_dim);
+
+    // Sinon, on construit une architecture compatible dans un Model générique.
+    VAEModel::buildInto(model, config);
 }
 
 // ============================================================================

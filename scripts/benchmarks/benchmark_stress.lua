@@ -157,8 +157,8 @@ for test_idx, test in ipairs(config.tests) do
     
     -- Test 2: Création Modèle
     local create_time, params = timer("Création modèle Transformer", function()
-        model.create("transformer", test_config)
-        local ok, p = model.build()
+        Mimir.Model.create("transformer", test_config)
+        local ok, p = Mimir.Model.build()
         return p
     end)
     
@@ -182,8 +182,8 @@ for test_idx, test in ipairs(config.tests) do
         
         local success = pcall(function()
             tokenizer.create(config.vocab_size)
-            model.create("transformer", test_config)
-            model.build()
+            Mimir.Model.create("transformer", test_config)
+            Mimir.Model.build()
         end)
         
         if success then
@@ -202,9 +202,9 @@ for test_idx, test in ipairs(config.tests) do
     log("   ✓ Throughput: " .. string.format("%.2f", test.iterations / stress_time) .. " models/s")
     
     -- Test 4: Sérialisation sous charge
-    local checkpoint_path = "/tmp/mimir_stress_" .. test.name
+    local checkpoint_path = "/tmp/mimir_stress_" .. test.name .. ".safetensors"
     local save_time = timer("Sérialisation checkpoint", function()
-        model.save(checkpoint_path)
+        Mimir.Serialization.save(checkpoint_path, "safetensors")
     end)
     
     -- Get size

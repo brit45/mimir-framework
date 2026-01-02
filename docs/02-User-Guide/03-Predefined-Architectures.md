@@ -2,9 +2,8 @@
 
 > **⚠️ AVERTISSEMENT IMPORTANT**  
 > Les noms de fonctions dans cette doc sont incorrects.  
-> Utiliser `architectures.transformer()` et non `buildTransformer()`.  
+> Utiliser `Mimir.Architectures.transformer()` et non `buildTransformer()`.  
 > **Référez-vous aux scripts dans `scripts/` pour la syntaxe correcte.**  
-> Voir [VERIFICATION_REPORT.md](../VERIFICATION_REPORT.md) pour les détails.
 
 Guide complet des 9 architectures prédéfinies disponibles dans Mímir Framework.
 
@@ -31,10 +30,10 @@ Mímir propose **9 architectures prédéfinies** accessibles via l'API `architec
 
 ```lua
 -- Syntaxe générale
-local model = architectures.build<Architecture>(config)
+local model = Mimir.Architectures.build<Architecture>(config)
 
 -- Exemple
-local transformer = architectures.transformer({
+local transformer = Mimir.Architectures.transformer({
     vocab_size = 10000,
     d_model = 512,
     num_layers = 6
@@ -62,7 +61,7 @@ Input → [Encoder] → Bottleneck → [Decoder + Skip] → Output
 ### Utilisation
 
 ```lua
-local unet = architectures.unet({
+local unet = Mimir.Architectures.unet({
     in_channels = 3,      -- RGB images
     out_channels = 1,     -- Binary mask
     base_channels = 64,   -- Channels de base
@@ -108,7 +107,7 @@ Output: [B, out_channels, H, W]
 
 ```lua
 -- Créer UNet pour segmentation médicale
-local unet = architectures.unet({
+local unet = Mimir.Architectures.unet({
     in_channels = 1,      -- Images grayscale
     out_channels = 2,     -- Background + Tumor
     base_channels = 32,
@@ -123,13 +122,13 @@ model.configure(unet, {
 })
 
 -- Charger dataset
-local dataset = dataset.loadFromJson("medical_scans.json")
+local dataset = Mimir.Dataset.loadFromJson("medical_scans.json")
 
 -- Entraîner
-model.train(unet, dataset, 50)
+Mimir.Model.train(unet, dataset, 50)
 
 -- Sauvegarder
-model.save(unet, "unet_medical.json")
+Mimir.Model.save(unet, "unet_medical.json")
 ```
 
 ---
@@ -147,21 +146,37 @@ Input → Encoder → [μ, σ] → Latent(z) → Decoder → Output
 ### Utilisation
 
 ```lua
-local vae = architectures.vae({
-    input_dim = 784,      -- 28×28 images
-    latent_dim = 20,      -- Dimension latente
-    hidden_dims = {256, 128}  -- Couches cachées
+local ok, err = Mimir.Model.create("vae", {
+    input_dim = 784,                -- 28×28 images aplaties
+    latent_dim = 20,                -- Dimension latente
+    encoder_hidden = {256, 128},    -- MLP encoder
+    decoder_hidden = {128, 256},    -- MLP decoder
+    kl_beta = 1.0,                  -- Poids KL (β-VAE)
+    activation = "relu",
+    use_mean_in_infer = true
 })
+assert(ok, err)
+
+ok, err = Mimir.Model.build()
+assert(ok, err)
+
+-- Note: `Mimir.Architectures.vae(config)` existe, mais ne lit actuellement
+-- que `input_dim` et `latent_dim` (le reste reste aux valeurs par défaut).
 ```
 
 ### Paramètres
 
 | Paramètre | Type | Défaut | Description |
 |-----------|------|--------|-------------|
-| `input_dim` | int | 784 | Dimension d'entrée (pixels aplatis) |
-| `latent_dim` | int | 20 | Dimension de l'espace latent |
-| `hidden_dims` | table | {256, 128} | Dimensions des couches cachées (encoder) |
-| `beta` | float | 1.0 | Poids KL divergence (β-VAE) |
+| `input_dim` | int | 256 | Dimension d'entrée (ex: embeddings) |
+| `embed_dim` | int | — | Alias de `input_dim` (si vous réutilisez un config Transformer) |
+| `latent_dim` | int | 64 | Dimension de l'espace latent |
+| `encoder_hidden` | table | {512, 256} | Dimensions des couches cachées (encoder) |
+| `decoder_hidden` | table | {256, 512} | Dimensions des couches cachées (decoder) |
+| `kl_beta` | float | 1.0 | Poids KL divergence (β-VAE) |
+| `activation` | string | "relu" | relu / gelu / tanh / sigmoid / swish(silu) |
+| `use_mean_in_infer` | bool | true | Si vrai: z = μ en inférence (sinon sampling) |
+| `seed` | int | 0xC0FFEE | Seed par défaut pour le sampling |
 
 ### Architecture Résultante
 
@@ -198,29 +213,18 @@ L = Reconstruction_Loss + β × KL_Divergence
 
 ```lua
 -- VAE pour MNIST
-local vae = architectures.vae({
+local ok, err = Mimir.Model.create("vae", {
     input_dim = 784,
     latent_dim = 10,
-    hidden_dims = {512, 256},
-    beta = 1.0
+    encoder_hidden = {512, 256},
+    decoder_hidden = {256, 512},
+    kl_beta = 1.0
 })
+assert(ok, err)
+Mimir.Model.build()
 
--- Configuration
-model.configure(vae, {
-    learning_rate = 0.001,
-    optimizer = "adam",
-    loss = "vae_loss"  -- Custom loss (MSE + KL)
-})
-
--- Dataset
-local dataset = dataset.loadFromJson("mnist.json")
-
--- Entraîner
-model.train(vae, dataset, 100)
-
--- Générer nouvelles images
-local z_random = generate_random_latent(10)  -- Sample z ~ N(0,1)
-local generated = model.forward(vae, z_random)
+-- Entraîner (le dataset doit être préparé via Mimir.Dataset.*)
+Mimir.Model.train(100, 0.001)
 ```
 
 ---
@@ -238,7 +242,7 @@ Image → Patches → Embedding → Transformer Blocks → Classification
 ### Utilisation
 
 ```lua
-local vit = architectures.vit({
+local vit = Mimir.Architectures.vit({
     image_size = 224,     -- Taille image
     patch_size = 16,      -- Taille patch (16×16)
     num_classes = 1000,   -- Classes de sortie
@@ -283,17 +287,17 @@ Output: [B, num_classes]
 
 ```lua
 -- ViT-Base
-local vit_base = architectures.vit({
+local vit_base = Mimir.Architectures.vit({
     d_model = 768, num_layers = 12, num_heads = 12
 })
 
 -- ViT-Large
-local vit_large = architectures.vit({
+local vit_large = Mimir.Architectures.vit({
     d_model = 1024, num_layers = 24, num_heads = 16
 })
 
 -- ViT-Tiny (pour CPU)
-local vit_tiny = architectures.vit({
+local vit_tiny = Mimir.Architectures.vit({
     d_model = 192, num_layers = 12, num_heads = 3
 })
 ```
@@ -308,7 +312,7 @@ local vit_tiny = architectures.vit({
 
 ```lua
 -- ViT pour ImageNet-like dataset
-local vit = architectures.vit({
+local vit = Mimir.Architectures.vit({
     image_size = 224,
     patch_size = 16,
     num_classes = 100,  -- Custom dataset
@@ -327,7 +331,7 @@ model.configure(vit, {
 })
 
 -- Entraîner
-model.train(vit, dataset, 50)
+Mimir.Model.train(vit, dataset, 50)
 ```
 
 ---
@@ -346,7 +350,7 @@ Real Image / Fake Image → Discriminator → [Real/Fake]
 ### Utilisation
 
 ```lua
-local gan = architectures.gan({
+local gan = Mimir.Architectures.gan({
     latent_dim = 100,     -- Dimension bruit z
     image_channels = 1,   -- Grayscale
     image_size = 28,      -- 28×28
@@ -392,7 +396,7 @@ for epoch = 1, epochs do
         -- 1. Train Discriminator
         local real_images = batch.images
         local z = sample_noise(batch_size, latent_dim)
-        local fake_images = model.forward(generator, z)
+        local fake_images = Mimir.Model.forward(generator, z)
         
         local d_loss_real = discriminator_loss(discriminator, real_images, 1)
         local d_loss_fake = discriminator_loss(discriminator, fake_images, 0)
@@ -402,7 +406,7 @@ for epoch = 1, epochs do
         
         -- 2. Train Generator
         local z = sample_noise(batch_size, latent_dim)
-        local fake_images = model.forward(generator, z)
+        local fake_images = Mimir.Model.forward(generator, z)
         local g_loss = generator_loss(discriminator, fake_images, 1)  -- Fool D
         
         update_generator(g_loss)
@@ -432,7 +436,7 @@ Noise → Denoise(t=1000) → ... → Denoise(t=1) → Image
 ### Utilisation
 
 ```lua
-local diffusion = architectures.diffusion({
+local diffusion = Mimir.Architectures.diffusion({
     image_channels = 3,
     image_size = 64,
     model_channels = 128,
@@ -485,7 +489,7 @@ Input Tokens → Embedding → Transformer Blocks → Output Logits
 ### Utilisation
 
 ```lua
-local transformer = architectures.transformer({
+local transformer = Mimir.Architectures.transformer({
     vocab_size = 10000,
     d_model = 512,
     num_layers = 6,
@@ -532,7 +536,7 @@ Output: Logits [B, seq_len, vocab_size]
 
 ```lua
 -- GPT-like (decoder-only)
-local gpt = architectures.transformer({
+local gpt = Mimir.Architectures.transformer({
     vocab_size = 50000,
     d_model = 768,
     num_layers = 12,
@@ -541,7 +545,7 @@ local gpt = architectures.transformer({
 })
 
 -- BERT-like (encoder-only)
-local bert = architectures.transformer({
+local bert = Mimir.Architectures.transformer({
     vocab_size = 30000,
     d_model = 768,
     num_layers = 12,
@@ -550,7 +554,7 @@ local bert = architectures.transformer({
 })
 
 -- Tiny Transformer (CPU-friendly)
-local tiny = architectures.transformer({
+local tiny = Mimir.Architectures.transformer({
     vocab_size = 10000,
     d_model = 256,
     num_layers = 4,
@@ -569,12 +573,12 @@ local tiny = architectures.transformer({
 
 ```lua
 -- Transformer pour génération de texte
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
-local vocab_size = tokenizer.getVocabSize(tokenizer)
+local vocab_size = Mimir.Tokenizer.getVocabSize(tokenizer)
 
-local transformer = architectures.transformer({
+local transformer = Mimir.Architectures.transformer({
     vocab_size = vocab_size,
     d_model = 512,
     num_layers = 6,
@@ -590,16 +594,16 @@ model.configure(transformer, {
 })
 
 -- Dataset texte
-local dataset = dataset.loadText("corpus.txt", tokenizer)
+local dataset = Mimir.Dataset.loadText("corpus.txt", tokenizer)
 
 -- Entraîner
-model.train(transformer, dataset, 50)
+Mimir.Model.train(transformer, dataset, 50)
 
 -- Générer
 local prompt = "Once upon a time"
-local prompt_ids = tokenizer.encode(tokenizer, prompt)
+local prompt_ids = Mimir.Tokenizer.encode(tokenizer, prompt)
 local generated = model.generate(transformer, prompt_ids, 100)
-local text = tokenizer.decode(tokenizer, generated)
+local text = Mimir.Tokenizer.decode(tokenizer, generated)
 print(text)
 ```
 
@@ -618,7 +622,7 @@ x → Conv Block → Residual Block ×N → Global Pool → FC
 ### Utilisation
 
 ```lua
-local resnet = architectures.resnet({
+local resnet = Mimir.Architectures.resnet({
     num_classes = 1000,
     depth = 50,  -- ResNet-50
     in_channels = 3
@@ -637,13 +641,13 @@ local resnet = architectures.resnet({
 
 ```lua
 -- ResNet-18 (léger)
-local resnet18 = architectures.resnet({depth = 18})
+local resnet18 = Mimir.Architectures.resnet({depth = 18})
 
 -- ResNet-50 (standard)
-local resnet50 = architectures.resnet({depth = 50})
+local resnet50 = Mimir.Architectures.resnet({depth = 50})
 
 -- ResNet-101 (deep)
-local resnet101 = architectures.resnet({depth = 101})
+local resnet101 = Mimir.Architectures.resnet({depth = 101})
 ```
 
 ### Architecture (ResNet-50)
@@ -690,7 +694,7 @@ Input → Depthwise Conv → Pointwise Conv → ... → Classification
 ### Utilisation
 
 ```lua
-local mobilenet = architectures.mobilenet({
+local mobilenet = Mimir.Architectures.mobilenet({
     num_classes = 1000,
     width_multiplier = 1.0,
     input_size = 224
@@ -724,17 +728,17 @@ Total = 3×3×C_in + C_in×C_out ≈ 8-9× fewer params!
 
 ```lua
 -- MobileNet-v1 (1.0)
-local mobilenet_10 = architectures.mobilenet({
+local mobilenet_10 = Mimir.Architectures.mobilenet({
     width_multiplier = 1.0
 })
 
 -- MobileNet-v1 (0.5) - Ultra-light
-local mobilenet_05 = architectures.mobilenet({
+local mobilenet_05 = Mimir.Architectures.mobilenet({
     width_multiplier = 0.5
 })
 
 -- MobileNet-v1 (0.25) - Extreme-light
-local mobilenet_025 = architectures.mobilenet({
+local mobilenet_025 = Mimir.Architectures.mobilenet({
     width_multiplier = 0.25
 })
 ```

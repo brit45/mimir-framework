@@ -41,7 +41,7 @@ Créez `my_first_model.lua` :
 log("🚀 Création de mon premier modèle avec Mímir!")
 
 -- Créer un tokenizer
-tokenizer.create(32000)
+Mimir.Tokenizer.create(32000)
 
 -- Configuration du modèle Encoder (BERT-like)
 local config = {
@@ -54,8 +54,8 @@ local config = {
 }
 
 -- Créer et construire le modèle
-model.create("encoder", config)
-local ok, num_params = model.build()
+Mimir.Model.create("encoder", config)
+local ok, num_params = Mimir.Model.build()
 
 if ok then
     log(string.format("✓ Modèle créé avec %d paramètres", num_params))
@@ -64,8 +64,8 @@ else
 end
 
 -- Charger un dataset
-dataset.load("datasets/text")
-dataset.prepare_sequences(512)
+Mimir.Dataset.load("datasets/text")
+Mimir.Dataset.prepare_sequences(512)
 
 -- Entraîner le modèle
 log("📚 Début de l'entraînement...")
@@ -90,7 +90,7 @@ log("✓ Modèle sauvegardé!")
 
 ```lua
 -- Encoder pour classification de texte
-tokenizer.create(30000)
+Mimir.Tokenizer.create(30000)
 
 local encoder_config = {
     num_layers = 12,
@@ -104,10 +104,10 @@ local encoder_config = {
     pooling = "cls"  -- Utiliser le token [CLS]
 }
 
-model.create("encoder", encoder_config)
-model.build()
+Mimir.Model.create("encoder", encoder_config)
+Mimir.Model.build()
 
-dataset.load("datasets/text")
+Mimir.Dataset.load("datasets/text")
 model.train(20, 0.0001)
 model.save("checkpoints/bert_classifier")
 ```
@@ -116,7 +116,7 @@ model.save("checkpoints/bert_classifier")
 
 ```lua
 -- Decoder pour génération de texte
-tokenizer.create(50000)
+Mimir.Tokenizer.create(50000)
 
 local decoder_config = {
     num_layers = 12,
@@ -129,10 +129,10 @@ local decoder_config = {
     dropout = 0.1
 }
 
-model.create("decoder", decoder_config)
-model.build()
+Mimir.Model.create("decoder", decoder_config)
+Mimir.Model.build()
 
-dataset.load("datasets/text")
+Mimir.Dataset.load("datasets/text")
 model.train(50, 0.0003)
 
 -- Générer du texte
@@ -154,10 +154,10 @@ local unet_config = {
     attention_levels = {2, 3}
 }
 
-model.create("unet", unet_config)
-model.build()
+Mimir.Model.create("unet", unet_config)
+Mimir.Model.build()
 
-dataset.load("datasets/images")
+Mimir.Dataset.load("datasets/images")
 model.train(100, 0.0002)
 model.save("checkpoints/segmentation_model")
 ```
@@ -179,10 +179,10 @@ local vit_config = {
     use_class_token = true
 }
 
-model.create("vit", vit_config)
-model.build()
+Mimir.Model.create("vit", vit_config)
+Mimir.Model.build()
 
-dataset.load("datasets/imagenet")
+Mimir.Dataset.load("datasets/imagenet")
 model.train(300, 0.0003)
 model.save("checkpoints/vit_imagenet")
 ```
@@ -227,8 +227,8 @@ Utilisation en Lua :
 
 ```lua
 local config = read_json("config.json")
-model.create(config.model.type, config.model)
-model.build()
+Mimir.Model.create(config.model.type, config.model)
+Mimir.Model.build()
 
 -- Utiliser les paramètres de training
 local num_epochs = config.training.num_epochs
@@ -303,7 +303,7 @@ make clean && make
 ```bash
 cat > test.lua << 'EOF'
 log("Mímir est installé correctement!")
-tokenizer.create(1000)
+Mimir.Tokenizer.create(1000)
 log("Tokenizer créé avec succès")
 EOF
 

@@ -58,65 +58,65 @@ model.train(sequences, 50, 0.0002)
 model.save("checkpoints/my_model")
 ```
 
-### Tokenizer (tokenizer.*)
+### Tokenizer (Mimir.Tokenizer.*)
 
 Tokenisation et vocabulaire :
 
 ```lua
 -- Créer et construire le vocabulaire
-tokenizer.create(1000000)
+Mimir.Tokenizer.create(1000000)
 for _, word in ipairs(words) do
-    tokenizer.add_token(word)
+    Mimir.Tokenizer.add_token(word)
 end
 
 -- Tokenisation
-local ids = tokenizer.tokenize("Hello world")
-local text = tokenizer.detokenize(ids)
+local ids = Mimir.Tokenizer.tokenize("Hello world")
+local text = Mimir.Tokenizer.detokenize(ids)
 
 -- Statistiques
-tokenizer.print_stats()
+Mimir.Tokenizer.print_stats()
 ```
 
-### Dataset (dataset.*)
+### Dataset (Mimir.Dataset.*)
 
 Chargement de données :
 
 ```lua
-dataset.load("../data/train")
-local sequences = dataset.prepare_sequences(tokenizer, 128)
+Mimir.Dataset.load("../data/train")
+local sequences = Mimir.Dataset.prepare_sequences(tokenizer, 128)
 ```
 
-### Allocator (allocator.*)
+### Allocator (Mimir.Allocator.*)
 
 Gestion dynamique de la RAM avec compression LZ4 :
 
 ```lua
 -- Configuration (limite stricte à 10 GB)
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
 })
 
 -- Monitoring
-local stats = allocator.get_stats()
+local stats = Mimir.Allocator.get_stats()
 print("Tenseurs chargés: " .. stats.loaded_count .. "/" .. stats.tensor_count)
-allocator.print_stats()
+Mimir.Allocator.print_stats()
 ```
 
-### HtopDisplay (htop.*)
+### HtopDisplay (Mimir.Htop.*)
 
 Monitoring temps réel type htop :
 
 ```lua
 -- Créer le moniteur
-htop.create()
+Mimir.Htop.create()
 
 -- Dans la boucle d'entraînement
 for epoch = 1, num_epochs do
     for batch = 1, num_batches do
         -- ... training ...
         
-        htop.update(
+        Mimir.Htop.update(
             epoch, num_epochs,
             batch, num_batches,
             loss, avg_loss, lr,
@@ -124,25 +124,25 @@ for epoch = 1, num_epochs do
             batches_per_sec, total_params, timestep,
             kl, wass, ent, mom, spat, temp, mse
         )
-        htop.render()
+        Mimir.Htop.render()
     end
 end
 ```
 
-### Visualizer (viz.*)
+### Visualizer (Mimir.Viz.*)
 
 Visualisation graphique SFML avec **rendu asynchrone non-bloquant** :
 
 ```lua
 -- Créer et démarrer le visualizer asynchrone (lance un thread séparé)
-viz.create({
+Mimir.Viz.create({
     enabled = true,
     window_width = 1280,
     window_height = 720,
     show_loss_graph = true
 })
 
--- Pas besoin de viz.initialize() - automatique dans le thread
+-- Pas besoin de Mimir.Viz.initialize() - automatique dans le thread
 
 -- Dans la boucle d'entraînement
 for epoch = 1, total_epochs do
@@ -150,31 +150,31 @@ for epoch = 1, total_epochs do
         -- ... training ...
         
         -- Mise à jour thread-safe (non-bloquante)
-        viz.update_metrics(epoch, batch, loss, lr, mse, kl, wass, ent, mom, spat, temp)
+        Mimir.Viz.update_metrics(epoch, batch, loss, lr, mse, kl, wass, ent, mom, spat, temp)
         
         -- Ajouter images générées (thread-safe)
         if batch % 100 == 0 then
-            viz.add_image(generated_pixels, "my prompt")
+            Mimir.Viz.add_image(generated_pixels, "my prompt")
         end
         
-        -- PAS BESOIN de viz.process_events() ni viz.update()!
+        -- PAS BESOIN de Mimir.Viz.process_events() ni Mimir.Viz.update()!
         -- Le rendu et les événements sont gérés automatiquement
     end
 end
 
 -- Sauvegarder historique
-viz.save_loss_history("loss_history.csv")
+Mimir.Viz.save_loss_history("loss_history.csv")
 ```
 
-**Note**: `viz.process_events()` et `viz.update()` existent encore pour compatibilité mais sont des NO-OP.
+**Note**: `Mimir.Viz.process_events()` et `Mimir.Viz.update()` existent encore pour compatibilité mais sont des NO-OP.
 
-### Guard & Memory (guard.*, memory.*)
+### Guard & Memory (Mimir.Mimir.MemoryGuard.*, memory.*)
 
 Gestion stricte de la mémoire :
 
 ```lua
 -- Limite stricte (refuse allocations dépassant la limite)
-guard.set_limit(10.0)  -- 10 GB
+Mimir.Mimir.MemoryGuard.set_limit(10.0)  -- 10 GB
 
 -- Gestionnaire avec compression
 memory.config({
@@ -184,7 +184,7 @@ memory.config({
 })
 
 -- Statistiques
-local guard_stats = guard.get_stats()
+local guard_stats = Mimir.Mimir.MemoryGuard.get_stats()
 print(string.format("RAM: %.1f%% (%.0f/%.0f MB)", 
     guard_stats.usage_percent, 
     guard_stats.current_mb, 
@@ -199,23 +199,23 @@ print(string.format("RAM: %.1f%% (%.0f/%.0f MB)",
 log("=== Entraînement Transformer v2.0 (Asynchrone + GPU) ===")
 
 -- Configuration RAM dynamique avec compression LZ4
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true,
     compression_threshold_mb = 100
 })
 
 -- Monitoring asynchrone (non-bloquant)
-htop.create()
+Mimir.Htop.create()
 
 -- Dataset et Tokenizer
-dataset.load("../data/train")
-tokenizer.create(100000)
+Mimir.Dataset.load("../data/train")
+Mimir.Tokenizer.create(100000)
 -- ... build vocab ...
 
 -- Modèle (détection GPU automatique au démarrage)
 model.create("encoder", {
-    vocab_size = tokenizer.vocab_size(),
+    vocab_size = Mimir.Tokenizer.vocab_size(),
     embed_dim = 256,
     num_layers = 4
 })
@@ -230,7 +230,7 @@ else
 end
 
 -- Entraînement
-local sequences = dataset.prepare_sequences(tokenizer, 128)
+local sequences = Mimir.Dataset.prepare_sequences(tokenizer, 128)
 for epoch = 1, 50 do
     for batch = 1, #sequences do
         local start_time = os.clock()
@@ -245,16 +245,16 @@ for epoch = 1, 50 do
         
         -- Mise à jour monitoring (thread-safe, non-bloquant)
         -- Le rendu se fait automatiquement dans le thread séparé
-        htop.update(epoch, 50, batch, #sequences, 
+        Mimir.Htop.update(epoch, 50, batch, #sequences, 
                    loss, avg_loss, lr, batch_time, memory_mb)
         
-        -- PAS BESOIN de htop.render() - c'est automatique!
+        -- PAS BESOIN de Mimir.Htop.render() - c'est automatique!
     end
 end
 
 -- Sauvegarde
 model.save("checkpoints/final")
-allocator.print_stats()
+Mimir.Allocator.print_stats()
 
 log("✓ Entraînement terminé!")
 ```

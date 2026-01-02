@@ -9,7 +9,7 @@ log("=" .. string.rep("=", 78))
 
 -- Configuration système
 log("\n🔧 Configuration...")
-allocator.configure({max_ram_gb = 10.0, enable_compression = true})
+Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
 model.set_hardware(true)
 log("✓ Système configuré")
 
@@ -92,7 +92,7 @@ log("  ⚠ Plus coûteux en calcul")
 -- Sauvegarder
 log("\n💾 Sauvegarde du modèle...")
 os.execute("mkdir -p checkpoints")
-model.save("checkpoints/vit_demo")
+Mimir.Serialization.save("checkpoints/vit_demo.safetensors", "safetensors")
 log("✓ Modèle sauvegardé")
 
 log("\n✓ Demo ViT terminé!")

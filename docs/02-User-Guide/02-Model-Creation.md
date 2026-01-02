@@ -22,11 +22,11 @@ Dans Mímir, créer un modèle suit ce workflow **déclaratif** :
 
 ```lua
 1. Définir une configuration (table Lua)
-2. Créer le modèle avec model.create(type, config)
-   OU utiliser un builder architectures.xxx(config)
-3. Construire: model.build()
-4. Initialiser poids: model.init_weights()
-5. Entraîner: model.train()
+2. Créer le modèle avec Mimir.Model.create(type, config)
+   OU utiliser un builder Mimir.Architectures.xxx(config)
+3. Construire: Mimir.Model.build()
+4. Initialiser poids: Mimir.Model.init_weights()
+5. Entraîner: Mimir.Model.train()
 ```
 
 **Mímir utilise une approche déclarative**, pas impérative. Vous ne construisez pas le modèle couche par couche.
@@ -50,39 +50,39 @@ local config = {
 }
 
 -- 2. Créer modèle
-model.create("transformer", config)
+Mimir.Model.create("transformer", config)
 
 -- 3. Construire (allouer mémoire)
-local ok, num_params = model.build()
+local ok, num_params = Mimir.Model.build()
 if ok then
     log(string.format("✓ Modèle construit: %d paramètres", num_params))
 end
 
 -- 4. Initialiser poids
-model.init_weights("xavier")
+Mimir.Model.init_weights("xavier")
 
 -- 5. Prêt pour l'entraînement
-model.train(epochs, learning_rate)
+Mimir.Model.train(epochs, learning_rate)
 ```
 
 ### Types de Modèles Supportés
 
 ```lua
 -- Transformers
-model.create("transformer", config)  -- Transformer complet
-model.create("encoder", config)      -- Encoder seulement (BERT-like)
-model.create("decoder", config)      -- Decoder seulement (GPT-like)
+Mimir.Model.create("transformer", config)  -- Transformer complet
+Mimir.Model.create("encoder", config)      -- Encoder seulement (BERT-like)
+Mimir.Model.create("decoder", config)      -- Decoder seulement (GPT-like)
 
 -- Vision
-model.create("unet", config)         -- U-Net segmentation
-model.create("vit", config)          -- Vision Transformer
-model.create("resnet", config)       -- ResNet
-model.create("mobilenet", config)    -- MobileNet
+Mimir.Model.create("unet", config)         -- U-Net segmentation
+Mimir.Model.create("vit", config)          -- Vision Transformer
+Mimir.Model.create("resnet", config)       -- ResNet
+Mimir.Model.create("mobilenet", config)    -- MobileNet
 
 -- Génératif
-model.create("vae", config)          -- Variational Autoencoder
-model.create("gan", config)          -- GAN
-model.create("diffusion", config)    -- Diffusion models
+Mimir.Model.create("vae", config)          -- Variational Autoencoder
+Mimir.Model.create("gan", config)          -- GAN
+Mimir.Model.create("diffusion", config)    -- Diffusion models
 ```
 
 ---
@@ -91,7 +91,7 @@ model.create("diffusion", config)    -- Diffusion models
 
 ### Utiliser les Builders
 
-Les builders `architectures.*` sont des helpers qui créent des modèles avec configurations prédéfinies.
+Les builders `Mimir.Architectures.*` sont des helpers qui créent des modèles avec configurations prédéfinies.
 
 #### Transformer
 
@@ -107,10 +107,10 @@ local config = {
 }
 
 -- Utiliser le builder
-local transformer = architectures.transformer(config)
+local transformer = Mimir.Architectures.transformer(config)
 
 -- Puis construire
-local ok, params = model.build()
+local ok, params = Mimir.Model.build()
 ```
 
 #### U-Net
@@ -127,9 +127,9 @@ local config = {
     dropout = 0.1
 }
 
-local unet = architectures.unet(config)
-model.build()
-model.init_weights("he")
+local unet = Mimir.Architectures.unet(config)
+Mimir.Model.build()
+Mimir.Model.init_weights("he")
 ```
 
 #### Vision Transformer (ViT)
@@ -146,8 +146,8 @@ local config = {
     dropout = 0.1
 }
 
-local vit = architectures.vit(config)
-model.build()
+local vit = Mimir.Architectures.vit(config)
+Mimir.Model.build()
 ```
 
 #### VAE
@@ -156,11 +156,13 @@ model.build()
 local config = {
     input_dim = 784,
     latent_dim = 128,
-    hidden_dims = {512, 256}
+    encoder_hidden = {512, 256},
+    decoder_hidden = {256, 512},
+    kl_beta = 1.0
 }
 
-local vae = architectures.vae(config)
-model.build()
+Mimir.Model.create("vae", config)
+Mimir.Model.build()
 ```
 
 #### GAN
@@ -174,8 +176,8 @@ local config = {
     disc_channels = {64, 128, 256}
 }
 
-local gan = architectures.gan(config)
-model.build()
+local gan = Mimir.Architectures.gan(config)
+Mimir.Model.build()
 ```
 
 #### ResNet
@@ -188,8 +190,8 @@ local config = {
     use_bottleneck = true
 }
 
-local resnet = architectures.resnet(config)
-model.build()
+local resnet = Mimir.Architectures.resnet(config)
+Mimir.Model.build()
 ```
 
 #### MobileNet
@@ -201,8 +203,8 @@ local config = {
     resolution = 224
 }
 
-local mobilenet = architectures.mobilenet(config)
-model.build()
+local mobilenet = Mimir.Architectures.mobilenet(config)
+Mimir.Model.build()
 ```
 
 ---
@@ -289,7 +291,7 @@ local vit_config = {
 
 ```lua
 -- Construire modèle (allouer paramètres)
-local ok, num_params, err = model.build()
+local ok, num_params, err = Mimir.Model.build()
 
 if ok then
     log(string.format("✓ Modèle construit avec %d paramètres", num_params))
@@ -303,27 +305,27 @@ end
 
 ```lua
 -- Méthodes d'initialisation disponibles
-model.init_weights("xavier")    -- Xavier/Glorot (défaut)
-model.init_weights("he")        -- He initialization (pour ReLU)
-model.init_weights("normal")    -- Distribution normale
-model.init_weights("uniform")   -- Distribution uniforme
+Mimir.Model.init_weights("xavier")    -- Xavier/Glorot (défaut)
+Mimir.Model.init_weights("he")        -- He initialization (pour ReLU)
+Mimir.Model.init_weights("normal")    -- Distribution normale
+Mimir.Model.init_weights("uniform")   -- Distribution uniforme
 
 -- Avec seed pour reproductibilité
-model.init_weights("xavier", 42)
+Mimir.Model.init_weights("xavier", 42)
 ```
 
 ### Étape 3: Allocation Explicite (optionnel)
 
 ```lua
 -- Parfois utile pour debugging
-model.allocate_params()
+Mimir.Model.allocate_params()
 ```
 
 ### Vérifier Paramètres
 
 ```lua
 -- Compter paramètres total
-local total = model.total_params()
+local total = Mimir.Model.total_params()
 log(string.format("Paramètres: %d (%.2f M)", total, total / 1e6))
 ```
 
@@ -347,26 +349,26 @@ local gpt_config = {
 }
 
 -- 2. Créer
-model.create("decoder", gpt_config)
+Mimir.Model.create("decoder", gpt_config)
 
 -- 3. Build
-local ok, params = model.build()
+local ok, params = Mimir.Model.build()
 if ok then
     log(string.format("GPT créé: %d paramètres", params))
 end
 
 -- 4. Initialiser
-model.init_weights("xavier", 42)
+Mimir.Model.init_weights("xavier", 42)
 
 -- 5. Dataset
-dataset.load("data/corpus")
-dataset.prepare_sequences(1024)
+Mimir.Dataset.load("data/corpus")
+Mimir.Dataset.prepare_sequences(1024)
 
 -- 6. Entraîner
-model.train(50, 0.0003)
+Mimir.Model.train(50, 0.0003)
 
 -- 7. Sauvegarder
-model.save("checkpoints/gpt_model")
+Mimir.Model.save("checkpoints/gpt_model")
 ```
 
 ### Exemple 2: BERT Classifier
@@ -386,21 +388,21 @@ local bert_config = {
 }
 
 -- 2. Créer
-model.create("encoder", bert_config)
+Mimir.Model.create("encoder", bert_config)
 
 -- 3. Build
-model.build()
-model.init_weights("xavier")
+Mimir.Model.build()
+Mimir.Model.init_weights("xavier")
 
 -- 4. Dataset classification
-dataset.load("data/sentiment")
-dataset.prepare_sequences(512)
+Mimir.Dataset.load("data/sentiment")
+Mimir.Dataset.prepare_sequences(512)
 
 -- 5. Entraîner
-model.train(20, 0.0001)
+Mimir.Model.train(20, 0.0001)
 
 -- 6. Sauvegarder
-model.save("checkpoints/bert_classifier")
+Mimir.Model.save("checkpoints/bert_classifier")
 ```
 
 ### Exemple 3: U-Net Segmentation
@@ -417,20 +419,20 @@ local unet_config = {
 }
 
 -- 2. Créer avec builder
-local unet = architectures.unet(unet_config)
+local unet = Mimir.Architectures.unet(unet_config)
 
 -- 3. Build
-model.build()
-model.init_weights("he")  -- He pour ReLU
+Mimir.Model.build()
+Mimir.Model.init_weights("he")  -- He pour ReLU
 
 -- 4. Dataset images
-dataset.load("data/images")
+Mimir.Dataset.load("data/images")
 
 -- 5. Entraîner
-model.train(100, 0.0002)
+Mimir.Model.train(100, 0.0002)
 
 -- 6. Sauvegarder
-model.save("checkpoints/unet_segmentation")
+Mimir.Model.save("checkpoints/unet_segmentation")
 ```
 
 ### Exemple 4: Vision Transformer
@@ -451,20 +453,20 @@ local vit_config = {
 }
 
 -- 2. Créer
-model.create("vit", vit_config)
+Mimir.Model.create("vit", vit_config)
 
 -- 3. Build
-model.build()
-model.init_weights("xavier")
+Mimir.Model.build()
+Mimir.Model.init_weights("xavier")
 
 -- 4. Dataset
-dataset.load("data/imagenet")
+Mimir.Dataset.load("data/imagenet")
 
 -- 5. Entraîner (long sur CPU!)
-model.train(300, 0.0003)
+Mimir.Model.train(300, 0.0003)
 
 -- 6. Sauvegarder
-model.save("checkpoints/vit_imagenet")
+Mimir.Model.save("checkpoints/vit_imagenet")
 ```
 
 ---
@@ -474,7 +476,7 @@ model.save("checkpoints/vit_imagenet")
 ### 1. Toujours Vérifier Build
 
 ```lua
-local ok, params, err = model.build()
+local ok, params, err = Mimir.Model.build()
 if not ok then
     error("Erreur build: " .. (err or "inconnue"))
 end
@@ -484,23 +486,23 @@ end
 
 ```lua
 -- Pour ReLU: He initialization
-model.init_weights("he")
+Mimir.Model.init_weights("he")
 
 -- Pour Tanh/Sigmoid: Xavier
-model.init_weights("xavier")
+Mimir.Model.init_weights("xavier")
 ```
 
 ### 3. Reproductibilité
 
 ```lua
 -- Utiliser seed fixe
-model.init_weights("xavier", 42)
+Mimir.Model.init_weights("xavier", 42)
 ```
 
 ### 4. Vérifier Mémoire
 
 ```lua
-local params = model.total_params()
+local params = Mimir.Model.total_params()
 local memory_mb = params * 4 / 1024 / 1024
 log(string.format("Mémoire requise: %.2f MB", memory_mb))
 
@@ -583,10 +585,10 @@ Les fonctions suivantes **n'existent pas** dans Mímir:
 **Le module `layers` contient des fonctions de CALCUL** (conv2d, linear, maxpool2d), **PAS de construction de modèle**.
 
 Utiliser à la place:
-- ✅ `model.create(type, config)`
-- ✅ `architectures.xxx(config)`
-- ✅ `model.build()`
-- ✅ `model.init_weights()`
+- ✅ `Mimir.Model.create(type, config)`
+- ✅ `Mimir.Architectures.xxx(config)`
+- ✅ `Mimir.Model.build()`
+- ✅ `Mimir.Model.init_weights()`
 
 ---
 

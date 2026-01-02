@@ -2,9 +2,8 @@
 
 > **⚠️ AVERTISSEMENT IMPORTANT**  
 > Les exemples de génération de texte sont théoriques.  
-> API réelle : `model.infer(input)` ou `model.forward(input)`.  
+> API réelle : `Mimir.Model.infer(input)` ou `Mimir.Model.forward(input)`.  
 > **Référez-vous à `scripts/example_gpt.lua` pour des exemples corrects.**  
-> Voir [VERIFICATION_REPORT.md](../VERIFICATION_REPORT.md) pour les détails.
 
 Guide d'utilisation de modèles entraînés pour la génération et prédiction.
 
@@ -26,7 +25,7 @@ Guide d'utilisation de modèles entraînés pour la génération et prédiction.
 
 ```lua
 -- Charger modèle
-local model = model.load("trained_model.json")
+local model = Mimir.Model.load("trained_model.json")
 
 -- Mode eval (désactive dropout)
 model.setMode(model, "eval")
@@ -35,7 +34,7 @@ model.setMode(model, "eval")
 local input = {{1.0, 2.0, 3.0, 4.0}}  -- [1, 4]
 
 -- Forward
-local output = model.forward(model, input)
+local output = Mimir.Model.forward(model, input)
 -- output = [[0.1, 0.3, 0.6]] → [1, 3]
 
 -- Interpréter
@@ -52,7 +51,7 @@ function predict(model, raw_input)
     local input_tensor = {normalized}
     
     -- Forward
-    local output = model.forward(model, input_tensor)
+    local output = Mimir.Model.forward(model, input_tensor)
     
     -- Postprocessing
     local probabilities = softmax(output[1])
@@ -76,12 +75,12 @@ print("Classe:", class_id, "Confiance:", probs[class_id])
 ```lua
 function generate_greedy(model, tokenizer, prompt, max_length)
     -- Encoder prompt
-    local input_ids = tokenizer.encode(tokenizer, prompt)
-    local eos_id = tokenizer.getEosTokenId(tokenizer)
+    local input_ids = Mimir.Tokenizer.encode(tokenizer, prompt)
+    local eos_id = Mimir.Tokenizer.getEosTokenId(tokenizer)
     
     for i = 1, max_length do
         -- Forward
-        local output = model.forward(model, {input_ids})
+        local output = Mimir.Model.forward(model, {input_ids})
         
         -- Prendre token avec plus haute probabilité
         local logits = output[1][#output[1]]
@@ -97,13 +96,13 @@ function generate_greedy(model, tokenizer, prompt, max_length)
     end
     
     -- Décoder
-    return tokenizer.decode(tokenizer, input_ids)
+    return Mimir.Tokenizer.decode(tokenizer, input_ids)
 end
 
 -- Usage
-local model = model.load("gpt_model.json")
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local model = Mimir.Model.load("gpt_model.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
 local prompt = "Once upon a time"
 local story = generate_greedy(model, tokenizer, prompt, 100)
@@ -114,11 +113,11 @@ print(story)
 
 ```lua
 function generate_with_temperature(model, tokenizer, prompt, max_length, temperature)
-    local input_ids = tokenizer.encode(tokenizer, prompt)
-    local eos_id = tokenizer.getEosTokenId(tokenizer)
+    local input_ids = Mimir.Tokenizer.encode(tokenizer, prompt)
+    local eos_id = Mimir.Tokenizer.getEosTokenId(tokenizer)
     
     for i = 1, max_length do
-        local output = model.forward(model, {input_ids})
+        local output = Mimir.Model.forward(model, {input_ids})
         local logits = output[1][#output[1]]
         
         -- Appliquer température
@@ -137,7 +136,7 @@ function generate_with_temperature(model, tokenizer, prompt, max_length, tempera
         end
     end
     
-    return tokenizer.decode(tokenizer, input_ids)
+    return Mimir.Tokenizer.decode(tokenizer, input_ids)
 end
 
 -- Temperature :
@@ -153,11 +152,11 @@ local text2 = generate_with_temperature(model, tokenizer, prompt, 50, 1.2)  -- C
 
 ```lua
 function generate_topk(model, tokenizer, prompt, max_length, k)
-    local input_ids = tokenizer.encode(tokenizer, prompt)
-    local eos_id = tokenizer.getEosTokenId(tokenizer)
+    local input_ids = Mimir.Tokenizer.encode(tokenizer, prompt)
+    local eos_id = Mimir.Tokenizer.getEosTokenId(tokenizer)
     
     for i = 1, max_length do
-        local output = model.forward(model, {input_ids})
+        local output = Mimir.Model.forward(model, {input_ids})
         local logits = output[1][#output[1]]
         
         -- Garder top-K
@@ -175,7 +174,7 @@ function generate_topk(model, tokenizer, prompt, max_length, k)
         end
     end
     
-    return tokenizer.decode(tokenizer, input_ids)
+    return Mimir.Tokenizer.decode(tokenizer, input_ids)
 end
 
 -- k = 5 : Très conservateur
@@ -187,8 +186,8 @@ end
 
 ```lua
 function beam_search(model, tokenizer, prompt, max_length, beam_width)
-    local eos_id = tokenizer.getEosTokenId(tokenizer)
-    local start_ids = tokenizer.encode(tokenizer, prompt)
+    local eos_id = Mimir.Tokenizer.getEosTokenId(tokenizer)
+    local start_ids = Mimir.Tokenizer.encode(tokenizer, prompt)
     
     -- Initialiser beams
     local beams = {{ids = start_ids, score = 0.0}}
@@ -201,7 +200,7 @@ function beam_search(model, tokenizer, prompt, max_length, beam_width)
                 table.insert(candidates, beam)
             else
                 -- Générer suite
-                local output = model.forward(model, {beam.ids})
+                local output = Mimir.Model.forward(model, {beam.ids})
                 local logits = output[1][#output[1]]
                 local probs = softmax(logits)
                 
@@ -229,7 +228,7 @@ function beam_search(model, tokenizer, prompt, max_length, beam_width)
     
     -- Retourner meilleur beam
     local best_beam = beams[1]
-    return tokenizer.decode(tokenizer, best_beam.ids)
+    return Mimir.Tokenizer.decode(tokenizer, best_beam.ids)
 end
 
 -- beam_width = 3-5 : Bon compromis qualité/vitesse
@@ -250,7 +249,7 @@ function classify_image(model, image_path, class_names)
     
     -- Forward
     model.setMode(model, "eval")
-    local output = model.forward(model, {image})
+    local output = Mimir.Model.forward(model, {image})
     
     -- Top-5 prédictions
     local probs = softmax(output[1])
@@ -267,7 +266,7 @@ function classify_image(model, image_path, class_names)
 end
 
 -- Usage
-local model = model.load("resnet50.json")
+local model = Mimir.Model.load("resnet50.json")
 local classes = load_imagenet_classes("imagenet_classes.txt")
 classify_image(model, "cat.jpg", classes)
 ```
@@ -280,7 +279,7 @@ function segment_image(model, image_path, num_classes)
     local h, w = get_dimensions(image)
     
     -- Forward
-    local output = model.forward(model, {image})
+    local output = Mimir.Model.forward(model, {image})
     -- output = [1, num_classes, h, w]
     
     -- Argmax par pixel
@@ -325,7 +324,7 @@ function batch_predict(model, inputs, batch_size)
         batch = pad_batch(batch)
         
         -- Forward
-        local outputs = model.forward(model, batch)
+        local outputs = Mimir.Model.forward(model, batch)
         
         -- Collecter
         for k, output in ipairs(outputs) do
@@ -359,7 +358,7 @@ function forward_with_cache(model, input_ids, cache)
         return output
     else
         -- Forward complet
-        local output = model.forward(model, input_ids)
+        local output = Mimir.Model.forward(model, input_ids)
         cache.keys, cache.values = model.getKVCache(model)
         return output
     end
@@ -398,9 +397,9 @@ model.setInferenceMode(model, true)  -- Pas de gradients
 ### Chatbot Simple
 
 ```lua
-local model = model.load("chatbot.json")
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local model = Mimir.Model.load("chatbot.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
 local conversation_history = ""
 
@@ -435,14 +434,14 @@ end
 function analyze_sentiment(model, tokenizer, text)
     -- Preprocesser
     text = text:lower()
-    local input_ids = tokenizer.encode(tokenizer, text, {
+    local input_ids = Mimir.Tokenizer.encode(tokenizer, text, {
         max_length = 128,
         padding = "max_length",
         truncation = true
     })
     
     -- Prédire
-    local output = model.forward(model, {input_ids})
+    local output = Mimir.Model.forward(model, {input_ids})
     local probs = softmax(output[1])
     
     -- Interpréter

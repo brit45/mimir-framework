@@ -2,9 +2,13 @@
 #include "HardwareOpt.hpp"
 #include "SIMD_Ops.hpp"
 #include "Layers.hpp"
+#include "LayerTypes.hpp"
+#include "LayerOps.hpp"
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
 #include "VulkanCompute.hpp"
+#include "RuntimeAllocator.hpp"
+#include "LayerOpsExt.hpp"
 #include <fstream>
 #include <iomanip>
 #include <ctime>
@@ -18,6 +22,13 @@
 #include <cpuid.h>
 #include <atomic>
 #include <mutex>
+#include <unordered_set>
+
+// ============================================================================
+// Registry centralisé (via LayerTypes.hpp)
+// ============================================================================
+
+using namespace LayerRegistry;
 
 // ============================================================================
 // Implémentation des méthodes Layer
@@ -119,7 +130,8 @@ namespace fs = std::filesystem;
 
 // === constructeurs / destructeurs (déjà présents) ===
 Model::Model()
-    : tokenizer(20000), encoder(64, 20000), hasTokenizer(true), hasEncoder(true)
+    : tokenizer(20000), encoder(64, 20000), hasTokenizer(true), hasEncoder(true),
+      max_ram_mb_(4096)
 {
     tw = 64; th = 64;
     // Tenter d'initialiser le compute engine
@@ -211,12 +223,85 @@ Gradients Model::getGradients() const {
     return grads;
 }
 
+// ============================================================================
+// TENSOR STORE (Multi-input/Branch Support)
+// ============================================================================
+
+const std::vector<float>& Model::getTensor(const std::string& name) const {
+    auto it = tensor_store.find(name);
+    if (it == tensor_store.end()) {
+        std::cerr << "❌ ERROR: Tensor '" << name << "' not found in TensorStore" << std::endl;
+        std::cerr << "Available tensors: ";
+        for (const auto& kv : tensor_store) {
+            std::cerr << "'" << kv.first << "' ";
+        }
+        std::cerr << std::endl;
+        throw std::runtime_error("Tensor not found: " + name);
+    }
+    return it->second;
+}
+
+std::vector<float>& Model::getTensorMutable(const std::string& name) {
+    auto it = tensor_store.find(name);
+    if (it == tensor_store.end()) {
+        std::cerr << "❌ ERROR: Tensor '" << name << "' not found in TensorStore" << std::endl;
+        std::cerr << "Available tensors: ";
+        for (const auto& kv : tensor_store) {
+            std::cerr << "'" << kv.first << "' ";
+        }
+        std::cerr << std::endl;
+        throw std::runtime_error("Tensor not found: " + name);
+    }
+    return it->second;
+}
+
+void Model::storeTensor(const std::string& name, const std::vector<float>& data) {
+    tensor_store[name] = data;
+}
+
+void Model::storeTensor(const std::string& name, std::vector<float>&& data) {
+    tensor_store[name] = std::move(data);
+}
+
+std::vector<std::string> Model::getAvailableTensors() const {
+    std::vector<std::string> names;
+    names.reserve(tensor_store.size());
+    for (const auto& kv : tensor_store) {
+        names.push_back(kv.first);
+    }
+    return names;
+}
+
+void Model::clearTensorStore() {
+    tensor_store.clear();
+}
+
+Layer* Model::getLayerByName(const std::string& name) {
+    for (auto& layer : layers) {
+        if (layer.name == name) {
+            return &layer;
+        }
+    }
+    return nullptr;  // Layer not found
+}
+
 // === méthodes utilitaires simples (déjà présentes) ===
 void Model::setDensity(double d) { densityFactor = (d > 0.0 ? d : 1.0); }
 double Model::getDensity() const { return densityFactor; }
 
 void Model::push(const std::string &name, const std::string &type, size_t params_count) {
-    Layer layer(name, type, params_count);
+    // Normaliser le type et créer le layer avec enum
+    std::string normalized_type = normalize_type(type);
+    Layer layer(name, normalized_type, params_count);
+    
+    // Le constructeur Layer a déjà converti string -> enum
+    // Vérifier que c'est supporté
+    if (layer.type_enum == LayerType::UNKNOWN) {
+        std::cerr << "❌ ERROR: Unknown layer type '" << type << "' (normalized: '" 
+                  << normalized_type << "')" << std::endl;
+        log_supported_types();
+        throw std::runtime_error("Unknown layer type: " + type);
+    }
     
     // Si des dimensions sont configurées dans modelConfig, les appliquer
     if (modelConfig.contains("in_channels")) {
@@ -242,8 +327,8 @@ void Model::push(const std::string &name, const std::string &type, size_t params
     }
     
     // Calculer les dimensions de sortie pour Conv2D
-    if ((type == "Conv2d" || type == "ConvTranspose2d") && layer.kernel_size > 0) {
-        if (type == "Conv2d") {
+    if ((normalized_type == "Conv2d" || normalized_type == "ConvTranspose2d") && layer.kernel_size > 0) {
+        if (normalized_type == "Conv2d") {
             layer.output_height = (layer.input_height + 2 * layer.padding - layer.kernel_size) / layer.stride + 1;
             layer.output_width = (layer.input_width + 2 * layer.padding - layer.kernel_size) / layer.stride + 1;
         } else { // ConvTranspose2d
@@ -291,24 +376,6 @@ void Model::allocateParams() {
         }
     }
     
-#ifdef MIMIR_ENABLE_LEGACY_PARAMS
-    // ⚠️ ATTENTION: Cette structure legacy consomme énormément de RAM!
-    // std::vector<tensor> avec des millions d'entrées = explosion mémoire
-    // Cette allocation ne passe PAS par MemoryGuard
-    // TODO: Supprimer complètement en production
-    std::cout << "⚠️  LEGACY: Allocation structure params (" << tot << " tensors)..." << std::endl;
-    params.clear();
-    params.resize(tot);
-    for (size_t i = 0; i < tot; ++i) {
-        params[i].Weight = 0;
-        params[i].Value = 0;
-    }
-    std::cout << "⚠️  Structure legacy allouée (désactiver avec -DMIMIR_ENABLE_LEGACY_PARAMS=OFF)" << std::endl;
-#else
-    // Structure legacy désactivée pour économiser la RAM
-    params.clear();
-#endif
-    
     std::cout << "✓ " << layers.size() << " blocs de poids créés (1 tensor par layer)" << std::endl;
 }
 
@@ -334,10 +401,19 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
                       << " (" << layer.name << ")..." << std::endl;
         }
         
-        // Estimation fan_in/fan_out depuis params_count
-        int fan_estimate = static_cast<int>(std::sqrt(static_cast<float>(layer.params_count)));
-        int fan_in = std::max(fan_estimate, 32);
-        int fan_out = std::max(fan_estimate, 32);
+        // fan_in/fan_out: utiliser les dimensions réelles quand disponibles
+        int fan_in = 0;
+        int fan_out = 0;
+
+        if (layer.type_enum == LayerType::Linear && layer.in_features > 0 && layer.out_features > 0) {
+            fan_in = layer.in_features;
+            fan_out = layer.out_features;
+        } else {
+            // Estimation fan_in/fan_out depuis params_count
+            int fan_estimate = static_cast<int>(std::sqrt(static_cast<float>(layer.params_count)));
+            fan_in = std::max(fan_estimate, 32);
+            fan_out = std::max(fan_estimate, 32);
+        }
         
         float std_dev = 0.01f;
         
@@ -353,13 +429,28 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
         
         std::normal_distribution<float> dist(0.0f, std_dev);
         
-        // Estimer nombre de bias
-        size_t num_weights = layer.params_count;
-        size_t estimated_bias = fan_out;
-        if (estimated_bias > num_weights / 10) {
-            estimated_bias = num_weights / 10;
+        // Déterminer précisément la zone bias quand possible
+        const size_t num_weights = layer.params_count;
+        size_t num_pure_weights = num_weights;
+
+        if (layer.type_enum == LayerType::Linear && layer.in_features > 0 && layer.out_features > 0) {
+            const size_t expected_w = static_cast<size_t>(layer.in_features) * static_cast<size_t>(layer.out_features);
+            const size_t expected_b = layer.use_bias ? static_cast<size_t>(layer.out_features) : 0;
+            if (expected_w + expected_b == num_weights) {
+                num_pure_weights = expected_w;
+            } else {
+                // Fallback si le comptage ne correspond pas exactement
+                size_t estimated_bias = std::min(expected_b, num_weights / 10);
+                num_pure_weights = num_weights - estimated_bias;
+            }
+        } else {
+            // Heuristique générique
+            size_t estimated_bias = static_cast<size_t>(fan_out);
+            if (estimated_bias > num_weights / 10) {
+                estimated_bias = num_weights / 10;
+            }
+            num_pure_weights = num_weights - estimated_bias;
         }
-        size_t num_pure_weights = num_weights - estimated_bias;
         
         // NOUVEAU: Initialiser directement le weight_block du layer
         float* weights_data = layer.weight_block->getData();
@@ -367,12 +458,8 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
         for (size_t i = 0; i < num_weights; ++i) {
             float value;
             
-            // Bias initialisé à 0, weights normalement
-            if (i >= num_pure_weights) {
-                value = 0.0f;  // Bias = 0
-            } else {
-                value = dist(gen);  // Weights ~ N(0, std²)
-            }
+            // Bias initialisé à 0, weights ~ N(0,std²)
+            value = (i >= num_pure_weights) ? 0.0f : dist(gen);
             
             // Clip direct sans tanh (préserve magnitude)
             value = std::clamp(value, -3.0f, 3.0f);  // ±3σ capture 99.7%
@@ -385,155 +472,32 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
 }
 
 void Model::updateWeightsWithNoise(float learning_rate, float noise_std) {
-    if (params.empty()) return;
-    
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<float> noise_dist(0.0f, noise_std);
-    
-    for (auto &param : params) {
-        float current = static_cast<float>(param.Weight) / 65535.0f;
-        float noise = noise_dist(gen);
-        float updated = current + learning_rate * noise;
-        updated = std::clamp(updated, 0.0f, 1.0f);
-        param.Weight = static_cast<uint16_t>(updated * 65535.0f);
-        
-        // Mettre à jour aussi tensor.data
-        if (!param.data.empty()) {
-            for (auto &d : param.data) {
-                d += learning_rate * noise_dist(gen);
-            }
-        }
-    }
+    // NOTE: Fonction obsolète utilisant l'ancienne structure params
+    std::cerr << "⚠️ updateWeightsWithNoise() est obsolète" << std::endl;
 }
 
 std::vector<uint16_t> Model::getWeights() const {
-    std::vector<uint16_t> out;
-    out.reserve(params.size());
-    for (const auto &p : params) out.push_back(p.Weight);
-    return out;
+    // NOTE: Fonction obsolète utilisant l'ancienne structure params
+    return std::vector<uint16_t>();
 }
 
 void Model::setTokenizer(const Tokenizer &t) { tokenizer = t; hasTokenizer = true; }
 void Model::setEncoder(const Encoder &e) { encoder = e; hasEncoder = true; }
 
 void Model::forward(std::vector<uint8_t> &out_uint8) const {
-    const size_t N = static_cast<size_t>(tw) * static_cast<size_t>(th);
-    out_uint8.assign(N, 0);
-    if (params.empty()) return;
-    for (size_t i = 0; i < N; ++i) {
-        size_t idx = i % params.size();
-        out_uint8[i] = params[idx].Value;
-    }
+    // NOTE: Fonction obsolète utilisant l'ancienne structure params
+    // Utilisez forwardPass() à la place
+    out_uint8.clear();
 }
 
 void Model::setOutputTarget(const std::vector<uint8_t> &target) {
-    // simple mapping: write target into tail of params[].Value if sizes allow
-    size_t needed = target.size();
-    if (needed == 0 || params.empty()) return;
-    for (size_t i = 0; i < needed; ++i) {
-        params[i % params.size()].Value = target[i];
-    }
+    // NOTE: Fonction obsolète utilisant l'ancienne structure params
 }
 
 void Model::applyParamUpdate(float learning_rate) {
-    // VRAIE mise à jour avec gradient descent + momentum
-    static std::vector<float> velocity(params.size(), 0.0f);
-    float momentum = 0.9f;
-    float weight_decay = 0.0001f;
-    
-    if (velocity.size() != params.size()) {
-        velocity.resize(params.size(), 0.0f);
-    }
-    
-    size_t i = 0;
-    
-#ifdef __AVX2__
-    // Vectorisation AVX2 des mises à jour de paramètres
-    __m256 scale_w = _mm256_set1_ps(1.0f / 65535.0f);
-    __m256 scale_v = _mm256_set1_ps(1.0f / 255.0f);
-    __m256 two = _mm256_set1_ps(2.0f);
-    __m256 one = _mm256_set1_ps(1.0f);
-    __m256 momentum_vec = _mm256_set1_ps(momentum);
-    __m256 weight_decay_vec = _mm256_set1_ps(weight_decay);
-    __m256 lr_vec = _mm256_set1_ps(learning_rate);
-    __m256 max_val = _mm256_set1_ps(65535.0f);
-    __m256 zero = _mm256_setzero_ps();
-    
-    for (; i + 8 <= params.size(); i += 8) {
-        // Charger weights
-        float w_temp[8], v_temp[8], vel_temp[8];
-        for (int j = 0; j < 8; ++j) {
-            w_temp[j] = static_cast<float>(params[i + j].Weight);
-            v_temp[j] = static_cast<float>(params[i + j].Value);
-            vel_temp[j] = velocity[i + j];
-        }
-        
-        __m256 cur = _mm256_loadu_ps(w_temp);
-        __m256 tgt_raw = _mm256_loadu_ps(v_temp);
-        __m256 vel = _mm256_loadu_ps(vel_temp);
-        
-        // Normaliser cur: [0,65535] -> [-1,1]
-        cur = _mm256_mul_ps(cur, scale_w);
-        cur = _mm256_fmsub_ps(cur, two, one);
-        
-        // Normaliser tgt: [0,255] -> [-1,1]
-        __m256 tgt = _mm256_mul_ps(tgt_raw, scale_v);
-        tgt = _mm256_fmsub_ps(tgt, two, one);
-        
-        // Gradient avec weight decay: grad = (tgt - cur) + weight_decay * cur
-        __m256 diff = _mm256_sub_ps(tgt, cur);
-        __m256 decay_term = _mm256_mul_ps(weight_decay_vec, cur);
-        __m256 grad = _mm256_add_ps(diff, decay_term);
-        
-        // Momentum: velocity = momentum * velocity + grad
-        vel = _mm256_fmadd_ps(momentum_vec, vel, grad);
-        _mm256_storeu_ps(vel_temp, vel);
-        for (int j = 0; j < 8; ++j) velocity[i + j] = vel_temp[j];
-        
-        // Mise à jour: cur += learning_rate * velocity
-        cur = _mm256_fmadd_ps(lr_vec, vel, cur);
-        
-        // Clamp à [-1, 1]
-        cur = _mm256_max_ps(_mm256_set1_ps(-1.0f), _mm256_min_ps(one, cur));
-        
-        // Dénormaliser: [-1,1] -> [0,1] -> [0,65535]
-        cur = _mm256_add_ps(cur, one);
-        cur = _mm256_div_ps(cur, two);
-        cur = _mm256_mul_ps(cur, max_val);
-        
-        // Stocker
-        _mm256_storeu_ps(w_temp, cur);
-        for (int j = 0; j < 8; ++j) {
-            params[i + j].Weight = static_cast<uint16_t>(std::lround(w_temp[j]));
-        }
-    }
-#endif
-    
-    // Fallback scalaire pour les éléments restants
-    for (; i < params.size(); ++i) {
-        float cur = static_cast<float>(params[i].Weight) / 65535.0f;
-        cur = cur * 2.0f - 1.0f; // [0,1] -> [-1,1]
-        
-        float tgt = static_cast<float>(params[i].Value) / 255.0f;
-        tgt = tgt * 2.0f - 1.0f;
-        
-        // Gradient avec weight decay (L2 regularization)
-        float grad = (tgt - cur) + weight_decay * cur;
-        
-        // Momentum update
-        velocity[i] = momentum * velocity[i] + learning_rate * grad;
-        
-        // Update weight
-        float upd = cur + velocity[i];
-        
-        // Clip pour stabilité
-        upd = std::clamp(upd, -1.0f, 1.0f);
-        
-        // Convertir back to [0,1] puis uint16
-        upd = (upd + 1.0f) / 2.0f;
-        params[i].Weight = static_cast<uint16_t>(std::lround(upd * 65535.0f));
-    }
+    // NOTE: Fonction obsolète - utilisez optimizerStep() pour l'entraînement moderne avec layer_weight_blocks
+    std::cerr << "[DEPRECATED] applyParamUpdate() est obsolète. Utilisez optimizerStep() à la place.\n";
+    return;
 }
 
 // Multi-optimizer step (SGD, Adam, AdamW)
@@ -708,98 +672,11 @@ static void sanitize_id2token_json(json &tokj) {
 }
 
 bool Model::saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch) {
-    try {
-        std::string epoch_name = (epoch >= 0) ? ("epoch_" + std::to_string(epoch)) : std::string("epoch_latest");
-        fs::path outdir = dir / epoch_name;
-        fs::path tmpdir = outdir.string() + ".tmp";
-
-        if (fs::exists(tmpdir)) fs::remove_all(tmpdir);
-        fs::create_directories(tmpdir);
-
-        json tokj;
-        // id2Token
-
-        tokj = tokenizer.to_json();
-
-            // sanitize id2token entries to avoid embedded control chars that break JSON files when edited
-            sanitize_id2token_json(tokj);
-
-        // write tokenizer.json atomically (write tmp file then rename)
-        {
-            fs::path tf_tmp = tmpdir / "tokenizer.json.tmp";
-            std::ofstream tf(tf_tmp.string(), std::ios::binary);
-            if (!tf) { fs::remove_all(tmpdir); return false; }
-            tf << std::setw(2) << tokj;
-            tf.close();
-            fs::rename(tf_tmp, tmpdir / "tokenizer.json");
-        }
-
-        // write metadata with epoch and timestamp
-        json meta;
-        meta["created_by"] = model_name + "::saveCheckpoint";
-        meta["name"] = model_name;
-        meta["timestamp"] = static_cast<long long>(std::time(nullptr));
-        meta["epoch"] = epoch;
-        meta["magic_tokens"] = magic_tokens_to_json(magic_tokens);
-        meta["num_layers"] = layers.size();
-        meta["total_params"] = totalParamCount();
-        meta["image_width"] = tw;
-        meta["image_height"] = th;
-        {
-            fs::path mf_tmp = tmpdir / "metadata.json.tmp";
-            std::ofstream mf(mf_tmp.string(), std::ios::binary);
-            if (!mf) { fs::remove_all(tmpdir); return false; }
-            mf << std::setw(2) << meta;
-            mf.close();
-            fs::rename(mf_tmp, tmpdir / "metadata.json");
-        }
-        
-        // Sauvegarder la structure des layers
-        if (!saveLayersStructure(tmpdir / "layers.json")) {
-            fs::remove_all(tmpdir);
-            return false;
-        }
-        
-        // Sauvegarder les embeddings de l'encoder
-        if (hasEncoder && !saveEmbeddings(tmpdir / "embeddings.bin")) {
-            fs::remove_all(tmpdir);
-            return false;
-        }
-        
-        // Sauvegarder les données des paramètres (tensor.data)
-        if (!saveParamsData(tmpdir / "params_data.bin")) {
-            fs::remove_all(tmpdir);
-            return false;
-        }
-
-        // Sauvegarder les poids (weights.u16)
-        {
-            fs::path wf_tmp = tmpdir / "weights.u16.tmp";
-            std::ofstream wf(wf_tmp.string(), std::ios::binary);
-            if (!wf) { fs::remove_all(tmpdir); return false; }
-
-            // write params[].Weight as little-endian uint16 array
-            for (size_t i = 0; i < params.size(); ++i) {
-                uint16_t w = params[i].Weight;
-                uint8_t bytes[2];
-                bytes[0] = static_cast<uint8_t>(w & 0xFF);
-                bytes[1] = static_cast<uint8_t>((w >> 8) & 0xFF);
-                wf.write(reinterpret_cast<const char*>(bytes), 2);
-                if (!wf) { fs::remove_all(tmpdir); return false; }
-            }
-
-            wf.close();
-            fs::rename(wf_tmp, tmpdir / "weights.u16");
-        }
-
-        if (fs::exists(outdir)) fs::remove_all(outdir);
-        fs::rename(tmpdir, outdir);
-
-        return true;
-    } catch (...) {
-        try { /* best-effort cleanup */ } catch(...) {}
-        return false;
-    }
+    // NOTE: Cette fonction est obsolète et a été remplacée par le module Serialization
+    // Utilisez maintenant checkpoint.save() depuis Lua ou Mimir::Serialization::save_checkpoint() depuis C++
+    std::cerr << "⚠️ Model::saveCheckpoint() est obsolète! Utilisez Mimir::Serialization::save_checkpoint()" << std::endl;
+    std::cerr << "   Depuis Lua: checkpoint.save(model, path, {format='safetensors'})" << std::endl;
+    return false;
 }
 
 static void write_u64_le(std::ofstream &f, uint64_t v) {
@@ -980,6 +857,9 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                     try { std::ifstream mf(mp); json mj; mf >> mj; if (mj.contains("magic_tokens")) { json_to_magic_tokens(mj["magic_tokens"], outMagic); loaded_any = true; } } catch(...) {}
                 }
                 
+                // NOTE: Anciennes méthodes de sauvegarde/chargement supprimées
+                // Utiliser maintenant le module Serialization avec checkpoint.load()
+                /*
                 // Charger la structure des layers
                 if (fs::exists(layersp)) {
                     try {
@@ -1015,6 +895,7 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                         std::cerr << "⚠️ Échec du chargement des params_data" << std::endl;
                     }
                 }
+                */
                 
                 if (loaded_any) return true;
             }
@@ -1771,207 +1652,863 @@ void Model::backpropThroughBranch(int layer_idx,
 // === Forward/Backward Pass Complet ===
 
 std::vector<float> Model::forwardPass(const std::vector<float> &input, bool training) {
-    if (params.empty() || layers.empty()) {
-        std::cerr << "⚠️  Cannot perform forward pass: model not initialized" << std::endl;
+    // Vérifications préliminaires
+    if (layers.empty()) {
+        std::cerr << "⚠️  Cannot perform forward pass: no layers defined" << std::endl;
         return input;
     }
     
-    // Réinitialiser l'état du forward si nécessaire
+    if (layer_weight_blocks.empty()) {
+        std::cerr << "⚠️  Cannot perform forward pass: weights not allocated" << std::endl;
+        std::cerr << "    Call allocate_params() and init_weights() first" << std::endl;
+        return input;
+    }
+    
+    // ========================================================================
+    // INITIALIZATION: TensorStore + Validation
+    // ========================================================================
+    
+    // Clear et initialiser TensorStore avec l'input principal
+    clearTensorStore();
+    storeTensor("x", input);
+    
+    // VALIDATION: Vérifier que tous les layers sont supportés (une seule fois)
+    static bool validated = false;
+    if (!validated) {
+        for (size_t i = 0; i < layers.size(); ++i) {
+            if (layers[i].type_enum == LayerType::UNKNOWN) {
+                std::cerr << "❌ ERROR: Unsupported layer type '" << layers[i].type 
+                          << "' at index " << i << " (" << layers[i].name << ")" << std::endl;
+                log_supported_types();
+                throw std::runtime_error("Unsupported layer type: " + layers[i].type);
+            }
+        }
+        validated = true;
+        std::cerr << "✓ All " << layers.size() << " layers validated" << std::endl;
+    }
+    
+    // État du forward
     if (training) {
         forward_state.clear();
         forward_state.is_valid = true;
-    }
-    
-    std::vector<float> x = input;
-    
-    if (training) {
         forward_state.layer_inputs.reserve(layers.size());
         forward_state.layer_outputs.reserve(layers.size());
         forward_state.activations.reserve(layers.size());
     }
     
-    // Pré-allouer un buffer de sortie réutilisable
-    std::vector<float> layer_output;
-    layer_output.reserve(x.size());
-    
-    // Stocker les sorties de tous les layers pour gérer les branches
+    // Conservation pour backward (à migrer vers TensorStore)
     std::vector<std::vector<float>> all_layer_outputs;
     if (training) {
         all_layer_outputs.reserve(layers.size());
     }
     
-    // Forward pass à travers chaque layer
+    // ========================================================================
+    // FORWARD PASS: Routing via TensorStore
+    // ========================================================================
+    
     for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
         const auto &layer = layers[layer_idx];
+        
+        // ====================================================================
+        // RETRIEVE INPUTS (multi-input support)
+        // ====================================================================
+        
+        std::vector<std::string> input_names = layer.inputs;
+        if (input_names.empty()) {
+            input_names = {"x"};  // Default: lire "x"
+        }
+        
+        std::vector<const std::vector<float>*> inputs;
+        inputs.reserve(input_names.size());
+        
+        for (const auto& name : input_names) {
+            try {
+                inputs.push_back(&getTensor(name));
+            } catch (const std::exception& e) {
+                std::cerr << "❌ ERROR in layer " << layer_idx << " (" << layer.name 
+                          << "): Cannot find input tensor '" << name << "'" << std::endl;
+                std::cerr << "Available tensors: ";
+                auto available = getAvailableTensors();
+                for (const auto& t : available) std::cerr << "'" << t << "' ";
+                std::cerr << std::endl;
+                throw;
+            }
+        }
+        
+        // Pour compatibilité: x est toujours inputs[0]
+        const std::vector<float>& x = *inputs[0];
         
         if (training) {
             forward_state.layer_inputs.push_back(x);
         }
         
-        layer_output.clear(); // Réutiliser au lieu de réallouer
+        std::vector<float> layer_output;
         
-        // === DISPATCH HARDWARE ACCELERATED vs CPU ===
-        bool use_gpu = g_compute_available && layer.params_count > 10000; // Seuil pour GPU
+        // ====================================================================
+        // STRICT MODE: RuntimeAllocator
+        // ====================================================================
+        RuntimeAllocator allocator(MemoryGuard::instance(), max_ram_mb_);
         
-        // Traitement selon le type de layer
-        if (layer.type == "Conv2d" || layer.type == "ConvTranspose2d") {
-            // VRAIE convolution 2D avec kernel spatial
-            const int kernel_size = layer.kernel_size > 0 ? layer.kernel_size : 3;
-            const int in_channels = layer.in_channels > 0 ? layer.in_channels : 64;
-            const int out_channels = layer.out_channels > 0 ? layer.out_channels : 64;
-            const int height = layer.input_height > 0 ? layer.input_height : 64;
-            const int width = layer.input_width > 0 ? layer.input_width : 64;
-            const int stride = layer.stride > 0 ? layer.stride : 1;
-            const int padding = layer.padding;
-            
-            // Calculer les dimensions de sortie
-            int out_height, out_width;
-            if (layer.type == "Conv2d") {
-                out_height = (height + 2 * padding - kernel_size) / stride + 1;
-                out_width = (width + 2 * padding - kernel_size) / stride + 1;
-            } else { // ConvTranspose2d
-                out_height = (height - 1) * stride - 2 * padding + kernel_size;
-                out_width = (width - 1) * stride - 2 * padding + kernel_size;
-            }
-            
-            const size_t output_size = out_channels * out_height * out_width;
-            if (layer_output.capacity() < output_size) {
-                layer_output.reserve(output_size);
-            }
-            layer_output.resize(output_size, 0.0f);
-            
-            if (use_gpu) {
-                // === GPU PATH: Utiliser ComputeEngine (Vulkan) ===
-                // Note: Pour une vraie implémentation, il faudrait créer des buffers GPU
-                // et uploader les données. Ici on fait un fallback CPU pour simplicité.
-                // TODO: Implémenter les kernels de convolution Vulkan
-                std::cout << "⚡ GPU convolution (layer " << layer_idx << ") - TODO: implement kernels" << std::endl;
-                use_gpu = false; // Fallback CPU pour l'instant
-            }
-            
-            if (!use_gpu) {
-                // === CPU PATH: Convolution parallélisée OpenMP ===
-                // NOUVEAU: Récupérer les poids depuis le weight_block du layer
-                const float* layer_weights = layer.getWeights();
-                
-                // Convolution 2D complète (parallélisée - FORCÉE)
-                #pragma omp parallel for schedule(dynamic)
-                for (int oc = 0; oc < out_channels; ++oc) {
-                    for (int oh = 0; oh < out_height; ++oh) {
-                        for (int ow = 0; ow < out_width; ++ow) {
-                            float sum = 0.0f;
-                            
-                            for (int ic = 0; ic < in_channels; ++ic) {
-                                for (int kh = 0; kh < kernel_size; ++kh) {
-                                    for (int kw = 0; kw < kernel_size; ++kw) {
-                                        int ih = oh * stride + kh - padding;
-                                        int iw = ow * stride + kw - padding;
-                                        
-                                        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                            int in_idx = ic * (height * width) + ih * width + iw;
-                                            int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
-                                            
-                                            if (in_idx < static_cast<int>(x.size()) && 
-                                                w_idx < static_cast<int>(layer.getWeightsSize())) {
-                                                float weight = layer_weights[w_idx];
-                                                sum += x[in_idx] * weight;
-                                            }
-                                        }
+        // ====================================================================
+        // DISPATCH PRINCIPAL VIA SWITCH/CASE SUR LayerType (MODE STRICT)
+        // ====================================================================
+        
+        try {
+            switch (layer.type_enum) {
+    
+    // ====================================================================
+    // CONVOLUTION
+    // ====================================================================
+    
+    case LayerType::Conv2d:
+    case LayerType::ConvTranspose2d: {
+        RUNTIME_CHECK(
+            layer.in_channels > 0 && layer.out_channels > 0,
+            "Conv2d: in_channels and out_channels must be set"
+        );
+        RUNTIME_CHECK(
+            layer.get_kernel_h() > 0,
+            "Conv2d: kernel_size must be set"
+        );
+        
+        const int kernel_size = layer.get_kernel_h();
+        const int in_channels = layer.in_channels;
+        const int out_channels = layer.out_channels;
+        const int height = layer.input_height > 0 ? layer.input_height : 64;
+        const int width = layer.input_width > 0 ? layer.input_width : 64;
+        const int stride = layer.get_stride_h();
+        const int padding = layer.get_pad_h();
+        
+        int out_height, out_width;
+        if (layer.type_enum == LayerType::Conv2d) {
+            out_height = (height + 2 * padding - kernel_size) / stride + 1;
+            out_width = (width + 2 * padding - kernel_size) / stride + 1;
+        } else {
+            out_height = (height - 1) * stride - 2 * padding + kernel_size;
+            out_width = (width - 1) * stride - 2 * padding + kernel_size;
+        }
+        
+        // ✅ Allocation gérée
+        auto output_handle = allocator.allocate_tensor(
+            {out_channels, out_height, out_width},
+            "float32",
+            layer.name + "_output"
+        );
+        layer_output = output_handle.data();
+        
+        const float* layer_weights = layer.getWeights();
+        
+        #pragma omp parallel for schedule(dynamic)
+        for (int oc = 0; oc < out_channels; ++oc) {
+            for (int oh = 0; oh < out_height; ++oh) {
+                for (int ow = 0; ow < out_width; ++ow) {
+                    float sum = 0.0f;
+                    
+                    for (int ic = 0; ic < in_channels; ++ic) {
+                        for (int kh = 0; kh < kernel_size; ++kh) {
+                            for (int kw = 0; kw < kernel_size; ++kw) {
+                                int ih = oh * stride + kh - padding;
+                                int iw = ow * stride + kw - padding;
+                                
+                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                    int in_idx = ic * (height * width) + ih * width + iw;
+                                    int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
+                                    
+                                    if (in_idx < static_cast<int>(x.size()) && 
+                                        w_idx < static_cast<int>(layer.getWeightsSize())) {
+                                        sum += x[in_idx] * layer_weights[w_idx];
                                     }
                                 }
                             }
-                            
-                            int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
-                            layer_output[out_idx] = sum;
                         }
                     }
+                    
+                    int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
+                    layer_output[out_idx] = sum;
                 }
             }
-            
-            x = layer_output;
-            
-        } else if (layer.type == "BatchNorm2d") {
-            // BatchNorm : normalisation + scale + shift
-            layer_output = x;
-            
-            // Calculer mean et std
-            float mean = 0.0f;
-            for (float val : x) mean += val;
-            mean /= x.size();
-            
-            float var = 0.0f;
-            for (float val : x) {
-                float diff = val - mean;
-                var += diff * diff;
+        }
+        
+        // ReLU activation if specified
+        if (layer.activation != ActivationType::NONE) {
+            for (auto &val : layer_output) {
+                val = std::max(0.0f, val);
             }
-            var /= x.size();
-            float std = std::sqrt(var + 1e-5f);
-            
-            // NOUVEAU: Récupérer gamma depuis le weight_block
-            const float* layer_weights = layer.getWeights();
-            
-            // Normaliser
-            for (size_t i = 0; i < layer_output.size(); ++i) {
-                layer_output[i] = (layer_output[i] - mean) / std;
-                
-                // Appliquer gamma et beta si disponibles
-                if (i < layer.getWeightsSize()) {
-                    float gamma = layer_weights[i];
-                    layer_output[i] *= gamma;
+        }
+        
+        break;
+    }
+    
+    case LayerType::Conv1d: {
+        layer_output = LayerOpsExt::conv1d_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::DepthwiseConv2d: {
+        layer_output = LayerOpsExt::depthwise_conv2d_forward(x, layer);
+        break;
+    }
+    
+    // ====================================================================
+    // LINEAR
+    // ====================================================================
+    
+    case LayerType::Linear: {
+        layer_output = LayerOps::linear_forward(x, layer, training);
+        break;
+    }
+    
+    case LayerType::Bilinear: {
+        RUNTIME_ERROR_STRICT(
+            "Bilinear layer not implemented yet. "
+            "Remove from model or implement in LayerOpsExt."
+        );
+        break;
+    }
+    
+    // ====================================================================
+    // EMBEDDING
+    // ====================================================================
+    
+    case LayerType::Embedding: {
+        RUNTIME_ERROR_STRICT(
+            "Embedding layer requires integer token input (not float vector). "
+            "Current API is float-only. Use external embedding lookup or "
+            "implement int-based forward API."
+        );
+        break;
+    }
+    
+    case LayerType::EmbeddingBag: {
+        RUNTIME_ERROR_STRICT(
+            "EmbeddingBag layer not implemented. "
+            "Remove from model or implement in LayerOpsExt."
+        );
+        break;
+    }
+    
+    // ====================================================================
+    // NORMALIZATION
+    // ====================================================================
+    
+    case LayerType::BatchNorm2d:
+    case LayerType::BatchNorm1d: {
+        auto output_handle = allocator.allocate_tensor(
+            {static_cast<int>(x.size())},
+            "float32",
+            layer.name + "_output"
+        );
+        std::vector<float>& layer_output = output_handle.data();
+        layer_output = x;
+        
+        float mean = 0.0f;
+        for (float val : x) mean += val;
+        mean /= x.size();
+        
+        float var = 0.0f;
+        for (float val : x) {
+            float diff = val - mean;
+            var += diff * diff;
+        }
+        var /= x.size();
+        float std = std::sqrt(var + layer.eps);
+        
+        const float* layer_weights = layer.getWeights();
+        
+        for (size_t i = 0; i < layer_output.size(); ++i) {
+            layer_output[i] = (layer_output[i] - mean) / std;
+            if (layer.affine && i < layer.getWeightsSize()) {
+                layer_output[i] *= layer_weights[i];
+            }
+        }
+        
+        break;
+    }
+    
+    case LayerType::LayerNorm: {
+        layer_output = LayerOps::layernorm_forward(x, layer, training);
+        break;
+    }
+    
+    case LayerType::GroupNorm: {
+        layer_output = LayerOps::groupnorm_forward(x, layer, training);
+        break;
+    }
+    
+    case LayerType::InstanceNorm2d: {
+        layer_output = LayerOpsExt::instance_norm2d_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::RMSNorm: {
+        layer_output = LayerOpsExt::rms_norm_forward(x, layer);
+        break;
+    }
+    
+    // ====================================================================
+    // ACTIVATION
+    // ====================================================================
+    
+    case LayerType::ReLU: {
+        layer_output = LayerOps::relu_forward(x);
+        break;
+    }
+    
+    case LayerType::LeakyReLU: {
+        float alpha = layer.leaky_relu_alpha > 0 ? layer.leaky_relu_alpha : 0.01f;
+        layer_output = LayerOpsExt::leaky_relu_forward(x, alpha);
+        break;
+    }
+    
+    case LayerType::GELU: {
+        layer_output = LayerOps::gelu_forward(x);
+        break;
+    }
+    
+    case LayerType::SiLU: {
+        layer_output = LayerOps::silu_forward(x);
+        break;
+    }
+    
+    case LayerType::Tanh: {
+        layer_output = LayerOps::tanh_forward(x);
+        break;
+    }
+    
+    case LayerType::Sigmoid: {
+        layer_output = LayerOps::sigmoid_forward(x);
+        break;
+    }
+    
+    case LayerType::Softmax:
+    case LayerType::LogSoftmax: {
+        layer_output = LayerOps::softmax_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::Softplus: {
+        layer_output = LayerOpsExt::softplus_forward(x);
+        break;
+    }
+    
+    case LayerType::Mish: {
+        layer_output = LayerOpsExt::mish_forward(x);
+        break;
+    }
+    
+    case LayerType::HardSigmoid: {
+        layer_output = LayerOpsExt::hard_sigmoid_forward(x);
+        break;
+    }
+    
+    case LayerType::HardSwish: {
+        layer_output = LayerOpsExt::hard_swish_forward(x);
+        break;
+    }
+    
+    // ====================================================================
+    // POOLING
+    // ====================================================================
+    
+    case LayerType::MaxPool2d: {
+        RUNTIME_CHECK(
+            layer.get_kernel_h() > 0,
+            "MaxPool2d: kernel_size must be set"
+        );
+        
+        const int kernel_size = layer.get_kernel_h();
+        const int in_channels = layer.in_channels > 0 ? layer.in_channels : 64;
+        const int height = layer.input_height > 0 ? layer.input_height : 64;
+        const int width = layer.input_width > 0 ? layer.input_width : 64;
+        const int stride = layer.get_stride_h();
+        const int padding = layer.get_pad_h();
+        
+        const int out_height = (height + 2 * padding - kernel_size) / stride + 1;
+        const int out_width = (width + 2 * padding - kernel_size) / stride + 1;
+        
+        auto output_handle = allocator.allocate_tensor(
+            {in_channels, out_height, out_width},
+            "float32",
+            layer.name + "_output"
+        );
+        std::vector<float>& layer_output = output_handle.data();
+        std::fill(layer_output.begin(), layer_output.end(), 
+                  -std::numeric_limits<float>::infinity());
+        
+        #pragma omp parallel for schedule(static)
+        for (int c = 0; c < in_channels; ++c) {
+            for (int oh = 0; oh < out_height; ++oh) {
+                for (int ow = 0; ow < out_width; ++ow) {
+                    float max_val = -std::numeric_limits<float>::infinity();
+                    
+                    for (int kh = 0; kh < kernel_size; ++kh) {
+                        for (int kw = 0; kw < kernel_size; ++kw) {
+                            int ih = oh * stride + kh - padding;
+                            int iw = ow * stride + kw - padding;
+                            
+                            if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                int in_idx = c * (height * width) + ih * width + iw;
+                                if (in_idx < static_cast<int>(x.size())) {
+                                    max_val = std::max(max_val, x[in_idx]);
+                                }
+                            }
+                        }
+                    }
+                    
+                    int out_idx = c * (out_height * out_width) + oh * out_width + ow;
+                    layer_output[out_idx] = max_val;
                 }
             }
-            
-            x = layer_output;
-            
-        } else if (layer.type == "MaxPool2d") {
-            // MaxPool : sous-échantillonnage (stride 2)
-            layer_output.resize(x.size() / 2);
-            for (size_t i = 0; i < layer_output.size(); ++i) {
-                size_t idx1 = i * 2;
-                size_t idx2 = i * 2 + 1;
-                layer_output[i] = std::max(
-                    idx1 < x.size() ? x[idx1] : 0.0f,
-                    idx2 < x.size() ? x[idx2] : 0.0f
-                );
-            }
-            x = layer_output;
-            
+        }
+        
+
+    }
+    
+    case LayerType::AvgPool2d: {
+        layer_output = LayerOps::avgpool2d_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::AvgPool1d: {
+        layer_output = LayerOpsExt::avgpool1d_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::GlobalAvgPool2d:
+    case LayerType::AdaptiveAvgPool2d: {
+        layer_output = LayerOps::global_avgpool2d_forward(x, layer);
+        break;
+    }
+    
+    // ====================================================================
+    // DROPOUT
+    // ====================================================================
+    
+    case LayerType::Dropout:
+    case LayerType::Dropout2d: {
+        layer_output = LayerOps::dropout_forward(x, layer, training);
+        break;
+    }
+    
+    case LayerType::AlphaDropout: {
+        RUNTIME_ERROR_STRICT(
+            "AlphaDropout not implemented. Use standard Dropout or implement."
+        );
+        break;
+    }
+    
+    // ====================================================================
+    // SHAPE OPERATIONS
+    // ====================================================================
+    
+    case LayerType::Flatten: {
+        layer_output = LayerOps::flatten_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::Reshape:
+    case LayerType::View: {
+        layer_output = LayerOps::reshape_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::Transpose: {
+        RUNTIME_CHECK(
+            layer.in_features > 0 && layer.out_features > 0,
+            "Transpose: in_features and out_features must be set"
+        );
+        
+        layer_output = LayerOps::transpose_forward(
+            x, layer.in_features, layer.out_features
+        );
+        break;
+    }
+    
+    case LayerType::Permute: {
+        RUNTIME_CHECK(
+            !layer.permute_dims.empty(),
+            "Permute: permute_dims must be configured"
+        );
+        
+        std::vector<int> shape = layer.shape;
+        if (shape.empty()) {
+            shape = {1, static_cast<int>(x.size())};
+        }
+        
+        layer_output = LayerOps::permute_forward(x, layer.permute_dims, shape);
+        break;
+    }
+    
+    case LayerType::Squeeze: {
+        std::vector<int> input_shape = {static_cast<int>(x.size())};
+        std::vector<int> output_shape;
+        layer_output = LayerOpsExt::squeeze_forward(
+            x, input_shape, output_shape, layer.squeeze_dim
+        );
+        break;
+    }
+    
+    case LayerType::Unsqueeze: {
+        std::vector<int> input_shape = {static_cast<int>(x.size())};
+        std::vector<int> output_shape;
+        RUNTIME_CHECK(
+            layer.unsqueeze_dim >= -10 && layer.unsqueeze_dim < 10,
+            "Unsqueeze: unsqueeze_dim must be set (valid range: -10 to 10)"
+        );
+        layer_output = LayerOpsExt::unsqueeze_forward(
+            x, input_shape, output_shape, layer.unsqueeze_dim
+        );
+        break;
+    }
+    
+    case LayerType::Identity: {
+        layer_output = LayerOps::identity_forward(x);
+        break;
+    }
+    
+    case LayerType::Lambda: {
+        RUNTIME_ERROR_STRICT(
+            "Lambda layer with Lua callbacks is unsafe in strict mode. "
+            "Use C++ layer implementations instead."
+        );
+        break;
+    }
+    
+    // ====================================================================
+    // ELEMENT-WISE OPERATIONS
+    // ====================================================================
+    
+    case LayerType::Add: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "Add layer requires 2 inputs, got " + std::to_string(inputs.size())
+        );
+        layer_output = LayerOps::add_forward(*inputs[0], *inputs[1]);
+        break;
+    }
+    
+    case LayerType::Subtract: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "Subtract layer requires 2 inputs, got " + std::to_string(inputs.size())
+        );
+        layer_output = LayerOpsExt::subtract_forward(*inputs[0], *inputs[1]);
+        break;
+    }
+    
+    case LayerType::Multiply: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "Multiply layer requires 2 inputs, got " + std::to_string(inputs.size())
+        );
+        layer_output = LayerOps::multiply_forward(*inputs[0], *inputs[1]);
+        break;
+    }
+    
+    case LayerType::Divide: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "Divide layer requires 2 inputs, got " + std::to_string(inputs.size())
+        );
+        layer_output = LayerOpsExt::divide_forward(*inputs[0], *inputs[1]);
+        break;
+    }
+    
+    // ====================================================================
+    // TENSOR OPERATIONS
+    // ====================================================================
+    
+    case LayerType::Concat: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "Concat requires at least 2 inputs, got " + std::to_string(inputs.size())
+        );
+        
+        std::vector<std::vector<float>> inputs_vec;
+        inputs_vec.reserve(inputs.size());
+        for (const auto* inp : inputs) {
+            inputs_vec.push_back(*inp);
+        }
+        layer_output = LayerOps::concat_forward(inputs_vec, layer.concat_axis);
+        break;
+    }
+    
+    case LayerType::Split: {
+        RUNTIME_CHECK(
+            !layer.split_sizes.empty(),
+            "Split: split_sizes must be configured"
+        );
+        
+        std::vector<std::vector<float>> splits = LayerOps::split_forward(
+            x, layer.split_sizes, layer.split_axis
+        );
+        
+        std::string output_base = layer.output.empty() ? "x" : layer.output;
+        for (size_t i = 0; i < splits.size(); ++i) {
+            std::string split_name = output_base + "_" + std::to_string(i);
+            storeTensor(split_name, std::move(splits[i]));
+        }
+        
+        layer_output = getTensor(output_base + "_0");
+        break;
+    }
+    
+    case LayerType::Chunk: {
+        RUNTIME_CHECK(
+            layer.num_chunks > 0,
+            "Chunk: num_chunks must be set"
+        );
+        
+        auto chunks = LayerOpsExt::chunk_forward(x, layer.num_chunks, layer.split_axis);
+        
+        std::string output_base = layer.output.empty() ? "x" : layer.output;
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            storeTensor(output_base + "_" + std::to_string(i), std::move(chunks[i]));
+        }
+        
+        layer_output = getTensor(output_base + "_0");
+        break;
+    }
+    
+    case LayerType::Stack: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "Stack requires at least 2 inputs, got " + std::to_string(inputs.size())
+        );
+        
+        std::vector<std::vector<float>> inputs_vec;
+        for (const auto* inp : inputs) inputs_vec.push_back(*inp);
+        
+        layer_output = LayerOpsExt::stack_forward(inputs_vec, layer.stack_axis);
+        break;
+    }
+    
+    case LayerType::MatMul: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "MatMul requires 2 matrix inputs, got " + std::to_string(inputs.size())
+        );
+        RUNTIME_CHECK(
+            layer.in_features > 0 && layer.out_features > 0 && layer.embed_dim > 0,
+            "MatMul: dimensions (in_features, out_features, embed_dim) must be configured"
+        );
+        
+        int M = layer.in_features;
+        int K = layer.out_features;
+        int N = layer.embed_dim;
+        
+        layer_output = LayerOps::matmul_forward(*inputs[0], *inputs[1], M, K, N);
+        break;
+    }
+    
+    case LayerType::BatchMatMul: {
+        RUNTIME_ERROR_STRICT(
+            "BatchMatMul not implemented. Use MatMul with batching or implement."
+        );
+        break;
+    }
+    
+    // ====================================================================
+    // ATTENTION
+    // ====================================================================
+    
+    case LayerType::SelfAttention:
+    case LayerType::MultiHeadAttention: {
+        RUNTIME_CHECK(
+            layer.getWeights() != nullptr,
+            "Attention: weights not initialized. Call allocateParams() first."
+        );
+        
+        int seq_len = layer.seq_len > 0 ? layer.seq_len : 1;
+        int embed_dim = layer.embed_dim > 0 ? layer.embed_dim : x.size();
+        int num_heads = layer.num_heads > 0 ? layer.num_heads : 1;
+        bool causal = layer.causal;
+        
+        const float* weights = layer.getWeights();
+        int qkv_size = embed_dim * embed_dim * 3;
+        int out_size = embed_dim * embed_dim;
+        
+        std::vector<float> qkv_weight(weights, weights + qkv_size);
+        std::vector<float> out_weight(weights + qkv_size, weights + qkv_size + out_size);
+        
+        if (layer.type_enum == LayerType::SelfAttention) {
+            layer_output = LayerOps::self_attention_forward(
+                x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal
+            );
         } else {
-            // Layer générique : application linéaire
-            layer_output = x;
-            x = layer_output;
+            layer_output = LayerOps::multihead_attention_forward(
+                x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal
+            );
+        }
+        break;
+    }
+    
+    case LayerType::CrossAttention: {
+        RUNTIME_CHECK(
+            inputs.size() >= 2,
+            "CrossAttention requires 2 inputs (query, key_value), got " +
+            std::to_string(inputs.size())
+        );
+        
+        RUNTIME_ERROR_STRICT(
+            "CrossAttention: Full implementation pending. "
+            "Need separate Q/K/V projections for cross-attention."
+        );
+        break;
+    }
+    
+    // ====================================================================
+    // UPSAMPLING
+    // ====================================================================
+    
+    case LayerType::UpsampleNearest: {
+        RUNTIME_CHECK(
+            layer.out_h > 0 && layer.out_w > 0 && layer.in_channels > 0,
+            "UpsampleNearest: dimensions (out_h, out_w, in_channels) must be set"
+        );
+        
+        int in_h = layer.out_h;
+        int in_w = layer.out_w;
+        int channels = layer.in_channels;
+        int scale_h = layer.scale_h > 0 ? layer.scale_h : 2;
+        int scale_w = layer.scale_w > 0 ? layer.scale_w : 2;
+        
+        layer_output = LayerOps::upsample_nearest_forward(
+            x, in_h, in_w, channels, scale_h, scale_w
+        );
+        break;
+    }
+    
+    case LayerType::UpsampleBilinear: {
+        RUNTIME_CHECK(
+            layer.out_h > 0 && layer.out_w > 0 && layer.in_channels > 0,
+            "UpsampleBilinear: dimensions must be set"
+        );
+        
+        int in_h = layer.out_h;
+        int in_w = layer.out_w;
+        int channels = layer.in_channels;
+        int out_h = in_h * 2;
+        int out_w = in_w * 2;
+        
+        layer_output = LayerOps::upsample_bilinear_forward(
+            x, in_h, in_w, channels, out_h, out_w
+        );
+        break;
+    }
+    
+    case LayerType::UpsampleBicubic: {
+        RUNTIME_CHECK(
+            layer.out_h > 0 && layer.out_w > 0,
+            "UpsampleBicubic: dimensions must be set"
+        );
+        
+        int in_h = layer.out_h;
+        int in_w = layer.out_w;
+        int channels = layer.in_channels > 0 ? layer.in_channels : 3;
+        int out_h = in_h * 2;
+        int out_w = in_w * 2;
+        
+        layer_output = LayerOpsExt::upsample_bicubic_forward(
+            x, in_h, in_w, channels, out_h, out_w
+        );
+        break;
+    }
+    
+    case LayerType::PixelShuffle: {
+        layer_output = LayerOpsExt::pixel_shuffle_forward(x, layer);
+        break;
+    }
+    
+    // ====================================================================
+    // PADDING
+    // ====================================================================
+    
+    case LayerType::ZeroPad2d: {
+        layer_output = LayerOpsExt::zero_pad2d_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::ReflectionPad2d: {
+        layer_output = LayerOpsExt::reflection_pad2d_forward(x, layer);
+        break;
+    }
+    
+    case LayerType::ReplicationPad2d: {
+        layer_output = LayerOpsExt::replication_pad2d_forward(x, layer);
+        break;
+    }
+    
+    // ====================================================================
+    // RECURRENT (Hors scope - À SUPPRIMER de l'enum si non implémenté)
+    // ====================================================================
+    
+    case LayerType::LSTM:
+    case LayerType::GRU:
+    case LayerType::RNN: {
+        RUNTIME_ERROR_STRICT(
+            "Recurrent layers (LSTM/GRU/RNN) not implemented. "
+            "These are complex and require multi-timestep state handling. "
+            "Decision: implement in v2.4.0 OR remove from LayerType enum."
+        );
+        break;
+    }
+    
+    // ====================================================================
+    // UNKNOWN / DEFAULT
+    // ====================================================================
+    
+    case LayerType::UNKNOWN:
+    default: {
+        throw std::runtime_error(
+            "Layer '" + layer.name + "' type '" + 
+            type_to_string(layer.type_enum) + "' is UNKNOWN. " +
+            "This should never happen in strict mode. Check LayerType registry."
+        );
+        break;
+    }
+}
+
+// ============================================================================
+// FIN DU SWITCH-CASE
+// ============================================================================
+
+        
+        } catch (const std::exception& e) {
+            std::cerr << "❌ ERROR in layer " << layer_idx << " (" << layer.name 
+                      << ", type: " << type_to_string(layer.type_enum) << "): " 
+                      << e.what() << std::endl;
+            throw;
         }
         
-        // Activation ReLU pour les layers de convolution
-        if (layer.type == "Conv2d" || layer.type == "ConvTranspose2d") {
-            for (auto &val : x) {
-                val = std::max(0.0f, val); // ReLU
-            }
-        }
+        // ====================================================================
+        // STORE OUTPUT (multi-output support)
+        // ====================================================================
         
-        // Stocker la sortie de ce layer pour les branches
+        std::string output_name = layer.output.empty() ? "x" : layer.output;
+        storeTensor(output_name, std::move(layer_output));
+        
+        // Pour backward: conserver aussi dans all_layer_outputs
         if (training) {
-            all_layer_outputs.push_back(x);
+            all_layer_outputs.push_back(getTensor(output_name));
+            forward_state.layer_outputs.push_back(getTensor(output_name));
+            forward_state.activations.push_back(getTensor(output_name));
         }
         
-        // Exécuter les calculs de branche si nécessaire
+        // Gestion des branches
         if (layer.requiresBranchComputation() && training) {
             executeBranchComputation(layer_idx, all_layer_outputs, training);
-            // Mettre à jour x avec la sortie fusionnée
-            x = all_layer_outputs[layer_idx];
-        }
-        
-        if (training) {
-            forward_state.layer_outputs.push_back(layer_output);
-            forward_state.activations.push_back(x);
+            // Update tensor store avec le résultat mergé
+            storeTensor(output_name, all_layer_outputs[layer_idx]);
         }
     }
     
+    // Le résultat final est toujours dans "x" (ou dernier output)
     if (training) {
-        forward_state.final_output = x;
+        forward_state.final_output = getTensor("x");
     }
     
-    return x;
+    return getTensor("x");
 }
 
 Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
@@ -1979,10 +2516,12 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
     
     if (!forward_state.is_valid) {
         std::cerr << "⚠️  Cannot perform backward pass: no valid forward state" << std::endl;
+        std::cerr << "    Call forwardPass() in training mode first" << std::endl;
         return grads;
     }
     
     if (layers.empty() || layer_weight_blocks.empty()) {
+        std::cerr << "⚠️  Cannot perform backward pass: layers or weights not initialized" << std::endl;
         return grads;
     }
     
@@ -2381,7 +2920,7 @@ void Model::build()
     if (total > 0) {
         std::cout << "  Allocation des paramètres..." << std::endl;
         allocateParams();
-        std::cout << "  ✓ " << params.size() << " paramètres alloués" << std::endl;
+        std::cout << "  ✓ " << layer_weight_blocks.size() << " blocs de poids alloués" << std::endl;
         
         // Initialisation automatique des poids (méthode He par défaut)
         std::cout << "  Initialisation des poids (He)..." << std::endl;
@@ -2493,277 +3032,6 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
     std::cout << "    - Magic tokens: " << magic_tokens.size() << std::endl;
 }
 
-// === Nouvelles méthodes de sauvegarde/chargement ===
-
-bool Model::saveLayersStructure(const fs::path &filepath) const {
-    try {
-        json layers_json = json::array();
-        
-        for (const auto &layer : layers) {
-            json layer_obj;
-            layer_obj["name"] = layer.name;
-            layer_obj["type"] = layer.type;
-            layer_obj["params_count"] = layer.params_count;
-            layers_json.push_back(layer_obj);
-        }
-        
-        json root;
-        root["layers"] = layers_json;
-        root["total_layers"] = layers.size();
-        
-        std::ofstream ofs(filepath.string());
-        if (!ofs) return false;
-        
-        ofs << std::setw(2) << root;
-        ofs.close();
-        
-        return true;
-    } catch (const std::exception &e) {
-        std::cerr << "Erreur saveLayersStructure: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-bool Model::loadLayersStructure(const fs::path &filepath) {
-    try {
-        if (!fs::exists(filepath)) return false;
-        
-        std::ifstream ifs(filepath.string());
-        if (!ifs) return false;
-        
-        json root;
-        ifs >> root;
-        
-        if (!root.contains("layers") || !root["layers"].is_array()) {
-            return false;
-        }
-        
-        layers.clear();
-        for (const auto &layer_obj : root["layers"]) {
-            Layer layer;
-            layer.name = layer_obj.value("name", "");
-            layer.type = layer_obj.value("type", "");
-            layer.params_count = layer_obj.value("params_count", 0);
-            layers.push_back(layer);
-        }
-        
-        return true;
-    } catch (const std::exception &e) {
-        std::cerr << "Erreur loadLayersStructure: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-bool Model::saveEmbeddings(const fs::path &filepath) const {
-    try {
-        std::ofstream ofs(filepath.string(), std::ios::binary);
-        if (!ofs) return false;
-        
-        // Sauvegarder les dimensions
-        uint32_t dim = encoder.dim;
-        uint32_t vocab_size = encoder.vocab_size;
-        ofs.write(reinterpret_cast<const char*>(&dim), sizeof(uint32_t));
-        ofs.write(reinterpret_cast<const char*>(&vocab_size), sizeof(uint32_t));
-        
-        // Sauvegarder les embeddings
-        size_t emb_size = encoder.token_embeddings.size();
-        uint64_t size64 = static_cast<uint64_t>(emb_size);
-        ofs.write(reinterpret_cast<const char*>(&size64), sizeof(uint64_t));
-        
-        if (!encoder.token_embeddings.empty()) {
-            ofs.write(reinterpret_cast<const char*>(encoder.token_embeddings.data()),
-                     emb_size * sizeof(float));
-        }
-        
-        ofs.close();
-        return true;
-    } catch (const std::exception &e) {
-        std::cerr << "Erreur saveEmbeddings: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-bool Model::loadEmbeddings(const fs::path &filepath) {
-    try {
-        if (!fs::exists(filepath)) return false;
-        
-        std::ifstream ifs(filepath.string(), std::ios::binary);
-        if (!ifs) return false;
-        
-        // Charger les dimensions
-        uint32_t dim, vocab_size;
-        ifs.read(reinterpret_cast<char*>(&dim), sizeof(uint32_t));
-        ifs.read(reinterpret_cast<char*>(&vocab_size), sizeof(uint32_t));
-        
-        encoder.dim = dim;
-        encoder.vocab_size = vocab_size;
-        
-        // Charger les embeddings
-        uint64_t size64;
-        ifs.read(reinterpret_cast<char*>(&size64), sizeof(uint64_t));
-        
-        if (size64 > 0) {
-            encoder.token_embeddings.resize(size64);
-            ifs.read(reinterpret_cast<char*>(encoder.token_embeddings.data()),
-                    size64 * sizeof(float));
-        }
-        
-        ifs.close();
-        hasEncoder = true;
-        return true;
-    } catch (const std::exception &e) {
-        std::cerr << "Erreur loadEmbeddings: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-bool Model::saveParamsData(const fs::path &filepath) const {
-    try {
-        std::ofstream ofs(filepath.string(), std::ios::binary);
-        if (!ofs) return false;
-        
-        // Nombre total de tenseurs
-        uint64_t num_tensors = static_cast<uint64_t>(params.size());
-        ofs.write(reinterpret_cast<const char*>(&num_tensors), sizeof(uint64_t));
-        
-        // Pour chaque tenseur, sauvegarder sa taille et ses données
-        for (const auto &tensor : params) {
-            uint64_t data_size = static_cast<uint64_t>(tensor.data.size());
-            ofs.write(reinterpret_cast<const char*>(&data_size), sizeof(uint64_t));
-            
-            if (data_size > 0) {
-                ofs.write(reinterpret_cast<const char*>(tensor.data.data()),
-                         data_size * sizeof(float));
-            }
-            
-            // Sauvegarder aussi Weight, Value, Length
-            ofs.write(reinterpret_cast<const char*>(&tensor.Weight), sizeof(uint16_t));
-            ofs.write(reinterpret_cast<const char*>(&tensor.Value), sizeof(uint8_t));
-            ofs.write(reinterpret_cast<const char*>(&tensor.Length), sizeof(uint16_t));
-            
-            // Sauvegarder la position
-            ofs.write(reinterpret_cast<const char*>(&tensor.Pos.X), sizeof(float));
-            ofs.write(reinterpret_cast<const char*>(&tensor.Pos.Y), sizeof(float));
-            ofs.write(reinterpret_cast<const char*>(&tensor.Pos.Z), sizeof(float));
-            ofs.write(reinterpret_cast<const char*>(&tensor.Pos.W), sizeof(float));
-        }
-        
-        ofs.close();
-        return true;
-    } catch (const std::exception &e) {
-        std::cerr << "Erreur saveParamsData: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-bool Model::loadParamsData(const fs::path &filepath) {
-    try {
-        if (!fs::exists(filepath)) return false;
-        
-        std::ifstream ifs(filepath.string(), std::ios::binary);
-        if (!ifs) return false;
-        
-        // Lire le nombre de tenseurs
-        uint64_t num_tensors;
-        ifs.read(reinterpret_cast<char*>(&num_tensors), sizeof(uint64_t));
-        
-        auto& guard = MemoryGuard::instance();
-        size_t params_overhead = num_tensors * sizeof(tensor);
-        
-        if (!guard.requestAllocation(params_overhead, "Model params structure")) {
-            throw std::runtime_error("❌ MemoryGuard: Impossible d'allouer la structure params");
-        }
-        
-#ifdef MIMIR_ENABLE_LEGACY_PARAMS
-        // ⚠️ LEGACY: Allocation potentiellement massive
-        params.resize(num_tensors);
-#else
-        // Structure legacy désactivée
-        params.clear();
-#endif
-        
-        auto& allocator = DynamicTensorAllocator::instance();
-        std::cout << "📦 Chargement dynamique de " << num_tensors << " tenseurs..." << std::endl;
-        
-        // Charger chaque tenseur avec allocation dynamique
-        size_t loaded = 0;
-        size_t compressed = 0;
-        
-        for (size_t i = 0; i < num_tensors; ++i) {
-            uint64_t data_size;
-            ifs.read(reinterpret_cast<char*>(&data_size), sizeof(uint64_t));
-            
-            if (data_size > 0) {
-                // Allouer via DynamicTensorAllocator
-                auto handle = allocator.allocateTensor(data_size, "Tensor[" + std::to_string(i) + "]");
-                
-                if (!handle) {
-                    std::cerr << "⚠️  Allocation échouée au tenseur " << i << "/" << num_tensors << std::endl;
-                    std::cerr << "    Tentative de compression des tenseurs précédents..." << std::endl;
-                    
-                    // Compresser les tenseurs déjà chargés
-                    for (size_t j = 0; j < i; ++j) {
-                        if (params[j].dynamic_handle) {
-                            allocator.compressTensor(
-                                static_cast<DynamicTensorAllocator::TensorHandle*>(params[j].dynamic_handle));
-                            compressed++;
-                        }
-                    }
-                    
-                    // Réessayer
-                    handle = allocator.allocateTensor(data_size, "Tensor[" + std::to_string(i) + "]");
-                    if (!handle) {
-                        std::cerr << "❌ Impossible de charger le modèle même après compression!" << std::endl;
-                        ifs.close();
-                        return false;
-                    }
-                }
-                
-                // Charger les données
-                float* data_ptr = allocator.getTensorData(handle);
-                if (data_ptr) {
-                    ifs.read(reinterpret_cast<char*>(data_ptr), data_size * sizeof(float));
-                    params[i].dynamic_handle = handle;
-                    params[i].use_dynamic_alloc = true;
-                    loaded++;
-                    
-                    // Compresser périodiquement (tous les 100 tenseurs)
-                    if (i % 100 == 0 && i > 0) {
-                        allocator.compressTensor(handle);
-                    }
-                } else {
-                    // Fallback: allocation classique
-                    params[i].data.resize(data_size);
-                    ifs.read(reinterpret_cast<char*>(params[i].data.data()),
-                            data_size * sizeof(float));
-                }
-                
-                // Afficher progression
-                if (i % 1000 == 0 && i > 0) {
-                    std::cout << "  Chargé: " << i << "/" << num_tensors 
-                              << " (" << (loaded * 100 / (i + 1)) << "% dynamique, "
-                              << compressed << " compressés)" << std::endl;
-                }
-            }
-            
-            // Charger Weight, Value, Length
-            ifs.read(reinterpret_cast<char*>(&params[i].Weight), sizeof(uint16_t));
-            ifs.read(reinterpret_cast<char*>(&params[i].Value), sizeof(uint8_t));
-            ifs.read(reinterpret_cast<char*>(&params[i].Length), sizeof(uint16_t));
-            
-            // Charger la position
-            ifs.read(reinterpret_cast<char*>(&params[i].Pos.X), sizeof(float));
-            ifs.read(reinterpret_cast<char*>(&params[i].Pos.Y), sizeof(float));
-            ifs.read(reinterpret_cast<char*>(&params[i].Pos.Z), sizeof(float));
-            ifs.read(reinterpret_cast<char*>(&params[i].Pos.W), sizeof(float));
-        }
-        
-        ifs.close();
-        return true;
-    } catch (const std::exception &e) {
-        std::cerr << "Erreur loadParamsData: " << e.what() << std::endl;
-        return false;
-    }
-}
+// --- Fin ---
 
 // --- Fin ---

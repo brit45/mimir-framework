@@ -126,7 +126,7 @@ Conv::conv2d(input, output, kernel, bias,
 ### En Lua
 ```lua
 -- Créer le modèle
-model.create("my_model", {
+Mimir.Model.create("my_model", {
     in_channels = 3,
     out_channels = 16,
     height = 224,
@@ -136,10 +136,10 @@ model.create("my_model", {
 
 -- Ajouter Conv2D
 local num_params = (3 * 3 * 3 * 16) + 16
-model.push_layer("conv1", "Conv2d", num_params)
+Mimir.Model.push_layer("conv1", "Conv2d", num_params)
 
 -- Forward
-local output = model.forward(input)
+local output = Mimir.Model.forward(input)
 ```
 
 ## Compatibilité

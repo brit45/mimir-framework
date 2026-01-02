@@ -31,7 +31,7 @@ Tous les scripts incluent maintenant :
 
 ```lua
 -- Configuration allocateur RAM
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
 })
@@ -57,7 +57,7 @@ local ok, params = model.build()
 local success, err = model.create("model_name")
 
 -- Construire l'architecture
-success, err = architectures.transformer(config)
+success, err = Mimir.Architectures.transformer(config)
 
 -- Allouer les paramètres
 success, params = model.allocate_params()
@@ -68,17 +68,17 @@ model.init_weights("he", 42)
 
 ### 3. **Architectures disponibles**
 
-Toutes les architectures utilisent maintenant l'API `architectures.*` :
+Toutes les architectures utilisent maintenant l'API `Mimir.Architectures.*` :
 
 ```lua
-architectures.transformer(config)  -- GPT, BERT, Encoder, Decoder
-architectures.unet(config)         -- Segmentation
-architectures.vae(config)          -- Variational Autoencoder
-architectures.mobilenet(config)    -- MobileNetV2
-architectures.resnet(config)       -- ResNet-50
-architectures.vit(config)          -- Vision Transformer
-architectures.gan(type, config)    -- Generator/Discriminator
-architectures.diffusion(config)    -- Diffusion Models
+Mimir.Architectures.transformer(config)  -- GPT, BERT, Encoder, Decoder
+Mimir.Architectures.unet(config)         -- Segmentation
+Mimir.Architectures.vae(config)          -- Variational Autoencoder
+Mimir.Architectures.mobilenet(config)    -- MobileNetV2
+Mimir.Architectures.resnet(config)       -- ResNet-50
+Mimir.Architectures.vit(config)          -- Vision Transformer
+Mimir.Architectures.gan(type, config)    -- Generator/Discriminator
+Mimir.Architectures.diffusion(config)    -- Diffusion Models
 ```
 
 ### 4. **Entraînement avec Learning Rate Schedule**
@@ -104,7 +104,7 @@ Tous les scripts sauvegardent maintenant modèle + tokenizer :
 ```lua
 os.execute("mkdir -p checkpoints")
 model.save("checkpoints/model_name")
-tokenizer.save("checkpoints/model_name/tokenizer.json")
+Mimir.Tokenizer.save("checkpoints/model_name/Mimir.Tokenizer.json")
 ```
 
 ### 6. **Gestion des erreurs**
@@ -213,7 +213,7 @@ local config = {
     dropout = 0.1,
     causal = true
 }
-architectures.transformer(config)
+Mimir.Architectures.transformer(config)
 ```
 
 ### UNet (Segmentation)
@@ -226,7 +226,7 @@ local config = {
     use_attention = true,
     dropout = 0.1
 }
-architectures.unet(config)
+Mimir.Architectures.unet(config)
 ```
 
 ### MobileNetV2 (Classification)
@@ -236,7 +236,7 @@ local config = {
     width_multiplier = 1.0,
     resolution = 224
 }
-architectures.mobilenet(config)
+Mimir.Architectures.mobilenet(config)
 ```
 
 ---
@@ -245,15 +245,15 @@ architectures.mobilenet(config)
 
 Si vous avez des scripts personnalisés, voici les étapes de migration :
 
-1. ✅ Ajouter `allocator.configure()` au début
+1. ✅ Ajouter `Mimir.Allocator.configure()` au début
 2. ✅ Ajouter `model.hardware_caps()` et `model.set_hardware(true)`
 3. ✅ Remplacer `model.create(type, config)` + `model.build()` par :
    - `model.create(name)`
-   - `architectures.[type](config)`
+   - `Mimir.Architectures.[type](config)`
    - `model.allocate_params()`
    - `model.init_weights(method, seed)`
 4. ✅ Implémenter learning rate schedule dans la boucle d'entraînement
-5. ✅ Sauvegarder le tokenizer avec `tokenizer.save()`
+5. ✅ Sauvegarder le tokenizer avec `Mimir.Tokenizer.save()`
 6. ✅ Ajouter gestion d'erreurs avec vérification de `success`
 
 ---

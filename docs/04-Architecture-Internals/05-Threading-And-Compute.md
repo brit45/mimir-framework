@@ -59,13 +59,13 @@ class AsyncMonitor {
 
 ```lua
 -- Créer et démarrer le monitoring
-htop.create()  -- Démarre htop en thread séparé
+Mimir.Htop.create()  -- Démarre htop en thread séparé
 
 -- Mettre à jour les métriques (thread-safe)
-htop.update(epoch, total_epochs, batch, total_batches, 
+Mimir.Htop.update(epoch, total_epochs, batch, total_batches, 
             loss, avg_loss, lr, batch_time_ms, memory_mb, ...)
 
--- Les mises à jour sont automatiques, pas besoin de htop.render()
+-- Les mises à jour sont automatiques, pas besoin de Mimir.Htop.render()
 ```
 
 ## 2. ComputeEngine - Accélération GPU
@@ -156,14 +156,14 @@ output_buf.download(layer_output.data(), output_size);
 -- Script d'entraînement avec monitoring asynchrone
 
 -- Configurer l'allocation mémoire
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true,
     compression_threshold_mb = 100
 })
 
 -- Démarrer le monitoring
-htop.create()
+Mimir.Htop.create()
 
 -- Créer le modèle (détection GPU automatique)
 local m = model.create_t5_encoder(vocab_size, d_model, num_layers)
@@ -182,13 +182,13 @@ for epoch = 1, total_epochs do
         m:optimizer_step(optimizer, lr)
         
         -- Mise à jour monitoring (thread-safe, non-bloquant)
-        htop.update(epoch, total_epochs, batch, total_batches,
+        Mimir.Htop.update(epoch, total_epochs, batch, total_batches,
                    loss, avg_loss, lr, batch_time, memory_mb, ...)
     end
 end
 
 -- Statistiques finales
-allocator.print_stats()
+Mimir.Allocator.print_stats()
 ```
 
 ## 4. Performance
@@ -238,7 +238,7 @@ bool use_gpu = g_compute_available && layer.paramsCount > 5000; // Seuil plus ba
 ### Désactiver le Monitoring
 
 ```lua
--- Ne pas appeler htop.create() ou viz.create()
+-- Ne pas appeler Mimir.Htop.create() ou Mimir.Viz.create()
 -- Le training continuera sans monitoring
 ```
 

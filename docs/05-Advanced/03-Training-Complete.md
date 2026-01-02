@@ -361,7 +361,7 @@ Epoch  LR         Loss    Time
 ### 1. Améliorer le Training
 ```lua
 -- Batch réel au lieu de 1 epoch à la fois
-for batch in dataset.batches(config.batch_size) do
+for batch in Mimir.Dataset.batches(config.batch_size) do
     loss = model.train_batch(batch, lr)
 end
 

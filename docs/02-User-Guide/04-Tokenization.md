@@ -1,10 +1,11 @@
 # Tokenization
 
-> **⚠️ AVERTISSEMENT CRITIQUE**  
-> Ce document a été corrigé. Utiliser `tokenizer.tokenize()` et `tokenizer.detokenize()`.  
-> **Exemples validés contre le code source.**
+**Version:** 2.3.0  
+**API:** Conforme à mimir-api.lua  
 
 Guide complet de la tokenization et gestion du vocabulaire dans Mímir Framework.
+
+> 💡 **Syntaxe Recommandée:** Utiliser `Mimir.Tokenizer.*` pour bénéficier de l'autocompletion IDE.
 
 ---
 
@@ -54,10 +55,10 @@ Les réseaux de neurones ne peuvent pas traiter directement du texte. La tokeniz
 
 ```lua
 -- Créer tokenizer avec taille vocabulaire
-tokenizer.create(5000)
+Mimir.Tokenizer.create(5000)
 
 -- Vérifier création
-local size = tokenizer.vocab_size()
+local size = Mimir.Tokenizer.vocab_size()
 print("Vocabulaire:", size)  -- 5000
 ```
 
@@ -65,11 +66,11 @@ print("Vocabulaire:", size)  -- 5000
 
 ```lua
 -- Créer et charger depuis fichier
-tokenizer.create(50000)
-tokenizer.load("tokenizer.json")
+Mimir.Tokenizer.create(50000)
+Mimir.Tokenizer.load("Mimir.Tokenizer.json")
 
 -- Vérifier taille
-local vocab_size = tokenizer.vocab_size()
+local vocab_size = Mimir.Tokenizer.vocab_size()
 print("Vocabulaire:", vocab_size, "tokens")
 -- Vocabulaire: 50000 tokens
 ```
@@ -108,7 +109,7 @@ print("Vocabulaire:", vocab_size, "tokens")
 
 ```lua
 -- Taille vocabulaire
-local vocab_size = tokenizer.vocab_size()
+local vocab_size = Mimir.Tokenizer.vocab_size()
 print("Taille vocabulaire:", vocab_size)
 ```
 
@@ -116,11 +117,11 @@ print("Taille vocabulaire:", vocab_size)
 
 ```lua
 -- Tokenisation d'un mot
-local token_ids = tokenizer.tokenize("hello")
+local token_ids = Mimir.Tokenizer.tokenize("hello")
 print("IDs de 'hello':", table.concat(token_ids, ", "))
 
 -- Détokenisation
-local text = tokenizer.detokenize({6, 7, 8})
+local text = Mimir.Tokenizer.detokenize({6, 7, 8})
 print("Texte:", text)
 ```
 
@@ -128,7 +129,7 @@ print("Texte:", text)
 
 ```lua
 -- Vérifier taille
-local size = tokenizer.vocab_size()
+local size = Mimir.Tokenizer.vocab_size()
 print("Taille:", size)
 ```
 
@@ -136,20 +137,20 @@ print("Taille:", size)
 
 ```lua
 -- Ajouter un token au vocabulaire
-tokenizer.add_token("newword")
+Mimir.Tokenizer.add_token("newword")
 
 -- Ajouter plusieurs
-tokenizer.addTokens(tokenizer, {"token1", "token2", "token3"})
+Mimir.Tokenizer.addTokens(tokenizer, {"token1", "token2", "token3"})
 
 -- Vérifier
-print("Nouveau vocab size:", tokenizer.getVocabSize(tokenizer))
+print("Nouveau vocab size:", Mimir.Tokenizer.getVocabSize(tokenizer))
 ```
 
 ### Sauvegarder Vocabulaire
 
 ```lua
 -- Sauvegarder tokenizer
-tokenizer.save("my_tokenizer.json")
+Mimir.Tokenizer.save("my_tokenizer.json")
 ```
 
 ---
@@ -161,7 +162,7 @@ tokenizer.save("my_tokenizer.json")
 ```lua
 -- Tokenizer une phrase
 local text = "The quick brown fox jumps"
-local token_ids = tokenizer.tokenize(text)
+local token_ids = Mimir.Tokenizer.tokenize(text)
 
 -- Résultat : table d'entiers
 print("Token IDs:", table.concat(token_ids, ", "))
@@ -173,7 +174,7 @@ print("Token IDs:", table.concat(token_ids, ", "))
 ```lua
 -- Détokenizer IDs en texte
 local token_ids = {4, 2341, 3456, 7823, 9012}
-local text = tokenizer.detokenize(token_ids)
+local text = Mimir.Tokenizer.detokenize(token_ids)
 
 print("Texte décodé:", text)
 -- Texte décodé: The quick brown fox jumps
@@ -186,11 +187,11 @@ print("Texte décodé:", text)
 local text = "Hello, world!"
 
 -- Tokenize
-local token_ids = tokenizer.tokenize(text)
+local token_ids = Mimir.Tokenizer.tokenize(text)
 print("IDs:", table.concat(token_ids, ", "))
 
 -- Detokenize
-local reconstructed = tokenizer.detokenize(token_ids)
+local reconstructed = Mimir.Tokenizer.detokenize(token_ids)
 print("Texte:", reconstructed)  -- "Hello, world!"
 ```
 
@@ -217,25 +218,25 @@ Avec BPE : ["run", "##ning"] → [2341, 4523]
 
 ```lua
 -- Créer tokenizer
-tokenizer.create(50000)
+Mimir.Tokenizer.create(50000)
 
 -- Apprendre BPE sur corpus
-tokenizer.learn_bpe(corpus_text, 50000)
+Mimir.Tokenizer.learn_bpe(corpus_text, 50000)
 
 -- Sauvegarder
-tokenizer.save("tokenizer_bpe.json")
+Mimir.Tokenizer.save("tokenizer_bpe.json")
 ```
 
 ### Utiliser BPE
 
 ```lua
 -- Charger tokenizer BPE
-tokenizer.create(50000)
-tokenizer.load("tokenizer_bpe.json")
+Mimir.Tokenizer.create(50000)
+Mimir.Tokenizer.load("tokenizer_bpe.json")
 
 -- Tokenizer avec BPE (automatique)
 local text = "running quickly"
-local ids = tokenizer.tokenize_bpe(text)
+local ids = Mimir.Tokenizer.tokenize_bpe(text)
 
 print("BPE IDs:", table.concat(ids, ", "))
 -- BPE IDs: 2341, 4523, 7812, 8934
@@ -247,7 +248,7 @@ print("BPE IDs:", table.concat(ids, ", "))
 ```lua
 -- Détokenizer fusionne automatiquement les sous-mots
 local ids = {2341, 4523, 7812, 8934}
-local text = tokenizer.detokenize(ids)
+local text = Mimir.Tokenizer.detokenize(ids)
 
 print("Texte:", text)
 -- Texte: running quickly
@@ -271,7 +272,7 @@ print("Texte:", text)
 
 ```lua
 -- Configuration tokens spéciaux
-tokenizer.setSpecialTokens(tokenizer, {
+Mimir.Tokenizer.setSpecialTokens(tokenizer, {
     pad_token = "<PAD>",   -- Padding
     unk_token = "<UNK>",   -- Unknown word
     bos_token = "<BOS>",   -- Begin of sequence
@@ -286,23 +287,23 @@ tokenizer.setSpecialTokens(tokenizer, {
 
 ```lua
 -- ID du PAD token
-local pad_id = tokenizer.getPadTokenId(tokenizer)
+local pad_id = Mimir.Tokenizer.getPadTokenId(tokenizer)
 
 -- ID du UNK token
-local unk_id = tokenizer.getUnkTokenId(tokenizer)
+local unk_id = Mimir.Tokenizer.getUnkTokenId(tokenizer)
 
 -- ID du BOS token
-local bos_id = tokenizer.getBosTokenId(tokenizer)
+local bos_id = Mimir.Tokenizer.getBosTokenId(tokenizer)
 
 -- ID du EOS token
-local eos_id = tokenizer.getEosTokenId(tokenizer)
+local eos_id = Mimir.Tokenizer.getEosTokenId(tokenizer)
 ```
 
 ### Usage en Encodage
 
 ```lua
 -- Ajouter BOS/EOS automatiquement
-local ids = tokenizer.encode(tokenizer, "Hello world", {
+local ids = Mimir.Tokenizer.encode(tokenizer, "Hello world", {
     add_bos = true,
     add_eos = true
 })
@@ -316,7 +317,7 @@ local ids = tokenizer.encode(tokenizer, "Hello world", {
 
 ```lua
 -- Padder séquence à longueur fixe
-local ids = tokenizer.encode(tokenizer, "Short text", {
+local ids = Mimir.Tokenizer.encode(tokenizer, "Short text", {
     max_length = 128,
     padding = "max_length",
     truncation = true
@@ -335,12 +336,12 @@ local ids = tokenizer.encode(tokenizer, "Short text", {
 ```lua
 -- ✅ BON : Même vocabulaire train/inference
 -- Training
-local tokenizer = tokenizer.create()
-tokenizer.trainBPE(tokenizer, "train.txt", 50000, "vocab.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.trainBPE(tokenizer, "train.txt", 50000, "vocab.json")
 
 -- Inference (plus tard)
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")  -- Même vocab
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")  -- Même vocab
 ```
 
 ### 2. Normalisation Texte
@@ -357,7 +358,7 @@ end
 
 local text = "  Hello   World!  "
 local normalized = preprocess(text)
-local ids = tokenizer.encode(tokenizer, normalized)
+local ids = Mimir.Tokenizer.encode(tokenizer, normalized)
 ```
 
 ### 3. Gestion OOV
@@ -365,10 +366,10 @@ local ids = tokenizer.encode(tokenizer, normalized)
 ```lua
 -- Vérifier tokens inconnus
 local text = "Hello unknownword world"
-local tokens = tokenizer.tokenize(tokenizer, text)
+local tokens = Mimir.Tokenizer.tokenize(tokenizer, text)
 
 for i, token in ipairs(tokens) do
-    if not tokenizer.hasToken(tokenizer, token) then
+    if not Mimir.Tokenizer.hasToken(tokenizer, token) then
         print("Token inconnu:", token)
         -- Gérer : ajouter au vocab, remplacer par <UNK>, etc.
     end
@@ -387,7 +388,7 @@ local texts = {
 
 local all_ids = {}
 for i, text in ipairs(texts) do
-    all_ids[i] = tokenizer.encode(tokenizer, text)
+    all_ids[i] = Mimir.Tokenizer.encode(tokenizer, text)
 end
 
 -- Padder au même longueur
@@ -396,7 +397,7 @@ for _, ids in ipairs(all_ids) do
     max_len = math.max(max_len, #ids)
 end
 
-local pad_id = tokenizer.getPadTokenId(tokenizer)
+local pad_id = Mimir.Tokenizer.getPadTokenId(tokenizer)
 for i, ids in ipairs(all_ids) do
     while #ids < max_len do
         table.insert(ids, pad_id)
@@ -410,11 +411,11 @@ end
 
 ```lua
 -- Sauvegarder tokenizer complet (vocab + config)
-tokenizer.save(tokenizer, "tokenizer_full.json")
+Mimir.Tokenizer.save(tokenizer, "tokenizer_full.json")
 
 -- Recharger tout
-local tokenizer2 = tokenizer.create()
-tokenizer.load(tokenizer2, "tokenizer_full.json")
+local tokenizer2 = Mimir.Tokenizer.create()
+Mimir.Tokenizer.load(tokenizer2, "tokenizer_full.json")
 ```
 
 ---
@@ -425,28 +426,28 @@ tokenizer.load(tokenizer2, "tokenizer_full.json")
 
 ```lua
 -- Créer et configurer
-local tokenizer = tokenizer.create()
+local tokenizer = Mimir.Tokenizer.create()
 
 -- Définir vocabulaire manuel
 local words = {"<PAD>", "<UNK>", "hello", "world", "foo", "bar"}
 for i, word in ipairs(words) do
-    tokenizer.addToken(tokenizer, word)
+    Mimir.Tokenizer.addToken(tokenizer, word)
 end
 
 -- Configurer tokens spéciaux
-tokenizer.setSpecialTokens(tokenizer, {
+Mimir.Tokenizer.setSpecialTokens(tokenizer, {
     pad_token = "<PAD>",
     unk_token = "<UNK>"
 })
 
 -- Encoder
 local text = "hello world foo unknown"
-local ids = tokenizer.encode(tokenizer, text)
+local ids = Mimir.Tokenizer.encode(tokenizer, text)
 print("IDs:", table.concat(ids, ", "))
 -- IDs: 2, 3, 4, 1  (unknown → <UNK> = 1)
 
 -- Décoder
-local decoded = tokenizer.decode(tokenizer, ids)
+local decoded = Mimir.Tokenizer.decode(tokenizer, ids)
 print("Décodé:", decoded)
 -- Décodé: hello world foo <UNK>
 ```
@@ -467,15 +468,15 @@ file:write(corpus)
 file:close()
 
 -- 2. Entraîner BPE
-local tokenizer = tokenizer.create()
-tokenizer.trainBPE(tokenizer, "corpus.txt", 1000, "vocab_bpe.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.trainBPE(tokenizer, "corpus.txt", 1000, "vocab_bpe.json")
 
 -- 3. Utiliser
-tokenizer.loadVocab(tokenizer, "vocab_bpe.json")
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab_bpe.json")
 
 local test_text = "The fox jumps quickly"
-local ids = tokenizer.encodeBPE(tokenizer, test_text)
-local decoded = tokenizer.decodeBPE(tokenizer, ids)
+local ids = Mimir.Tokenizer.encodeBPE(tokenizer, test_text)
+local decoded = Mimir.Tokenizer.decodeBPE(tokenizer, ids)
 
 print("Original:", test_text)
 print("IDs:", table.concat(ids, ", "))
@@ -486,8 +487,8 @@ print("Décodé:", decoded)
 
 ```lua
 -- Tokenizer
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
 -- Dataset brut
 local raw_data = {
@@ -499,7 +500,7 @@ local raw_data = {
 -- Tokenizer tout le dataset
 local tokenized_data = {}
 for i, item in ipairs(raw_data) do
-    local ids = tokenizer.encode(tokenizer, item.text, {
+    local ids = Mimir.Tokenizer.encode(tokenizer, item.text, {
         max_length = 32,
         padding = "max_length",
         truncation = true
@@ -518,32 +519,32 @@ file:write(json.encode(tokenized_data))
 file:close()
 
 -- Charger pour entraînement
-local dataset = dataset.loadFromJson("dataset_tokenized.json")
-model.train(model, dataset, 10)
+local dataset = Mimir.Dataset.loadFromJson("dataset_tokenized.json")
+Mimir.Model.train(model, dataset, 10)
 ```
 
 ### Exemple 4 : Génération avec Tokenizer
 
 ```lua
 -- Modèle de génération
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
-local model = model.load("generator.json")
+local model = Mimir.Model.load("generator.json")
 
 -- Fonction de génération
 function generate_text(prompt, max_length)
     -- Encoder prompt
-    local input_ids = tokenizer.encode(tokenizer, prompt, {
+    local input_ids = Mimir.Tokenizer.encode(tokenizer, prompt, {
         add_bos = true
     })
     
-    local eos_id = tokenizer.getEosTokenId(tokenizer)
+    local eos_id = Mimir.Tokenizer.getEosTokenId(tokenizer)
     
     -- Générer token par token
     for i = 1, max_length do
         -- Forward
-        local output = model.forward(model, {input_ids})
+        local output = Mimir.Model.forward(model, {input_ids})
         
         -- Prendre dernier token (greedy)
         local next_token = argmax(output[1][#output[1]])
@@ -558,7 +559,7 @@ function generate_text(prompt, max_length)
     end
     
     -- Décoder
-    local generated_text = tokenizer.decode(tokenizer, input_ids, {
+    local generated_text = Mimir.Tokenizer.decode(tokenizer, input_ids, {
         skip_special_tokens = true
     })
     

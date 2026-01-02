@@ -1,9 +1,20 @@
 -- Test complet du FluxModel avec eval() et train()
 print("=== Test FluxModel avec modes eval/train ===\n")
 
--- Configuration de la limite mémoire à 10 Go
-print("🛡️  Configuration MemoryGuard: Limite 10 Go")
-MemoryGuard.setLimit(10 * 1024 * 1024 * 1024)  -- 10 GB
+-- Bonne pratique: configurer l'allocateur tôt
+local MAX_RAM_GB = 10
+print("🛡️  Configuration Allocator/MemoryGuard: Limite " .. MAX_RAM_GB .. " Go")
+do
+    local ok, err = Mimir.Allocator.configure({
+        max_ram_gb = MAX_RAM_GB,
+        enable_compression = true,
+        swap_strategy = "lru",
+    })
+    if ok == false then
+        print("❌ Allocator.configure failed: " .. tostring(err))
+        os.exit(1)
+    end
+end
 print("")
 
 -- Configuration
@@ -26,7 +37,7 @@ local config = {
 }
 
 -- Créer le modèle
-local model = FluxModel.new(config)
+local model = Mimir.FluxModel.new(config)
 print("✓ Modèle FluxModel créé")
 
 -- Vérifier l'utilisation mémoire
@@ -43,7 +54,7 @@ model:eval()
 print("✓ Mode eval activé: " .. tostring(model:isTraining()))
 
 -- Test encode/decode
-log("\n--- Test VAE encode/decode ---")
+print("\n--- Test VAE encode/decode ---")
 local image_size = 3 * config.image_resolution * config.image_resolution
 local test_image = {}
 for i = 1, image_size do
@@ -67,6 +78,10 @@ print("✓ Image reconstruite: " .. #reconstructed .. " valeurs")
 -- Test text encoding
 print("\n--- Test Text Encoding ---")
 local prompt = "a beautiful mountain landscape"
+if not (tokenizer and tokenizer.tokenize) then
+    print("❌ Tokenizer non disponible (tokenizer.tokenize)")
+    os.exit(1)
+end
 local tokens = tokenizer.tokenize(prompt)
 print("✓ Prompt tokenisé: " .. #tokens .. " tokens")
 

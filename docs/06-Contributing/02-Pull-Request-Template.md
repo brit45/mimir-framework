@@ -213,7 +213,7 @@ Les tests `test_vae.cpp` et `test_base_models.cpp` (dans `tools/`) ne compilent 
 2. Ajouter des tests pour les nouveaux modules v2.0:
    - AsyncMonitor.hpp
    - DynamicTensorAllocator.hpp
-   - MemoryGuard.hpp
+   - Mimir.MemoryGuard.hpp
    - VulkanCompute.hpp
 3. Tests d'intégration pour les architectures complètes:
    - UNet

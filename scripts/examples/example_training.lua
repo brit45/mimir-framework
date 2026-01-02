@@ -14,15 +14,15 @@ log("\n[0/6] Configuration système...")
 
 -- ⚠️ IMPORTANT: Toujours configurer l'allocateur en premier!
 -- Cela active la limite de 10 GB et la compression LZ4
-allocator.configure({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,              -- Limite stricte
     enable_compression = true       -- Compression LZ4 (~50% économie)
 })
 log("✓ Allocateur configuré (limite: 10 GB, compression activée)")
 
-local hw = model.hardware_caps()
+local hw = Mimir.Model.hardware_caps()
 log("✓ Hardware: AVX2=" .. (hw.avx2 and "oui" or "non") .. ", FMA=" .. (hw.fma and "oui" or "non"))
-model.set_hardware(true)
+Mimir.Model.set_hardware(true)
 
 -- ================================================================
 -- 1. Configuration
@@ -46,7 +46,7 @@ log("✓ Model config: " .. config.num_layers .. " layers, " .. config.d_model .
 -- ================================================================
 log("\n[2/6] Creating tokenizer...")
 
-tokenizer.create(config.vocab_size)
+Mimir.Tokenizer.create(config.vocab_size)
 log("✓ Tokenizer created with vocab size: " .. config.vocab_size)
 
 -- ================================================================
@@ -54,7 +54,7 @@ log("✓ Tokenizer created with vocab size: " .. config.vocab_size)
 -- ================================================================
 log("\n[3/6] Creating model...")
 
-local success, error_msg = model.create("encoder_model")
+local success, error_msg = Mimir.Model.create("encoder_model")
 
 if not success then
     log("❌ Error creating model: " .. (error_msg or "unknown"))
@@ -75,7 +75,7 @@ local model_config = {
     causal = false
 }
 
-success, error_msg = architectures.transformer(model_config)
+success, error_msg = Mimir.Architectures.transformer(model_config)
 if not success then
     log("❌ Error building architecture: " .. (error_msg or "unknown"))
     return
@@ -84,13 +84,13 @@ end
 log("✓ Architecture built")
 
 -- Allocate and initialize
-success, num_params = model.allocate_params()
+success, num_params = Mimir.Model.allocate_params()
 if not success then
     log("❌ Error allocating parameters")
     return
 end
 
-success = model.init_weights("xavier", 42)
+success = Mimir.Model.init_weights("xavier", 42)
 if success then
     log("✓ Model built with " .. num_params .. " parameters")
     log("  Mémoire: " .. string.format("%.2f MB", num_params * 4 / 1024 / 1024))
@@ -104,13 +104,13 @@ end
 -- ================================================================
 log("\n[4/6] Loading dataset...")
 
-local dataset_ok, num_items = dataset.load("datasets.old/text")
+local dataset_ok, num_items = Mimir.Dataset.load("datasets.old/text")
 
 if dataset_ok then
     log("✓ Dataset loaded: " .. num_items .. " items")
     
     -- Prepare sequences
-    local seq_ok, num_sequences = dataset.prepare_sequences(256)
+    local seq_ok, num_sequences = Mimir.Dataset.prepare_sequences(256)
     
     if seq_ok then
         log("✓ Prepared " .. num_sequences .. " sequences of length 256")
@@ -135,7 +135,7 @@ log("Starting training: " .. num_epochs .. " epochs, LR=" .. learning_rate)
 for epoch = 1, num_epochs do
     local lr = learning_rate * math.exp(-0.1 * (epoch - 1))
     log("Epoch " .. epoch .. "/" .. num_epochs .. " (LR: " .. string.format("%.6f", lr) .. ")")
-    model.train(1, lr)
+    Mimir.Model.train(1, lr)
 end
 
 log("✓ Training completed successfully")
@@ -146,11 +146,11 @@ log("✓ Training completed successfully")
 log("\n[6/6] Saving model...")
 
 os.execute("mkdir -p checkpoints")
-local save_ok = model.save("checkpoints/example_encoder")
+local save_ok = Mimir.Serialization.save("checkpoints/example_encoder.safetensors", "safetensors")
 
 if save_ok then
     log("✓ Model saved to: checkpoints/example_encoder")
-    tokenizer.save("checkpoints/example_encoder/tokenizer.json")
+    Mimir.Tokenizer.save("checkpoints/example_encoder/tokenizer.json")
     log("✓ Tokenizer saved")
 else
     log("❌ Failed to save model")
@@ -161,7 +161,7 @@ end
 -- ================================================================
 log("\n[7/7] Testing inference...")
 
-local result = model.infer("This is a test input for the encoder model")
+local result = Mimir.Model.infer("This is a test input for the encoder model")
 if result and result ~= "" then
     log("✓ Inference result: " .. result)
 else

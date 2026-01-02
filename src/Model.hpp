@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <filesystem>
+#include <optional>
 #include "include/json.hpp"
 #include "Helpers.hpp"    // contient MagicToken, DatasetItem, loadDataset, imageToEmbedding, write_u32_le
 #include "tensors.hpp"
@@ -12,6 +13,7 @@
 #include "Autograd.hpp"   // Pour la structure Gradients
 #include "HardwareOpt.hpp" // Optimisations hardware avancées
 #include "Layers.hpp"      // Pour la structure Layer
+#include "MemoryGuard.hpp" // Pour le strict mode
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -106,7 +108,7 @@ struct Optimizer {
 class Model {
 public:
     Model();
-    ~Model();
+    virtual ~Model();
 
     void setDensity(double d);
     double getDensity() const;
@@ -129,8 +131,6 @@ public:
     size_t totalParamCount() const;
     void allocateParams();
     void initializeWeights(const std::string &method = "xavier", unsigned int seed = 0);
-    void updateWeightsWithNoise(float learning_rate, float noise_std = 0.01f);
-    void forward(std::vector<uint8_t> &) const;
     
     // Nouveau forward/backward pass complet
     std::vector<float> forwardPass(const std::vector<float> &input, bool training = true);
@@ -141,9 +141,13 @@ public:
     std::vector<float> computeLossGradient(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
     
     void push(const std::string &name, const std::string &type, size_t params_count);
+    void optimizerStep(Optimizer &opt, float learning_rate, const Gradients* gradients = nullptr);
+    
+    // Fonctions obsolètes (conservées pour compatibilité temporaire)
+    void updateWeightsWithNoise(float learning_rate, float noise_std = 0.01f);
+    void forward(std::vector<uint8_t> &) const;
     void setOutputTarget(const std::vector<uint8_t> &target);
     void applyParamUpdate(float learning_rate);
-    void optimizerStep(Optimizer &opt, float learning_rate, const Gradients* gradients = nullptr);
 
     struct DecoderOutput {
         std::vector<int> tokens;
@@ -152,9 +156,17 @@ public:
     };
 
 
+
+        // Optional training state (for checkpoint/debug)
+        void setSerializedOptimizer(const Optimizer& opt) { serialized_optimizer_ = opt; }
+        const Optimizer* getSerializedOptimizer() const { return serialized_optimizer_ ? &(*serialized_optimizer_) : nullptr; }
+        Optimizer* getMutableSerializedOptimizer() { return serialized_optimizer_ ? &(*serialized_optimizer_) : nullptr; }
+        void clearSerializedOptimizer() { serialized_optimizer_.reset(); }
     DecoderOutput eval(const std::vector<uint8_t> &target) const;
     void setLastEncoding(const std::vector<float> &e);
 
+
+        std::optional<Optimizer> serialized_optimizer_;
     // accessors used elsewhere
     int width() const { return tw; }
     int height() const { return th; }
@@ -162,20 +174,19 @@ public:
     Tokenizer &getMutableTokenizer() { return tokenizer; }
     const Encoder &getEncoder() const { return encoder; }
     Encoder &getMutableEncoder() { return encoder; }
-    std::vector<tensor>& getMutableParams() { return params; }  // Accès aux paramètres
+    
+    // Serialization-friendly accessors
+    const std::vector<Layer>& getLayers() const { return layers; }
+    std::vector<Layer>& getMutableLayers() { return layers; }
+    bool getHasEncoder() const { return hasEncoder; }
+    void setHasEncoder(bool val) { hasEncoder = val; }
+    const std::string& getModelName() const { return model_name; }
+    void setModelName(const std::string& name) { model_name = name; }
 
     // static helpers for saving/loading
     bool saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch);
     bool packToSafetensor(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors) const;
     bool tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, Encoder &outEnc, std::vector<MagicToken> &outMagic);
-    
-    // Nouvelles méthodes pour sauvegarder/charger la structure complète
-    bool saveLayersStructure(const fs::path &filepath) const;
-    bool loadLayersStructure(const fs::path &filepath);
-    bool saveEmbeddings(const fs::path &filepath) const;
-    bool loadEmbeddings(const fs::path &filepath);
-    bool saveParamsData(const fs::path &filepath) const;
-    bool loadParamsData(const fs::path &filepath);
 
     // ============================= 
     //           Helpers
@@ -381,12 +392,8 @@ public:
             v = gamma * ((v - float(mean)) * inv_std) + beta;
     }
 
-    // ANCIEN: std::vector<tensor> params;  // 1 paramètre = 1 tensor
-    // NOUVEAU: Chaque layer a son propre bloc de poids (weight_block)
+    // Chaque layer a son propre bloc de poids (weight_block)
     std::vector<tensor> layer_weight_blocks;  // 1 tensor = tous les poids d'un layer
-    
-    // Rétrocompatibilité: accès aux paramètres via une interface unifiée
-    std::vector<tensor> params;  // Conservé temporairement pour transition
 
     void setName(std::string name) {
 
@@ -410,6 +417,30 @@ public:
         }
     };
     ForwardState forward_state;
+    
+    // ========================================================================
+    // TENSOR STORE (Multi-input/Branch Support)
+    // ========================================================================
+    
+    // TensorStore : stockage nommé des tensors pour routing
+    std::unordered_map<std::string, std::vector<float>> tensor_store;
+    
+    // Helper pour récupérer un tensor (avec erreur explicite si manquant)
+    const std::vector<float>& getTensor(const std::string& name) const;
+    std::vector<float>& getTensorMutable(const std::string& name);
+    
+    // Helper pour stocker un tensor
+    void storeTensor(const std::string& name, const std::vector<float>& data);
+    void storeTensor(const std::string& name, std::vector<float>&& data);
+    
+    // Debug : liste tous les tensors disponibles
+    std::vector<std::string> getAvailableTensors() const;
+    
+    // Clear tensor store (appelé au début de chaque forward)
+    void clearTensorStore();
+    
+    // Helper pour récupérer un layer par nom
+    Layer* getLayerByName(const std::string& name);
 
 protected:
     std::vector<Layer> layers;
@@ -421,4 +452,10 @@ protected:
     std::vector<float> lastEncoding;
     double densityFactor = 1.0;
     std::string model_name;
+    
+    // =============================
+    // STRICT MODE: Memory Management
+    // =============================
+    size_t max_ram_mb_ = 4096;  // 4 GB par défaut
+    // MemoryGuard est un singleton, on utilise une référence via instance()
 };

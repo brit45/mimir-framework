@@ -17,11 +17,11 @@ Empêche toute nouvelle allocation mémoire :
 ```cpp
 // C++
 auto& guard = MemoryGuard::instance();
-guard.blockAllocations(true);   // Bloquer
-guard.blockAllocations(false);  // Débloquer
+Mimir.Mimir.MemoryGuard.blockAllocations(true);   // Bloquer
+Mimir.Mimir.MemoryGuard.blockAllocations(false);  // Débloquer
 
 // Vérifier l'état
-bool blocked = guard.isBlocked();
+bool blocked = Mimir.Mimir.MemoryGuard.isBlocked();
 ```
 
 **Comportement** :
@@ -37,11 +37,11 @@ Gèle l'état mémoire : autorise les libérations mais bloque les nouvelles all
 
 ```cpp
 // C++
-guard.freezeAllocations(true);   // Activer freeze
-guard.freezeAllocations(false);  // Désactiver freeze
+Mimir.Mimir.MemoryGuard.freezeAllocations(true);   // Activer freeze
+Mimir.Mimir.MemoryGuard.freezeAllocations(false);  // Désactiver freeze
 
 // Vérifier l'état
-bool frozen = guard.isFrozen();
+bool frozen = Mimir.Mimir.MemoryGuard.isFrozen();
 ```
 
 **Cas d'usage** :
@@ -56,7 +56,7 @@ Bloque automatiquement avec déblocage après timeout :
 
 ```cpp
 // Bloquer pendant 2 secondes puis débloquer automatiquement
-guard.blockTemporary(2000); // millisecondes
+Mimir.Mimir.MemoryGuard.blockTemporary(2000); // millisecondes
 ```
 
 **Implémentation** :
@@ -173,39 +173,39 @@ Les statistiques incluent maintenant l'état de blocage :
 
 ```cpp
 // Avant opération critique
-guard.blockAllocations(true);
+Mimir.Mimir.MemoryGuard.blockAllocations(true);
 
 // Opération garantie sans nouvelles allocations
 processData();
 
 // Débloquer après
-guard.blockAllocations(false);
+Mimir.Mimir.MemoryGuard.blockAllocations(false);
 ```
 
 ### 2. Tests de Robustesse
 
 ```cpp
 // Simuler conditions de mémoire limitée
-guard.blockAllocations(true);
+Mimir.Mimir.MemoryGuard.blockAllocations(true);
 
 // Tester que le code gère correctement les échecs
 bool success = model.forward(input);
 assert(!success && "Le modèle doit gérer l'échec d'allocation");
 
-guard.blockAllocations(false);
+Mimir.Mimir.MemoryGuard.blockAllocations(false);
 ```
 
 ### 3. Snapshot Mémoire
 
 ```cpp
 // Capturer état stable
-guard.freezeAllocations(true);
+Mimir.Mimir.MemoryGuard.freezeAllocations(true);
 
 // Permettre nettoyage mais pas nouvelles allocations
 cleanupUnusedTensors();
 saveMemorySnapshot();
 
-guard.freezeAllocations(false);
+Mimir.Mimir.MemoryGuard.freezeAllocations(false);
 ```
 
 ### 4. Protection Pendant Swap
@@ -226,7 +226,7 @@ ram.blockAllocations(false);
 ```cpp
 // Limiter vitesse d'allocation
 if (allocationRate() > threshold) {
-    guard.blockTemporary(1000); // Pause 1 seconde
+    Mimir.Mimir.MemoryGuard.blockTemporary(1000); // Pause 1 seconde
 }
 ```
 
@@ -235,10 +235,10 @@ if (allocationRate() > threshold) {
 ```cpp
 // 1. Configuration initiale
 auto& guard = MemoryGuard::instance();
-guard.setLimit(2ULL * 1024 * 1024 * 1024); // 2 GB
+Mimir.Mimir.MemoryGuard.setLimit(2ULL * 1024 * 1024 * 1024); // 2 GB
 
 auto& allocator = DynamicTensorAllocator::instance();
-allocator.configure(2, true); // 2 GB, compression activée
+Mimir.Allocator.configure(2, true); // 2 GB, compression activée
 
 // 2. Construction du modèle
 Model model;
@@ -249,27 +249,27 @@ model.allocateParams();
 for (int epoch = 0; epoch < num_epochs; ++epoch) {
     for (auto& batch : dataloader) {
         // Bloquer avant forward pass
-        guard.blockAllocations(true);
+        Mimir.Mimir.MemoryGuard.blockAllocations(true);
         
         // Forward (utilise uniquement mémoire existante)
         auto output = model.forward(batch.input, true);
         
         // Débloquer pour backward (gradients nécessitent allocation)
-        guard.blockAllocations(false);
+        Mimir.Mimir.MemoryGuard.blockAllocations(false);
         
         auto loss = criterion(output, batch.target);
         auto grads = model.backward(loss);
         
         // Freeze pendant optimisation
-        guard.freezeAllocations(true);
+        Mimir.Mimir.MemoryGuard.freezeAllocations(true);
         optimizer.step();
-        guard.freezeAllocations(false);
+        Mimir.Mimir.MemoryGuard.freezeAllocations(false);
         
         // Nettoyage périodique
         if (step % cleanup_interval == 0) {
-            guard.blockAllocations(true);
+            Mimir.Mimir.MemoryGuard.blockAllocations(true);
             model.clearCache();
-            guard.blockAllocations(false);
+            Mimir.Mimir.MemoryGuard.blockAllocations(false);
         }
     }
 }
@@ -359,9 +359,9 @@ local frozen = model.isFrozen()
 model.printMemoryStats()
 
 -- MemoryGuard direct
-MemoryGuard.setLimit(bytes)
-MemoryGuard.blockAllocations(true/false)
-MemoryGuard.printStats()
+Mimir.MemoryGuard.setLimit(bytes)
+Mimir.MemoryGuard.blockAllocations(true/false)
+Mimir.MemoryGuard.printStats()
 ```
 
 ## Conclusion

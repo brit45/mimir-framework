@@ -78,8 +78,8 @@ local small_config = {
 
 timer("Transformer " .. config.num_layers_small .. "L x " .. config.embed_dim_small .. "D", function()
     tokenizer.create(config.vocab_size)
-    model.create("transformer", small_config)
-    local ok, params = model.build()
+    Mimir.Model.create("transformer", small_config)
+    local ok, params = Mimir.Model.build()
     log("   📊 Paramètres: " .. params)
 end)
 
@@ -102,8 +102,8 @@ local medium_config = {
 
 timer("Transformer " .. config.num_layers_medium .. "L x " .. config.embed_dim_medium .. "D", function()
     tokenizer.create(config.vocab_size)
-    model.create("transformer", medium_config)
-    local ok, params = model.build()
+    Mimir.Model.create("transformer", medium_config)
+    local ok, params = Mimir.Model.build()
     log("   📊 Paramètres: " .. params)
 end)
 
@@ -127,8 +127,8 @@ if mode ~= "quick" then
     
     timer("Transformer " .. config.num_layers_large .. "L x " .. config.embed_dim_large .. "D", function()
         tokenizer.create(config.vocab_size)
-        model.create("transformer", large_config)
-        local ok, params = model.build()
+        Mimir.Model.create("transformer", large_config)
+        local ok, params = Mimir.Model.build()
         log("   📊 Paramètres: " .. params)
     end)
 end
@@ -143,16 +143,16 @@ log(string.rep("=", 70))
 -- Encoder
 timer("Encoder (" .. config.num_layers_medium .. "L x " .. config.embed_dim_medium .. "D)", function()
     tokenizer.create(config.vocab_size)
-    model.create("encoder", medium_config)
-    local ok, params = model.build()
+    Mimir.Model.create("encoder", medium_config)
+    local ok, params = Mimir.Model.build()
     log("   📊 Paramètres: " .. params)
 end)
 
 -- Decoder
 timer("Decoder (" .. config.num_layers_medium .. "L x " .. config.embed_dim_medium .. "D)", function()
     tokenizer.create(config.vocab_size)
-    model.create("decoder", medium_config)
-    local ok, params = model.build()
+    Mimir.Model.create("decoder", medium_config)
+    local ok, params = Mimir.Model.build()
     log("   📊 Paramètres: " .. params)
 end)
 
@@ -167,16 +167,17 @@ local checkpoint_path = "/tmp/mimir_benchmark_checkpoint"
 
 -- Créer modèle pour sauvegarder
 tokenizer.create(config.vocab_size)
-model.create("transformer", small_config)
-model.build()
+Mimir.Model.create("transformer", small_config)
+Mimir.Model.build()
 
 -- Save
+local checkpoint_path_st = checkpoint_path .. ".safetensors"
 local save_time = timer("Save checkpoint", function()
-    model.save(checkpoint_path)
+    Mimir.Serialization.save(checkpoint_path_st, "safetensors")
 end)
 
 -- Get size
-local size_cmd = "du -sh " .. checkpoint_path .. " 2>/dev/null | cut -f1"
+local size_cmd = "du -sh " .. checkpoint_path_st .. " 2>/dev/null | cut -f1"
 local handle = io.popen(size_cmd)
 local size = handle:read("*a"):gsub("%s+", "")
 handle:close()
@@ -188,9 +189,9 @@ end
 -- Load (créer nouveau modèle)
 local load_time = timer("Load checkpoint", function()
     tokenizer.create(config.vocab_size)
-    model.create("transformer", small_config)
-    model.build()
-    -- Note: Load serait model.load() mais vérifions l'API
+    Mimir.Model.create("transformer", small_config)
+    Mimir.Model.build()
+    Mimir.Serialization.load(checkpoint_path_st)
 end)
 
 -- Cleanup

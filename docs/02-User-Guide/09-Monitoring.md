@@ -2,9 +2,8 @@
 
 > **⚠️ AVERTISSEMENT**  
 > Les API htop et viz peuvent être partiellement incorrectes.  
-> Fonctions réelles : `htop.create()`, `viz.initialize()`, etc.  
+> Fonctions réelles : `Mimir.Htop.create()`, `Mimir.Viz.initialize()`, etc.  
 > **Référez-vous aux scripts dans `scripts/` pour usage vérifié.**  
-> Voir [VERIFICATION_REPORT.md](../VERIFICATION_REPORT.md) pour les détails.
 
 Guide de surveillance et visualisation de l'entraînement dans Mímir Framework.
 
@@ -26,16 +25,16 @@ Guide de surveillance et visualisation de l'entraînement dans Mímir Framework.
 
 ```lua
 -- Démarrer monitoring terminal
-htop.start()
+Mimir.Htop.start()
 
 -- Configurer refresh rate (ms)
-htop.setRefreshRate(500)  -- Update tous les 500ms
+Mimir.Htop.setRefreshRate(500)  -- Update tous les 500ms
 
 -- Entraîner (htop affiche en temps réel)
-model.train(model, dataset, epochs)
+Mimir.Model.train(model, dataset, epochs)
 
 -- Arrêter
-htop.stop()
+Mimir.Htop.stop()
 ```
 
 ### Affichage
@@ -65,15 +64,15 @@ htop.stop()
 
 ```lua
 -- Personnaliser affichage
-htop.setDisplayMode("compact")  -- compact, full, minimal
+Mimir.Htop.setDisplayMode("compact")  -- compact, full, minimal
 
 -- Activer/désactiver sections
-htop.showMemory(true)
-htop.showPerformance(true)
-htop.showProgress(true)
+Mimir.Htop.showMemory(true)
+Mimir.Htop.showPerformance(true)
+Mimir.Htop.showProgress(true)
 
 -- Couleurs
-htop.setColorScheme("dark")  -- dark, light, monochrome
+Mimir.Htop.setColorScheme("dark")  -- dark, light, monochrome
 ```
 
 ---
@@ -84,26 +83,26 @@ htop.setColorScheme("dark")  -- dark, light, monochrome
 
 ```lua
 -- Créer fenêtre
-viz.createWindow("Training Metrics", 800, 600)
+Mimir.Viz.createWindow("Training Metrics", 800, 600)
 
 -- Boucle d'entraînement
 for epoch = 1, epochs do
     local loss = train_one_epoch(model, dataset)
     
     -- Afficher métriques
-    viz.clear()
-    viz.plotLine("Loss", epoch, loss)
-    viz.render()
+    Mimir.Viz.clear()
+    Mimir.Viz.plotLine("Loss", epoch, loss)
+    Mimir.Viz.render()
 end
 
 -- Fermer
-viz.closeWindow()
+Mimir.Viz.closeWindow()
 ```
 
 ### Graphiques Multiples
 
 ```lua
-viz.createWindow("Dashboard", 1200, 800)
+Mimir.Viz.createWindow("Dashboard", 1200, 800)
 
 local train_losses = {}
 local val_losses = {}
@@ -120,71 +119,71 @@ for epoch = 1, epochs do
     table.insert(accuracies, accuracy)
     
     -- Visualiser
-    viz.clear()
+    Mimir.Viz.clear()
     
     -- Plot 1: Loss
-    viz.subplot(2, 2, 1)
-    viz.plotLines({
+    Mimir.Viz.subplot(2, 2, 1)
+    Mimir.Viz.plotLines({
         {name = "Train", data = train_losses, color = "blue"},
         {name = "Val", data = val_losses, color = "red"}
     })
-    viz.title("Loss over Epochs")
+    Mimir.Viz.title("Loss over Epochs")
     
     -- Plot 2: Accuracy
-    viz.subplot(2, 2, 2)
-    viz.plotLine("Accuracy", accuracies, "green")
-    viz.title("Validation Accuracy")
+    Mimir.Viz.subplot(2, 2, 2)
+    Mimir.Viz.plotLine("Accuracy", accuracies, "green")
+    Mimir.Viz.title("Validation Accuracy")
     
     -- Plot 3: Learning Rate
-    viz.subplot(2, 2, 3)
+    Mimir.Viz.subplot(2, 2, 3)
     local lr = model.getLearningRate(model)
-    viz.plotScalar("LR", lr)
+    Mimir.Viz.plotScalar("LR", lr)
     
     -- Plot 4: Gradient Norms
-    viz.subplot(2, 2, 4)
+    Mimir.Viz.subplot(2, 2, 4)
     local grad_norm = model.getGradientNorm(model)
-    viz.plotLine("Grad Norm", epoch, grad_norm)
+    Mimir.Viz.plotLine("Grad Norm", epoch, grad_norm)
     
-    viz.render()
+    Mimir.Viz.render()
 end
 
-viz.closeWindow()
+Mimir.Viz.closeWindow()
 ```
 
 ### Visualisation Poids
 
 ```lua
 -- Visualiser distribution poids
-viz.createWindow("Weight Distribution", 800, 600)
+Mimir.Viz.createWindow("Weight Distribution", 800, 600)
 
 local weights = model.getWeights(model)
 
 for layer_name, layer_weights in pairs(weights) do
     -- Histogramme
-    viz.histogram(layer_weights, layer_name)
+    Mimir.Viz.histogram(layer_weights, layer_name)
 end
 
-viz.render()
-viz.waitKey()  -- Attendre appui touche
-viz.closeWindow()
+Mimir.Viz.render()
+Mimir.Viz.waitKey()  -- Attendre appui touche
+Mimir.Viz.closeWindow()
 ```
 
 ### Heatmaps
 
 ```lua
 -- Visualiser attention weights
-viz.createWindow("Attention", 800, 800)
+Mimir.Viz.createWindow("Attention", 800, 800)
 
 local attention = model.getAttentionWeights(model)
 -- attention = [num_heads, seq_len, seq_len]
 
 for head = 1, num_heads do
-    viz.subplot(4, 4, head)
-    viz.heatmap(attention[head])
-    viz.title("Head " .. head)
+    Mimir.Viz.subplot(4, 4, head)
+    Mimir.Viz.heatmap(attention[head])
+    Mimir.Viz.title("Head " .. head)
 end
 
-viz.render()
+Mimir.Viz.render()
 ```
 
 ---
@@ -265,7 +264,7 @@ function Callbacks.on_epoch_end(epoch, metrics)
     
     -- Sauvegarder checkpoint
     if epoch % 10 == 0 then
-        model.save(model, "checkpoint_" .. epoch .. ".json")
+        Mimir.Model.save(model, "checkpoint_" .. epoch .. ".json")
     end
 end
 
@@ -336,7 +335,7 @@ mimir.async.setAlert("loss", {
     callback = function(value)
         print("⚠️  WARNING: Loss exploding:", value)
         -- Sauvegarder avant crash
-        model.save(model, "emergency_backup.json")
+        Mimir.Model.save(model, "emergency_backup.json")
     end
 })
 
@@ -441,8 +440,8 @@ export_to_tensorboard(metrics, "tensorboard_logs")
 
 ```lua
 -- Setup monitoring complet
-htop.start()
-viz.createWindow("Training Dashboard", 1200, 800)
+Mimir.Htop.start()
+Mimir.Viz.createWindow("Training Dashboard", 1200, 800)
 mimir.async.startMonitor()
 
 local logger = Logger.new("training.csv")
@@ -479,20 +478,20 @@ for epoch = 1, epochs do
     tracker:add("accuracy", accuracy)
     
     -- Visualize
-    viz.clear()
-    viz.subplot(2, 2, 1)
-    viz.plotLines({
+    Mimir.Viz.clear()
+    Mimir.Viz.subplot(2, 2, 1)
+    Mimir.Viz.plotLines({
         {name = "Train", data = tracker:get("train_loss")},
         {name = "Val", data = tracker:get("val_loss")}
     })
-    viz.render()
+    Mimir.Viz.render()
 end
 
 -- Cleanup
 logger:close()
 tracker:save("final_metrics.json")
-htop.stop()
-viz.closeWindow()
+Mimir.Htop.stop()
+Mimir.Viz.closeWindow()
 mimir.async.stopMonitor()
 ```
 

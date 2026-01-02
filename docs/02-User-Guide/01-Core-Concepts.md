@@ -1,12 +1,11 @@
 # Concepts Fondamentaux
 
-> **⚠️ AVERTISSEMENT CRITIQUE**  
-> Cette documentation contient des erreurs majeures concernant l'API Lua.  
-> Les noms de fonctions et le paradigme d'utilisation sont incorrects.  
-> **Référez-vous aux scripts dans `scripts/example_*.lua` pour l'API correcte.**  
-> Voir [VERIFICATION_REPORT.md](../VERIFICATION_REPORT.md) pour les détails.
+**Version:** 2.3.0  
+**API:** Conforme à mimir-api.lua (EmmyLua annotations)  
 
 Guide complet des concepts de base du Mímir Framework.
+
+> 💡 **Syntaxe Recommandée:** Utiliser `Mimir.Module.*` pour bénéficier de l'autocompletion IDE et du type checking.
 
 ---
 
@@ -41,16 +40,16 @@ Guide complet des concepts de base du Mímir Framework.
 
 ```lua
 -- 1. Prototypage rapide de modèles
-local model = model.create("transformer")
+local model = Mimir.Model.create("transformer")
 
 -- 2. Expérimentation avec architectures
-local custom = architectures.transformer({vocab_size = 10000})
+local custom = Mimir.Architectures.transformer({vocab_size = 10000})
 
 -- 3. Entraînement sur datasets modestes
-model.train(model, dataset, 10)
+Mimir.Model.train(model, dataset, 10)
 
 -- 4. Forward pass
-local output = model.forward(model, input)
+local output = Mimir.Model.forward(model, input)
 ```
 
 ---
@@ -108,13 +107,13 @@ Un **modèle** est un conteneur de couches (layers) avec :
 
 ```lua
 -- Création d'un modèle avec configuration JSON
-local model = model.create("custom")
+local model = Mimir.Model.create("custom")
 
 -- Le modèle est configuré via JSON, pas avec API layers
 -- Voir scripts/example_*.lua pour exemples complets
 
 -- Forward pass
-local output = model.forward(model, input_data)
+local output = Mimir.Model.forward(model, input_data)
 ```
 
 ### Types de Couches
@@ -225,7 +224,7 @@ local input = {
 }
 
 -- Forward : C++ fait matmul, activations, etc.
-local output = model.forward(model, input)
+local output = Mimir.Model.forward(model, input)
 
 -- Output : table Lua
 -- [[0.12, 0.88], [0.34, 0.66]]
@@ -264,7 +263,7 @@ L'autograd est **intégré** et **transparent** :
 
 ```lua
 -- Vous écrivez simplement :
-model.train(model, dataset, epochs)
+Mimir.Model.train(model, dataset, epochs)
 
 -- Mímir fait automatiquement :
 -- 1. Forward → calcul outputs
@@ -285,7 +284,7 @@ model.train(model, dataset, epochs)
 
 ```lua
 local input = {{1, 2, 3}, {4, 5, 6}}  -- [2, 3]
-local output = model.forward(model, input)
+local output = Mimir.Model.forward(model, input)
 -- output = [[0.2, 0.8], [0.3, 0.7]]  -- [2, 2]
 ```
 
@@ -302,12 +301,12 @@ local output = model.forward(model, input)
 
 ```lua
 -- Automatique dans train()
-model.train(model, dataset, epochs)
+Mimir.Model.train(model, dataset, epochs)
 
 -- Ou manuel pour contrôle fin
-local output = model.forward(model, input)
+local output = Mimir.Model.forward(model, input)
 local loss = compute_loss(output, target)
-local grads = model.backward(model, loss)
+local grads = Mimir.Model.backward(model, loss)
 model.updateWeights(model, grads, learning_rate)
 ```
 
@@ -395,16 +394,16 @@ Texte : "Bonjour monde"
 
 ```lua
 -- Charger un tokenizer
-local tokenizer = tokenizer.create()
-tokenizer.loadVocab(tokenizer, "vocab.json")
+local tokenizer = Mimir.Tokenizer.create()
+Mimir.Tokenizer.loadVocab(tokenizer, "vocab.json")
 
 -- Infos
-local vocab_size = tokenizer.getVocabSize(tokenizer)
+local vocab_size = Mimir.Tokenizer.getVocabSize(tokenizer)
 -- vocab_size = 50000
 
 -- Token ↔ ID
-local token_id = tokenizer.tokenToId(tokenizer, "hello")
-local token = tokenizer.idToToken(tokenizer, token_id)
+local token_id = Mimir.Tokenizer.tokenToId(tokenizer, "hello")
+local token = Mimir.Tokenizer.idToToken(tokenizer, token_id)
 ```
 
 ### Encodage/Décodage
@@ -412,11 +411,11 @@ local token = tokenizer.idToToken(tokenizer, token_id)
 ```lua
 -- Texte → IDs
 local text = "The quick brown fox"
-local ids = tokenizer.encode(tokenizer, text)
+local ids = Mimir.Tokenizer.encode(tokenizer, text)
 -- ids = {464, 2068, 7586, 21831}
 
 -- IDs → Texte
-local decoded = tokenizer.decode(tokenizer, ids)
+local decoded = Mimir.Tokenizer.decode(tokenizer, ids)
 -- decoded = "The quick brown fox"
 ```
 
@@ -426,10 +425,10 @@ Mímir supporte BPE pour sous-mots :
 
 ```lua
 -- Entraîner BPE
-tokenizer.trainBPE(tokenizer, corpus_path, vocab_size, output_path)
+Mimir.Tokenizer.trainBPE(tokenizer, corpus_path, vocab_size, output_path)
 
 -- Utiliser
-local ids = tokenizer.encodeBPE(tokenizer, "running")
+local ids = Mimir.Tokenizer.encodeBPE(tokenizer, "running")
 -- ids = {run, ##ning} → [2341, 4523]
 ```
 
@@ -461,10 +460,10 @@ local dataset = {
 
 ```lua
 -- Depuis JSON
-local dataset = dataset.loadFromJson("data.json")
+local dataset = Mimir.Dataset.loadFromJson("data.json")
 
 -- Depuis texte (NLP)
-local text_dataset = dataset.loadText("corpus.txt", tokenizer)
+local text_dataset = Mimir.Dataset.loadText("corpus.txt", tokenizer)
 ```
 
 ### Format Attendu
@@ -513,17 +512,17 @@ Mímir utilise 3 niveaux de gestion mémoire :
 
 ```lua
 -- Définir limite mémoire
-guard.setLimit(4 * 1024 * 1024 * 1024)  -- 4 GB
+Mimir.Mimir.MemoryGuard.setLimit(4 * 1024 * 1024 * 1024)  -- 4 GB
 
 -- Activer mode strict
-guard.enableStrictMode()
+Mimir.Mimir.MemoryGuard.enableStrictMode()
 
 -- Vérifier usage
 local usage = memory.getUsage()
 -- usage = {used = 1024000000, limit = 4294967296, ...}
 
 -- Nettoyer cache
-allocator.evictLRU(512 * 1024 * 1024)  -- Libérer 512 MB
+Mimir.Allocator.evictLRU(512 * 1024 * 1024)  -- Libérer 512 MB
 ```
 
 **Voir** : [Runtime Engine](../04-Architecture-Internals/02-Runtime-Engine.md) section Mémoire

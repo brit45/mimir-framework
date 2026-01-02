@@ -1,10 +1,40 @@
 # 📚 Mímir Framework - Documentation Complète
 
-**Version:** 2.0.0  
+**Version:** 2.3.0  
 **Licence:** GPL-2.0 (Open Source) / Commercial (avec licence)  
 **Date:** Décembre 2025
 
 Bienvenue dans la documentation complète du **Mímir Framework**, un framework de deep learning moderne, optimisé pour CPU, écrit en C++17 avec une API Lua intuitive.
+
+---
+
+## ⚡ NOUVEAU: Sérialisation Moderne v2.3
+
+Le framework dispose maintenant d'un **système de sérialisation complet** avec 3 formats :
+
+- 💾 **[SafeTensors](03-API-Reference/SAVE_LOAD.md#1-safetensors-production-)** - Format production compatible HuggingFace
+- 🔍 **[RawFolder](03-API-Reference/SAVE_LOAD.md#2-rawfolder-debug--development-)** - Format debug avec checksums SHA256
+- 📊 **[DebugJson](03-API-Reference/SAVE_LOAD.md#3-debugjson-inspection-)** - Dump JSON avec statistiques
+- 🧹 **[Legacy Cleanup](Archives/LEGACY_CLEANUP_COMPLETE.md)** - Suppression code legacy (v2.3)
+- 📖 **[Guide Complet](03-API-Reference/SAVE_LOAD.md)** - Documentation sérialisation
+- 🚀 **[API Lua v2.3](03-API-Reference/API_LUA_UPDATE_v2.3.0.md)** - Nouvelle API Mimir.Serialization
+- ✅ **[Validation API](03-API-Reference/SERIALIZATION_API_VALIDATED.md)** - Tests et validation
+
+**Bénéfices :** Interopérabilité Python/PyTorch, validation d'intégrité, performance optimale (850 MB/s write).
+
+---
+
+## ⚡ Système Unifié des Layers v2.1
+
+Le framework a été complètement refactorisé avec un **nouveau système unifié de layers** :
+
+- 🎯 **[Vue d'Ensemble](Archives/MISSION_COMPLETE.md)** - Mission "nettoyage" accomplie
+- 📋 **[Détails Techniques](Archives/REFONTE_COMPLETE.md)** - Architecture unifiée
+- 📚 **[Référence des Layers](03-API-Reference/LAYERS_REFERENCE.md)** - 67 layers supportés
+- 🔧 **[Guide Développeur](06-Contributing/HOWTO_ADD_LAYER.md)** - Ajouter un nouveau layer
+- ⚡ **[Performance](05-Advanced/PERFORMANCE.md)** - Optimisations et benchmarks
+
+**Bénéfices :** Dispatch 10-40x plus rapide, AVX2, OpenMP, type-safe, maintenable.
 
 ---
 
@@ -17,6 +47,7 @@ Bienvenue dans la documentation complète du **Mímir Framework**, un framework 
 - ❓ **[Pourquoi CPU-only?](01-Getting-Started/04-Why-CPU-Only.md)** - Philosophie du framework
 - 🏗️ **[Instructions de Build](01-Getting-Started/05-Build-Instructions.md)** - Compilation détaillée
 - 🔧 **[Rebuild et Tests](01-Getting-Started/06-Rebuild-And-Test.md)** - Recompilation et validation
+- 📖 **[Guide de Démarrage](01-Getting-Started/START_HERE.md)** - Introduction complète
 
 ### Guide Utilisateur (1-3 heures)
 - 📖 **[Concepts Fondamentaux](02-User-Guide/01-Core-Concepts.md)** - Architecture et concepts clés
@@ -31,12 +62,18 @@ Bienvenue dans la documentation complète du **Mímir Framework**, un framework 
 - 🛡️ **[Bonnes Pratiques Mémoire](02-User-Guide/10-Memory-Best-Practices.md)** - Gestion sécurisée de la RAM
 
 ### Référence API (consultation)
-- � **[API Complète](03-API-Reference/00-API-Complete.md)** - Documentation complète (114 fonctions)
+- 📘 **[API Complète](03-API-Reference/00-API-Complete.md)** - Documentation complète (117 fonctions)
 - 🚀 **[Référence Rapide](03-API-Reference/01-API-Quick-Reference.md)** - Guide rapide par module
+- 📚 **[Référence Layers](03-API-Reference/LAYERS_REFERENCE.md)** - 67 layers supportés
+- 💾 **[Guide Sérialisation](03-API-Reference/SAVE_LOAD.md)** - SafeTensors, RawFolder, DebugJson
+- 🔗 **[Support Multi-Input](03-API-Reference/MULTI_INPUT_SUPPORT.md)** - Entrées multiples pour modèles
+- 🚀 **[API Lua v2.3](03-API-Reference/API_LUA_UPDATE_v2.3.0.md)** - Mimir.Serialization API
+- ✅ **[Validation Sérialisation](03-API-Reference/SERIALIZATION_API_VALIDATED.md)** - Tests complets
 
-**Modules disponibles (13 modules, 114 fonctions):**
+**Modules disponibles (14 modules, 117 fonctions):**
 - `model` (17 fonctions) - Gestion du modèle et entraînement
 - `architectures` (9 fonctions) - Builders d'architectures pré-définies
+- `Mimir.Serialization` (3 fonctions) - **NOUVEAU v2.3** - Sérialisation moderne
 - `flux` (5 fonctions) - API fonctionnelle Flux (génération texte→image)
 - `FluxModel` (12 fonctions) - API orientée objet Flux
 - `layers` (8 fonctions) - Opérations de couches (placeholders)
@@ -64,6 +101,9 @@ Bienvenue dans la documentation complète du **Mímir Framework**, un framework 
 - 🔌 **[Mises à Jour API](04-Architecture-Internals/09-API-Updates.md)** - Évolution de l'API
 - 🌊 **[Modèle Flux](04-Architecture-Internals/10-Flux-Model.md)** - Architecture Flux complète
 - 🌊 **[Implémentation Flux](04-Architecture-Internals/10-Flux-Implementation.md)** - Résumé implémentation
+- 📊 **[Couverture Opérations](04-Architecture-Internals/OP_COVERAGE.md)** - Liste complète des opérations
+- 💾 **[Sérialisation Complète](04-Architecture-Internals/SERIALIZATION_COMPLETE.md)** - Implémentation système
+- 🔧 **[État Technique](04-Architecture-Internals/TECHNICAL_STATUS.md)** - Status v2.3.0
 
 ### Sujets Avancés
 - 🚀 **[API Pipeline](05-Advanced/01-Pipeline-API.md)** - Pipelines haut niveau
@@ -77,6 +117,9 @@ Bienvenue dans la documentation complète du **Mímir Framework**, un framework 
 - ⚡ **[Layer Fusion](05-Advanced/09-Layer-Fusion.md)** - Fusion de couches
 - 🔲 **[Conv2D Completion](05-Advanced/10-Conv2D-Completion.md)** - Convolution 2D complète
 - 🔳 **[Conv2D Improvements](05-Advanced/11-Conv2D-Improvements.md)** - Améliorations Conv2D
+- 🔄 **[Migration Strict Mode](05-Advanced/MIGRATION_STRICT_MODE.md)** - Migration v2.1 strict
+- ⚡ **[Performance](05-Advanced/PERFORMANCE.md)** - Optimisations et benchmarks
+- 📊 **[Migration Benchmarks](05-Advanced/BENCHMARKS_MIGRATION.md)** - Migration benchmarks v2.3
 
 ### Contribution
 - 🤝 **[Guide de Contribution](06-Contributing/01-Contributing-Guide.md)** - Comment contribuer
@@ -86,9 +129,15 @@ Bienvenue dans la documentation complète du **Mímir Framework**, un framework 
 - 🗺️ **[Roadmap](06-Contributing/05-Roadmap.md)** - Évolution future
 - 🔄 **[Mises à Jour Documentation](06-Contributing/06-Documentation-Updates.md)** - Changelog docs
 - 📜 **[Mises à Jour Scripts](06-Contributing/07-Scripts-Updates.md)** - Changelog scripts
+- 🔧 **[Ajouter un Layer](06-Contributing/HOWTO_ADD_LAYER.md)** - Guide développeur layers
 
-### Archives
-- 📦 **[Archives/](Archives/)** - Documents historiques et rapports de vérification
+### Archives et Historique
+- 📦 **[Archives/](Archives/)** - Documents historiques et rapports
+- 🎯 **[Mission Complete](Archives/MISSION_COMPLETE.md)** - Refonte système layers v2.1
+- 📋 **[Refonte Complete](Archives/REFONTE_COMPLETE.md)** - Détails refonte
+- 🧹 **[Legacy Cleanup](Archives/LEGACY_CLEANUP_COMPLETE.md)** - Nettoyage code v2.3
+- 📝 **[Release Notes 2.1.0](Archives/RELEASE_NOTES_2.1.0.md)** - Notes de version
+- 📊 **[Documentation Update](Archives/DOCUMENTATION_UPDATE_v2.3.0.md)** - Mise à jour docs v2.3
 
 ---
 
@@ -96,12 +145,14 @@ Bienvenue dans la documentation complète du **Mímir Framework**, un framework 
 
 | Métrique | Valeur |
 |----------|--------|
-| **Version** | 2.1.0 |
+| **Version** | 2.3.0 |
 | **Lignes de code C++** | ~15,000 |
 | **Fichiers source** | 30 |
-| **Fonctions API Lua** | 114 (100% synchronisées) |
-| **Modules API** | 13 |
+| **Fonctions API Lua** | 117 (100% synchronisées) |
+| **Modules API** | 14 (+ Mimir.Serialization) |
+| **Layers supportés** | 67 |
 | **Architectures pré-définies** | 9 |
+| **Formats sérialisation** | 3 (SafeTensors, RawFolder, DebugJson) |
 | **Optimisations SIMD** | AVX2, FMA, F16C, BMI2 |
 | **Licence** | GPL-2.0 / Commercial |
 

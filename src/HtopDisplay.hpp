@@ -36,7 +36,15 @@ private:
         float spatial_coherence;
         float temporal_consistency;
         float mse_loss;
+        float grad_norm;
+        float grad_max;
         float learning_rate;
+        int opt_type;
+        int opt_step;
+        float opt_beta1;
+        float opt_beta2;
+        float opt_eps;
+        float opt_weight_decay;
         int batch_time_ms;
         size_t memory_used_mb;
         size_t memory_freed_mb;
@@ -209,7 +217,11 @@ public:
                      float loss, float avg_loss, float lr, int batch_time_ms,
                      size_t memory_mb, size_t memory_freed, float bps, size_t params,
                      float t, float kl, float wass, float ent, float mom,
-                     float spat, float temp, float mse)
+                     float spat, float temp, float mse,
+                     float grad_norm, float grad_max,
+                     int opt_type, int opt_step,
+                     float opt_beta1, float opt_beta2,
+                     float opt_eps, float opt_weight_decay)
     {
         stats.current_epoch = epoch;
         stats.total_epochs = total_epochs;
@@ -231,6 +243,14 @@ public:
         stats.spatial_coherence = spat;
         stats.temporal_consistency = temp;
         stats.mse_loss = mse;
+        stats.grad_norm = grad_norm;
+        stats.grad_max = grad_max;
+        stats.opt_type = opt_type;
+        stats.opt_step = opt_step;
+        stats.opt_beta1 = opt_beta1;
+        stats.opt_beta2 = opt_beta2;
+        stats.opt_eps = opt_eps;
+        stats.opt_weight_decay = opt_weight_decay;
 
         // Calculer ETA
         int batches_remaining = (total_epochs - epoch) * total_batches + (total_batches - batch);
@@ -340,6 +360,16 @@ public:
         std::cout << "MSE (0.1×)       " << progressBar(std::min(stats.mse_loss * 100, 100.0f), 25, false)
                   << " " << stats.mse_loss;
 
+        moveCursor(row++, 4);
+        clearLine();
+        std::cout << "Grad L2          " << progressBar(std::min(stats.grad_norm * 0.1f, 100.0f), 25, false)
+              << " " << std::fixed << std::setprecision(6) << stats.grad_norm;
+
+        moveCursor(row++, 4);
+        clearLine();
+        std::cout << "Grad MaxAbs      " << progressBar(std::min(stats.grad_max * 1.0f, 100.0f), 25, false)
+              << " " << std::fixed << std::setprecision(6) << stats.grad_max;
+
         moveCursor(row++, 1);
         clearLine();
         std::cout << std::string(width - 2, '_');
@@ -375,6 +405,24 @@ public:
         moveCursor(row++, 4);
         clearLine();
         std::cout << "Learning Rate: " << colorText(std::to_string(stats.learning_rate), 93);
+
+        moveCursor(row++, 4);
+        clearLine();
+        {
+            const char* opt_name = "SGD";
+            if (stats.opt_type == 1) opt_name = "ADAM";
+            else if (stats.opt_type == 2) opt_name = "ADAMW";
+
+            std::stringstream ss;
+            ss << "Optimizer: " << opt_name
+               << " | step=" << stats.opt_step
+               << " | wd=" << std::fixed << std::setprecision(4) << stats.opt_weight_decay
+               << " | b1=" << std::fixed << std::setprecision(3) << stats.opt_beta1
+               << " b2=" << std::fixed << std::setprecision(3) << stats.opt_beta2
+               << " eps=" << std::scientific << std::setprecision(1) << stats.opt_eps;
+
+            std::cout << ss.str();
+        }
 
         moveCursor(row++, 4);
         clearLine();

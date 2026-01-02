@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
     LuaContext& ctx = LuaContext::getInstance();
     
     // 3. Enregistrer toutes les fonctions API
-    lua.registerAPI();  // Expose model.*, tokenizer.*, etc.
+    lua.registerAPI();  // Expose model.*, Mimir.Tokenizer.*, etc.
     
     // 4. Charger et exécuter le script
     lua.loadScript(argv[1]);
