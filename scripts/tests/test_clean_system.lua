@@ -7,6 +7,22 @@ log("\n╔═══════════════════════�
 log("║   Test Simple - Système de Layers Unifié             ║")
 log("╚════════════════════════════════════════════════════════╝\n")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
@@ -32,20 +48,27 @@ local config = {
     width = 32
 }
 
-local success, err = model.create("test_cv", config)
+local unet_input = {
+    image_w = config.width,
+    image_h = config.height,
+    image_c = config.in_channels,
+    base_channels = config.base_channels,
+    depth = config.num_levels,
+    dropout = config.dropout,
+}
+
+local cfg, warn = Arch.build_config("unet", unet_input)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, err = model.create("unet", cfg)
 if not success then
     log("❌ Échec création modèle: " .. (err or ""))
     os.exit(1)
 end
 
--- Utiliser l'architecture UNet simple
-success = architectures.unet(config)
-if not success then
-    log("❌ Échec construction UNet")
-    os.exit(1)
-end
-
-log("✓ Architecture UNet construite")
+log("✓ UNet créé via registre")
 
 -- Allocation
 success, num_params = model.allocate_params()
@@ -90,7 +113,7 @@ log("  TEST 2: Activations (ReLU, GELU, SiLU, Tanh)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 -- Test ReLU
-success, err = model.create("test_relu", {})
+success, err = model.create("basic_mlp", {})
 if not success then
     log("❌ Échec création modèle ReLU")
     os.exit(1)
@@ -107,7 +130,7 @@ log(string.format("✓ ReLU: [%s] → [%s]",
     table.concat(relu_out, ", ")))
 
 -- Test GELU
-success, err = model.create("test_gelu", {})
+success, err = model.create("basic_mlp", {})
 model.push_layer("gelu", "GELU", 0)
 model.allocate_params()
 model.init_weights("xavier", 2)
@@ -118,7 +141,7 @@ log(string.format("✓ GELU: [%s] → [%.2f, %.2f, %.2f, %.2f, %.2f]",
     gelu_out[1], gelu_out[2], gelu_out[3], gelu_out[4], gelu_out[5]))
 
 -- Test SiLU
-success, err = model.create("test_silu", {})
+success, err = model.create("basic_mlp", {})
 model.push_layer("silu", "SiLU", 0)
 model.allocate_params()
 model.init_weights("xavier", 3)
@@ -129,7 +152,7 @@ log(string.format("✓ SiLU: [%s] → [%.2f, %.2f, %.2f, %.2f, %.2f]",
     silu_out[1], silu_out[2], silu_out[3], silu_out[4], silu_out[5]))
 
 -- Test Tanh
-success, err = model.create("test_tanh", {})
+success, err = model.create("basic_mlp", {})
 model.push_layer("tanh", "Tanh", 0)
 model.allocate_params()
 model.init_weights("xavier", 4)
@@ -150,7 +173,7 @@ log("  TEST 3: Shape Operations (Flatten, Identity)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 -- Test Flatten
-success, err = model.create("test_flatten", {})
+success, err = model.create("basic_mlp", {})
 model.push_layer("flatten", "Flatten", 0)
 model.allocate_params()
 model.init_weights("xavier", 5)
@@ -161,7 +184,7 @@ log(string.format("✓ Flatten: %d → %d valeurs (pass-through)",
     #flatten_in, #flatten_out))
 
 -- Test Identity
-success, err = model.create("test_identity", {})
+success, err = model.create("basic_mlp", {})
 model.push_layer("id", "Identity", 0)
 model.allocate_params()
 model.init_weights("xavier", 6)

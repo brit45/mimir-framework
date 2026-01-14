@@ -7,6 +7,22 @@ log("=" .. string.rep("=", 78))
 log("🎨 Demo UNet - Segmentation d'Images")
 log("=" .. string.rep("=", 78))
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 -- Configuration système
 log("\n🔧 Configuration...")
 Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
@@ -29,20 +45,18 @@ local config = {
 
 -- Créer le modèle UNet
 log("\n🏗️  Création du modèle UNet...")
-local success, err = model.create("unet_segmentation")
+local cfg, warn = Arch.build_config("unet", config)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, err = model.create("unet", cfg)
 if not success then
-    log("❌ Erreur: " .. (err or "inconnue"))
+    log("❌ Erreur création modèle: " .. (err or "inconnue"))
     return
 end
 
--- Construire avec architectures API
-success, err = architectures.unet(config)
-if not success then
-    log("❌ Erreur architecture: " .. (err or "inconnue"))
-    return
-end
-
-log("✓ Architecture UNet construite")
+log("✓ UNet créé via registre")
 
 -- Allouer et initialiser
 success, params = model.allocate_params()

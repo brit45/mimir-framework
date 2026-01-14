@@ -512,13 +512,13 @@ Mímir utilise 3 niveaux de gestion mémoire :
 
 ```lua
 -- Définir limite mémoire
-Mimir.Mimir.MemoryGuard.setLimit(4 * 1024 * 1024 * 1024)  -- 4 GB
+Mimir.MemoryGuard.setLimit(4.0)  -- 4 GB
 
 -- Activer mode strict
-Mimir.Mimir.MemoryGuard.enableStrictMode()
+Mimir.Guard.enable_strict_mode()
 
 -- Vérifier usage
-local usage = memory.getUsage()
+local usage = Mimir.Memory.get_usage()
 -- usage = {used = 1024000000, limit = 4294967296, ...}
 
 -- Nettoyer cache

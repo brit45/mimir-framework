@@ -9,6 +9,21 @@ print("╔═══════════════════════�
 print("║     Test API Unifiée + Enhanced DebugJson v1.1.0        ║")
 print("╚════════════════════════════════════════════════════════════╝\n")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 -- Configuration mémoire
 Allocator.configure({
     max_ram_gb = 2.0,
@@ -20,15 +35,22 @@ print("✓ Allocateur configuré (2 GB)\n")
 -- Créer un modèle Transformer simple
 print("━━━ Création du modèle ━━━\n")
 
-model.create("test_unified_api")
-
-architectures.transformer({
+local cfg, warn = Arch.build_config("transformer", {
     vocab_size = 500,
     d_model = 64,
     num_layers = 2,
     num_heads = 2,
     max_seq_len = 32
 })
+if warn then
+    print("⚠️  " .. tostring(warn))
+end
+
+local ok_create, err_create = model.create("transformer", cfg)
+if not ok_create then
+    print("❌ Erreur création modèle: " .. tostring(err_create))
+    os.exit(1)
+end
 
 local ok_alloc, params = model.allocate_params()
 if not ok_alloc then

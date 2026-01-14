@@ -1,7 +1,7 @@
 # Mímir Framework - API Lua Complète
 
 **Version:** 2.3.0  
-**Date:** 28 Décembre 2025  
+**Date:** 12 Janvier 2026  
 **Auteur:** bri45  
 **Stub:** mimir-api.lua (EmmyLua annotations)
 
@@ -16,19 +16,17 @@ Ce document décrit l'API Lua complète du framework Mímir, exposant toutes les
 1. [Architecture Générale](#architecture-générale)
 2. [Module `Mimir.Model`](#module-mimirmodel)
 3. [Module `Mimir.Architectures`](#module-mimirarchitectures)
-4. [Module `Mimir.Flux`](#module-mimirflux)
-5. [Module `Mimir.FluxModel`](#module-mimirfluxmodel)
-6. [Module `Mimir.Layers`](#module-mimirlayers)
-7. [Module `Mimir.Tokenizer`](#module-mimirtokenizer)
-8. [Module `Mimir.Dataset`](#module-mimirdataset)
-9. [Module `Mimir.Memory`](#module-mimirmemory)
-10. [Module `Mimir.MemoryGuard`](#module-mimirmemoryguard)
-11. [Module `Mimir.Allocator`](#module-mimirallocator)
-12. [Module `Mimir.Serialization`](#module-mimirserialization)
-13. [Module `Mimir.Htop`](#module-mimirhtop)
-14. [Module `Mimir.Viz`](#module-mimirviz)
-15. [Fonctions Globales](#fonctions-globales)
-16. [Exemples Complets](#exemples-complets)
+4. [Module `Mimir.Tokenizer`](#module-mimirtokenizer)
+5. [Module `Mimir.Dataset`](#module-mimirdataset)
+6. [Module `Mimir.Memory`](#module-mimirmemory)
+7. [Module `Mimir.Guard`](#module-mimirguard)
+8. [Module `Mimir.MemoryGuard`](#module-mimirmemoryguard)
+9. [Module `Mimir.Allocator`](#module-mimirallocator)
+10. [Module `Mimir.Serialization`](#module-mimirserialization)
+11. [Module `Mimir.Htop`](#module-mimirhtop)
+12. [Module `Mimir.Viz`](#module-mimirviz)
+13. [Fonctions Globales](#fonctions-globales)
+14. [Exemples Complets](#exemples-complets)
 
 ---
 
@@ -37,14 +35,13 @@ Ce document décrit l'API Lua complète du framework Mímir, exposant toutes les
 Le framework Mímir utilise Lua comme langage de scripting pour piloter l'entraînement et l'inférence de modèles de deep learning. L'architecture est organisée en modules sous le namespace `Mimir.*`, chacun exposant une API spécifique :
 
 - **`Mimir.Model`** : Gestion du cycle de vie du modèle (création, build, train, infer, save/load)
-- **`Mimir.Architectures`** : Builders pour architectures pré-définies (UNet, VAE, ViT, GAN, Flux, etc.)
-- **`Mimir.Flux`** : API fonctionnelle pour génération d'images guidée par texte
-- **`Mimir.FluxModel`** : API orientée objet pour le modèle Flux
+- **`Mimir.Architectures`** : Helpers de registre (`available`, `default_config`)
 - **`Mimir.Layers`** : Opérations de couches bas niveau (placeholders)
 - **`Mimir.Tokenizer`** : Tokenization (word-level, BPE), gestion vocabulaire
 - **`Mimir.Dataset`** : Chargement et préparation des données
 - **`Mimir.Memory`** : Gestion avancée de la RAM (AdvancedRAMManager)
-- **`Mimir.MemoryGuard`** : Enforcement strict des limites mémoire (API moderne, recommandée)
+- **`Mimir.Guard`** : Enforcement strict (API legacy)
+- **`Mimir.MemoryGuard`** : Enforcement strict (API moderne, recommandée)
 - **`Mimir.Allocator`** : Allocation dynamique de tenseurs avec offload/compression
 - **`Mimir.Serialization`** : Sauvegarde/chargement (SafeTensors, RawFolder, DebugJson)
 - **`Mimir.Htop`** : Monitoring temps réel style htop en terminal
@@ -52,37 +49,43 @@ Le framework Mímir utilise Lua comme langage de scripting pour piloter l'entra�
 
 > **Note:** Les globales (`model.*`, `Mimir.Memory.*`, etc.) restent disponibles pour compatibilité ascendante, mais la syntaxe `Mimir.*` est **fortement recommandée**.
 
-### Flux typique
+### Workflow typique
 
 ```lua
 -- 1. Configuration mémoire
-Mimir.Mimir.Memory.set_limit(8000) -- 8 GB
-Mimir.Mimir.Allocator.configure({max_tensors = 1000, enable_compression = true})
+Mimir.Memory.set_limit(8000) -- 8 GB
+Mimir.Allocator.configure({max_tensors = 1000, enable_compression = true})
 
 -- 2. Tokenizer
-Mimir.Mimir.Tokenizer.create(50000)
-Mimir.Mimir.Tokenizer.ensure_vocab_from_text(corpus_text)
+Mimir.Tokenizer.create(50000)
+Mimir.Tokenizer.ensure_vocab_from_text(corpus_text)
 
 -- 3. Dataset
-Mimir.Mimir.Dataset.load("data/my_corpus")
-Mimir.Mimir.Dataset.prepare_sequences(512)
+Mimir.Dataset.load("data/my_corpus")
+Mimir.Dataset.prepare_sequences(512)
 
 -- 4. Modèle
-Mimir.Model.create("transformer", {vocab_size = 50000, embed_dim = 512, num_layers = 6})
-Mimir.Model.build()
+local cfg = Mimir.Architectures.default_config("transformer")
+cfg.vocab_size = 50000
+cfg.d_model = 512
+cfg.num_layers = 6
+Mimir.Model.create("transformer", cfg)
+Mimir.Model.build() -- compat
 Mimir.Model.init_weights("xavier")
 
 -- 5. Monitoring
-Mimir.Mimir.Htop.create({enable_viz = false})
-Mimir.Mimir.Htop.enable(true)
+Mimir.Htop.create({enable_viz = false})
+Mimir.Htop.enable(true)
 
 -- 6. Entraînement
 Mimir.Model.train(10, 3e-4)
 
 -- 7. Sauvegarde
-Mimir.Serialization.save_safetensors("checkpoints/run1/final.safetensors")
-Mimir.Mimir.Tokenizer.save("checkpoints/run1/Mimir.Tokenizer.json")
+Mimir.Serialization.save("checkpoints/run1/final.safetensors", "safetensors")
+Mimir.Tokenizer.save("checkpoints/run1/MIMIR_Tokenizer.json")
 ```
+
+> Source de vérité: le stub IDE [mimir-api.lua](../../../mimir-api.lua) est synchronisé avec l’implémentation C++ ([src/LuaScripting.cpp](../../../src/LuaScripting.cpp)).
 
 ---
 
@@ -167,8 +170,8 @@ end
 Entraîne le modèle sur le dataset chargé.
 
 **Prérequis:**
-- Dataset chargé via `Mimir.Mimir.Dataset.load()`
-- Séquences préparées via `Mimir.Mimir.Dataset.prepare_sequences()`
+- Dataset chargé via `Mimir.Dataset.load()`
+- Séquences préparées via `Mimir.Dataset.prepare_sequences()`
 - Modèle construit via `Mimir.Model.build()`
 
 **Paramètres:**
@@ -360,149 +363,55 @@ print("FMA:", caps.fma)
 
 ## Module `architectures`
 
-Ce module fournit des builders pour construire rapidement des architectures pré-définies.
+> **Mise à jour v2.3 (Jan 2026)** : les builders `Mimir.Architectures.<name>(cfg)` ne sont **pas** exposés.
+> Le module `Mimir.Architectures` fournit uniquement des helpers pour le registre C++.
 
-### `Mimir.Mimir.Architectures.unet(config)`
+### `Mimir.Architectures.available()`
 
-Construit un modèle U-Net.
+Liste les architectures disponibles dans le registre.
 
-**Configuration:**
+**Retour:**
+- `names` (table|nil) : Liste de strings
+- `err` (string|nil)
+
+**Exemple:**
 ```lua
-{
-  input_channels = 3,      -- Canaux d'entrée
-  output_channels = 1,     -- Canaux de sortie
-  base_channels = 64,      -- Canaux de base
-  num_levels = 4,          -- Nombre de niveaux (encoder/decoder)
-  blocks_per_level = 2,    -- Blocs par niveau
-  use_attention = true,    -- Utiliser attention
-  use_residual = true,     -- Connexions résiduelles
-  dropout = 0.1
-}
+local names, err = Mimir.Architectures.available()
+if not names then error(err) end
+for _, n in ipairs(names) do
+  print("arch:", n)
+end
 ```
 
 ---
 
-### `Mimir.Mimir.Architectures.vae(config)`
+### `Mimir.Architectures.default_config(name)`
 
-Construit un Variational Autoencoder.
+Retourne une configuration par défaut pour une architecture.
 
-**Configuration:**
+**Paramètres:**
+- `name` (string)
+
+**Retour:**
+- `config` (table|nil)
+- `err` (string|nil)
+
+**Exemple:**
 ```lua
-{
-  input_dim = 784,         -- Dimension d'entrée
-  latent_dim = 20,         -- Dimension latente
-  encoder_hidden = 400,    -- Dimension cachée encoder
-  decoder_hidden = 400     -- Dimension cachée decoder
-}
-```
-
----
-
-### `Mimir.Mimir.Architectures.vit(config)`
-
-Construit un Vision Transformer.
-
-**Configuration:**
-```lua
-{
-  image_size = 224,        -- Résolution image
-  patch_size = 16,         -- Taille des patches
-  embed_dim = 768,         -- Dimension embeddings
-  num_layers = 12,         -- Nombre de layers
-  num_heads = 12,          -- Têtes d'attention
-  mlp_ratio = 4.0,         -- Ratio MLP
-  num_classes = 1000       -- Nombre de classes
-}
-```
-
----
-
-### `Mimir.Mimir.Architectures.gan(config)`
-
-Construit un GAN (Generator + Discriminator).
-
-**Configuration:**
-```lua
-{
-  latent_dim = 100,        -- Dimension latente
-  image_channels = 3,      -- Canaux image
-  resolution = 64,         -- Résolution image
-  gen_channels = 64,       -- Canaux générateur
-  disc_channels = 64       -- Canaux discriminateur
-}
-```
-
----
-
-### `Mimir.Architectures.diffusion(config)`
-
-Construit un modèle de diffusion (DDPM-like).
-
-**Configuration:**
-```lua
-{
-  image_channels = 3,
-  resolution = 64,
-  model_channels = 128,
-  num_res_blocks = 2,
-  use_attention = true,
-  dropout = 0.1,
-  use_bottleneck = true
-}
-```
-
----
-
-### `Mimir.Mimir.Architectures.transformer(config)`
-
-Construit un transformer complet (encoder-decoder ou decoder-only).
-
-**Configuration:**
-```lua
-{
-  vocab_size = 50000,
-  embed_dim = 512,
-  num_layers = 6,
-  num_heads = 8,
-  d_ff = 2048,
-  max_seq_len = 512,
-  dropout = 0.1
-}
-```
-
----
-
-### `Mimir.Architectures.resnet(config)`
-
-Construit un ResNet.
-
-**Configuration:**
-```lua
-{
-  num_classes = 1000,
-  input_channels = 3
-}
-```
-
----
-
-### `Mimir.Architectures.mobilenet(config)`
-
-Construit un MobileNet.
-
-**Configuration:**
-```lua
-{
-  num_classes = 1000,
-  width_mult = 1.0  -- Multiplicateur de largeur
-}
+local cfg, err = Mimir.Architectures.default_config("transformer")
+if not cfg then error(err) end
+cfg.vocab_size = 32000
+cfg.d_model = 512
+cfg.num_layers = 6
+cfg.num_heads = 8
+assert(Mimir.Model.create("transformer", cfg))
 ```
 
 ---
 
 ## Module `tokenizer`
 
-### `Mimir.Mimir.Tokenizer.create(max_vocab)`
+### `Mimir.Tokenizer.create(max_vocab)`
 
 Crée un tokenizer avec une taille de vocabulaire maximale.
 
@@ -566,7 +475,7 @@ Ajoute un token au vocabulaire.
 
 ---
 
-### `Mimir.Mimir.Tokenizer.ensure_vocab_from_text(text)`
+### `Mimir.Tokenizer.ensure_vocab_from_text(text)`
 
 Étend le vocabulaire en analysant un texte (ajoute les mots manquants).
 
@@ -722,14 +631,14 @@ Extrait les mots-clés d'un texte (heuristique: fréquence, longueur).
 
 ### Sauvegarde/Chargement
 
-- `Mimir.Mimir.Tokenizer.save(path)` : Sauvegarde le vocabulaire en JSON
-- `Mimir.Mimir.Tokenizer.load(path)` : Charge le vocabulaire depuis JSON
+- `Mimir.Tokenizer.save(path)` : Sauvegarde le vocabulaire en JSON
+- `Mimir.Tokenizer.load(path)` : Charge le vocabulaire depuis JSON
 
 ---
 
 ## Module `dataset`
 
-### `Mimir.Mimir.Dataset.load(dir)`
+### `Mimir.Dataset.load(dir)`
 
 Charge un dataset depuis un répertoire.
 
@@ -742,7 +651,7 @@ Charge un dataset depuis un répertoire.
 
 ---
 
-### `Mimir.Mimir.Dataset.prepare_sequences(max_length)`
+### `Mimir.Dataset.prepare_sequences(max_length)`
 
 Prépare les séquences tokenisées pour l'entraînement. Les séquences sont stockées dans le contexte interne et utilisées par `Mimir.Model.train()`.
 
@@ -772,7 +681,7 @@ Configure le gestionnaire mémoire.
 
 ---
 
-### `Mimir.Mimir.Memory.get_stats()`
+### `Mimir.Memory.get_stats()`
 
 Récupère les statistiques mémoire.
 
@@ -800,7 +709,7 @@ Libère les caches mémoire.
 
 ---
 
-### `Mimir.Mimir.Memory.get_usage()`
+### `Mimir.Memory.get_usage()`
 
 Retourne l'utilisation mémoire actuelle.
 
@@ -809,7 +718,7 @@ Retourne l'utilisation mémoire actuelle.
 
 ---
 
-### `Mimir.Mimir.Memory.set_limit(limit_mb)`
+### `Mimir.Memory.set_limit(limit_mb)`
 
 Définit une limite mémoire.
 
@@ -841,7 +750,7 @@ Définit une limite stricte de mémoire.
 
 ### `Mimir.Guard.get_stats()`
 
-Récupère les statistiques du Mimir.Mimir.MemoryGuard.
+Récupère les statistiques du guard (API legacy).
 
 **Retour:**
 - `stats` (table) : Statistiques
@@ -852,15 +761,15 @@ Récupère les statistiques du Mimir.Mimir.MemoryGuard.
 
 ---
 
-### `Mimir.Mimir.MemoryGuard.print_stats()`
+### `Mimir.Guard.print_stats()`
 
-Affiche les statistiques du Mimir.Mimir.MemoryGuard.
+Affiche les statistiques du guard.
 
 ---
 
 ### `Mimir.Guard.reset()`
 
-Réinitialise les compteurs du Mimir.Mimir.MemoryGuard.
+Réinitialise les compteurs du guard.
 
 **Retour:**
 - `ok` (boolean) : Succès
@@ -868,11 +777,29 @@ Réinitialise les compteurs du Mimir.Mimir.MemoryGuard.
 
 ---
 
+## Module `Mimir.MemoryGuard`
+
+API moderne recommandée (fonctions en camelCase). Cette API retourne des valeurs en **bytes** pour l’usage courant/peak/limit, et une table en MB/% via `getStats()`.
+
+### Fonctions
+
+```lua
+Mimir.MemoryGuard.setLimit(limit)         -- limit = bytes (grand nombre) OU GB (si <= 1000)
+Mimir.MemoryGuard.getLimit()              -- bytes
+Mimir.MemoryGuard.getCurrentUsage()       -- bytes
+Mimir.MemoryGuard.getPeakUsage()          -- bytes
+Mimir.MemoryGuard.getStats()              -- {current_mb, peak_mb, limit_mb, usage_percent}
+Mimir.MemoryGuard.printStats()
+Mimir.MemoryGuard.reset()
+```
+
+---
+
 ## Module `allocator`
 
 Gestion dynamique des tenseurs avec offload et compression via `DynamicTensorAllocator`.
 
-### `Mimir.Mimir.Allocator.configure(config)`
+### `Mimir.Allocator.configure(config)`
 
 Configure l'allocateur.
 
@@ -890,7 +817,7 @@ Configure l'allocateur.
 
 **Exemple:**
 ```lua
-Mimir.Mimir.Allocator.configure({
+Mimir.Allocator.configure({
   max_tensors = 1000,
   offload_threshold_mb = 6000,
   enable_compression = true,
@@ -906,7 +833,7 @@ Affiche les statistiques de l'allocateur.
 
 ---
 
-### `Mimir.Mimir.Allocator.get_stats()`
+### `Mimir.Allocator.get_stats()`
 
 Récupère les statistiques.
 
@@ -917,11 +844,52 @@ Récupère les statistiques.
 
 ---
 
+## Module `Mimir.Serialization`
+
+API de sérialisation v2.3 (recommandée). Permet de sauvegarder/charger des checkpoints et de détecter automatiquement le format.
+
+### `Mimir.Serialization.save(path, format?)`
+
+**Paramètres:**
+- `path` (string) : Fichier (SafeTensors / DebugJson) ou dossier (RawFolder)
+- `format` (string, optionnel) : "safetensors" | "raw_folder" | "debug_json" (si omis, auto-détecté via l’extension ou le chemin)
+
+**Retour:**
+- `ok` (boolean)
+- `err` (string|nil)
+
+**Exemple:**
+```lua
+assert(Mimir.Serialization.save("checkpoints/run1/model.safetensors", "safetensors"))
+assert(Mimir.Serialization.save("checkpoints/run1/", "raw_folder"))
+assert(Mimir.Serialization.save("checkpoints/run1/debug.json", "debug_json"))
+```
+
+---
+
+### `Mimir.Serialization.load(path, format?)`
+
+Charge un checkpoint (auto-détection par défaut).
+
+---
+
+### `Mimir.Serialization.detect_format(path)`
+
+Retourne un string de format (ou nil + err).
+
+---
+
+### `Mimir.Serialization.save_enhanced_debug(path)`
+
+Sauvegarde un DebugJson enrichi.
+
+---
+
 ## Module `htop`
 
 Monitoring temps réel style htop dans le terminal via `HtopDisplay` et `AsyncMonitor`.
 
-### `Mimir.Mimir.Htop.create(config)`
+### `Mimir.Htop.create(config)`
 
 Crée le monitor avec configuration optionnelle.
 
@@ -936,7 +904,7 @@ Crée le monitor avec configuration optionnelle.
 
 ---
 
-### `Mimir.Mimir.Htop.enable(enabled)`
+### `Mimir.Htop.enable(enabled)`
 
 Active/désactive l'affichage Mimir.Htop.
 
@@ -1020,7 +988,7 @@ Efface l'affichage Mimir.Htop.
 
 Visualisation graphique via SFML (fenêtre, images, métriques, courbes).
 
-### `Mimir.Mimir.Viz.create(title, width, height)`
+### `Mimir.Viz.create(title, width, height)`
 
 Crée une fenêtre de visualisation.
 
@@ -1035,7 +1003,7 @@ Crée une fenêtre de visualisation.
 
 ---
 
-### `Mimir.Mimir.Viz.initialize()`
+### `Mimir.Viz.initialize()`
 
 Initialise et ouvre la fenêtre.
 
@@ -1066,7 +1034,7 @@ Met à jour et affiche le rendu.
 
 ---
 
-### `Mimir.Mimir.Viz.add_image(pixels, width, height, channels)`
+### `Mimir.Viz.add_image(pixels, width, height, channels)`
 
 Affiche une image dans le visualiseur.
 
@@ -1087,7 +1055,7 @@ local pixels = {}
 for i = 1, 64*64*3 do
   pixels[i] = math.random(0, 255)
 end
-Mimir.Mimir.Viz.add_image(pixels, 64, 64, 3)
+Mimir.Viz.add_image(pixels, 64, 64, 3)
 ```
 
 ---
@@ -1145,7 +1113,7 @@ Active/désactive le visualiseur.
 
 ---
 
-### `Mimir.Mimir.Viz.save_loss_history(filepath)`
+### `Mimir.Viz.save_loss_history(filepath)`
 
 Sauvegarde l'historique de loss dans un fichier.
 
@@ -1217,43 +1185,43 @@ local ok, err = write_json("output.json", {
 
 ```lua
 -- Configuration mémoire
-Mimir.Mimir.Memory.set_limit(8000) -- 8 GB
-Mimir.Mimir.Allocator.configure({max_tensors = 1000, enable_compression = true})
+Mimir.Memory.set_limit(8000) -- 8 GB
+Mimir.Allocator.configure({max_tensors = 1000, enable_compression = true})
 
 -- Tokenizer
-Mimir.Mimir.Tokenizer.create(50000)
+Mimir.Tokenizer.create(50000)
 local corpus = io.open("data/corpus.txt"):read("*all")
-Mimir.Mimir.Tokenizer.ensure_vocab_from_text(corpus)
-Mimir.Mimir.Tokenizer.save("Mimir.Tokenizer.json")
+Mimir.Tokenizer.ensure_vocab_from_text(corpus)
+Mimir.Tokenizer.save("Mimir.Tokenizer.json")
 
 -- Dataset
-Mimir.Mimir.Dataset.load("data/train")
-Mimir.Mimir.Dataset.prepare_sequences(512)
+Mimir.Dataset.load("data/train")
+Mimir.Dataset.prepare_sequences(512)
 
 -- Modèle
-Mimir.Model.create("transformer", {
-  vocab_size = Mimir.Tokenizer.vocab_size(),
-  embed_dim = 512,
-  num_layers = 6,
-  num_heads = 8,
-  d_ff = 2048,
-  max_seq_len = 512,
-  dropout = 0.1
-})
+local cfg, err = Mimir.Architectures.default_config("transformer")
+if not cfg then error(err) end
+cfg.vocab_size = Mimir.Tokenizer.vocab_size()
+cfg.d_model = 512
+cfg.num_layers = 6
+cfg.num_heads = 8
+cfg.seq_len = 512
+
+assert(Mimir.Model.create("transformer", cfg))
 local ok, params = Mimir.Model.build()
 print(string.format("Modèle construit: %d paramètres", params))
 Mimir.Model.init_weights("xavier", 42)
 
 -- Monitoring
-Mimir.Mimir.Htop.create()
-Mimir.Mimir.Htop.enable(true)
+Mimir.Htop.create()
+Mimir.Htop.enable(true)
 
 -- Entraînement
 Mimir.Model.train(10, 3e-4)
 
 -- Sauvegarde
-Mimir.Model.save("checkpoints/final")
-Mimir.Mimir.Tokenizer.save("checkpoints/Mimir.Tokenizer.json")
+Mimir.Serialization.save("checkpoints/final.safetensors", "safetensors")
+Mimir.Tokenizer.save("checkpoints/Mimir.Tokenizer.json")
 ```
 
 ---
@@ -1262,8 +1230,8 @@ Mimir.Mimir.Tokenizer.save("checkpoints/Mimir.Tokenizer.json")
 
 ```lua
 -- Charger tokenizer et modèle
-Mimir.Mimir.Tokenizer.load("checkpoints/Mimir.Tokenizer.json")
-Mimir.Model.load("checkpoints/final")
+Mimir.Tokenizer.load("checkpoints/Mimir.Tokenizer.json")
+Mimir.Serialization.load("checkpoints/final.safetensors")
 
 -- Inférence
 local prompt = "Once upon a time"
@@ -1277,13 +1245,13 @@ print("Génération:", output)
 
 ```lua
 -- Configuration
-Mimir.Mimir.Memory.set_limit(12000) -- 12 GB
-Mimir.Mimir.Htop.create({enable_viz = false})
-Mimir.Mimir.Htop.enable(true)
+Mimir.Memory.set_limit(12000) -- 12 GB
+Mimir.Htop.create({enable_viz = false})
+Mimir.Htop.enable(true)
 
 -- Visualiseur
-Mimir.Mimir.Viz.create("Training Monitor", 1920, 1080)
-Mimir.Mimir.Viz.initialize()
+Mimir.Viz.create("Training Monitor", 1920, 1080)
+Mimir.Viz.initialize()
 
 -- Tokenizer, dataset, modèle...
 -- (voir exemple 1)
@@ -1302,7 +1270,7 @@ for epoch = 1, 10 do
       loss = current_loss,
       avg_loss = avg_loss,
       lr = 3e-4,
-      memory_mb = Mimir.Mimir.Memory.get_usage()
+      memory_mb = Mimir.Memory.get_usage()
     })
     
     Mimir.Viz.update_metrics({
@@ -1320,7 +1288,7 @@ for epoch = 1, 10 do
 end
 
 -- Sauvegarde historique
-Mimir.Mimir.Viz.save_loss_history("loss_history.json")
+Mimir.Viz.save_loss_history("loss_history.json")
 ```
 
 ---
@@ -1329,23 +1297,25 @@ Mimir.Mimir.Viz.save_loss_history("loss_history.json")
 
 ```lua
 -- Créer VAE
-Mimir.Mimir.Architectures.vae({
-  input_dim = 784,  -- 28x28 MNIST
-  latent_dim = 20,
-  encoder_hidden = 400,
-  decoder_hidden = 400
-})
+local cfg, err = Mimir.Architectures.default_config("vae")
+if not cfg then error(err) end
+cfg.input_dim = 784  -- 28x28 MNIST
+cfg.latent_dim = 20
+cfg.encoder_hidden = 400
+cfg.decoder_hidden = 400
+
+assert(Mimir.Model.create("vae", cfg))
 Mimir.Model.build()
 
 -- Visualiseur
-Mimir.Mimir.Viz.create("VAE Training", 800, 600)
-Mimir.Mimir.Viz.initialize()
+Mimir.Viz.create("VAE Training", 800, 600)
+Mimir.Viz.initialize()
 
 -- Entraînement...
 
 -- Visualiser une reconstruction
 local reconstructed_pixels = {} -- obtenir depuis le modèle
-Mimir.Mimir.Viz.add_image(reconstructed_pixels, 28, 28, 1) -- grayscale
+Mimir.Viz.add_image(reconstructed_pixels, 28, 28, 1) -- grayscale
 Mimir.Viz.update()
 ```
 
@@ -1356,7 +1326,7 @@ Mimir.Viz.update()
 ### Optimisations Mémoire
 
 1. **Limites strictes** : Utilisez `Mimir.Guard.set_limit()` pour éviter les OOM
-2. **Compression** : Activez `Mimir.Mimir.Allocator.configure({enable_compression = true})`
+2. **Compression** : Activez `Mimir.Allocator.configure({enable_compression = true})`
 3. **Offload** : Configurez `offload_threshold_mb` pour swap sur disque
 4. **Clear périodique** : Appelez `Mimir.Memory.clear()` entre epochs
 

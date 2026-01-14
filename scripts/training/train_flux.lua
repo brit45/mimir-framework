@@ -5,6 +5,12 @@ log("========================================")
 log("Flux Training Pipeline")
 log("========================================")
 
+-- Flux/FluxModel n'est pas exposé dans l'API Lua v2.3 (skip propre)
+if type(_G.flux) ~= "table" and type(_G.FluxModel) ~= "table" and (type(_G.Mimir) ~= "table" or type(Mimir.FluxModel) ~= "table") then
+    log("⚠️  Flux/FluxModel indisponible dans l'API Lua v2.3 (skip)")
+    return
+end
+
 -- Configuration
 local config = {
     -- Model configuration

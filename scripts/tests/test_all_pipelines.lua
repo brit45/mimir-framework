@@ -3,6 +3,17 @@
 -- Test de tous les modèles disponibles
 -- ============================================================================
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
 local Pipeline = require("pipeline_api")
 
 

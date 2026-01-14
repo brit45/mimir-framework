@@ -6,6 +6,22 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Mímir Framework - API Lua Complète")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+local tokenizer = (type(_G.Mimir) == "table" and type(Mimir.Tokenizer) == "table") and Mimir.Tokenizer or _G.tokenizer
+
 -- ============================================================================
 -- Test 1: Vérification des capacités hardware
 -- ============================================================================
@@ -30,14 +46,7 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Test 1: Architecture UNet")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-local success, err = model.create("unet")
-if not success then
-    print("❌ Erreur création modèle: " .. (err or "inconnue"))
-    os.exit(1)
-end
-print("✓ Modèle créé")
-
--- Configuration UNet
+-- Configuration UNet (legacy-friendly)
 local unet_config = {
     input_channels = 3,
     output_channels = 1,
@@ -45,12 +54,17 @@ local unet_config = {
     num_levels = 4
 }
 
-success, err = architectures.unet(unet_config)
+local unet_cfg, unet_warn = Arch.build_config("unet", unet_config)
+if unet_warn then
+    print("⚠️  " .. tostring(unet_warn))
+end
+
+local success, err = model.create("unet", unet_cfg)
 if not success then
-    print("❌ Erreur construction UNet: " .. (err or "inconnue"))
+    print("❌ Erreur création modèle UNet: " .. (err or "inconnue"))
     os.exit(1)
 end
-print("✓ Architecture UNet construite")
+print("✓ UNet créé via registre")
 
 -- Allouer les paramètres
 success, count = model.allocate_params()
@@ -79,10 +93,6 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Test 2: Architecture Transformer")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
--- Créer un nouveau modèle
-model.create("transformer")
-print("✓ Modèle créé")
-
 local transformer_config = {
     vocab_size = 10000,
     d_model = 512,
@@ -90,9 +100,14 @@ local transformer_config = {
     num_heads = 8
 }
 
-success, err = architectures.transformer(transformer_config)
+local transformer_cfg, transformer_warn = Arch.build_config("transformer", transformer_config)
+if transformer_warn then
+    print("⚠️  " .. tostring(transformer_warn))
+end
+
+success, err = model.create("transformer", transformer_cfg)
 if success then
-    print("✓ Architecture Transformer construite")
+    print("✓ Transformer créé via registre")
     print(string.format("  • Vocab size: %d", transformer_config.vocab_size))
     print(string.format("  • Model dim: %d", transformer_config.d_model))
     print(string.format("  • Layers: %d", transformer_config.num_layers))
@@ -116,9 +131,6 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Test 3: Vision Transformer (ViT)")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-model.create("vit")
-print("✓ Modèle créé")
-
 local vit_config = {
     image_size = 224,
     patch_size = 16,
@@ -127,9 +139,14 @@ local vit_config = {
     num_layers = 12
 }
 
-success, err = architectures.vit(vit_config)
+local vit_cfg, vit_warn = Arch.build_config("vit", vit_config)
+if vit_warn then
+    print("⚠️  " .. tostring(vit_warn))
+end
+
+success, err = model.create("vit", vit_cfg)
 if success then
-    print("✓ Architecture ViT construite")
+    print("✓ ViT créé via registre")
     print(string.format("  • Image: %dx%d", vit_config.image_size, vit_config.image_size))
     print(string.format("  • Patches: %dx%d", vit_config.patch_size, vit_config.patch_size))
     print(string.format("  • Classes: %d", vit_config.num_classes))
@@ -152,17 +169,19 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Test 4: Variational Autoencoder (VAE)")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-model.create("vae")
-print("✓ Modèle créé")
-
 local vae_config = {
     input_dim = 784,    -- 28x28 pour MNIST
     latent_dim = 64
 }
 
-success, err = architectures.vae(vae_config)
+local vae_cfg, vae_warn = Arch.build_config("vae", vae_config)
+if vae_warn then
+    print("⚠️  " .. tostring(vae_warn))
+end
+
+success, err = model.create("vae", vae_cfg)
 if success then
-    print("✓ Architecture VAE construite")
+    print("✓ VAE créé via registre")
     print(string.format("  • Input: %d", vae_config.input_dim))
     print(string.format("  • Latent: %d", vae_config.latent_dim))
 else
@@ -179,47 +198,13 @@ print(string.format("📊 Nombre total de paramètres: %d", total_vae))
 -- Test 6: GAN (Generative Adversarial Network)
 -- ============================================================================
 
+local total_gen = 0
+local total_disc = 0
+
 print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  Test 5: GAN (Generator)")
+print("  Test 5: GAN")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-model.create("gan_generator")
-print("✓ Modèle créé")
-
-local gan_config = {
-    latent_dim = 100,
-    image_size = 64
-}
-
-success, err = architectures.gan("generator", gan_config)
-if success then
-    print("✓ Architecture GAN Generator construite")
-    print(string.format("  • Latent: %d", gan_config.latent_dim))
-    print(string.format("  • Output: %dx%d", gan_config.image_size, gan_config.image_size))
-else
-    print("❌ Erreur: " .. (err or "inconnue"))
-end
-
-model.allocate_params()
-model.init_weights("he", 111)
-
-local total_gen = model.total_params()
-print(string.format("📊 Paramètres Generator: %d", total_gen))
-
--- Discriminator
-print("\n  Test 5b: GAN (Discriminator)")
-
-model.create("gan_discriminator")
-success = architectures.gan("discriminator", gan_config)
-if success then
-    print("✓ Architecture GAN Discriminator construite")
-end
-
-model.allocate_params()
-model.init_weights("he", 222)
-
-local total_disc = model.total_params()
-print(string.format("📊 Paramètres Discriminator: %d", total_disc))
+print("⚠️  GAN n'est pas disponible dans l'API v2.3 (skip)")
 
 -- ============================================================================
 -- Test 7: Diffusion Model
@@ -229,17 +214,19 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Test 6: Diffusion Model (DDPM)")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-model.create("diffusion")
-print("✓ Modèle créé")
-
 local diffusion_config = {
     image_size = 32,
     base_channels = 128
 }
 
-success, err = architectures.diffusion(diffusion_config)
+local diffusion_cfg, diffusion_warn = Arch.build_config("diffusion", diffusion_config)
+if diffusion_warn then
+    print("⚠️  " .. tostring(diffusion_warn))
+end
+
+success, err = model.create("diffusion", diffusion_cfg)
 if success then
-    print("✓ Architecture Diffusion construite")
+    print("✓ Diffusion créé via registre")
     print(string.format("  • Image: %dx%d", diffusion_config.image_size, diffusion_config.image_size))
     print(string.format("  • Base channels: %d", diffusion_config.base_channels))
 else
@@ -261,16 +248,18 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Test 7: ResNet-50")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-model.create("resnet")
-print("✓ Modèle créé")
-
 local resnet_config = {
     num_classes = 1000
 }
 
-success, err = architectures.resnet(resnet_config)
+local resnet_cfg, resnet_warn = Arch.build_config("resnet", resnet_config)
+if resnet_warn then
+    print("⚠️  " .. tostring(resnet_warn))
+end
+
+success, err = model.create("resnet", resnet_cfg)
 if success then
-    print("✓ Architecture ResNet-50 construite")
+    print("✓ ResNet créé via registre")
     print(string.format("  • Classes: %d", resnet_config.num_classes))
 else
     print("❌ Erreur: " .. (err or "inconnue"))
@@ -291,17 +280,19 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Test 8: MobileNetV2")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-model.create("mobilenet")
-print("✓ Modèle créé")
-
 local mobilenet_config = {
     num_classes = 1000,
     width_multiplier = 1.0
 }
 
-success, err = architectures.mobilenet(mobilenet_config)
+local mobilenet_cfg, mobilenet_warn = Arch.build_config("mobilenet", mobilenet_config)
+if mobilenet_warn then
+    print("⚠️  " .. tostring(mobilenet_warn))
+end
+
+success, err = model.create("mobilenet", mobilenet_cfg)
 if success then
-    print("✓ Architecture MobileNetV2 construite")
+    print("✓ MobileNet créé via registre")
     print(string.format("  • Classes: %d", mobilenet_config.num_classes))
     print(string.format("  • Width: %.1fx", mobilenet_config.width_multiplier))
 else

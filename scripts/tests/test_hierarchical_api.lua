@@ -9,6 +9,19 @@ print("╔═══════════════════════�
 print("║     Test API Hiérarchique Mimir.* (v2.3.0)              ║")
 print("╚════════════════════════════════════════════════════════════╝\n")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
 -- ━━━ Test 1: Mimir.Allocator ━━━
 print("━━━ Test 1: Mimir.Allocator ━━━\n")
 
@@ -22,21 +35,33 @@ print("✓ Mimir.Allocator.configure() OK\n")
 -- ━━━ Test 2: Mimir.Model ━━━
 print("━━━ Test 2: Mimir.Model ━━━\n")
 
-Mimir.Model.create("test_hierarchical_api")
-print("✓ Mimir.Model.create() OK")
-
--- ━━━ Test 3: Mimir.Architectures ━━━
-print("\n━━━ Test 3: Mimir.Architectures ━━━\n")
-
-Mimir.Architectures.transformer({
+local cfg, warn = Arch.build_config("transformer", {
     vocab_size = 1000,
     d_model = 128,
     num_layers = 2,
     num_heads = 4,
     max_seq_len = 64
 })
+if warn then
+    print("⚠️  " .. tostring(warn))
+end
 
-print("✓ Mimir.Architectures.transformer() OK")
+local ok_create, err_create = Mimir.Model.create("transformer", cfg)
+if not ok_create then
+    print("❌ Erreur Mimir.Model.create: " .. tostring(err_create))
+    os.exit(1)
+end
+print("✓ Mimir.Model.create(type, cfg) OK")
+
+-- ━━━ Test 3: Mimir.Architectures ━━━
+print("\n━━━ Test 3: Mimir.Architectures ━━━\n")
+
+local names, err_names = Mimir.Architectures.available()
+if not names then
+    print("⚠️  Architectures.available() indisponible: " .. tostring(err_names))
+else
+    print("✓ Mimir.Architectures.available() OK (" .. tostring(#names) .. " entrées)")
+end
 
 -- ━━━ Test 4: Allocation des paramètres ━━━
 print("\n━━━ Test 4: Allocation ━━━\n")

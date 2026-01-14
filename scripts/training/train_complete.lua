@@ -13,6 +13,22 @@ log("╔════════════════════════
 log("║     Mímir - VAE Training Pipeline (Simple & Real)             ║")
 log("╚═══════════════════════════════════════════════════════════════╝")
 
+local function _mimir_add_module_path()
+  local ok, info = pcall(debug.getinfo, 1, "S")
+  if not ok or type(info) ~= "table" then return end
+  local src = info.source
+  if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+  local dir = src:sub(2):match("(.*/)")
+  if not dir then return end
+  package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+local dataset = (type(_G.Mimir) == "table" and type(Mimir.Dataset) == "table") and Mimir.Dataset or _G.dataset
+
 -- ---------------------------------------------------------------------------
 -- Runtime / memory (optional, but coherent with your framework)
 -- ---------------------------------------------------------------------------
@@ -68,24 +84,18 @@ local vae_cfg = {
   decoder_hidden = 512
 }
 
-ok, err = model.create("vae", vae_cfg)
+local cfg, warn = Arch.build_config("vae", vae_cfg)
+if warn then
+  log("⚠️  " .. tostring(warn))
+end
+
+ok, err = model.create("vae", cfg)
 if not ok then
   error("model.create('vae') failed: " .. tostring(err))
 end
 
-ok, err = architectures.vae(vae_cfg)
-if not ok then
-  error("architectures.vae failed: " .. tostring(err))
-end
-
-local params
-ok, params, err = model.build()
-if not ok then
-  error("model.build failed: " .. tostring(err))
-end
-
 log("✓ VAE built")
-log("📊 Params: " .. tostring(params or model.total_params()))
+log("📊 Params: " .. tostring(model.total_params()))
 
 ok, err = model.allocate_params()
 if not ok then

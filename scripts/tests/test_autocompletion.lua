@@ -26,24 +26,36 @@ Mimir.Serialization.save("checkpoint/.safetensors", "safetensors")
 model.total_params()
 
 -- Test module architectures (9 fonctions)
-architectures.transformer({vocab_size = 50000})
-architectures.unet({input_channels = 3})
-architectures.vae({latent_dim = 128})
-architectures.flux({image_resolution = 256})
+if type(Mimir) == "table" and type(Mimir.Architectures) == "table" then
+  Mimir.Architectures.available()
+  Mimir.Architectures.default_config("transformer")
+  Mimir.Architectures.default_config("unet")
+  Mimir.Architectures.default_config("vae")
+else
+  log("⚠️  Mimir.Architectures indisponible")
+end
 
 -- Test module flux (5 fonctions - API fonctionnelle)
-flux.generate("A beautiful sunset", 50)
-flux.encode_image("input.png")
-flux.decode_latent({})
-flux.encode_text("Description")
-flux.set_tokenizer("tokenizer.json")
+if type(_G.flux) == "table" then
+  flux.generate("A beautiful sunset", 50)
+  flux.encode_image("input.png")
+  flux.decode_latent({})
+  flux.encode_text("Description")
+  flux.set_tokenizer("tokenizer.json")
+else
+  log("⚠️  flux module indisponible (skip)")
+end
 
 -- Test module FluxModel (12 fonctions - API orientée objet)
-local flux_model = FluxModel.new({image_resolution = 256})
-flux_model.train()
-flux_model.eval()
-flux_model.isTraining()
-flux_model.encodeImage("img.png")
+if type(_G.FluxModel) == "table" and type(FluxModel.new) == "function" then
+  local flux_model = FluxModel.new({image_resolution = 256})
+  flux_model.train()
+  flux_model.eval()
+  flux_model.isTraining()
+  flux_model.encodeImage("img.png")
+else
+  log("⚠️  FluxModel indisponible (skip)")
+end
 
 -- Test module tokenizer (24 fonctions)
 tokenizer.create(50000)

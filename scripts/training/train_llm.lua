@@ -18,6 +18,24 @@ log("║              Simple LLM Training - Mímir Framework                ║"
 log("║                     CPU-Only Deep Learning                        ║")
 log("╚═══════════════════════════════════════════════════════════════════╝")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+-- Assurer la compat des aliases utilisés dans ce script
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+local tokenizer = (type(_G.Mimir) == "table" and type(Mimir.Tokenizer) == "table") and Mimir.Tokenizer or _G.tokenizer
+
 -- ============================================================================
 -- Fonctions utilitaires
 -- ============================================================================
@@ -589,13 +607,6 @@ log(string.rep("=", 70))
 log("\n🏗️  Création du modèle GPT-style (decoder-only)...")
 start_time = os.clock()
 
--- Créer le modèle
-local success, err = model.create("transformer_gpt")
-if not success then
-    log("❌ Erreur création modèle: " .. (err or "inconnue"))
-    return
-end
-
 -- Configuration pour architectures.transformer()
 local model_config = {
     vocab_size = config.vocab_size,
@@ -608,14 +619,19 @@ local model_config = {
     causal = true
 }
 
--- Construire l'architecture
-success, err = architectures.transformer(model_config)
+local cfg, warn = Arch.build_config("transformer", model_config)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+-- Créer le modèle via le registre (v2.3)
+local success, err = model.create("transformer", cfg)
 if not success then
-    log("❌ Erreur construction architecture: " .. (err or "inconnue"))
+    log("❌ Erreur création modèle: " .. (err or "inconnue"))
     return
 end
 
-log("✓ Architecture Transformer construite")
+log("✓ Modèle Transformer (causal) créé via registre")
 
 -- Allouer les paramètres
 success, params = model.allocate_params()

@@ -51,13 +51,14 @@ local success = Mimir.save_enhanced_debug(path, options)
 
 ```lua
 -- Créer un modèle
-Mimir.Model.create("test_conv")
-Mimir.Architectures.transformer({
-    vocab_size = 1000,
-    d_model = 128,
-    num_layers = 4,
-    num_heads = 8
-})
+local cfg, err = Mimir.Architectures.default_config("transformer")
+assert(cfg, err)
+cfg.vocab_size = 1000
+cfg.d_model = 128
+cfg.num_layers = 4
+cfg.num_heads = 8
+
+assert(Mimir.Model.create("transformer", cfg))
 
 model.allocate_params()
 model.init_weights("xavier")
@@ -69,7 +70,7 @@ local loss_grad = model.loss_gradient(output, {1, 0, 0, 0, 0}, "mse")
 model.backward(loss_grad)
 
 -- Snapshot AVANT optimizer step
-Mimir.save_enhanced_debug("/tmp/before.json", {
+Mimir.Serialization.save_enhanced_debug("/tmp/before.json", {
     include_gradients = true,
     include_checksums = true,
     include_weight_deltas = false  -- Pas encore de snapshot précédent

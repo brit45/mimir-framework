@@ -7,6 +7,22 @@ log("=" .. string.rep("=", 78))
 log("🏗️  Demo ResNet - Residual Network")
 log("=" .. string.rep("=", 78))
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 -- Configuration système
 log("\n🔧 Configuration...")
 Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
@@ -23,20 +39,29 @@ local config = {
 
 -- Créer le modèle ResNet
 log("\n🏗️  Création du modèle ResNet...")
-local success, err = model.create("resnet_model")
+local resnet_input = {
+    num_classes = config.num_classes,
+    base_channels = config.base_channels,
+}
+if type(config.layers) == "table" and #config.layers >= 4 then
+    resnet_input.blocks1 = config.layers[1]
+    resnet_input.blocks2 = config.layers[2]
+    resnet_input.blocks3 = config.layers[3]
+    resnet_input.blocks4 = config.layers[4]
+end
+
+local cfg, warn = Arch.build_config("resnet", resnet_input)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, err = model.create("resnet", cfg)
 if not success then
-    log("❌ Erreur: " .. (err or "inconnue"))
+    log("❌ Erreur création modèle: " .. (err or "inconnue"))
     return
 end
 
--- Construire avec architectures API
-success, err = architectures.resnet(config)
-if not success then
-    log("❌ Erreur architecture: " .. (err or "inconnue"))
-    return
-end
-
-log("✓ Architecture ResNet-50 construite")
+log("✓ ResNet créé via registre")
 
 -- Allouer et initialiser
 success, params = model.allocate_params()

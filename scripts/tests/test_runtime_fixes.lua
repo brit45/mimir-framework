@@ -8,6 +8,22 @@ log("\n╔═══════════════════════�
 log("║   Test Runtime Fixes - Mímir Framework                ║")
 log("╚════════════════════════════════════════════════════════╝\n")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 -- ══════════════════════════════════════════════════════════════
 --  TEST 1: Vérifier que les layers supportés fonctionnent
 -- ══════════════════════════════════════════════════════════════
@@ -31,19 +47,18 @@ local config_small = {
     dropout = 0.1
 }
 
-local success, err = model.create("test_model", config_small)
+local cfg, warn = Arch.build_config("unet", config_small)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, err = model.create("unet", cfg)
 if not success then
     log("❌ Échec création modèle: " .. (err or ""))
     os.exit(1)
 end
 
-success = architectures.unet(config_small)
-if not success then
-    log("❌ Échec construction UNet")
-    os.exit(1)
-end
-
-log("✓ Architecture UNet construite")
+log("✓ UNet créé via registre")
 
 success, num_params = model.allocate_params()
 if not success then

@@ -1,12 +1,12 @@
 # Mímir Framework - Référence Rapide API Lua
 
 **Version:** 2.3.0  
-**Dernière mise à jour:** 28 Décembre 2025  
+**Dernière mise à jour:** 12 Janvier 2026  
 **Synchronisé avec:** mimir-api.lua (EmmyLua stub)  
 
 Guide de référence rapide pour l'API Lua du framework Mímir.
 
-> ⚠️ **Important:** Toujours appeler `Mimir.Mimir.Allocator.configure()` avant d'utiliser le framework.
+> ⚠️ **Important:** Toujours appeler `Mimir.Allocator.configure()` avant d'utiliser le framework.
 > 💡 **Syntaxe Recommandée:** Utiliser `Mimir.Module.*` pour bénéficier de l'autocompletion IDE (annotations EmmyLua dans `mimir-api.lua`).
 
 ## 🆕 Nouveautés v2.3.0
@@ -19,24 +19,22 @@ Guide de référence rapide pour l'API Lua du framework Mímir.
 
 ---
 
-## Modules Disponibles (16 modules, 122+ fonctions)
+## Modules Disponibles (13 modules + 3 globales)
 
 | Module | Fonctions | Description |
 |--------|-----------|-------------|
 | `Mimir.Model` | 18 🆕 | Gestion du modèle + multi-input support |
-| `Mimir.Architectures` | 9 | Builders pour architectures pré-définies |
-| `Mimir.Flux` | 5 | API Flux pour génération d'images guidée par texte |
-| `Mimir.FluxModel` | 12 | Classe FluxModel (orientée objet) |
+| `Mimir.Architectures` | 2 | Registry helpers (`available`, `default_config`) |
 | `Mimir.Layers` | 8 | Opérations de couches (placeholders) |
 | `Mimir.Tokenizer` | 24 | Tokenization, BPE, analyse vocabulaire |
 | `Mimir.Dataset` | 3 | Chargement et préparation données |
 | `Mimir.Memory` | 6 | Gestion avancée RAM (AdvancedRAMManager) |
+| `Mimir.Guard` | 4 | Enforcement strict limites (API legacy) |
 | `Mimir.MemoryGuard` | 7 | Enforcement strict limites (API moderne) |
 | `Mimir.Allocator` | 3 | Allocation dynamique tenseurs avec compression |
-| `Mimir.Serialization` | 12 | Sauvegarde/chargement (SafeTensors, RawFolder, DebugJson) |
+| `Mimir.Serialization` | 4 | Sauvegarde/chargement (SafeTensors, RawFolder, DebugJson) |
 | `Mimir.Htop` | 5 | Monitoring temps réel style htop (terminal) |
 | `Mimir.Viz` | 11 | Visualisation graphique SFML (images, métriques, loss) |
-| `Mimir.Hardware` | 2 | Détection capacités hardware |
 | `Mimir.Checkpoint` | 2 | API checkpoint (legacy) |
 | **Globales** | 3 | `log()`, `read_json()`, `write_json()` |
 
@@ -48,32 +46,36 @@ Guide de référence rapide pour l'API Lua du framework Mímir.
 
 ```lua
 -- 1. Setup mémoire
-Mimir.Mimir.Memory.set_limit(8000)
-Mimir.Mimir.Allocator.configure({max_tensors = 1000, enable_compression = true})
+Mimir.Memory.set_limit(8000)
+Mimir.Allocator.configure({max_tensors = 1000, enable_compression = true})
 
 -- 2. Tokenizer
-Mimir.Mimir.Tokenizer.create(50000)
-Mimir.Mimir.Tokenizer.ensure_vocab_from_text(corpus_text)
+Mimir.Tokenizer.create(50000)
+Mimir.Tokenizer.ensure_vocab_from_text(corpus_text)
 
 -- 3. Dataset
-Mimir.Mimir.Dataset.load("data/corpus")
-Mimir.Mimir.Dataset.prepare_sequences(512)
+Mimir.Dataset.load("data/corpus")
+Mimir.Dataset.prepare_sequences(512)
 
 -- 4. Modèle
-Mimir.Model.create("transformer", {vocab_size = 50000, embed_dim = 512, num_layers = 6})
-Mimir.Model.build()
+local cfg = Mimir.Architectures.default_config("transformer")
+cfg.vocab_size = 50000
+cfg.d_model = 512
+cfg.num_layers = 6
+Mimir.Model.create("transformer", cfg)
+Mimir.Model.build() -- compat (rebuild)
 Mimir.Model.init_weights("xavier")
 
 -- 5. Monitoring
-Mimir.Mimir.Htop.create()
-Mimir.Mimir.Htop.enable(true)
+Mimir.Htop.create()
+Mimir.Htop.enable(true)
 
 -- 6. Entraînement
 Mimir.Model.train(10, 3e-4)
 
 -- 7. Sauvegarde
-Mimir.Serialization.save_safetensors("checkpoints/run1.safetensors")
-Mimir.Mimir.Tokenizer.save("checkpoints/Mimir.Tokenizer.json")
+Mimir.Serialization.save("checkpoints/run1.safetensors", "safetensors")
+Mimir.Tokenizer.save("checkpoints/Mimir.Tokenizer.json")
 ```
 
 ---
@@ -95,8 +97,8 @@ Mimir.Model.hardware_caps()               -- Capacités CPU
 Mimir.Model.set_layer_io(name, inputs, output)  -- Config entrées/sorties layer
 
 -- Serialization (remplace model.save/load)
-Mimir.Serialization.save_safetensors(path)    -- Sauvegarder (SafeTensors)
-Mimir.Serialization.load_safetensors(path)    -- Charger (SafeTensors)
+Mimir.Serialization.save(path, "safetensors") -- Sauvegarder (SafeTensors)
+Mimir.Serialization.load(path)                -- Charger (auto-détection)
 ```
 
 **Exemple Multi-Input (Residual Connection):**
@@ -112,42 +114,14 @@ model.set_layer_io("add", {"x", "skip"}, "x")  -- Add(x, skip) → x
 ### Architectures
 
 ```lua
-Mimir.Architectures.transformer(config)   -- Transformer GPT-like
-Mimir.Architectures.unet(config)          -- U-Net
-Mimir.Architectures.vae(config)           -- VAE
-Mimir.Architectures.vit(config)           -- Vision Transformer
-Mimir.Architectures.gan(config)           -- GAN
-Mimir.Architectures.diffusion(config)     -- Diffusion model
-Mimir.Architectures.resnet(config)        -- ResNet
-Mimir.Architectures.mobilenet(config)     -- MobileNet
+-- v2.3+ : les builders `Mimir.Architectures.<name>(cfg)` ne sont plus exposés.
+-- Utiliser le registre :
+local names = Mimir.Architectures.available()
+local cfg = Mimir.Architectures.default_config("transformer")
+local ok, err = Mimir.Model.create("transformer", cfg)
 ```
 
-### Flux (API Fonctionnelle)
-
-```lua
-Mimir.Flux.generate(prompt, steps)           -- Générer image depuis prompt
-Mimir.Flux.encode_image(img_path)            -- Encoder image → latent
-Mimir.Flux.decode_latent(latent)             -- Décoder latent → image
-Mimir.Flux.encode_text(text)                 -- Encoder texte → embeddings
-Mimir.Flux.set_tokenizer(tok_path)           -- Définir tokenizer
-```
-
-### FluxModel (API Orientée Objet)
-
-```lua
-local flux_model = Mimir.FluxModel.new(config)     -- Créer instance
-flux_model.train()                            -- Mode entraînement
-flux_model.eval()                             -- Mode évaluation
-flux_model.isTraining()                       -- Vérifier mode
-flux_model.encodeImage(path)                  -- Encoder image
-flux_model.decodeLatent(latent)               -- Décoder latent
-flux_model.tokenizePrompt(text)               -- Tokeniser prompt
-flux_model.encodeText(tokens)                 -- Encoder tokens
-flux_model.predictNoise(latent, embed, t)     -- Prédire bruit
-flux_model.generate(prompt, steps)            -- Générer image
-flux_model.computeDiffusionLoss(img, txt, t) -- Calculer loss
-flux_model.setPromptTokenizer(tok_path)       -- Définir tokenizer
-```
+> Note: `Mimir.Flux` / `Mimir.FluxModel` ne sont pas présents dans cette version du code source.
 
 ### Tokenizer (24 fonctions)
 
@@ -211,10 +185,11 @@ Mimir.Memory.set_limit(limit_mb) -- Définir limite
 ### Guard (enforcement strict)
 
 ```lua
-Mimir.Mimir.MemoryGuard.set_limit(limit_mb)  -- Limite stricte
-Mimir.Mimir.MemoryGuard.get_stats()          -- Stats (current_mb, peak_mb, limit_mb, usage_percent)
-Mimir.Mimir.MemoryGuard.print_stats()        -- Afficher stats
-Mimir.Mimir.MemoryGuard.reset()              -- Reset compteurs
+-- API moderne (camelCase)
+Mimir.MemoryGuard.setLimit(10)         -- 10 GB (auto)
+local stats = Mimir.MemoryGuard.getStats()
+Mimir.MemoryGuard.printStats()
+Mimir.MemoryGuard.reset()
 ```
 
 ### Allocator
@@ -537,7 +512,7 @@ end
 ```lua
 -- Afficher infos mémoire
 Mimir.Memory.print_stats()
-Mimir.Mimir.MemoryGuard.print_stats()
+Mimir.MemoryGuard.printStats()
 Mimir.Allocator.print_stats()
 
 -- Afficher infos tokenizer
@@ -579,7 +554,7 @@ end
 
 ## Best Practices
 
-1. **Toujours définir une limite mémoire** : `Mimir.Memory.set_limit()` ou `Mimir.Mimir.MemoryGuard.set_limit()`
+1. **Toujours définir une limite mémoire** : `Mimir.Memory.set_limit()` ou `Mimir.MemoryGuard.setLimit()`
 2. **Configurer l'allocateur** : Active compression et offload pour grands modèles
 3. **Sauvegarder régulièrement** : Checkpoints toutes les N epochs
 4. **Monitoring** : Utilise htop ou viz pour suivre progression

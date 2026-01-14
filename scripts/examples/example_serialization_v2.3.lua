@@ -9,6 +9,19 @@ print("╔═══════════════════════�
 print("║     Serialization API v2.3.0 - Exemple Complet            ║")
 print("╚════════════════════════════════════════════════════════════╝\n")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
 -- ══════════════════════════════════════════════════════════════
 --  Configuration Mémoire (OBLIGATOIRE)
 -- ══════════════════════════════════════════════════════════════
@@ -26,16 +39,23 @@ print("✓ Allocateur configuré (limite: 10 GB)")
 
 print("\n━━━ Création du modèle ━━━\n")
 
-Mimir.Model.create("demo_serialization")
-
 -- Créer un petit Transformer pour la démo
-Mimir.Architectures.transformer({
+local cfg, warn = Arch.build_config("transformer", {
     vocab_size = 1000,
     d_model = 128,
     num_layers = 2,
     num_heads = 4,
     max_seq_len = 64
 })
+if warn then
+    print("⚠️  " .. tostring(warn))
+end
+
+local ok_create, err_create = Mimir.Model.create("transformer", cfg)
+if not ok_create then
+    print("❌ Erreur création modèle: " .. tostring(err_create))
+    os.exit(1)
+end
 
 local ok, params = Mimir.Model.allocate_params()
 if not ok then

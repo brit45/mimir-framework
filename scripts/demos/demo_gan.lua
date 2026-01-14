@@ -7,6 +7,10 @@ log("=" .. string.rep("=", 78))
 log("🎨 Demo GAN - Generative Adversarial Network")
 log("=" .. string.rep("=", 78))
 
+log("⚠️  GAN n'est pas disponible dans l'API Lua v2.3 (skip)")
+log("   (Aucun ModelType/registre GAN exposé côté C++/Lua)")
+do return end
+
 -- Configuration système
 log("\n🔧 Configuration...")
 Allocator.configure({max_ram_gb = 10.0, enable_compression = true})

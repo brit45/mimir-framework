@@ -78,11 +78,11 @@ Redéfinition des allocateurs dans `stb_image_impl.cpp`:
 ```cpp
 static void* stbi_malloc_wrapper(size_t size) {
     auto& guard = MemoryGuard::instance();
-    if (!Mimir.Mimir.MemoryGuard.requestAllocation(size, "stb_image")) {
+    if (!guard.requestAllocation(size, "stb_image")) {
         return nullptr;  // Refuse proprement
     }
     void* ptr = std::malloc(size);
-    if (!ptr) Mimir.Mimir.MemoryGuard.releaseAllocation(size);
+    if (!ptr) guard.releaseAllocation(size);
     return ptr;
 }
 
@@ -109,13 +109,13 @@ Dans `tensors.cpp`, constructeur `tensor(size, true)`:
 tensor::tensor(size_t size, bool dynamic) : use_dynamic_alloc(dynamic) {
     if (dynamic) {
         auto& allocator = DynamicTensorAllocator::instance();
-        dynamic_handle = Mimir.Allocator.allocateTensor(size, "tensor_data");
+        dynamic_handle = allocator.allocateTensor(size, "tensor_data");
         
         if (!dynamic_handle) {
             // 🛑 PANIC OOM: Arrêt contrôlé
             std::cerr << "\n❌❌❌ PANIC: OUT OF MEMORY ❌❌❌" << std::endl;
             // ... logs détaillés ...
-            Mimir.Mimir.MemoryGuard.printStats();
+            MemoryGuard::instance().printStats();
             std::exit(1);  // Arrêt propre
         }
     }
@@ -166,13 +166,13 @@ endif()
 ```cpp
 // Dans main.cpp ou scripts Lua
 auto& allocator = DynamicTensorAllocator::instance();
-Mimir.Allocator.configure(
+allocator.configure(
     10,     // 10 GB limite stricte
     true    // Compression activée
 );
 
 auto& guard = MemoryGuard::instance();
-Mimir.Mimir.MemoryGuard.setLimit(10ULL * 1024 * 1024 * 1024);
+guard.setLimit(10ULL * 1024 * 1024 * 1024);
 ```
 
 ---

@@ -210,7 +210,10 @@ Fonctionnent en combinant le layer actuel avec le layer précédent.
 local config = {
     use_residual = true  -- Active les connexions Add
 }
-Mimir.Architectures.unet(config)
+local cfg, err = Mimir.Architectures.default_config("unet")
+assert(cfg, err)
+for k, v in pairs(config) do cfg[k] = v end
+assert(Mimir.Model.create("unet", cfg))
 ```
 
 ---
@@ -266,7 +269,9 @@ Split implémenté et retourne vecteur de tensors.
 **Exemple Lua:**
 ```lua
 -- Utilisé automatiquement dans ConvTranspose2d (UNet decoder)
-Mimir.Architectures.unet(config)
+local cfg, err = Mimir.Architectures.default_config("unet")
+assert(cfg, err)
+assert(Mimir.Model.create("unet", cfg))
 ```
 
 ---

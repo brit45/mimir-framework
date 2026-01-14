@@ -7,6 +7,22 @@ log("\n╔═══════════════════════�
 log("║   Test Nouveaux Layers Implémentés                   ║")
 log("╚════════════════════════════════════════════════════════╝\n")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true
@@ -33,19 +49,27 @@ local config = {
     width = 32
 }
 
-local success, err = model.create("test_add", config)
+local unet_input = {
+    image_w = config.width,
+    image_h = config.height,
+    image_c = config.in_channels,
+    base_channels = config.base_channels,
+    depth = config.num_levels,
+    dropout = config.dropout,
+}
+
+local cfg, warn = Arch.build_config("unet", unet_input)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, err = model.create("unet", cfg)
 if not success then
     log("❌ Échec création: " .. (err or ""))
     os.exit(1)
 end
 
-success = architectures.unet(config)
-if not success then
-    log("❌ Échec construction UNet")
-    os.exit(1)
-end
-
-log("✓ UNet avec residual connections construit")
+log("✓ UNet (residual) créé via registre")
 
 success, num_params = model.allocate_params()
 if not success then

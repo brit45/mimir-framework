@@ -7,6 +7,22 @@ log("=" .. string.rep("=", 78))
 log("📱 Demo MobileNet - Efficient Mobile Architecture")
 log("=" .. string.rep("=", 78))
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 -- Configuration système
 log("\n🔧 Configuration...")
 Allocator.configure({max_ram_gb = 10.0, enable_compression = true})
@@ -22,20 +38,23 @@ local config = {
 
 -- Créer le modèle MobileNet
 log("\n🏗️  Création du modèle MobileNet...")
-local success, err = model.create("mobilenet_model")
+local mobilenet_input = {
+    num_classes = config.num_classes,
+    image_size = config.resolution,
+}
+
+local cfg, warn = Arch.build_config("mobilenet", mobilenet_input)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, err = model.create("mobilenet", cfg)
 if not success then
-    log("❌ Erreur: " .. (err or "inconnue"))
+    log("❌ Erreur création modèle: " .. (err or "inconnue"))
     return
 end
 
--- Construire avec architectures API
-success, err = architectures.mobilenet(config)
-if not success then
-    log("❌ Erreur architecture: " .. (err or "inconnue"))
-    return
-end
-
-log("✓ Architecture MobileNetV2 construite")
+log("✓ MobileNet créé via registre")
 
 -- Allouer et initialiser
 success, params = model.allocate_params()
@@ -49,13 +68,15 @@ else
 end
 
 -- Estimation params selon width_mult
-local estimated_params = 3.4 * (config.width_mult ^ 2)  -- ~3.4M pour width_mult=1.0
+local width_mult = config.width_multiplier or 1.0
+local input_size = config.resolution or 224
+local estimated_params = 3.4 * (width_mult ^ 2)  -- ~3.4M pour width_mult=1.0
 
 -- Afficher config
 log("\n📋 Configuration:")
 log("  Classes: " .. config.num_classes)
-log("  Width multiplier: " .. config.width_mult)
-log("  Input size: " .. config.input_size .. "x" .. config.input_size)
+log("  Width multiplier: " .. width_mult)
+log("  Input size: " .. input_size .. "x" .. input_size)
 log("  Params estimés: ~" .. string.format("%.1fM", estimated_params))
 
 -- Concept clé: Depthwise Separable Convolutions

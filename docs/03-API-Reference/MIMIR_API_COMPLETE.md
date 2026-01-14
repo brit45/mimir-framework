@@ -1,6 +1,6 @@
 # 🎯 API Mimir v2.3.0 - Structure Complète Hiérarchique
 
-**Date:** 28 décembre 2025  
+**Date:** 12 janvier 2026  
 **Version:** 2.3.0  
 **Type:** Architecture hiérarchique complète
 
@@ -13,9 +13,7 @@ Toute l'API Mimir est désormais organisée sous un **namespace unique** `Mimir.
 ```lua
 Mimir
 ├── Model.*              -- Gestion et manipulation de modèles
-├── Architectures.*      -- Builders d'architectures pré-définies
-├── Flux.*               -- API Flux fonctionnelle
-├── FluxModel.*          -- API Flux orientée objet
+├── Architectures.*      -- Helpers de registre (available/default_config)
 ├── Layers.*             -- Opérations de layers bas niveau
 ├── Tokenizer.*          -- Tokenisation et vocabulaire
 ├── Dataset.*            -- Chargement et préparation de données
@@ -23,7 +21,7 @@ Mimir
 ├── Allocator.*          -- Allocation dynamique de tenseurs
 ├── Memory.*             -- Gestion mémoire RAM
 ├── Guard.*              -- Enforcement mémoire strict
-├── Mimir.MemoryGuard.*        -- API moderne MemoryGuard
+├── MemoryGuard.*        -- API moderne MemoryGuard
 ├── Htop.*               -- Monitoring système en temps réel
 ├── Viz.*                -- Visualisation SFML
 └── Checkpoint.*         -- API checkpoint legacy (deprecated)
@@ -99,90 +97,37 @@ Mimir.Model.optimizer_step(0.001)
 
 ## 🏛️ Mimir.Architectures
 
-Builders d'architectures pré-définies.
+Helpers de registre d'architectures (C++).
 
-### Architectures Supportées
+### Fonctions
 
 ```lua
--- Vision
-Mimir.Architectures.unet(config)
-Mimir.Architectures.vae(config)
-Mimir.Architectures.vit(config)
-Mimir.Architectures.resnet(config)
-Mimir.Architectures.mobilenet(config)
-
--- Génératif
-Mimir.Architectures.gan(config)
-Mimir.Architectures.diffusion(config)
-
--- NLP
-Mimir.Architectures.transformer(config)
-Mimir.Architectures.flux(config)
+Mimir.Architectures.available()
+Mimir.Architectures.default_config(name)
 ```
 
 ### Exemple
 
 ```lua
--- Créer un modèle
-Mimir.Model.create("my_transformer")
+-- Charger config par défaut puis override quelques champs
+local cfg = Mimir.Architectures.default_config("transformer")
+cfg.vocab_size = 50000
+cfg.d_model = 512
+cfg.num_layers = 6
+cfg.num_heads = 8
 
--- Builder Transformer
-Mimir.Architectures.transformer({
-    vocab_size = 50000,
-    d_model = 512,
-    num_layers = 6,
-    num_heads = 8,
-    max_seq_len = 2048
-})
+-- Créer le modèle via le registre
+local ok, err = Mimir.Model.create("transformer", cfg)
+assert(ok, err)
 
--- Allocation
-local ok, params = Mimir.Model.allocate_params()
+-- Allocation (si nécessaire)
+local ok2, params = Mimir.Model.allocate_params()
 print(string.format("Modèle créé: %d paramètres", params))
 ```
 
 ---
 
-## ⚡ Mimir.Flux & Mimir.FluxModel
-
-API pour les modèles Flux (text-to-image diffusion).
-
-### Mimir.Flux (API fonctionnelle)
-
-```lua
-Mimir.Flux.generate(prompt, steps, cfg_scale)
-Mimir.Flux.encode_image(image_path)
-Mimir.Flux.decode_latent(latent)
-Mimir.Flux.encode_text(text)
-Mimir.Flux.set_tokenizer(tokenizer_path)
-```
-
-### Mimir.FluxModel (API orientée objet)
-
-```lua
--- Construction
-local flux = Mimir.FluxModel.new(config)
-
--- Modes
-Mimir.FluxModel.train()
-Mimir.FluxModel.eval()
-Mimir.FluxModel.isTraining()
-
--- VAE
-Mimir.FluxModel.encodeImage(image_path)
-Mimir.FluxModel.decodeLatent(latent)
-
--- Text processing
-Mimir.FluxModel.tokenizePrompt(text)
-Mimir.FluxModel.encodeText(text)
-
--- Diffusion
-Mimir.FluxModel.predictNoise(latent, t, cond)
-Mimir.FluxModel.generate(prompt, steps, cfg_scale)
-
--- Training
-Mimir.FluxModel.computeDiffusionLoss(pred, target)
-Mimir.FluxModel.setPromptTokenizer(path)
-```
+> Note: Les modules `Mimir.Flux` / `Mimir.FluxModel` ne sont pas présents dans cette version du code source.
 
 ---
 
@@ -388,13 +333,13 @@ Mimir.Guard.reset()
 ### Mimir.MemoryGuard (API moderne)
 
 ```lua
-Mimir.Mimir.MemoryGuard.setLimit(gb)
-Mimir.Mimir.MemoryGuard.getCurrentUsage()
-Mimir.Mimir.MemoryGuard.getPeakUsage()
-Mimir.Mimir.MemoryGuard.getLimit()
-Mimir.Mimir.MemoryGuard.getStats()
-Mimir.Mimir.MemoryGuard.printStats()
-Mimir.Mimir.MemoryGuard.reset()
+Mimir.MemoryGuard.setLimit(gb)
+Mimir.MemoryGuard.getCurrentUsage()
+Mimir.MemoryGuard.getPeakUsage()
+Mimir.MemoryGuard.getLimit()
+Mimir.MemoryGuard.getStats()
+Mimir.MemoryGuard.printStats()
+Mimir.MemoryGuard.reset()
 ```
 
 ---
@@ -461,14 +406,15 @@ Mimir.Allocator.configure({
 })
 
 -- Créer un modèle
-Mimir.Model.create("gpt2_small")
-Mimir.Architectures.transformer({
-    vocab_size = 50000,
-    d_model = 768,
-    num_layers = 12,
-    num_heads = 12,
-    max_seq_len = 1024
-})
+local cfg, err = Mimir.Architectures.default_config("transformer")
+assert(cfg, err)
+cfg.vocab_size = 50000
+cfg.d_model = 768
+cfg.num_layers = 12
+cfg.num_heads = 12
+cfg.seq_len = 1024
+
+assert(Mimir.Model.create("transformer", cfg))
 
 -- Allocation et init
 local ok, params = Mimir.Model.allocate_params()
@@ -522,7 +468,7 @@ Mimir.Serialization.save("debug.json", "debug_json", {
 
 ```lua
 Mimir.Model.create("my_model")
-Mimir.Architectures.transformer({...})
+-- (ancienne doc) Mimir.Architectures.transformer({...})
 Mimir.Allocator.configure({...})
 Mimir.Tokenizer.create(50000)
 Mimir.Serialization.save(...)
@@ -531,8 +477,9 @@ Mimir.Serialization.save(...)
 ### Après (API hiérarchique)
 
 ```lua
-Mimir.Model.create("my_model")
-Mimir.Architectures.transformer({...})
+local cfg = Mimir.Architectures.default_config("transformer")
+-- override cfg ici...
+assert(Mimir.Model.create("transformer", cfg))
 Mimir.Allocator.configure({...})
 Mimir.Tokenizer.create(50000)
 Mimir.Serialization.save(...)

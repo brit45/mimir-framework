@@ -7,6 +7,19 @@ log("═════════════════════════
 log("  Mímir Framework - Example Training Script")
 log("════════════════════════════════════════════════")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
 -- ================================================================
 -- 0. Configuration allocateur et hardware (OBLIGATOIRE!)
 -- ================================================================
@@ -54,16 +67,7 @@ log("✓ Tokenizer created with vocab size: " .. config.vocab_size)
 -- ================================================================
 log("\n[3/6] Creating model...")
 
-local success, error_msg = Mimir.Model.create("encoder_model")
-
-if not success then
-    log("❌ Error creating model: " .. (error_msg or "unknown"))
-    return
-end
-
-log("✓ Model created")
-
--- Build with architectures API
+-- Build config (encoder-style: causal=false)
 local model_config = {
     vocab_size = config.vocab_size,
     max_seq_len = config.max_seq_len,
@@ -75,13 +79,18 @@ local model_config = {
     causal = false
 }
 
-success, error_msg = Mimir.Architectures.transformer(model_config)
+local cfg, warn = Arch.build_config("transformer", model_config)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, error_msg = Mimir.Model.create("transformer", cfg)
 if not success then
-    log("❌ Error building architecture: " .. (error_msg or "unknown"))
+    log("❌ Error creating model: " .. (error_msg or "unknown"))
     return
 end
 
-log("✓ Architecture built")
+log("✓ Model created via registre")
 
 -- Allocate and initialize
 success, num_params = Mimir.Model.allocate_params()

@@ -168,23 +168,23 @@ Mimir.Viz.save_loss_history("loss_history.csv")
 
 **Note**: `Mimir.Viz.process_events()` et `Mimir.Viz.update()` existent encore pour compatibilité mais sont des NO-OP.
 
-### Guard & Memory (Mimir.Mimir.MemoryGuard.*, memory.*)
+### Guard & Memory (Mimir.MemoryGuard.*, Mimir.Guard.*, Mimir.Memory.*)
 
 Gestion stricte de la mémoire :
 
 ```lua
 -- Limite stricte (refuse allocations dépassant la limite)
-Mimir.Mimir.MemoryGuard.set_limit(10.0)  -- 10 GB
+Mimir.MemoryGuard.setLimit(10.0)  -- 10 GB
 
 -- Gestionnaire avec compression
-memory.config({
+Mimir.Allocator.configure({
     max_ram_gb = 10.0,
     enable_compression = true,
     enable_statistics = true
 })
 
 -- Statistiques
-local guard_stats = Mimir.Mimir.MemoryGuard.get_stats()
+local guard_stats = Mimir.MemoryGuard.getStats()
 print(string.format("RAM: %.1f%% (%.0f/%.0f MB)", 
     guard_stats.usage_percent, 
     guard_stats.current_mb, 

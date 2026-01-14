@@ -7,6 +7,19 @@ log("═════════════════════════
 log("  GPT-style Decoder Model Training")
 log("════════════════════════════════════════════════")
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
 -- Configuration allocateur (OBLIGATOIRE!)
 log("\n🔧 Configuration allocateur...")
 -- ⚠️ IMPORTANT: Cette étape active la limite de 10 GB et la protection OOM
@@ -42,20 +55,19 @@ local gpt_config = {
     causal = true
 }
 
--- Create decoder model
-local success, err = Mimir.Model.create("gpt_decoder")
+local cfg, warn = Arch.build_config("transformer", gpt_config)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+-- Create decoder model via registre
+local success, err = Mimir.Model.create("transformer", cfg)
 if not success then
-    log("❌ Erreur: " .. (err or "inconnue"))
+    log("❌ Erreur création modèle: " .. (err or "inconnue"))
     return
 end
 
--- Build with architectures API
-success, err = Mimir.Architectures.transformer(gpt_config)
-if not success then
-    log("❌ Erreur architecture: " .. (err or "inconnue"))
-    return
-end
-log("✓ Architecture Transformer construite")
+log("✓ Modèle Transformer (causal) créé via registre")
 
 -- Allocate and initialize
 log("\n💾 Allocation des paramètres...")

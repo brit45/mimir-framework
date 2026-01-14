@@ -7,7 +7,19 @@ print("\n╔══════════════════════�
 print("║      Exemple Simple - API Lua Mímir                   ║")
 print("╚════════════════════════════════════════════════════════╝\n")
 
--- 0. Configuration allocateur (OBLIGATOIRE!)
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
 print("🔧 Configuration Système:")
 Mimir.Allocator.configure({
     max_ram_gb = 10.0,
@@ -34,9 +46,6 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
 print("  Création d'un Transformer")
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-Mimir.Model.create("my_transformer")
-print("✓ Modèle créé")
-
 -- Configuration simple
 local config = {
     vocab_size = 5000,
@@ -46,8 +55,18 @@ local config = {
     max_seq_len = 512
 }
 
-Mimir.Architectures.transformer(config)
-print("✓ Architecture Transformer construite")
+local cfg, warn = Arch.build_config("transformer", config)
+if warn then
+    print("⚠️  " .. tostring(warn))
+end
+
+local ok_create, err_create = Mimir.Model.create("transformer", cfg)
+if not ok_create then
+    print("❌ ERREUR: Impossible de créer le modèle: " .. tostring(err_create))
+    os.exit(1)
+end
+
+print("✓ Modèle Transformer créé via registre")
 print(string.format("  • Vocabulaire: %d tokens", config.vocab_size))
 print(string.format("  • Dimension: %d", config.d_model))
 print(string.format("  • Couches: %d", config.num_layers))

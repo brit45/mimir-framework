@@ -7,6 +7,22 @@ log("=" .. string.rep("=", 78))
 log("🌊 Demo Diffusion - Denoising Diffusion Models")
 log("=" .. string.rep("=", 78))
 
+local function _mimir_add_module_path()
+    local ok, info = pcall(debug.getinfo, 1, "S")
+    if not ok or type(info) ~= "table" then return end
+    local src = info.source
+    if type(src) ~= "string" or src:sub(1, 1) ~= "@" then return end
+    local dir = src:sub(2):match("(.*/)")
+    if not dir then return end
+    package.path = package.path .. ";" .. dir .. "../modules/?.lua;" .. dir .. "../modules/?/init.lua"
+end
+
+_mimir_add_module_path()
+local Arch = require("arch")
+
+local Allocator = (type(_G.Mimir) == "table" and type(Mimir.Allocator) == "table") and Mimir.Allocator or _G.Allocator
+local model = (type(_G.Mimir) == "table" and type(Mimir.Model) == "table") and Mimir.Model or _G.model
+
 -- Configuration système (OBLIGATOIRE!)
 log("\n🔧 Configuration...")
 -- ⚠️ Toujours configurer l'allocateur au début pour activer la limite de 10 GB
@@ -28,20 +44,25 @@ local config = {
 
 -- Créer le modèle Diffusion
 log("\n🏗️  Création du modèle Diffusion...")
-local success, err = model.create("diffusion_model")
+local diffusion_input = {
+    image_size = config.image_size,
+    input_channels = config.image_channels,
+    hidden_dim = config.base_channels,
+    time_dim = config.time_embed_dim,
+}
+
+local cfg, warn = Arch.build_config("diffusion", diffusion_input)
+if warn then
+    log("⚠️  " .. tostring(warn))
+end
+
+local success, err = model.create("diffusion", cfg)
 if not success then
-    log("❌ Erreur: " .. (err or "inconnue"))
+    log("❌ Erreur création modèle: " .. (err or "inconnue"))
     return
 end
 
--- Construire avec architectures API
-success, err = architectures.diffusion(config)
-if not success then
-    log("❌ Erreur architecture: " .. (err or "inconnue"))
-    return
-end
-
-log("✓ Architecture Diffusion construite")
+log("✓ Diffusion créé via registre")
 
 -- Allouer et initialiser
 log("\n💾 Allocation des paramètres...")
@@ -67,8 +88,9 @@ end
 log("\n📋 Configuration:")
 log("  Image size: " .. config.image_size .. "x" .. config.image_size)
 log("  Channels:   " .. config.image_channels .. " (RGB)")
-log("  Timesteps:  " .. config.timesteps)
-log("  Base channels: " .. config.model_channels)
+local timesteps = config.timesteps or 1000
+log("  Timesteps:  " .. timesteps)
+log("  Base channels: " .. config.base_channels)
 log("  Res blocks: " .. config.num_res_blocks)
 
 -- Process de diffusion
@@ -82,9 +104,9 @@ log("    Débruiter progressivement")
 
 -- Estimation génération
 log("\n⏱️  Estimation génération:")
-log("  Timesteps: " .. config.timesteps)
+log("  Timesteps: " .. timesteps)
 log("  Mode rapide: ~50 steps (DDIM)")
-log("  Mode qualité: " .. config.timesteps .. " steps (DDPM)")
+log("  Mode qualité: " .. timesteps .. " steps (DDPM)")
 
 -- Usage pour génération
 log("\n💡 Cas d'usage:")

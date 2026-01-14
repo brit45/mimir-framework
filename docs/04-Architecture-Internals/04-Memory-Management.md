@@ -127,12 +127,12 @@ print("RAM: " .. string.format("%.2f GB", usage / 1e9))
 int main() {
     // Configurer
     auto& guard = MemoryGuard::instance();
-    Mimir.Mimir.MemoryGuard.setLimit(10ULL * 1024 * 1024 * 1024);
+    guard.setLimit(10ULL * 1024 * 1024 * 1024);
     
     // Votre code...
     
     // Vérifier
-    Mimir.Mimir.MemoryGuard.printStats();
+    guard.printStats();
     return 0;
 }
 ```
