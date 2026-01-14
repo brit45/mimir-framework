@@ -174,10 +174,9 @@ class RuntimeAllocator {
 public:
     RuntimeAllocator(MemoryGuard& guard, size_t max_ram_mb = 4096)
         : memory_guard_(guard), max_ram_bytes_(max_ram_mb * 1024ULL * 1024ULL) {
-        // Initialiser avec MemoryGuard configuré
-        if (memory_guard_.getLimit() == 10ULL * 1024 * 1024 * 1024) {  // Valeur par défaut
-            memory_guard_.setLimit(max_ram_mb * 1024ULL * 1024ULL);
-        }
+        // IMPORTANT: ne jamais modifier la limite globale du MemoryGuard ici.
+        // Le RuntimeAllocator doit respecter la limite déjà configurée ailleurs (Lua/config).
+        // max_ram_bytes_ sert uniquement de cap local optionnel.
     }
     
     // Allocation d'un Tensor avec shape
@@ -185,6 +184,17 @@ public:
                                   const std::string& dtype = "float32",
                                   const std::string& name = "") {
         TensorDescriptor desc(shape, dtype, name);
+
+        // Cap local optionnel (sans toucher à la limite MemoryGuard)
+        if (max_ram_bytes_ > 0 && (memory_guard_.getCurrentBytes() + desc.size_bytes) > max_ram_bytes_) {
+            throw std::runtime_error(
+                "RuntimeAllocator: Cannot allocate tensor '" + name + "' (" +
+                std::to_string(desc.size_bytes / (1024*1024)) + " MB) - " +
+                "would exceed local RAM cap. Current: " +
+                std::to_string(memory_guard_.getCurrentBytes() / (1024*1024)) + " MB / " +
+                std::to_string(max_ram_bytes_ / (1024*1024)) + " MB"
+            );
+        }
         
         // Vérifier limite avant allocation
         if (!memory_guard_.requestAllocation(desc.size_bytes, name)) {
@@ -209,6 +219,16 @@ public:
     
     // Allocation d'un buffer brut (pour calculs temporaires)
     BufferHandle allocate_buffer(size_t bytes, const std::string& tag = "") {
+        // Cap local optionnel (sans toucher à la limite MemoryGuard)
+        if (max_ram_bytes_ > 0 && (memory_guard_.getCurrentBytes() + bytes) > max_ram_bytes_) {
+            throw std::runtime_error(
+                "RuntimeAllocator: Cannot allocate buffer '" + tag + "' (" +
+                std::to_string(bytes / (1024*1024)) + " MB) - " +
+                "would exceed local RAM cap. Current: " +
+                std::to_string(memory_guard_.getCurrentBytes() / (1024*1024)) + " MB / " +
+                std::to_string(max_ram_bytes_ / (1024*1024)) + " MB"
+            );
+        }
         if (!memory_guard_.requestAllocation(bytes, tag)) {
             throw std::runtime_error(
                 "RuntimeAllocator: Cannot allocate buffer '" + tag + "' (" +

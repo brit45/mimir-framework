@@ -1,0 +1,244 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_date": "2026-01-09T00:00:00.000Z",
+  "__export_source": "mimir-lua-api",
+  "resources": [
+    {
+      "_id": "wrk_mimir_lua_api",
+      "_type": "workspace",
+      "name": "Mímir Lua API",
+      "description": "Collection Insomnia pour le serveur Lua (HTTP) de pilotage Mímir.",
+      "scope": "collection"
+    },
+    {
+      "_id": "env_mimir_base",
+      "_type": "environment",
+      "parentId": "wrk_mimir_lua_api",
+      "name": "Base Environment",
+      "data": {
+        "host": "127.0.0.1",
+        "port": 8088,
+        "base_url": "http://{{ host }}:{{ port }}"
+      }
+    },
+    {
+      "_id": "grp_core",
+      "_type": "request_group",
+      "parentId": "wrk_mimir_lua_api",
+      "name": "Core"
+    },
+    {
+      "_id": "req_help",
+      "_type": "request",
+      "parentId": "grp_core",
+      "name": "GET /help",
+      "method": "GET",
+      "url": "{{ base_url }}/help",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+    {
+      "_id": "req_health",
+      "_type": "request",
+      "parentId": "grp_core",
+      "name": "GET /health",
+      "method": "GET",
+      "url": "{{ base_url }}/health",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+
+    {
+      "_id": "grp_hw",
+      "_type": "request_group",
+      "parentId": "wrk_mimir_lua_api",
+      "name": "Hardware"
+    },
+    {
+      "_id": "req_hw_get",
+      "_type": "request",
+      "parentId": "grp_hw",
+      "name": "GET /hardware",
+      "method": "GET",
+      "url": "{{ base_url }}/hardware",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+    {
+      "_id": "req_hw_put",
+      "_type": "request",
+      "parentId": "grp_hw",
+      "name": "PUT /hardware (set backend)",
+      "method": "PUT",
+      "url": "{{ base_url }}/hardware",
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "Accept", "value": "application/json" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"backend\": \"auto\"\n}"
+      }
+    },
+
+    {
+      "_id": "grp_alloc",
+      "_type": "request_group",
+      "parentId": "wrk_mimir_lua_api",
+      "name": "Allocator"
+    },
+    {
+      "_id": "req_alloc_get",
+      "_type": "request",
+      "parentId": "grp_alloc",
+      "name": "GET /allocator (stats)",
+      "method": "GET",
+      "url": "{{ base_url }}/allocator",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+    {
+      "_id": "req_alloc_patch",
+      "_type": "request",
+      "parentId": "grp_alloc",
+      "name": "PATCH /allocator (configure)",
+      "method": "PATCH",
+      "url": "{{ base_url }}/allocator",
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "Accept", "value": "application/json" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"max_ram_gb\": 10.0,\n  \"enable_compression\": true\n}"
+      }
+    },
+    {
+      "_id": "req_alloc_delete",
+      "_type": "request",
+      "parentId": "grp_alloc",
+      "name": "DELETE /allocator (ack + GC)",
+      "method": "DELETE",
+      "url": "{{ base_url }}/allocator",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+
+    {
+      "_id": "grp_model",
+      "_type": "request_group",
+      "parentId": "wrk_mimir_lua_api",
+      "name": "Model"
+    },
+    {
+      "_id": "req_model_create",
+      "_type": "request",
+      "parentId": "grp_model",
+      "name": "POST /model/create",
+      "method": "POST",
+      "url": "{{ base_url }}/model/create",
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "Accept", "value": "application/json" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"model_type\": \"transformer\",\n  \"config\": {\n    \"vocab_size\": 32000,\n    \"embed_dim\": 256,\n    \"num_layers\": 4,\n    \"num_heads\": 4,\n    \"max_seq_len\": 128\n  }\n}"
+      }
+    },
+    {
+      "_id": "req_model_build",
+      "_type": "request",
+      "parentId": "grp_model",
+      "name": "POST /model/build",
+      "method": "POST",
+      "url": "{{ base_url }}/model/build",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+    {
+      "_id": "req_model_init_weights",
+      "_type": "request",
+      "parentId": "grp_model",
+      "name": "POST /model/init_weights",
+      "method": "POST",
+      "url": "{{ base_url }}/model/init_weights",
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "Accept", "value": "application/json" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"init\": \"xavier\",\n  \"seed\": 123\n}"
+      }
+    },
+    {
+      "_id": "req_model_params",
+      "_type": "request",
+      "parentId": "grp_model",
+      "name": "GET /model/params",
+      "method": "GET",
+      "url": "{{ base_url }}/model/params",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+    {
+      "_id": "req_model_infer",
+      "_type": "request",
+      "parentId": "grp_model",
+      "name": "POST /model/infer",
+      "method": "POST",
+      "url": "{{ base_url }}/model/infer",
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "Accept", "value": "application/json" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"input\": \"Hello\"\n}"
+      }
+    },
+    {
+      "_id": "req_model_delete",
+      "_type": "request",
+      "parentId": "grp_model",
+      "name": "DELETE /model (ack + GC)",
+      "method": "DELETE",
+      "url": "{{ base_url }}/model",
+      "headers": [{ "name": "Accept", "value": "application/json" }]
+    },
+
+    {
+      "_id": "grp_ser",
+      "_type": "request_group",
+      "parentId": "wrk_mimir_lua_api",
+      "name": "Serialization"
+    },
+    {
+      "_id": "req_ser_load",
+      "_type": "request",
+      "parentId": "grp_ser",
+      "name": "POST /serialization/load",
+      "method": "POST",
+      "url": "{{ base_url }}/serialization/load",
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "Accept", "value": "application/json" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"path\": \"checkpoint/\",\n  \"format\": \"raw_folder\",\n  \"options\": {\n    \"verify_checksums\": true\n  }\n}"
+      }
+    },
+    {
+      "_id": "req_ser_save",
+      "_type": "request",
+      "parentId": "grp_ser",
+      "name": "POST /serialization/save",
+      "method": "POST",
+      "url": "{{ base_url }}/serialization/save",
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "Accept", "value": "application/json" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"path\": \"model.safetensors\",\n  \"format\": \"safetensors\",\n  \"options\": {\n    \"include_git_info\": true\n  }\n}"
+      }
+    }
+  ]
+}

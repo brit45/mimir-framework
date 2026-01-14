@@ -1,5 +1,5 @@
 
-.PHONY: mk-video clean build-docs
+.PHONY: all build clean mk-video build-docs
 
 FLAGS= -ffp-contract=fast \
 	-funroll-loops \
@@ -9,25 +9,12 @@ FLAGS= -ffp-contract=fast \
 	-mbmi2 \
 	-DUSE_HUGEPAGES \
 
-all: bin/mimir bin/model_architectures_demo
+all: build
 
-bin/mimir: src/*.cpp src/*.hpp src/LuaScripting.cpp src/LuaScripting.hpp src/Models/*.cpp src/Models/*.hpp src/Serialization/*.cpp src/Serialization/*.hpp
-	@echo "🏭️  Compilation de Mímir Framework avec optimisations avancées..."
-	@echo "   • FMA saturé (3 ops/cycle)"
-	@echo "   • FP16 storage + F16C"
-	@echo "   • BMI2 pour quantification"
-	@echo "   • HugePages (2MB) + madvise"
-	@echo "   • Architectures modernes prêtes à l'emploi"
-	@echo "   • Compression LZ4 pour gestion mémoire"
-	@echo "   • Module de sérialisation (SafeTensors, RawFolder, DebugJson)"
-	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp src/Encoder.cpp src/main.cpp src/Model.cpp src/Sha256.cpp src/stb_image_impl.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp src/LuaScripting.cpp src/Models/FluxModel.cpp src/Models/VAEModel.cpp src/Serialization/Serialization.cpp src/Serialization/SafeTensorsWriter.cpp src/Serialization/SafeTensorsReader.cpp src/Serialization/RawCheckpointWriter.cpp src/Serialization/RawCheckpointReader.cpp src/Serialization/DebugJsonDump.cpp -I./src -I/usr/include/lua5.3 -o bin/mimir -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llua5.3 -llz4 -lvulkan -fopenmp $(FLAGS)
-	@echo "✓ Mímir Framework compilé avec hardware opt: bin/mimir"
-	@ls -lh bin/mimir | awk '{print "  Taille:", $$5}'
-
-bin/model_architectures_demo: examples/model_architectures_demo.cpp src/Model.cpp src/Encoder.cpp src/Sha256.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp
-	@echo "🔧 Compilation de l'exemple d'architectures..."
-	g++ -std=c++17 -O3 -march=native -mavx2 -mfma -fopenmp examples/model_architectures_demo.cpp src/Model.cpp src/Encoder.cpp src/Sha256.cpp src/tensors.cpp src/Tokenizer.cpp src/Visualizer.cpp -I./src -o bin/model_architectures_demo -lOpenCL -lsfml-graphics -lsfml-window -lsfml-system -llz4 -lvulkan -fopenmp $(FLAGS)
-	@echo "✓ Exemple compilé: bin/model_architectures_demo"
+build:
+	@echo "🏗️  Build via CMake (recommandé)"
+	@cmake -S . -B build
+	@cmake --build build -j
 
 
 

@@ -244,10 +244,10 @@ Utiliser le template comme référence et adapter chaque script.
 
 ### Documentation Existante
 
-- **[docs/SAVE_LOAD.md](../docs/SAVE_LOAD.md)** - Guide complet sérialisation
-- **[LEGACY_CLEANUP_COMPLETE.md](../LEGACY_CLEANUP_COMPLETE.md)** - Cleanup legacy
-- **[SERIALIZATION_COMPLETE.md](../SERIALIZATION_COMPLETE.md)** - Détails module
-- **[TECHNICAL_STATUS.md](../TECHNICAL_STATUS.md)** - État technique v2.2
+- **[docs/SAVE_LOAD.md](SAVE_LOAD.md)** - Guide complet sérialisation
+- **[LEGACY_CLEANUP_COMPLETE.md](../Archives/LEGACY_CLEANUP_COMPLETE.md)** - Cleanup legacy
+- **[SERIALIZATION_COMPLETE.md](../04-Architecture-Internals/SERIALIZATION_COMPLETE.md)** - Détails module
+- **[TECHNICAL_STATUS.md](../04-Architecture-Internals/TECHNICAL_STATUS.md)** - État technique v2.2
 
 ---
 

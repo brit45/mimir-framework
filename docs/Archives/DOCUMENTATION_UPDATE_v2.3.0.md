@@ -135,15 +135,15 @@ Ces fichiers sont conservés pour référence historique mais mentionnés dans D
 ### Hiérarchie des Documents
 
 **Point d'entrée principal:**
-1. [START_HERE.md](START_HERE.md) → Nouveau utilisateur
+1. [START_HERE.md](../01-Getting-Started/START_HERE.md) → Nouveau utilisateur
 
 **Documents de référence:**
-1. [README.md](README.md) → Vue d'ensemble et quickstart
-2. [DOCS_INDEX.md](DOCS_INDEX.md) → Navigation complète
-3. [TECHNICAL_STATUS.md](TECHNICAL_STATUS.md) → État technique
+1. [README.md](../../README.md) → Vue d'ensemble et quickstart
+2. [DOCS_INDEX.md](../../DOCS_INDEX.md) → Navigation complète
+3. [TECHNICAL_STATUS.md](../04-Architecture-Internals/TECHNICAL_STATUS.md) → État technique
 
 **Documentation structurée:**
-1. [docs/00-INDEX.md](docs/00-INDEX.md) → Point d'entrée docs/
+1. [docs/00-INDEX.md](../00-INDEX.md) → Point d'entrée docs/
 2. [docs/01-Getting-Started/](docs/01-Getting-Started/) → Démarrage
 3. [docs/02-User-Guide/](docs/02-User-Guide/) → Guide utilisateur
 4. etc.

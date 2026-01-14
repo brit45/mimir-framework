@@ -176,6 +176,11 @@ struct Layer {
     int head_dim = 64;            // Dimension par head
     int seq_len = 0;              // Sequence length pour attention
     bool causal = false;          // Causal mask
+
+    // === Custom: PatchEmbed (projection learnable des patches) ===
+    int patch_dim = 0;            // Dimension d'un patch aplati (p*p)
+    int num_patches = 0;          // Nombre total de patches
+    int seq_text = 0;             // Longueur de la partie texte (sans le time token)
     
     // === Activation ===
     float alpha = 0.01f;          // LeakyReLU alpha
@@ -601,7 +606,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
     
     #ifdef __AVX2__
     // Version SIMD optimisée
-    #pragma omp parallel for collapse(2) if(out_channels * out_height * out_width > 1024)
+        #pragma omp parallel for collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -668,7 +673,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
     }
     #else
     // Version CPU standard optimisée
-    #pragma omp parallel for collapse(2) if(out_channels * out_height * out_width > 1024)
+        #pragma omp parallel for collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {

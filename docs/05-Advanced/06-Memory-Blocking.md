@@ -290,7 +290,7 @@ Les opérations `load()` et `store()` sont atomiques et ne nécessitent pas de m
 
 ## Tests
 
-Un programme de test complet est fourni : [tests/test_memory_blocking.cpp](../tests/test_memory_blocking.cpp)
+Un programme de test complet est fourni : [scripts/benchmarks/benchmark_stress.lua](../scripts/benchmarks/benchmark_stress.lua)
 
 **Tests inclus** :
 
@@ -303,7 +303,7 @@ Un programme de test complet est fourni : [tests/test_memory_blocking.cpp](../te
 **Exécution** :
 
 ```bash
-g++ -std=c++17 -O3 tests/test_memory_blocking.cpp -I./src -o test_blocking -llz4 -pthread
+g++ -std=c++17 -O3 scripts/benchmarks/benchmark_stress.lua -I./src -o test_blocking -llz4 -pthread
 ./test_blocking
 ```
 

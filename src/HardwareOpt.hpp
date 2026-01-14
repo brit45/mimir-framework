@@ -19,7 +19,6 @@ inline void fp32_to_fp16_f16c(uint16_t* dst, const float* src, size_t count) {
 #ifdef __F16C__
     // Parallélisation OpenMP pour grandes conversions (>1024 éléments)
     size_t vec_count = (count / 8) * 8; // Nombre d'éléments vectorisés
-    #pragma omp parallel for if(count > 1024) schedule(static)
     for (size_t i = 0; i < vec_count; i += 8) {
         __m256 f32 = _mm256_loadu_ps(&src[i]);
         __m128i f16 = _mm256_cvtps_ph(f32, _MM_FROUND_TO_NEAREST_INT);
@@ -33,7 +32,7 @@ inline void fp32_to_fp16_f16c(uint16_t* dst, const float* src, size_t count) {
     }
 #else
     // Fallback software avec OpenMP
-    #pragma omp parallel for if(count > 1024) schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < count; ++i) {
         union { float f; uint32_t u; } v;
         v.f = src[i];
@@ -54,7 +53,6 @@ inline void fp16_to_fp32_f16c(float* dst, const uint16_t* src, size_t count) {
 #ifdef __F16C__
     // Parallélisation OpenMP pour grandes conversions
     size_t vec_count = (count / 8) * 8; // Nombre d'éléments vectorisés
-    #pragma omp parallel for if(count > 1024) schedule(static)
     for (size_t i = 0; i < vec_count; i += 8) {
         __m128i f16 = _mm_loadu_si128((__m128i*)&src[i]);
         __m256 f32 = _mm256_cvtph_ps(f16);
@@ -68,7 +66,7 @@ inline void fp16_to_fp32_f16c(float* dst, const uint16_t* src, size_t count) {
     }
 #else
     // Fallback software avec OpenMP
-    #pragma omp parallel for if(count > 1024) schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < count; ++i) {
         uint16_t h = src[i];
         uint32_t sign = (h & 0x8000) << 16;
@@ -99,39 +97,53 @@ inline void matmul_fma_saturated(float* __restrict__ C,
                                   const float* __restrict__ B,
                                   size_t M, size_t N, size_t K) {
     std::memset(C, 0, M * N * sizeof(float));
-    
-    #pragma omp parallel for schedule(dynamic)
+
+    const size_t vecN8 = N & ~static_cast<size_t>(7);
+    const size_t vecN24 = (N / 24) * 24;
+
+    #pragma omp parallel for if(M * N * K > 262144) schedule(static)
     for (size_t i = 0; i < M; ++i) {
-        for (size_t j = 0; j < N; j += 24) {  // Process 24 floats (3x8 pour saturation)
-            size_t limit = std::min(j + 24, N);
-            
-            // 3 accumulateurs indépendants (saturation FMA)
+        // 24-wide unroll (3x8) for FMA saturation
+        for (size_t j = 0; j < vecN24; j += 24) {
             __m256 acc0 = _mm256_setzero_ps();
             __m256 acc1 = _mm256_setzero_ps();
             __m256 acc2 = _mm256_setzero_ps();
-            
+
             for (size_t k = 0; k < K; ++k) {
                 __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
-                
-                // 3 FMA indépendants par itération
-                if (j < limit) {
-                    __m256 b0 = _mm256_loadu_ps(&B[k * N + j]);
-                    acc0 = _mm256_fmadd_ps(a_broadcast, b0, acc0);
-                }
-                if (j + 8 < limit) {
-                    __m256 b1 = _mm256_loadu_ps(&B[k * N + j + 8]);
-                    acc1 = _mm256_fmadd_ps(a_broadcast, b1, acc1);
-                }
-                if (j + 16 < limit) {
-                    __m256 b2 = _mm256_loadu_ps(&B[k * N + j + 16]);
-                    acc2 = _mm256_fmadd_ps(a_broadcast, b2, acc2);
-                }
+
+                __m256 b0 = _mm256_loadu_ps(&B[k * N + j]);
+                __m256 b1 = _mm256_loadu_ps(&B[k * N + j + 8]);
+                __m256 b2 = _mm256_loadu_ps(&B[k * N + j + 16]);
+
+                acc0 = _mm256_fmadd_ps(a_broadcast, b0, acc0);
+                acc1 = _mm256_fmadd_ps(a_broadcast, b1, acc1);
+                acc2 = _mm256_fmadd_ps(a_broadcast, b2, acc2);
             }
-            
-            // Store results
-            if (j < limit) _mm256_storeu_ps(&C[i * N + j], acc0);
-            if (j + 8 < limit) _mm256_storeu_ps(&C[i * N + j + 8], acc1);
-            if (j + 16 < limit) _mm256_storeu_ps(&C[i * N + j + 16], acc2);
+
+            _mm256_storeu_ps(&C[i * N + j], acc0);
+            _mm256_storeu_ps(&C[i * N + j + 8], acc1);
+            _mm256_storeu_ps(&C[i * N + j + 16], acc2);
+        }
+
+        // Remaining full 8-wide vectors (after vecN24)
+        for (size_t j = vecN24; j < vecN8; j += 8) {
+            __m256 acc = _mm256_setzero_ps();
+            for (size_t k = 0; k < K; ++k) {
+                __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
+                __m256 b = _mm256_loadu_ps(&B[k * N + j]);
+                acc = _mm256_fmadd_ps(a_broadcast, b, acc);
+            }
+            _mm256_storeu_ps(&C[i * N + j], acc);
+        }
+
+        // Scalar tail (N not multiple of 8)
+        for (size_t j = vecN8; j < N; ++j) {
+            float acc = 0.0f;
+            for (size_t k = 0; k < K; ++k) {
+                acc += A[i * K + k] * B[k * N + j];
+            }
+            C[i * N + j] = acc;
         }
     }
 }
@@ -143,8 +155,8 @@ inline void conv2d_fma_saturated(float* __restrict__ output,
                                   int in_h, int in_w, int out_h, int out_w,
                                   int kernel_size, int stride, int padding) {
     std::memset(output, 0, out_h * out_w * sizeof(float));
-    
-    #pragma omp parallel for collapse(2)
+
+    #pragma omp parallel for collapse(2) if(static_cast<long long>(out_h) * out_w * kernel_size * kernel_size > 262144) schedule(static)
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             // 3 accumulateurs pour saturation FMA
@@ -204,8 +216,6 @@ inline void conv2d_fma_saturated(float* __restrict__ output,
 inline void quantize_int8_bmi(int8_t* dst, const float* src, size_t count,
                                float scale, float zero_point) {
     const float inv_scale = 1.0f / scale;
-    
-    #pragma omp parallel for
     for (size_t i = 0; i < count; i += 8) {
         __m256 f32 = _mm256_loadu_ps(&src[i]);
         
@@ -231,7 +241,6 @@ inline void quantize_int8_bmi(int8_t* dst, const float* src, size_t count,
 // Dequantification int8 avec BMI2
 inline void dequantize_int8_bmi(float* dst, const int8_t* src, size_t count,
                                  float scale, float zero_point) {
-    #pragma omp parallel for
     for (size_t i = 0; i < count; i += 8) {
         // Load 8 int8
         __m128i i8 = _mm_loadl_epi64((__m128i*)&src[i]);
@@ -255,8 +264,6 @@ inline void dequantize_int8_bmi(float* dst, const int8_t* src, size_t count,
 inline void quantize_int4_bmi(uint8_t* dst, const float* src, size_t count,
                                float scale, float zero_point) {
     const float inv_scale = 1.0f / scale;
-    
-    #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < count; i += 16) {
         __m256 f32_0 = _mm256_loadu_ps(&src[i]);
         __m256 f32_1 = _mm256_loadu_ps(&src[i + 8]);
@@ -321,7 +328,6 @@ public:
             
             // Prefetch parallèle par blocs de 4KB (page size) pour grandes allocations
             if (aligned_size > 16 * HUGEPAGE_SIZE) {
-                #pragma omp parallel for schedule(static)
                 for (size_t offset = 0; offset < aligned_size; offset += 4096) {
                     __builtin_prefetch(static_cast<char*>(ptr) + offset, 1, 3);
                 }

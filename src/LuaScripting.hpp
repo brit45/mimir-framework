@@ -8,7 +8,7 @@ extern "C" {
 #include <string>
 #include <memory>
 #include "Model.hpp"
-#include "Models/ModelArchitectures.hpp"
+#include "Models/Registry/ModelArchitectures.hpp"
 #include "Tokenizer.hpp"
 #include "Encoder.hpp"
 #include "include/json.hpp"
@@ -73,6 +73,7 @@ private:
     static int lua_pushLayer(lua_State* L);
     static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
+    static int lua_encodePrompt(lua_State* L);
     static int lua_backwardPass(lua_State* L);
     static int lua_optimizerStep(lua_State* L);
     static int lua_zeroGradients(lua_State* L);
@@ -81,29 +82,8 @@ private:
     static int lua_getHardwareCaps(lua_State* L);
     
     // === ModelArchitectures API ===
-    static int lua_buildUNet(lua_State* L);
-    static int lua_buildVAE(lua_State* L);
-    static int lua_buildViT(lua_State* L);
-    static int lua_buildGAN(lua_State* L);
-    static int lua_buildDiffusion(lua_State* L);
-    static int lua_buildTransformer(lua_State* L);
-    static int lua_buildResNet(lua_State* L);
-    static int lua_buildMobileNet(lua_State* L);
-    static int lua_buildFlux(lua_State* L);
-    
-    // === Flux-specific API ===
-    static int lua_fluxGenerate(lua_State* L);
-    static int lua_fluxEncodeImage(lua_State* L);
-    static int lua_fluxDecodeLatent(lua_State* L);
-    static int lua_fluxEncodeText(lua_State* L);
-    static int lua_fluxSetPromptTokenizer(lua_State* L);
-    static int lua_fluxTrain(lua_State* L);
-    static int lua_fluxEval(lua_State* L);
-    static int lua_fluxIsTraining(lua_State* L);
-    static int lua_fluxTokenizePrompt(lua_State* L);
-    static int lua_fluxPredictNoise(lua_State* L);
-    static int lua_fluxComputeDiffusionLoss(lua_State* L);
-    static int lua_fluxModelNew(lua_State* L);
+    static int lua_archAvailable(lua_State* L);
+    static int lua_archDefaultConfig(lua_State* L);
     
     // === Layer Operations API ===
     static int lua_computeConv2D(lua_State* L);

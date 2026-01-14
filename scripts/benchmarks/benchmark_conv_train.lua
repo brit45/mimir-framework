@@ -1,7 +1,7 @@
 #!/usr/bin/env mimir --lua
 
 log("╔════════════════════════════════════════════════════════════════════╗")
-log("║ Conv Training Bench (API optimizer_step) - loss should decrease    ║")
+log("║ BasicMLP Training Bench (API optimizer_step) - loss should decrease║")
 log("╚════════════════════════════════════════════════════════════════════╝")
 
 -- ======================================================================
@@ -17,26 +17,19 @@ log("🛡️  MemoryGuard / Allocator configured (4 GB, compression ON)")
 -- 1) Build model : Single Conv2d (3x3, same padding)
 -- ======================================================================
 log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-log("1) Build model (Conv2d only)")
+log("1) Build model (BasicMLP)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-local H, W, C = 32, 32, 3
-local OUT = 3
-local K = 3
+local DIM = 256
 
-Mimir.Model.create("conv_train_api", {
-  in_channels = C,
-  out_channels = OUT,
-  height = H,
-  width = W,
-  kernel = K,
-  stride = 1,
-  padding = 1
+local ok, err = Mimir.Model.create("basic_mlp", {
+  input_dim = DIM,
+  hidden_dim = DIM,
+  output_dim = DIM,
+  hidden_layers = 2,
+  dropout = 0.0
 })
-
--- params conv: K*K*C*OUT + OUT (bias)
-local params = (K * K * C * OUT) + OUT
-assert(Mimir.Model.push_layer("conv", "Conv2d", params))
+assert(ok ~= false, tostring(err or "Model.create(basic_mlp) failed"))
 
 assert(Mimir.Model.allocate_params())
 assert(Mimir.Model.init_weights("xavier_uniform", 42))
@@ -54,19 +47,11 @@ local function rand_uniform()
   return (math.random() * 2.0 - 1.0)
 end
 
-local N = H * W * C
 local x = {}
-for i = 1, N do x[i] = rand_uniform() end
+for i = 1, DIM do x[i] = rand_uniform() end
 
--- target: une version “adoucie” (pas un vrai blur 2D ici, mais stable et déterministe)
--- (le but = vérifier que l’optimisation bouge bien les poids)
 local y = {}
-for i = 1, N do
-  local a = x[i]
-  local b = x[math.max(1, i - 1)]
-  local c_ = x[math.min(N, i + 1)]
-  y[i] = 0.8 * a + 0.1 * b + 0.1 * c_
-end
+for i = 1, DIM do y[i] = 0.0 end
 
 log("✓ Input size=" .. #x .. " | Target size=" .. #y)
 
@@ -109,8 +94,8 @@ log("\n━━━━━━━━━━━━━━━━━━━━━━━━�
 log("3) Train (forward(train=true) + backward + optimizer_step)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-local epochs = 20000
-local lr = 6e-5  -- volontairement assez grand pour voir bouger vite (tu peux baisser ensuite)
+local epochs = 400
+local lr = 1e-4
 local best = 1e30
 local first = nil
 
@@ -157,7 +142,7 @@ for epoch = 1, epochs do
     break
   end
 
-  if epoch % 10 == 0 or epoch == 1 then
+  if epoch % 20 == 0 or epoch == 1 then
     log(string.format("epoch=%d | loss=%.6f | best=%.6f | grad_norm=%.6f", epoch, loss, best, gn))
   end
 end

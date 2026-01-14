@@ -1,44 +1,53 @@
 -- ================================================================
 -- Mímir Benchmark Script - CPU Performance Tests
+-- (Updated for registry-based architectures + int-token forward)
 -- ================================================================
 
 log("╔═══════════════════════════════════════════════════════════════════╗")
-log("║           Mímir Framework - Suite de Benchmarks v2.0             ║")
+log("║           Mímir Framework - Suite de Benchmarks (v2.3+)          ║")
 log("║                    CPU-Only Deep Learning                         ║")
 log("╚═══════════════════════════════════════════════════════════════════╝")
 
 -- Configuration
 local config = {
     vocab_size = 10000,
-    embed_dim_small = 128,
-    embed_dim_medium = 256,
-    embed_dim_large = 512,
+    d_model_small = 128,
+    d_model_medium = 256,
+    d_model_large = 512,
     num_layers_small = 2,
     num_layers_medium = 4,
     num_layers_large = 8,
-    max_seq_len = 128
+    seq_len = 128
 }
 
 -- Parse mode
-local mode = "standard"
+-- Note: le binaire `mimir --lua ...` ne transmet pas toujours les args au script.
+-- Donc on supporte aussi `MIMIR_BENCH_MODE=quick|full`.
+local mode = os.getenv("MIMIR_BENCH_MODE") or "standard"
+
 if arg and #arg > 0 then
     for i = 1, #arg do
         if arg[i] == "--quick" then
             mode = "quick"
-            config.embed_dim_medium = 128
-            config.num_layers_medium = 2
         elseif arg[i] == "--full" then
             mode = "full"
-            config.vocab_size = 20000
         end
     end
 end
 
+if mode == "quick" then
+    config.d_model_medium = 128
+    config.num_layers_medium = 2
+elseif mode == "full" then
+    config.vocab_size = 20000
+else
+    mode = "standard"
+end
+
 log("\n📊 Configuration: " .. mode)
 log("  Vocab size:     " .. config.vocab_size)
-log("  Max seq length: " .. config.max_seq_len)
+log("  Seq length:     " .. config.seq_len)
 
--- Helper
 local function timer(name, func)
     log("\n⏱️  " .. name)
     local start = os.clock()
@@ -59,6 +68,21 @@ timer("Création tokenizer (" .. config.vocab_size .. " tokens)", function()
     tokenizer.create(config.vocab_size)
 end)
 
+-- Helper: Transformer config (registry)
+local function make_transformer_cfg(d_model, num_layers, num_heads)
+    return {
+        vocab_size = config.vocab_size,
+        d_model = d_model,
+        num_layers = num_layers,
+        num_heads = num_heads,
+        mlp_hidden = d_model * 4,
+        output_dim = d_model,
+        seq_len = config.seq_len,
+        padding_idx = 0,
+        causal = false
+    }
+end
+
 -- ================================================================
 -- Benchmark 2: Model Creation - Small
 -- ================================================================
@@ -66,21 +90,12 @@ log("\n" .. string.rep("=", 70))
 log("  Benchmark 2: Création Modèle (Petit)")
 log(string.rep("=", 70))
 
-local small_config = {
-    vocab_size = config.vocab_size,
-    embed_dim = config.embed_dim_small,
-    num_layers = config.num_layers_small,
-    num_heads = 4,
-    d_ff = config.embed_dim_small * 4,
-    max_seq_len = config.max_seq_len,
-    dropout = 0.1
-}
+local small_config = make_transformer_cfg(config.d_model_small, config.num_layers_small, 4)
 
-timer("Transformer " .. config.num_layers_small .. "L x " .. config.embed_dim_small .. "D", function()
+timer("Transformer " .. config.num_layers_small .. "L x " .. config.d_model_small .. "D", function()
     tokenizer.create(config.vocab_size)
     Mimir.Model.create("transformer", small_config)
-    local ok, params = Mimir.Model.build()
-    log("   📊 Paramètres: " .. params)
+    log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
 -- ================================================================
@@ -90,70 +105,52 @@ log("\n" .. string.rep("=", 70))
 log("  Benchmark 3: Création Modèle (Moyen)")
 log(string.rep("=", 70))
 
-local medium_config = {
-    vocab_size = config.vocab_size,
-    embed_dim = config.embed_dim_medium,
-    num_layers = config.num_layers_medium,
-    num_heads = 8,
-    d_ff = config.embed_dim_medium * 4,
-    max_seq_len = config.max_seq_len,
-    dropout = 0.1
-}
+local medium_config = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
 
-timer("Transformer " .. config.num_layers_medium .. "L x " .. config.embed_dim_medium .. "D", function()
+timer("Transformer " .. config.num_layers_medium .. "L x " .. config.d_model_medium .. "D", function()
     tokenizer.create(config.vocab_size)
     Mimir.Model.create("transformer", medium_config)
-    local ok, params = Mimir.Model.build()
-    log("   📊 Paramètres: " .. params)
+    log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
 -- ================================================================
--- Benchmark 4: Model Creation - Large (if not quick mode)
+-- Benchmark 4: Model Creation - Large
 -- ================================================================
 if mode ~= "quick" then
     log("\n" .. string.rep("=", 70))
     log("  Benchmark 4: Création Modèle (Grand)")
     log(string.rep("=", 70))
-    
-    local large_config = {
-        vocab_size = config.vocab_size,
-        embed_dim = config.embed_dim_large,
-        num_layers = config.num_layers_large,
-        num_heads = 16,
-        d_ff = config.embed_dim_large * 4,
-        max_seq_len = config.max_seq_len,
-        dropout = 0.1
-    }
-    
-    timer("Transformer " .. config.num_layers_large .. "L x " .. config.embed_dim_large .. "D", function()
+
+    local large_config = make_transformer_cfg(config.d_model_large, config.num_layers_large, 16)
+
+    timer("Transformer " .. config.num_layers_large .. "L x " .. config.d_model_large .. "D", function()
         tokenizer.create(config.vocab_size)
         Mimir.Model.create("transformer", large_config)
-        local ok, params = Mimir.Model.build()
-        log("   📊 Paramètres: " .. params)
+        log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
     end)
 end
 
 -- ================================================================
--- Benchmark 5: Encoder vs Decoder
+-- Benchmark 5: Causal vs Non-causal
 -- ================================================================
 log("\n" .. string.rep("=", 70))
-log("  Benchmark 5: Architectures - Encoder vs Decoder")
+log("  Benchmark 5: Transformer causal vs non-causal")
 log(string.rep("=", 70))
 
--- Encoder
-timer("Encoder (" .. config.num_layers_medium .. "L x " .. config.embed_dim_medium .. "D)", function()
+timer("Transformer non-causal", function()
     tokenizer.create(config.vocab_size)
-    Mimir.Model.create("encoder", medium_config)
-    local ok, params = Mimir.Model.build()
-    log("   📊 Paramètres: " .. params)
+    local cfg = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
+    cfg.causal = false
+    Mimir.Model.create("transformer", cfg)
+    log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
--- Decoder
-timer("Decoder (" .. config.num_layers_medium .. "L x " .. config.embed_dim_medium .. "D)", function()
+timer("Transformer causal", function()
     tokenizer.create(config.vocab_size)
-    Mimir.Model.create("decoder", medium_config)
-    local ok, params = Mimir.Model.build()
-    log("   📊 Paramètres: " .. params)
+    local cfg = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
+    cfg.causal = true
+    Mimir.Model.create("transformer", cfg)
+    log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
 -- ================================================================
@@ -164,37 +161,30 @@ log("  Benchmark 6: Sérialisation (Save/Load)")
 log(string.rep("=", 70))
 
 local checkpoint_path = "/tmp/mimir_benchmark_checkpoint"
+local checkpoint_path_st = checkpoint_path .. ".safetensors"
 
--- Créer modèle pour sauvegarder
 tokenizer.create(config.vocab_size)
 Mimir.Model.create("transformer", small_config)
-Mimir.Model.build()
+Mimir.Model.allocate_params()
+Mimir.Model.init_weights("xavier", 42)
 
--- Save
-local checkpoint_path_st = checkpoint_path .. ".safetensors"
-local save_time = timer("Save checkpoint", function()
+timer("Save checkpoint", function()
     Mimir.Serialization.save(checkpoint_path_st, "safetensors")
 end)
 
--- Get size
 local size_cmd = "du -sh " .. checkpoint_path_st .. " 2>/dev/null | cut -f1"
 local handle = io.popen(size_cmd)
 local size = handle:read("*a"):gsub("%s+", "")
 handle:close()
+if size ~= "" then log("   📦 Taille: " .. size) end
 
-if size ~= "" then
-    log("   📦 Taille: " .. size)
-end
-
--- Load (créer nouveau modèle)
-local load_time = timer("Load checkpoint", function()
+timer("Load checkpoint", function()
     tokenizer.create(config.vocab_size)
     Mimir.Model.create("transformer", small_config)
-    Mimir.Model.build()
+    Mimir.Model.allocate_params()
     Mimir.Serialization.load(checkpoint_path_st)
 end)
 
--- Cleanup
 os.execute("rm -rf " .. checkpoint_path .. " 2>/dev/null")
 
 -- ================================================================
@@ -205,12 +195,11 @@ log("  Benchmark 7: Estimation Mémoire par Configuration")
 log(string.rep("=", 70))
 
 local function estimate_memory(layers, dim, vocab)
-    -- Estimation: params * 4 bytes (float32)
-    local params_per_layer = dim * dim * 4  -- Self-attention
-    params_per_layer = params_per_layer + (dim * dim * 4 * 2)  -- FFN
+    -- Estimation grossière: params * 4 bytes (float32)
+    local params_per_layer = dim * dim * 4  -- attention (approx)
+    params_per_layer = params_per_layer + (dim * dim * 8)  -- ffn (approx)
     local total_params = params_per_layer * layers
-    total_params = total_params + (vocab * dim)  -- Embedding
-    
+    total_params = total_params + (vocab * dim)  -- embedding
     local memory_mb = (total_params * 4) / (1024 * 1024)
     return memory_mb, total_params
 end
@@ -229,7 +218,7 @@ local configs_to_test = {
 for _, cfg in ipairs(configs_to_test) do
     local name, layers, dim, vocab = cfg[1], cfg[2], cfg[3], cfg[4]
     local mem_mb, params = estimate_memory(layers, dim, vocab)
-    log(string.format("%-20s %4d    %4d   %7.1f MB  %8.1f M", 
+    log(string.format("%-20s %4d    %4d   %7.1f MB  %8.1f M",
                      name, layers, dim, mem_mb, params / 1000000))
 end
 
@@ -242,11 +231,3 @@ log(string.rep("=", 70))
 
 log("\n✅ Benchmarks terminés avec succès!")
 log("🚀 Mode: " .. mode)
-log("💡 Mímir est optimisé pour CPU - Aucun GPU requis")
-log("\n📝 Conseils:")
-log("   • --quick : Tests rapides (petits modèles)")
-log("   • --full  : Tests complets (grands modèles)")
-log("\n🔧 Optimisations CPU actives:")
-log("   • OpenMP multi-threading")
-log("   • Instructions SIMD (FMA, F16C)")
-log("   • Huge Pages pour mémoire")

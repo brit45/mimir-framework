@@ -312,6 +312,7 @@ struct DatasetItem {
     
     // Métadonnées
     int w = 0, h = 0;
+    int img_c = 0; // 0 = inconnu, 1 = grayscale, 3 = RGB
     
     // Tracking RAM et LRU
     mutable uint64_t last_access_time = 0;
@@ -359,7 +360,8 @@ struct DatasetItem {
         
         if (!image_file.empty() && !img.has_value()) {
             // Estimation basée sur la taille cible
-            total += (size_t)w * (size_t)h; // grayscale
+            const size_t c = (img_c > 0) ? static_cast<size_t>(img_c) : 1ULL;
+            total += (size_t)w * (size_t)h * c;
         }
         
         if (!audio_file.empty() && !audio_bytes.has_value()) {
@@ -466,8 +468,59 @@ struct DatasetItem {
             
             w = target_w;
             h = target_h;
+            img_c = 1;
             touch();
             
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Charge une image en RGB (3 canaux) et la redimensionne en nearest.
+    // Ne modifie pas loadImage() (grayscale) pour préserver la compatibilité.
+    bool loadImageRGB(int target_w, int target_h) {
+        if (img.has_value() && img_c == 3 && w == target_w && h == target_h) {
+            touch();
+            return true;
+        }
+        if (image_file.empty()) return false;
+
+        auto& mgr = DatasetMemoryManager::instance();
+
+        try {
+            // Estimer la RAM nécessaire
+            size_t needed = (size_t)target_w * (size_t)target_h * 3 * 2; // temporaire + final
+            if (!mgr.canAllocate(needed)) {
+                return false;
+            }
+
+            int w_img = 0, h_img = 0, c = 0;
+            unsigned char* data = stbi_load(image_file.c_str(), &w_img, &h_img, &c, 3);
+            if (!data) return false;
+
+            std::vector<unsigned char> src((size_t)w_img * (size_t)h_img * 3);
+            std::memcpy(src.data(), data, src.size());
+            stbi_image_free(data);
+
+            std::vector<uint8_t> dst((size_t)target_w * (size_t)target_h * 3);
+            resizeNearest(src.data(), w_img, h_img, 3, dst.data(), target_w, target_h);
+
+            // Si on avait déjà une image chargée, décrémenter l'ancien tracking
+            if (img.has_value()) {
+                mgr.trackDeallocation((void*)img->data());
+                estimated_ram_usage -= img->size();
+            }
+
+            const size_t actual_size = dst.size();
+            img = std::move(dst);
+            mgr.trackAllocation((void*)img->data(), actual_size);
+            estimated_ram_usage += actual_size;
+
+            w = target_w;
+            h = target_h;
+            img_c = 3;
+            touch();
             return true;
         } catch (...) {
             return false;

@@ -32,7 +32,7 @@ inline std::vector<float> leaky_relu_forward(
 ) {
     std::vector<float> output(input.size());
     
-    #pragma omp parallel for schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         output[i] = input[i] > 0.0f ? input[i] : alpha * input[i];
     }
@@ -44,7 +44,7 @@ inline std::vector<float> leaky_relu_forward(
 inline std::vector<float> mish_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp parallel for schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         float x = input[i];
         // softplus(x) = ln(1 + e^x) ≈ x pour x grand, évite overflow
@@ -59,7 +59,7 @@ inline std::vector<float> mish_forward(const std::vector<float>& input) {
 inline std::vector<float> softplus_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp parallel for schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         float x = input[i];
         // Pour x > 20, softplus(x) ≈ x (évite overflow)
@@ -73,7 +73,7 @@ inline std::vector<float> softplus_forward(const std::vector<float>& input) {
 inline std::vector<float> hard_sigmoid_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp parallel for schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         float x = input[i];
         float val = (x + 3.0f) / 6.0f;
@@ -87,7 +87,7 @@ inline std::vector<float> hard_sigmoid_forward(const std::vector<float>& input) 
 inline std::vector<float> hard_swish_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp parallel for schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         float x = input[i];
         float hs = std::max(0.0f, std::min(1.0f, (x + 3.0f) / 6.0f));
@@ -115,7 +115,7 @@ inline std::vector<float> subtract_forward(
     
     std::vector<float> output(a.size());
     
-    #pragma omp parallel for schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < a.size(); ++i) {
         output[i] = a[i] - b[i];
     }
@@ -138,7 +138,6 @@ inline std::vector<float> divide_forward(
     
     std::vector<float> output(a.size());
     
-    #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < a.size(); ++i) {
         // Protection division par zéro
         float divisor = b[i];
@@ -297,13 +296,13 @@ inline std::vector<float> instance_norm2d_forward(
     const int spatial_size = height * width;
     
     // Normalize each channel independently
-    #pragma omp parallel for schedule(static)
     for (int c = 0; c < channels; ++c) {
         const float* channel_data = &input[c * spatial_size];
         float* out_channel = &output[c * spatial_size];
         
         // Compute mean
         float mean = 0.0f;
+        #pragma omp simd reduction(+:mean)
         for (int i = 0; i < spatial_size; ++i) {
             mean += channel_data[i];
         }
@@ -311,6 +310,7 @@ inline std::vector<float> instance_norm2d_forward(
         
         // Compute variance
         float var = 0.0f;
+        #pragma omp simd reduction(+:var)
         for (int i = 0; i < spatial_size; ++i) {
             float diff = channel_data[i] - mean;
             var += diff * diff;
@@ -319,6 +319,7 @@ inline std::vector<float> instance_norm2d_forward(
         float std = std::sqrt(var + eps);
         
         // Normalize
+        #pragma omp simd
         for (int i = 0; i < spatial_size; ++i) {
             out_channel[i] = (channel_data[i] - mean) / std;
         }
@@ -329,6 +330,7 @@ inline std::vector<float> instance_norm2d_forward(
             float gamma = weights[c];
             float beta = weights[channels + c];
             
+            #pragma omp simd
             for (int i = 0; i < spatial_size; ++i) {
                 out_channel[i] = gamma * out_channel[i] + beta;
             }
@@ -361,7 +363,7 @@ const int normalized_size = layer.target_shape.empty() ?
     // Normalize
     const float* weights = layer.getWeights();
     
-    #pragma omp parallel for schedule(static)
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         output[i] = input[i] / rms;
         
@@ -401,7 +403,8 @@ inline std::vector<float> conv1d_forward(
     const float* bias = layer.use_bias ? 
                         (weights + out_channels * in_channels * kernel_size) : nullptr;
     
-    #pragma omp parallel for schedule(dynamic)
+    const long long conv1d_work = static_cast<long long>(out_channels) * out_length * in_channels * kernel_size;
+    #pragma omp parallel for if(conv1d_work >= 262144) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int ol = 0; ol < out_length; ++ol) {
             float sum = 0.0f;
@@ -454,7 +457,8 @@ inline std::vector<float> depthwise_conv2d_forward(
     const float* bias = layer.use_bias ? (weights + channels * kernel_size * kernel_size) : nullptr;
     
     // Each channel processed independently
-    #pragma omp parallel for schedule(dynamic)
+    const long long dwconv_work = static_cast<long long>(channels) * out_height * out_width * kernel_size * kernel_size;
+    #pragma omp parallel for if(dwconv_work >= 262144) schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -507,7 +511,6 @@ inline std::vector<float> maxpool1d_forward(
     const int out_length = (length + 2 * padding - kernel_size) / stride + 1;
     std::vector<float> output(channels * out_length, -std::numeric_limits<float>::infinity());
     
-    #pragma omp parallel for schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int ol = 0; ol < out_length; ++ol) {
             float max_val = -std::numeric_limits<float>::infinity();
@@ -544,7 +547,6 @@ inline std::vector<float> avgpool1d_forward(
     const int out_length = (length + 2 * padding - kernel_size) / stride + 1;
     std::vector<float> output(channels * out_length, 0.0f);
     
-    #pragma omp parallel for schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int ol = 0; ol < out_length; ++ol) {
             float sum = 0.0f;
@@ -591,7 +593,6 @@ inline std::vector<float> zero_pad2d_forward(
     
     std::vector<float> output(channels * out_height * out_width, 0.0f);
     
-    #pragma omp parallel for schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int h = 0; h < in_height; ++h) {
             for (int w = 0; w < in_width; ++w) {
@@ -621,7 +622,6 @@ inline std::vector<float> reflection_pad2d_forward(
     
     std::vector<float> output(channels * out_height * out_width, 0.0f);
     
-    #pragma omp parallel for schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -665,7 +665,6 @@ inline std::vector<float> replication_pad2d_forward(
     
     std::vector<float> output(channels * out_height * out_width, 0.0f);
     
-    #pragma omp parallel for schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -702,39 +701,42 @@ inline std::vector<float> upsample_bicubic_forward(
     const float scale_h = static_cast<float>(in_h) / out_h;
     const float scale_w = static_cast<float>(in_w) / out_w;
     
-    #pragma omp parallel for schedule(dynamic)
-    for (int c = 0; c < channels; ++c) {
-        for (int oh = 0; oh < out_h; ++oh) {
-            for (int ow = 0; ow < out_w; ++ow) {
-                // Source position (bilinear approximation)
-                float ih_f = (oh + 0.5f) * scale_h - 0.5f;
-                float iw_f = (ow + 0.5f) * scale_w - 0.5f;
-                
-                ih_f = std::max(0.0f, std::min(ih_f, in_h - 1.0f));
-                iw_f = std::max(0.0f, std::min(iw_f, in_w - 1.0f));
-                
-                int ih0 = static_cast<int>(std::floor(ih_f));
-                int iw0 = static_cast<int>(std::floor(iw_f));
-                int ih1 = std::min(ih0 + 1, in_h - 1);
-                int iw1 = std::min(iw0 + 1, in_w - 1);
-                
-                float dh = ih_f - ih0;
-                float dw = iw_f - iw0;
-                
-                // Bilinear interpolation
-                float v00 = input[c * (in_h * in_w) + ih0 * in_w + iw0];
-                float v01 = input[c * (in_h * in_w) + ih0 * in_w + iw1];
-                float v10 = input[c * (in_h * in_w) + ih1 * in_w + iw0];
-                float v11 = input[c * (in_h * in_w) + ih1 * in_w + iw1];
-                
-                float val = v00 * (1 - dh) * (1 - dw) +
-                            v01 * (1 - dh) * dw +
-                            v10 * dh * (1 - dw) +
-                            v11 * dh * dw;
-                
-                output[c * (out_h * out_w) + oh * out_w + ow] = val;
-            }
-        }
+    const size_t out_hw = static_cast<size_t>(out_h) * static_cast<size_t>(out_w);
+    const size_t in_hw = static_cast<size_t>(in_h) * static_cast<size_t>(in_w);
+    const size_t total = static_cast<size_t>(channels) * out_hw;
+    #pragma omp simd
+    for (size_t idx = 0; idx < total; ++idx) {
+        const int c = static_cast<int>(idx / out_hw);
+        const size_t rem = idx - static_cast<size_t>(c) * out_hw;
+        const int oh = static_cast<int>(rem / static_cast<size_t>(out_w));
+        const int ow = static_cast<int>(rem - static_cast<size_t>(oh) * static_cast<size_t>(out_w));
+
+        float ih_f = (oh + 0.5f) * scale_h - 0.5f;
+        float iw_f = (ow + 0.5f) * scale_w - 0.5f;
+
+        ih_f = std::max(0.0f, std::min(ih_f, in_h - 1.0f));
+        iw_f = std::max(0.0f, std::min(iw_f, in_w - 1.0f));
+
+        int ih0 = static_cast<int>(std::floor(ih_f));
+        int iw0 = static_cast<int>(std::floor(iw_f));
+        int ih1 = std::min(ih0 + 1, in_h - 1);
+        int iw1 = std::min(iw0 + 1, in_w - 1);
+
+        float dh = ih_f - ih0;
+        float dw = iw_f - iw0;
+
+        const size_t base = static_cast<size_t>(c) * in_hw;
+        float v00 = input[base + static_cast<size_t>(ih0) * static_cast<size_t>(in_w) + static_cast<size_t>(iw0)];
+        float v01 = input[base + static_cast<size_t>(ih0) * static_cast<size_t>(in_w) + static_cast<size_t>(iw1)];
+        float v10 = input[base + static_cast<size_t>(ih1) * static_cast<size_t>(in_w) + static_cast<size_t>(iw0)];
+        float v11 = input[base + static_cast<size_t>(ih1) * static_cast<size_t>(in_w) + static_cast<size_t>(iw1)];
+
+        float val = v00 * (1 - dh) * (1 - dw) +
+                    v01 * (1 - dh) * dw +
+                    v10 * dh * (1 - dw) +
+                    v11 * dh * dw;
+
+        output[idx] = val;
     }
     
     return output;
@@ -766,24 +768,27 @@ inline std::vector<float> pixel_shuffle_forward(
     
     std::vector<float> output(out_channels * out_height * out_width, 0.0f);
     
-    #pragma omp parallel for schedule(dynamic)
-    for (int oc = 0; oc < out_channels; ++oc) {
-        for (int oh = 0; oh < out_height; ++oh) {
-            for (int ow = 0; ow < out_width; ++ow) {
-                // Map output position to input
-                int ih = oh / r;
-                int iw = ow / r;
-                int sub_h = oh % r;
-                int sub_w = ow % r;
-                int ic = oc * r2 + sub_h * r + sub_w;
-                
-                int in_idx = ic * (height * width) + ih * width + iw;
-                int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
-                
-                if (in_idx < static_cast<int>(input.size())) {
-                    output[out_idx] = input[in_idx];
-                }
-            }
+    const size_t out_hw = static_cast<size_t>(out_height) * static_cast<size_t>(out_width);
+    const size_t in_hw = static_cast<size_t>(height) * static_cast<size_t>(width);
+    const size_t total = static_cast<size_t>(out_channels) * out_hw;
+    #pragma omp simd
+    for (size_t out_idx = 0; out_idx < total; ++out_idx) {
+        const int oc = static_cast<int>(out_idx / out_hw);
+        const size_t rem = out_idx - static_cast<size_t>(oc) * out_hw;
+        const int oh = static_cast<int>(rem / static_cast<size_t>(out_width));
+        const int ow = static_cast<int>(rem - static_cast<size_t>(oh) * static_cast<size_t>(out_width));
+
+        const int ih = oh / r;
+        const int iw = ow / r;
+        const int sub_h = oh - ih * r;
+        const int sub_w = ow - iw * r;
+        const int ic = oc * r2 + sub_h * r + sub_w;
+
+        const size_t in_idx = static_cast<size_t>(ic) * in_hw
+            + static_cast<size_t>(ih) * static_cast<size_t>(width)
+            + static_cast<size_t>(iw);
+        if (in_idx < input.size()) {
+            output[out_idx] = input[in_idx];
         }
     }
     

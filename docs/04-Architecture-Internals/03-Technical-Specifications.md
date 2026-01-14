@@ -205,7 +205,7 @@ private:
 
 ### ModelArchitectures Namespace
 
-**Fichier**: `src/Models/ModelArchitectures.hpp`
+**Fichier**: `src/Models/Registry/ModelArchitectures.hpp`
 
 #### Configurations
 

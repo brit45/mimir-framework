@@ -371,7 +371,6 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
         std::vector<unsigned short> len(n);
         std::vector<unsigned short> out(n);
 
-        #pragma omp parallel for if(n > 2048) schedule(static)
         for (size_t i = 0; i < n; ++i) {
             pos[i].x = tensors[i].Pos.X;
             pos[i].y = tensors[i].Pos.Y;
@@ -422,8 +421,7 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
             return false;
         }
 
-        // copy back avec OpenMP
-        #pragma omp parallel for if(n > 1024)
+        // copy back
         for (size_t i = 0; i < n; ++i) tensors[i].Weight = static_cast<uint16_t>(out[i]);
 
         clReleaseMemObject(posBuf);
@@ -434,8 +432,7 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
         return true;
     }
 
-    // CPU fallback: même math optimisée avec OpenMP
-    #pragma omp parallel for schedule(dynamic, 256) if(n > 512)
+    // CPU fallback
     for (size_t i = 0; i < n; ++i) {
         const tensor &t = tensors[i];
         

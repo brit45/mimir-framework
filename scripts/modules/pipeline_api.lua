@@ -6,6 +6,60 @@
 local Pipeline = {}
 Pipeline.__index = Pipeline
 
+-- ==========================================================================
+-- Utilitaires (logger + config helpers)
+-- ==========================================================================
+
+local function default_log(...)
+    local out = {}
+    for i = 1, select("#", ...) do
+        out[#out + 1] = tostring(select(i, ...))
+    end
+    io.stdout:write(table.concat(out, " ") .. "\n")
+end
+
+local log = (type(_G) == "table" and type(_G.log) == "function") and _G.log or default_log
+
+local function ensure_mimir()
+    if type(_G.Mimir) ~= "table" or type(_G.Mimir.Model) ~= "table" then
+        error("Mimir indisponible: lancez via ./bin/mimir --lua ...")
+    end
+end
+
+local function try_arch_default_config(model_type)
+    if type(_G.Mimir) ~= "table" then return nil end
+    if type(Mimir.Architectures) ~= "table" then return nil end
+    if type(Mimir.Architectures.default_config) ~= "function" then return nil end
+    local cfg = Mimir.Architectures.default_config(model_type)
+    if type(cfg) ~= "table" then return nil end
+    return cfg
+end
+
+local function pick_keys(src, keys)
+    local out = {}
+    if type(src) ~= "table" then return out end
+    for _, k in ipairs(keys) do
+        local v = src[k]
+        if v ~= nil then out[k] = v end
+    end
+    return out
+end
+
+local function build_config(model_type, user_cfg, allowed_keys, fallback_cfg, legacy_mapper)
+    user_cfg = user_cfg or {}
+    local base = try_arch_default_config(model_type) or (fallback_cfg or {})
+    local cfg = pick_keys(base, allowed_keys)
+    if type(legacy_mapper) == "function" then
+        legacy_mapper(cfg, user_cfg)
+    end
+    for _, k in ipairs(allowed_keys) do
+        if user_cfg[k] ~= nil then
+            cfg[k] = user_cfg[k]
+        end
+    end
+    return cfg
+end
+
 -- ============================================================================
 -- Pipeline de base
 -- ============================================================================
@@ -28,25 +82,38 @@ end
 -- Pipeline Transformer (GPT, BERT, etc.)
 function Pipeline.Transformer(config)
     config = config or {}
-    
-    local default_config = {
+
+    local allowed = {
+        -- TransformerConfig
+        "seq_len", "d_model", "vocab_size", "padding_idx", "num_layers", "num_heads", "mlp_hidden", "output_dim", "causal",
+        -- ModelConfig (communs)
+        "dropout", "optimizer", "beta1", "beta2", "epsilon", "weight_decay", "min_lr", "decay_rate", "decay_steps", "warmup_steps", "decay_strategy",
+    }
+
+    local function legacy_map(cfg, user)
+        if user.max_seq_len ~= nil and user.seq_len == nil then cfg.seq_len = user.max_seq_len end
+        if user.embed_dim ~= nil and user.d_model == nil then cfg.d_model = user.embed_dim end
+        if user.d_ff ~= nil and user.mlp_hidden == nil then cfg.mlp_hidden = user.d_ff end
+        if user.model_type == "decoder" and user.causal == nil then cfg.causal = true end
+        if user.model_type == "encoder" and user.causal == nil then cfg.causal = false end
+    end
+
+    local fallback = {
         vocab_size = 50000,
-        embed_dim = 768,
+        seq_len = 512,
+        d_model = 768,
         num_layers = 12,
         num_heads = 12,
-        d_ff = 3072,
-        max_seq_len = 512,
+        mlp_hidden = 3072,
         dropout = 0.1,
-        model_type = "transformer"  -- transformer, encoder, decoder
+        causal = true,
     }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
-    end
-    
-    local pipe = Pipeline:new("transformer_pipeline", default_config)
+
+    local cfg = build_config("transformer", config, allowed, fallback, legacy_map)
+    local pipe = Pipeline:new("transformer_pipeline", cfg)
     
     pipe.build = function(self)
+        ensure_mimir()
         log("🏗️  Construction du pipeline Transformer...")
         
         -- Créer tokenizer
@@ -54,7 +121,7 @@ function Pipeline.Transformer(config)
         self.tokenizer = true
         
         -- Créer modèle
-        Mimir.Model.create(self.config.model_type, self.config)
+        Mimir.Model.create("transformer", self.config)
         local ok, params = Mimir.Model.build()
         
         if ok then
@@ -76,7 +143,9 @@ function Pipeline.Transformer(config)
         
         -- Charger dataset
         Mimir.Dataset.load(dataset_path)
-        Mimir.Dataset.prepare_sequences(self.config.max_seq_len)
+        if type(Mimir.Dataset) == "table" and type(Mimir.Dataset.prepare_sequences) == "function" then
+            Mimir.Dataset.prepare_sequences(self.config.seq_len)
+        end
         
         -- Entraîner
         Mimir.Model.train(epochs or 10, lr or 0.0003)
@@ -110,25 +179,27 @@ end
 -- Pipeline UNet (Segmentation, génération d'images)
 function Pipeline.UNet(config)
     config = config or {}
-    
-    local default_config = {
-        input_channels = 3,
-        output_channels = 3,
-        base_channels = 64,
-        num_levels = 4,
-        blocks_per_level = 2,
-        use_attention = true,
-        use_residual = true,
-        dropout = 0.0
+
+    local allowed = {
+        "image_w", "image_h", "image_c", "base_channels", "depth",
+        "dropout", "optimizer", "beta1", "beta2", "epsilon", "weight_decay", "min_lr", "decay_rate", "decay_steps", "warmup_steps", "decay_strategy",
     }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
+
+    local function legacy_map(cfg, user)
+        if user.image_size ~= nil and (user.image_w == nil and user.image_h == nil) then
+            cfg.image_w = user.image_size
+            cfg.image_h = user.image_size
+        end
+        if user.input_channels ~= nil and user.image_c == nil then cfg.image_c = user.input_channels end
+        if user.num_levels ~= nil and user.depth == nil then cfg.depth = user.num_levels end
     end
-    
-    local pipe = Pipeline:new("unet_pipeline", default_config)
+
+    local fallback = { image_w = 256, image_h = 256, image_c = 3, base_channels = 64, depth = 4, dropout = 0.0 }
+    local cfg = build_config("unet", config, allowed, fallback, legacy_map)
+    local pipe = Pipeline:new("unet_pipeline", cfg)
     
     pipe.build = function(self)
+        ensure_mimir()
         log("🏗️  Construction du pipeline UNet...")
         
         Mimir.Model.create("unet", self.config)
@@ -177,21 +248,33 @@ end
 -- Pipeline VAE (Variational Autoencoder)
 function Pipeline.VAE(config)
     config = config or {}
-    
-    local default_config = {
-        input_dim = 784,
-        latent_dim = 128,
-        hidden_dims = {512, 256},
-        beta = 1.0
+
+    local allowed = {
+        "image_w", "image_h", "image_c", "latent_dim", "hidden_dim",
+        "dropout", "optimizer", "beta1", "beta2", "epsilon", "weight_decay", "min_lr", "decay_rate", "decay_steps", "warmup_steps", "decay_strategy",
     }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
+
+    local function legacy_map(cfg, user)
+        -- Compat: input_dim=784 -> 28x28x1 (si carré parfait)
+        if type(user.input_dim) == "number" and (user.image_w == nil and user.image_h == nil and user.image_c == nil) then
+            local s = math.floor(math.sqrt(user.input_dim))
+            if s * s == user.input_dim then
+                cfg.image_w = s
+                cfg.image_h = s
+                cfg.image_c = 1
+            end
+        end
+        if type(user.hidden_dims) == "table" and user.hidden_dim == nil then
+            cfg.hidden_dim = tonumber(user.hidden_dims[1]) or cfg.hidden_dim
+        end
     end
-    
-    local pipe = Pipeline:new("vae_pipeline", default_config)
+
+    local fallback = { image_w = 28, image_h = 28, image_c = 1, latent_dim = 128, hidden_dim = 256 }
+    local cfg = build_config("vae", config, allowed, fallback, legacy_map)
+    local pipe = Pipeline:new("vae_pipeline", cfg)
     
     pipe.build = function(self)
+        ensure_mimir()
         log("🏗️  Construction du pipeline VAE...")
         
         Mimir.Model.create("vae", self.config)
@@ -230,7 +313,7 @@ function Pipeline.VAE(config)
         log("🎨 Génération de " .. num_samples .. " échantillons...")
         local samples = {}
         for i = 1, num_samples do
-            table.insert(samples, Mimir.Model.infer(nil))
+            table.insert(samples, Mimir.Model.infer(""))
         end
         return samples
     end
@@ -241,25 +324,34 @@ end
 -- Pipeline ViT (Vision Transformer)
 function Pipeline.ViT(config)
     config = config or {}
-    
-    local default_config = {
-        image_size = 224,
-        patch_size = 16,
-        num_classes = 1000,
-        embed_dim = 768,
-        num_layers = 12,
-        num_heads = 12,
-        d_ff = 3072,
-        dropout = 0.1
+
+    local allowed = {
+        "num_tokens", "d_model", "num_layers", "num_heads", "mlp_hidden", "output_dim", "causal",
+        "dropout", "optimizer", "beta1", "beta2", "epsilon", "weight_decay", "min_lr", "decay_rate", "decay_steps", "warmup_steps", "decay_strategy",
     }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
+
+    local function legacy_map(cfg, user)
+        if user.embed_dim ~= nil and user.d_model == nil then cfg.d_model = user.embed_dim end
+        if user.d_ff ~= nil and user.mlp_hidden == nil then cfg.mlp_hidden = user.d_ff end
+
+        -- Compat: image_size/patch_size -> num_tokens
+        if user.num_tokens == nil and type(user.image_size) == "number" and type(user.patch_size) == "number" then
+            local patches = user.image_size / user.patch_size
+            if patches == math.floor(patches) then
+                cfg.num_tokens = patches * patches
+            end
+        end
+
+        -- Compat: num_classes -> output_dim
+        if user.num_classes ~= nil and user.output_dim == nil then cfg.output_dim = user.num_classes end
     end
-    
-    local pipe = Pipeline:new("vit_pipeline", default_config)
+
+    local fallback = { num_tokens = 196, d_model = 768, num_layers = 12, num_heads = 12, mlp_hidden = 3072, output_dim = 1000, dropout = 0.1, causal = false }
+    local cfg = build_config("vit", config, allowed, fallback, legacy_map)
+    local pipe = Pipeline:new("vit_pipeline", cfg)
     
     pipe.build = function(self)
+        ensure_mimir()
         log("🏗️  Construction du pipeline ViT...")
         
         Mimir.Model.create("vit", self.config)
@@ -293,44 +385,16 @@ end
 -- Pipeline GAN (Generative Adversarial Network)
 function Pipeline.GAN(config)
     config = config or {}
-    
-    local default_config = {
-        latent_dim = 100,
-        image_channels = 3,
-        image_size = 64,
-        gen_channels = 64,
-        disc_channels = 64
-    }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
-    end
-    
-    local pipe = Pipeline:new("gan_pipeline", default_config)
+
+    -- Le framework expose un seul "modèle courant" côté Lua (Mimir.Model.*).
+    -- Un pipeline GAN nécessite au minimum 2 modèles simultanés (G + D) et
+    -- n'est donc pas supporté proprement par l'API publique actuelle.
+    local pipe = Pipeline:new("gan_pipeline", {})
     
     pipe.build = function(self)
-        log("🏗️  Construction du pipeline GAN...")
-        
-        -- Construire générateur
-        Mimir.Model.create("generator", self.config)
-        local ok_gen, params_gen = Mimir.Model.build()
-        
-        if ok_gen then
-            self.generator = true
-            log("✓ Générateur: " .. params_gen .. " paramètres")
-        end
-        
-        -- Construire discriminateur
-        Mimir.Model.create("discriminator", self.config)
-        local ok_disc, params_disc = Mimir.Model.build()
-        
-        if ok_disc then
-            self.discriminator = true
-            log("✓ Discriminateur: " .. params_disc .. " paramètres")
-        end
-        
-        self.model = ok_gen and ok_disc
-        return self.model
+        ensure_mimir()
+        log("⚠️  Pipeline GAN non supporté par l'API Lua actuelle")
+        return false, "GAN: nécessite 2 modèles simultanés (non supporté)"
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
@@ -352,7 +416,7 @@ function Pipeline.GAN(config)
         log("🎨 Génération de " .. num_samples .. " images...")
         local images = {}
         for i = 1, num_samples do
-            table.insert(images, Mimir.Model.infer(nil))
+            table.insert(images, Mimir.Model.infer(""))
         end
         return images
     end
@@ -363,23 +427,28 @@ end
 -- Pipeline Diffusion (Stable Diffusion style)
 function Pipeline.Diffusion(config)
     config = config or {}
-    
-    local default_config = {
-        image_channels = 3,
-        image_size = 256,
-        timesteps = 1000,
-        model_channels = 128,
-        attention_resolutions = {16, 8},
-        num_res_blocks = 2
+
+    local allowed = {
+        "image_w", "image_h", "image_c", "time_dim", "hidden_dim",
+        "dropout", "optimizer", "beta1", "beta2", "epsilon", "weight_decay", "min_lr", "decay_rate", "decay_steps", "warmup_steps", "decay_strategy",
     }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
+
+    local function legacy_map(cfg, user)
+        if user.image_size ~= nil and (user.image_w == nil and user.image_h == nil) then
+            cfg.image_w = user.image_size
+            cfg.image_h = user.image_size
+        end
+        if user.image_channels ~= nil and user.image_c == nil then cfg.image_c = user.image_channels end
+        if user.model_channels ~= nil and user.hidden_dim == nil then cfg.hidden_dim = user.model_channels end
+        -- NOTE: timesteps n'est pas mappé automatiquement: la config officielle utilise time_dim (dimension embedding)
     end
-    
-    local pipe = Pipeline:new("diffusion_pipeline", default_config)
+
+    local fallback = { image_w = 256, image_h = 256, image_c = 3, time_dim = 256, hidden_dim = 128 }
+    local cfg = build_config("diffusion", config, allowed, fallback, legacy_map)
+    local pipe = Pipeline:new("diffusion_pipeline", cfg)
     
     pipe.build = function(self)
+        ensure_mimir()
         log("🏗️  Construction du pipeline Diffusion...")
         
         Mimir.Model.create("diffusion", self.config)
@@ -417,21 +486,32 @@ end
 -- Pipeline ResNet (Classification)
 function Pipeline.ResNet(config)
     config = config or {}
-    
-    local default_config = {
-        num_classes = 1000,
-        layers = {3, 4, 6, 3},  -- ResNet-50
-        base_channels = 64,
-        use_bottleneck = true
+
+    local allowed = {
+        "image_w", "image_h", "image_c", "base_channels", "num_classes", "blocks1", "blocks2", "blocks3", "blocks4",
+        "dropout", "optimizer", "beta1", "beta2", "epsilon", "weight_decay", "min_lr", "decay_rate", "decay_steps", "warmup_steps", "decay_strategy",
     }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
+
+    local function legacy_map(cfg, user)
+        if type(user.layers) == "table" then
+            if user.blocks1 == nil then cfg.blocks1 = tonumber(user.layers[1]) or cfg.blocks1 end
+            if user.blocks2 == nil then cfg.blocks2 = tonumber(user.layers[2]) or cfg.blocks2 end
+            if user.blocks3 == nil then cfg.blocks3 = tonumber(user.layers[3]) or cfg.blocks3 end
+            if user.blocks4 == nil then cfg.blocks4 = tonumber(user.layers[4]) or cfg.blocks4 end
+        end
+        if user.input_size ~= nil and (user.image_w == nil and user.image_h == nil) then
+            cfg.image_w = user.input_size
+            cfg.image_h = user.input_size
+        end
+        if user.image_channels ~= nil and user.image_c == nil then cfg.image_c = user.image_channels end
     end
-    
-    local pipe = Pipeline:new("resnet_pipeline", default_config)
+
+    local fallback = { image_w = 224, image_h = 224, image_c = 3, base_channels = 64, num_classes = 1000, blocks1 = 3, blocks2 = 4, blocks3 = 6, blocks4 = 3 }
+    local cfg = build_config("resnet", config, allowed, fallback, legacy_map)
+    local pipe = Pipeline:new("resnet_pipeline", cfg)
     
     pipe.build = function(self)
+        ensure_mimir()
         log("🏗️  Construction du pipeline ResNet...")
         
         Mimir.Model.create("resnet", self.config)
@@ -465,20 +545,26 @@ end
 -- Pipeline MobileNet (Mobile/Edge)
 function Pipeline.MobileNet(config)
     config = config or {}
-    
-    local default_config = {
-        num_classes = 1000,
-        width_mult = 1.0,
-        input_size = 224
+
+    local allowed = {
+        "image_w", "image_h", "image_c", "base_channels", "num_classes",
+        "dropout", "optimizer", "beta1", "beta2", "epsilon", "weight_decay", "min_lr", "decay_rate", "decay_steps", "warmup_steps", "decay_strategy",
     }
-    
-    for k, v in pairs(config) do
-        default_config[k] = v
+
+    local function legacy_map(cfg, user)
+        if user.input_size ~= nil and (user.image_w == nil and user.image_h == nil) then
+            cfg.image_w = user.input_size
+            cfg.image_h = user.input_size
+        end
+        if user.image_channels ~= nil and user.image_c == nil then cfg.image_c = user.image_channels end
     end
-    
-    local pipe = Pipeline:new("mobilenet_pipeline", default_config)
+
+    local fallback = { image_w = 224, image_h = 224, image_c = 3, base_channels = 32, num_classes = 1000 }
+    local cfg = build_config("mobilenet", config, allowed, fallback, legacy_map)
+    local pipe = Pipeline:new("mobilenet_pipeline", cfg)
     
     pipe.build = function(self)
+        ensure_mimir()
         log("🏗️  Construction du pipeline MobileNet...")
         
         Mimir.Model.create("mobilenet", self.config)

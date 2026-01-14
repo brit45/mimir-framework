@@ -8,7 +8,29 @@ json Encoder::to_json() const {
     json j;
     j["dim"] = dim;
     j["vocab_size"] = vocab_size;
-    j["token_embeddings"] = token_embeddings;
+    // Ne pas inclure token_embeddings ici: c'est volumineux et doit être sauvegardé
+    // via les formats binaires (SafeTensors/RawCheckpoint). On garde seulement des métadonnées.
+    j["token_embeddings_size"] = token_embeddings.size();
+    j["magik_prefix_count"] = magik_prefix_count;
+    j["magik_prefix_weight"] = magik_prefix_weight;
+
+    // Snapshot léger: embeddings des ids 0..(N-1) si disponibles.
+    // Utile pour inspection/debug (les poids complets restent dans les tensors).
+    if (!token_embeddings.empty() && dim > 0 && vocab_size > 0) {
+        const int n = std::max(0, std::min(magik_prefix_count, vocab_size));
+        if (n > 0) {
+            json rows = json::array();
+            for (int id = 0; id < n; ++id) {
+                json row = json::array();
+                const size_t base = static_cast<size_t>(id) * static_cast<size_t>(dim);
+                for (int d = 0; d < dim; ++d) {
+                    row.push_back(token_embeddings[base + static_cast<size_t>(d)]);
+                }
+                rows.push_back(row);
+            }
+            j["magik_token_embeddings_snapshot"] = rows;
+        }
+    }
     if (!seq_embedding.empty()) j["seq_embedding"] = seq_embedding;
     if (!mod_embedding.empty()) j["mod_embedding"] = mod_embedding;
     if (!mag_embedding.empty()) j["mag_embedding"] = mag_embedding;
@@ -18,6 +40,9 @@ json Encoder::to_json() const {
 void Encoder::from_json(const json &j) {
     if (j.contains("dim")) dim = j["dim"].get<int>();
     if (j.contains("vocab_size")) vocab_size = j["vocab_size"].get<int>();
+
+    if (j.contains("magik_prefix_count")) magik_prefix_count = j["magik_prefix_count"].get<int>();
+    if (j.contains("magik_prefix_weight")) magik_prefix_weight = j["magik_prefix_weight"].get<float>();
 
     if (j.contains("token_embeddings") && j["token_embeddings"].is_array()) {
         token_embeddings = j["token_embeddings"].get<std::vector<float>>();
@@ -36,6 +61,8 @@ void Encoder::from_json(const json &j) {
     // Cohérence minimale
     if (dim <= 0) throw std::runtime_error("Encoder::from_json: invalid dim");
     if (vocab_size < 0) throw std::runtime_error("Encoder::from_json: invalid vocab_size");
+    if (magik_prefix_count < 0) magik_prefix_count = 0;
+    if (!(magik_prefix_weight > 0.0f)) magik_prefix_weight = 1.0f;
     if (!token_embeddings.empty()) {
         size_t expected = static_cast<size_t>(std::max(0, vocab_size)) * static_cast<size_t>(dim);
         if (expected > 0 && token_embeddings.size() != expected) {
@@ -65,10 +92,46 @@ void Encoder::initRandom(uint64_t seed)
     for (size_t i = 0; i < token_embeddings.size(); ++i) {
         token_embeddings[i] = dist(rng);
     }
-    // init special embeddings
-    seq_embedding.assign(dim, 0.0f);
-    mod_embedding.assign(dim, 0.0f);
-    mag_embedding.assign(dim, 0.0f);
+}
+
+void Encoder::ensureSpecialEmbeddings(uint64_t seed)
+{
+    if (dim <= 0) throw std::runtime_error("Encoder::ensureSpecialEmbeddings: invalid dim");
+    std::mt19937 rng(static_cast<uint32_t>(seed ^ 0xA5A5A5A5u));
+    std::uniform_real_distribution<float> dist(-0.02f, 0.02f);
+
+    auto init_if_empty = [&](std::vector<float>& emb, uint32_t tweak) {
+        if (emb.size() == static_cast<size_t>(dim)) return;
+        emb.assign(static_cast<size_t>(dim), 0.0f);
+        std::mt19937 lrng(rng());
+        lrng.seed(static_cast<uint32_t>(seed ^ tweak));
+        for (int d = 0; d < dim; ++d) {
+            emb[static_cast<size_t>(d)] = dist(lrng);
+        }
+    };
+
+    init_if_empty(seq_embedding, 0x13579BDFu);
+    init_if_empty(mod_embedding, 0x2468ACE0u);
+    init_if_empty(mag_embedding, 0x0F0F0F0Fu);
+}
+
+void Encoder::sgdUpdateSpecialEmbeddings(const std::vector<float>& grad_text, float lr,
+                                        bool update_seq, bool update_mod, bool update_mag)
+{
+    if (lr == 0.0f) return;
+    if (grad_text.size() != static_cast<size_t>(dim)) return;
+
+    const auto apply = [&](std::vector<float>& emb) {
+        if (emb.size() != static_cast<size_t>(dim)) return;
+        #pragma omp simd
+        for (int d = 0; d < dim; ++d) {
+            emb[static_cast<size_t>(d)] -= lr * grad_text[static_cast<size_t>(d)];
+        }
+    };
+
+    if (update_seq) apply(seq_embedding);
+    if (update_mod) apply(mod_embedding);
+    if (update_mag) apply(mag_embedding);
 }
 
 void Encoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
@@ -90,31 +153,39 @@ void Encoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
 
 void Encoder::setMagicFromToken(const MagicToken & /*mt*/)
 {
-    // Best-effort: initialize mag_embedding to zeros (user can override via setMagEmbedding)
-    mag_embedding.assign(static_cast<size_t>(dim), 0.0f);
-    // If MagicToken structure is richer, user may call setMagEmbedding after constructing the mapped vector.
+    // Best-effort: pas d'initialisation implicite. L'appelant peut définir via setMagEmbedding.
+    mag_embedding.clear();
 }
 
 void Encoder::setSeqEmbedding(const std::vector<float> &v)
 {
+    if (v.empty()) {
+        seq_embedding.clear();
+        return;
+    }
     seq_embedding.assign(static_cast<size_t>(dim), 0.0f);
-    if (v.empty()) return;
     size_t n = std::min<size_t>(v.size(), static_cast<size_t>(dim));
     std::copy_n(v.data(), n, seq_embedding.data());
 }
 
 void Encoder::setModEmbedding(const std::vector<float> &v)
 {
+    if (v.empty()) {
+        mod_embedding.clear();
+        return;
+    }
     mod_embedding.assign(static_cast<size_t>(dim), 0.0f);
-    if (v.empty()) return;
     size_t n = std::min<size_t>(v.size(), static_cast<size_t>(dim));
     std::copy_n(v.data(), n, mod_embedding.data());
 }
 
 void Encoder::setMagEmbedding(const std::vector<float> &v)
 {
+    if (v.empty()) {
+        mag_embedding.clear();
+        return;
+    }
     mag_embedding.assign(static_cast<size_t>(dim), 0.0f);
-    if (v.empty()) return;
     size_t n = std::min<size_t>(v.size(), static_cast<size_t>(dim));
     std::copy_n(v.data(), n, mag_embedding.data());
 }
@@ -132,22 +203,24 @@ std::vector<float> Encoder::encode(const std::vector<int> &tokens, uint32_t /*se
         return out;
     }
 
-    size_t count = 0;
-    for (int id : tokens) {
-        if (id < 0) continue;
+    float weight_sum = 0.0f;
+    for (size_t pos = 0; pos < tokens.size(); ++pos) {
+        const int id = tokens[pos];
+        if (id <= 0) continue; // PAD(0) + ids négatifs
         if (static_cast<size_t>(id) >= static_cast<size_t>(vocab_size)) continue;
+
+        const float w = (static_cast<int>(pos) < magik_prefix_count && magik_prefix_weight > 0.0f) ? magik_prefix_weight : 1.0f;
         const float *row = token_embeddings.data() + (static_cast<size_t>(id) * static_cast<size_t>(dim));
-        #pragma omp parallel for if(dim > 128) schedule(static)
+        #pragma omp simd
         for (int d = 0; d < dim; ++d) {
-            #pragma omp atomic
-            out[static_cast<size_t>(d)] += row[static_cast<size_t>(d)];
+            out[static_cast<size_t>(d)] += row[static_cast<size_t>(d)] * w;
         }
-        ++count;
+        weight_sum += w;
     }
 
-    if (count > 0) {
-        float inv = 1.0f / float(count);
-        #pragma omp parallel for if(dim > 128) schedule(static)
+    if (weight_sum > 0.0f) {
+        float inv = 1.0f / weight_sum;
+        #pragma omp simd
         for (int i = 0; i < dim; ++i) out[i] *= inv;
     }
 
@@ -174,7 +247,7 @@ void Encoder::trainOnTextTokens(const std::vector<int> &token_ids, const std::ve
         if (id <= 4) continue;
         if (static_cast<size_t>(id) >= static_cast<size_t>(vocab_size)) continue;
         float *row = token_embeddings.data() + (static_cast<size_t>(id) * static_cast<size_t>(dim));
-        #pragma omp parallel for if(dim > 128) schedule(static)
+        #pragma omp simd
         for (int d = 0; d < dim; ++d) {
             float err = target[static_cast<size_t>(d)] - row[static_cast<size_t>(d)];
             row[static_cast<size_t>(d)] += lr * err;

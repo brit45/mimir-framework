@@ -3,12 +3,12 @@
 ## ✅ Résumé des Modifications
 
 ### Fichiers Modifiés
-1. **[src/Layers.hpp](../src/Layers.hpp#L403-L519)** - Implémentation principale de Conv2D
-2. **[src/Model.cpp](../src/Model.cpp#L934-L941)** - Simplification de computeConv2D
+1. **[src/Layers.hpp](../../src/Layers.hpp#L403-L519)** - Implémentation principale de Conv2D
+2. **[src/Model.cpp](../../src/Model.cpp#L934-L941)** - Simplification de computeConv2D
 
 ### Scripts de Test Créés
-1. **[scripts/test_conv2d_simple.lua](../scripts/test_conv2d_simple.lua)** - Test unitaire simple
-2. **[scripts/test_conv2d.lua](../scripts/test_conv2d.lua)** - Test complet avec statistiques
+1. **[scripts/test_conv2d_simple.lua](../../scripts/tests/test_conv2d_simple.lua)** - Test unitaire simple
+2. **[scripts/test_conv2d.lua](../../scripts/tests/test_conv2d.lua)** - Test complet avec statistiques
 
 ## 🚀 Améliorations Apportées
 
@@ -134,7 +134,7 @@ local output = Mimir.Model.forward(input)
 
 ## 📚 Documentation
 
-Voir [CONV2D_IMPROVEMENTS.md](CONV2D_IMPROVEMENTS.md) pour plus de détails techniques.
+Voir [11-Conv2D-Improvements.md](11-Conv2D-Improvements.md) pour plus de détails techniques.
 
 ## 🎊 Conclusion
 

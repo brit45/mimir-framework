@@ -298,18 +298,18 @@ $ ./bin/mimir --lua scripts/tests/test_clean_system.lua
 
 ### Guides
 - [CLEANUP_COMPLETE.md](CLEANUP_COMPLETE.md) - Ce document
-- [HOWTO_ADD_LAYER.md](HOWTO_ADD_LAYER.md) - Guide pour ajouter un layer
-- [LAYERS_REFERENCE.md](LAYERS_REFERENCE.md) - Référence des 67 layers
-- [PERFORMANCE.md](PERFORMANCE.md) - Benchmarks et optimisations
+- [HOWTO_ADD_LAYER.md](../06-Contributing/HOWTO_ADD_LAYER.md) - Guide pour ajouter un layer
+- [LAYERS_REFERENCE.md](../03-API-Reference/LAYERS_REFERENCE.md) - Référence des 67 layers
+- [PERFORMANCE.md](../05-Advanced/PERFORMANCE.md) - Benchmarks et optimisations
 
 ### Code
-- [src/LayerTypes.hpp](../src/LayerTypes.hpp) - Enum system (489 lignes)
-- [src/LayerOps.hpp](../src/LayerOps.hpp) - Implementations (642 lignes)
-- [src/Layers.hpp](../src/Layers.hpp) - Layer struct étendu
-- [src/Model.cpp](../src/Model.cpp) - Switch/case dispatch (lignes 1793-2067)
+- [src/LayerTypes.hpp](../../src/LayerTypes.hpp) - Enum system (489 lignes)
+- [src/LayerOps.hpp](../../src/LayerOps.hpp) - Implementations (642 lignes)
+- [src/Layers.hpp](../../src/Layers.hpp) - Layer struct étendu
+- [src/Model.cpp](../../src/Model.cpp) - Switch/case dispatch (lignes 1793-2067)
 
 ### Tests
-- [scripts/tests/test_clean_system.lua](../scripts/tests/test_clean_system.lua) - Tests de validation
+- [scripts/tests/test_clean_system.lua](../../scripts/tests/test_clean_system.lua) - Tests de validation
 
 ---
 

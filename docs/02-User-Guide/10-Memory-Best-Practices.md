@@ -370,7 +370,7 @@ Mímir affiche un message clair :
 - [MEMORY_SAFETY_FIXES.md](../MEMORY_SAFETY_FIXES.md) - Détails techniques des correctifs
 - [REBUILD_AND_TEST.md](../REBUILD_AND_TEST.md) - Instructions de compilation
 - [README.md](../README.md) - Documentation générale du framework
-- [scripts/validate_memory_fixes.lua](../scripts/validate_memory_fixes.lua) - Script de test complet
+- [scripts/validate_memory_fixes.lua](../../scripts/tests/validate_memory_fixes.lua) - Script de test complet
 
 ---
 

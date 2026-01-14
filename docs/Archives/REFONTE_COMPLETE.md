@@ -15,7 +15,7 @@ J'ai analysé et préparé une refonte complète du framework Mímir pour le ren
 ## 📦 Livrables Créés
 
 ### 1. **Documentation d'Audit** ✅
-- **[docs/OP_COVERAGE.md](docs/OP_COVERAGE.md)**: Inventaire complet des 68 layers
+- **[docs/OP_COVERAGE.md](../04-Architecture-Internals/OP_COVERAGE.md)**: Inventaire complet des 68 layers
   - Tableau de couverture par catégorie
   - Status détaillé (forward/backward/alloc)
   - Identification des 24 pass-through
@@ -23,7 +23,7 @@ J'ai analysé et préparé une refonte complète du framework Mímir pour le ren
   - Plan d'action priorisé
 
 ### 2. **Infrastructure Mémoire Stricte** ✅
-- **[src/RuntimeAllocator.hpp](src/RuntimeAllocator.hpp)**: Gestionnaire mémoire
+- **[src/RuntimeAllocator.hpp](../../src/RuntimeAllocator.hpp)**: Gestionnaire mémoire
   - API `allocate_tensor()` / `allocate_buffer()`
   - RAII handles (auto-release)
   - Intégration MemoryGuard
@@ -31,7 +31,7 @@ J'ai analysé et préparé une refonte complète du framework Mímir pour le ren
   - Macros `RUNTIME_CHECK` / `RUNTIME_ERROR_STRICT`
 
 ### 3. **Implémentations Layers Manquants** ✅
-- **[src/LayerOpsExt.hpp](src/LayerOpsExt.hpp)**: 34 layers implémentés
+- **[src/LayerOpsExt.hpp](../../src/LayerOpsExt.hpp)**: 34 layers implémentés
   - **Activations**: LeakyReLU, Mish, Softplus, HardSigmoid, HardSwish
   - **Element-wise**: Subtract, Divide
   - **Shape ops**: Squeeze, Unsqueeze, Chunk, Stack
@@ -52,7 +52,7 @@ J'ai analysé et préparé une refonte complète du framework Mímir pour le ren
   - Prêt à intégrer dans Model.cpp
 
 ### 5. **Guide de Migration** ✅
-- **[docs/MIGRATION_STRICT_MODE.md](docs/MIGRATION_STRICT_MODE.md)**:
+- **[docs/MIGRATION_STRICT_MODE.md](../05-Advanced/MIGRATION_STRICT_MODE.md)**:
   - Plan détaillé en 5 phases
   - Exemples de code avant/après
   - Checklist exhaustive (39 items)

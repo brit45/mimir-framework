@@ -29,10 +29,10 @@
 ## 💻 Exemples et Scripts
 
 ### Scripts Lua
-- **[scripts/test_lua_api.lua](scripts/test_lua_api.lua)** - Tests complets de l'API (10 tests)
-- **[scripts/example_simple.lua](scripts/example_simple.lua)** - Exemple minimal de Transformer
-- **[scripts/example_gpt.lua](scripts/example_gpt.lua)** - Génération de texte avec GPT
-- **[scripts/example_training.lua](scripts/example_training.lua)** - Boucle d'entraînement complète
+- **[scripts/test_lua_api.lua](../../scripts/tests/test_lua_api.lua)** - Tests complets de l'API (10 tests)
+- **[scripts/example_simple.lua](../../scripts/examples/example_simple.lua)** - Exemple minimal de Transformer
+- **[scripts/example_gpt.lua](../../scripts/examples/example_gpt.lua)** - Génération de texte avec GPT
+- **[scripts/example_training.lua](../../scripts/examples/example_training.lua)** - Boucle d'entraînement complète
 
 ### Exécution
 ```bash
@@ -43,7 +43,7 @@
 
 ## 🛠️ Développement
 
-- **[CONTRIBUTING.md](../../CONTRIBUTING.md)** - Guide de contribution au projet
+- **[CONTRIBUTING.md](../../build/_deps/googletest-src/CONTRIBUTING.md)** - Guide de contribution au projet
 - **[CHANGELOG.md](../../CHANGELOG.md)** - Historique des versions et changements
 - **[docs/06-Contributing/05-Roadmap.md](05-Roadmap.md)** - Roadmap et features à venir
 

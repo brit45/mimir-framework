@@ -61,13 +61,15 @@ struct Optimizer {
     
     // Calcule le learning rate actuel avec decay
     float getCurrentLR() const {
-        if (step < warmup_steps) {
-            // Warmup linéaire
-            return initial_lr * (static_cast<float>(step) / warmup_steps);
+        const size_t wu = warmup_steps > 0 ? static_cast<size_t>(warmup_steps) : 0ULL;
+        if (wu > 0 && step < wu) {
+            // Warmup linéaire (évite LR=0 au tout premier step)
+            return initial_lr * (static_cast<float>(step + 1) / static_cast<float>(wu));
         }
         
-        int effective_step = step - warmup_steps;
+        int effective_step = static_cast<int>(step) - warmup_steps;
         int effective_total = total_steps - warmup_steps;
+        if (effective_total <= 0) effective_total = 1;
         
         switch (decay_strategy) {
             case LRDecayStrategy::NONE:
@@ -134,7 +136,12 @@ public:
     
     // Nouveau forward/backward pass complet
     std::vector<float> forwardPass(const std::vector<float> &input, bool training = true);
+    // Nouveau: forward en entrée tokens int (Embedding consomme des ids)
+    std::vector<float> forwardPass(const std::vector<int> &input_ids, bool training = true);
     Gradients backwardPass(const std::vector<float> &loss_gradient);
+    // Gradient d'entrée capturé au dernier backward (si l'architecture route "__input__")
+    bool hasLastInputGradient() const { return has_last_input_gradient_; }
+    const std::vector<float>& getLastInputGradient() const { return last_input_gradient_; }
     void zeroGradients();  // Réinitialise tous les gradients à zéro
     Gradients getGradients() const;  // Récupère les gradients actuels
     float computeLoss(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
@@ -310,6 +317,10 @@ public:
     // Configuration du modèle (pour dimensionnement dynamique des layers)
     json modelConfig;
 
+    // Dernier gradient d'entrée (debug/usage avancé)
+    std::vector<float> last_input_gradient_;
+    bool has_last_input_gradient_ = false;
+
     static void conv2d_same(const std::vector<float> &in, std::vector<float> &out, int W, int H, const std::vector<float> &kernel, int ksize);
 
     static inline void add_inplace(std::vector<float> &a, const std::vector<float> &b)
@@ -402,7 +413,15 @@ public:
     
     // Activations du forward pass (pour le backward)
     struct ForwardState {
+        // Legacy: premier input seulement (conservé pour compatibilité/debug)
         std::vector<std::vector<float>> layer_inputs;
+
+        // Multi-input: liste des inputs (copiés) par layer, dans l'ordre de layer.inputs
+        std::vector<std::vector<std::vector<float>>> layer_inputs_multi;
+
+        // Multi-input: noms des inputs utilisés au forward (après défaut "x")
+        std::vector<std::vector<std::string>> layer_input_names;
+
         std::vector<std::vector<float>> layer_outputs;
         std::vector<std::vector<float>> activations;
         std::vector<float> final_output;
@@ -410,6 +429,8 @@ public:
         
         void clear() {
             layer_inputs.clear();
+            layer_inputs_multi.clear();
+            layer_input_names.clear();
             layer_outputs.clear();
             activations.clear();
             final_output.clear();
@@ -424,20 +445,30 @@ public:
     
     // TensorStore : stockage nommé des tensors pour routing
     std::unordered_map<std::string, std::vector<float>> tensor_store;
+    // Nouveau: TensorStore d'IDs (int) pour layers type Embedding
+    std::unordered_map<std::string, std::vector<int>> tensor_store_int;
     
     // Helper pour récupérer un tensor (avec erreur explicite si manquant)
     const std::vector<float>& getTensor(const std::string& name) const;
     std::vector<float>& getTensorMutable(const std::string& name);
+
+    const std::vector<int>& getTensorInt(const std::string& name) const;
+    std::vector<int>& getTensorIntMutable(const std::string& name);
     
     // Helper pour stocker un tensor
     void storeTensor(const std::string& name, const std::vector<float>& data);
     void storeTensor(const std::string& name, std::vector<float>&& data);
+
+    void storeTensorInt(const std::string& name, const std::vector<int>& data);
+    void storeTensorInt(const std::string& name, std::vector<int>&& data);
     
     // Debug : liste tous les tensors disponibles
     std::vector<std::string> getAvailableTensors() const;
+    std::vector<std::string> getAvailableIntTensors() const;
     
     // Clear tensor store (appelé au début de chaque forward)
     void clearTensorStore();
+    void clearTensorStoreInt();
     
     // Helper pour récupérer un layer par nom
     Layer* getLayerByName(const std::string& name);
@@ -456,6 +487,8 @@ protected:
     // =============================
     // STRICT MODE: Memory Management
     // =============================
-    size_t max_ram_mb_ = 4096;  // 4 GB par défaut
+    // 0 => suivre la limite MemoryGuard déjà configurée (ex: via Lua)
+    // IMPORTANT: éviter toute ré-assignation implicite après build/allocation.
+    size_t max_ram_mb_ = 0;
     // MemoryGuard est un singleton, on utilise une référence via instance()
 };

@@ -53,34 +53,34 @@ Tous les scripts suivants ont été mis à jour avec :
 
 #### Scripts Principaux
 
-4. **[scripts/example_simple.lua](scripts/example_simple.lua)**
+4. **[scripts/example_simple.lua](../../scripts/examples/example_simple.lua)**
    - Configuration allocateur ajoutée au début
    - Vérification du succès d'allocation
    - Messages d'erreur clairs avec solutions
 
-5. **[scripts/example_training.lua](scripts/example_training.lua)**
+5. **[scripts/example_training.lua](../../scripts/examples/example_training.lua)**
    - Commentaire "OBLIGATOIRE!" sur la configuration
    - Explication de chaque paramètre
    - Vérification hardware améliorée
 
-6. **[scripts/example_gpt.lua](scripts/example_gpt.lua)**
+6. **[scripts/example_gpt.lua](../../scripts/examples/example_gpt.lua)**
    - Configuration avec commentaires explicatifs
    - Vérification allocation avec messages clairs
    - Solutions proposées en cas d'erreur
 
-7. **[scripts/demo_diffusion.lua](scripts/demo_diffusion.lua)**
+7. **[scripts/demo_diffusion.lua](../../scripts/demos/demo_diffusion.lua)**
    - Configuration système au début
    - Commentaires sur l'importance de la limite
    - Vérification allocation avec exit propre
 
-8. **[scripts/test_flux.lua](scripts/test_flux.lua)**
+8. **[scripts/test_flux.lua](../../scripts/tests/test_flux.lua)**
    - Configuration allocateur ajoutée (manquait!)
    - Hardware check ajouté
    - Logging amélioré
 
 #### Nouveau Template
 
-9. **[scripts/template_new_model.lua](scripts/template_new_model.lua)** (NOUVEAU)
+9. **[scripts/template_new_model.lua](../../scripts/templates/template_new_model.lua)** (NOUVEAU)
    - Template complet en 9 étapes
    - Commentaires exhaustifs sur chaque étape
    - Exemples de configurations réalistes
@@ -184,14 +184,14 @@ print(string.format("✓ Paramètres alloués: %d (%.2f MB)", params, memory_mb)
 ## 🔗 Navigation Documentation
 
 ### Pour les Débutants
-1. Lire [README.md](README.md) - Vue d'ensemble
-2. Utiliser [scripts/template_new_model.lua](scripts/template_new_model.lua) - Template prêt à l'emploi
+1. Lire [README.md](../../README.md) - Vue d'ensemble
+2. Utiliser [scripts/template_new_model.lua](../../scripts/templates/template_new_model.lua) - Template prêt à l'emploi
 3. Consulter [docs/MEMORY_BEST_PRACTICES.md](docs/MEMORY_BEST_PRACTICES.md) - Guide détaillé
 
 ### Pour les Développeurs
 1. Lire [MEMORY_SAFETY_FIXES.md](../../MEMORY_SAFETY_FIXES.md) - Détails techniques
 2. Consulter [docs/02-User-Guide/10-Memory-Best-Practices.md](../02-User-Guide/10-Memory-Best-Practices.md) - Cas d'usage avancés
-3. Étudier [scripts/validate_memory_fixes.lua](scripts/validate_memory_fixes.lua) - Tests complets
+3. Étudier [scripts/validate_memory_fixes.lua](../../scripts/tests/validate_memory_fixes.lua) - Tests complets
 
 ### En Cas de Problème
 1. [docs/02-User-Guide/10-Memory-Best-Practices.md](../02-User-Guide/10-Memory-Best-Practices.md) - Section "Debugging"

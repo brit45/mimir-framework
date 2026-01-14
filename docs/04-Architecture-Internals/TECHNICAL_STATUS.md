@@ -451,17 +451,17 @@ docs/
 
 ### Documents Principaux
 
-- **[README.md](README.md)** - Vue d'ensemble et quickstart
+- **[README.md](../../README.md)** - Vue d'ensemble et quickstart
 - **[TECHNICAL_STATUS.md](TECHNICAL_STATUS.md)** - Ce document
-- **[CHANGELOG.md](CHANGELOG.md)** - Historique des versions
-- **[docs/00-INDEX.md](docs/00-INDEX.md)** - Index complet documentation
-- **[docs/LAYERS_REFERENCE.md](docs/LAYERS_REFERENCE.md)** - Référence layers
-- **[docs/SAVE_LOAD.md](docs/SAVE_LOAD.md)** - Guide sérialisation
+- **[CHANGELOG.md](../../CHANGELOG.md)** - Historique des versions
+- **[docs/00-INDEX.md](../00-INDEX.md)** - Index complet documentation
+- **[docs/LAYERS_REFERENCE.md](../03-API-Reference/LAYERS_REFERENCE.md)** - Référence layers
+- **[docs/SAVE_LOAD.md](docs/01-Getting-Started/05-Save-Load.md)** - Guide sérialisation
 
 ### Guides de Migration
 
-- **[LEGACY_CLEANUP_COMPLETE.md](LEGACY_CLEANUP_COMPLETE.md)** - Suppression code legacy
-- **[docs/MIGRATION_STRICT_MODE.md](docs/MIGRATION_STRICT_MODE.md)** - Migration strict mode
+- **[LEGACY_CLEANUP_COMPLETE.md](../Archives/LEGACY_CLEANUP_COMPLETE.md)** - Suppression code legacy
+- **[docs/MIGRATION_STRICT_MODE.md](../05-Advanced/MIGRATION_STRICT_MODE.md)** - Migration strict mode
 
 ---
 

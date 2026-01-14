@@ -425,10 +425,10 @@ Le système accepte plusieurs variantes pour chaque type:
 
 ## 📚 Ressources
 
-- **Guide d'ajout:** [HOWTO_ADD_LAYER.md](HOWTO_ADD_LAYER.md)
-- **Implémentations:** [src/LayerOps.hpp](../src/LayerOps.hpp)
-- **Types:** [src/LayerTypes.hpp](../src/LayerTypes.hpp)
-- **Dispatch:** [src/Model.cpp](../src/Model.cpp) (ligne ~1850)
+- **Guide d'ajout:** [HOWTO_ADD_LAYER.md](../06-Contributing/HOWTO_ADD_LAYER.md)
+- **Implémentations:** [src/LayerOps.hpp](../../src/LayerOps.hpp)
+- **Types:** [src/LayerTypes.hpp](../../src/LayerTypes.hpp)
+- **Dispatch:** [src/Model.cpp](../../src/Model.cpp) (ligne ~1850)
 
 ---
 

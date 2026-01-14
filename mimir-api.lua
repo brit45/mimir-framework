@@ -1,7 +1,7 @@
 ---@meta
 ---@version 2.3.0
 ---@author <bri45> for "Mímir Framework"
----@date 28 décembre 2025 (dernière sync)
+---@date 12 janvier 2026 (dernière sync)
 ---@diagnostic disable: missing-return, unused-local, unused-vararg, duplicate-doc-field, redundant-parameter
 
 --=============================================================================
@@ -12,7 +12,7 @@
 --
 -- ⚠️  IMPORTANT: Ce fichier est synchronisé avec src/LuaScripting.cpp
 --    Toute modification de l'API C++ doit être reflétée ici.
---    Dernière synchronisation: 28 décembre 2025 - 16 modules, 122+ fonctions
+--    Dernière synchronisation: 12 janvier 2026 - 16 modules, 122+ fonctions
 --
 -- Objectifs :
 --  • Autocomplétion IDE, signatures, types, docstrings
@@ -35,9 +35,7 @@
 -- Historique v2.0.0 :
 --  • MemoryGuard API (limite stricte 10 GB par défaut)
 --  • Mimir.Allocator.configure() pour configuration mémoire (OBLIGATOIRE)
---  • FluxModel API complète (diffusion text-to-image avec VAE)
 --  • Modes train()/eval() pour tous les modèles
---  • Support complet 8 architectures (UNet, VAE, ViT, GAN, Diffusion, Transformer, ResNet, MobileNet)
 --  • API Mimir.Htop et Mimir.Viz pour monitoring temps réel
 --
 -- Remarques :
@@ -58,8 +56,6 @@ Mimir = {}
 ---@class Mimir
 ---@field Model MimirModelAPI
 ---@field Architectures MimirArchitecturesAPI
----@field Flux MimirFluxAPI
----@field FluxModel MimirFluxModelAPI
 ---@field Layers MimirLayersAPI
 ---@field Tokenizer MimirTokenizerAPI
 ---@field Dataset MimirDatasetAPI
@@ -85,18 +81,17 @@ Mimir = {}
 ---@alias TokenText string
 
 ---@alias ModelType
----| "encoder"
----| "decoder"
+---| "ponyxl_ddpm"
+---| "basic_mlp"
 ---| "transformer"
----| "unet"
----| "vae"
 ---| "vit"
----| "gan"
----| "generator"
----| "discriminator"
----| "diffusion"
+---| "vae"
 ---| "resnet"
+---| "unet"
 ---| "mobilenet"
+---| "vgg16"
+---| "vgg19"
+---| "diffusion"
 
 ---@alias ActivationType
 ---| "relu"
@@ -114,11 +109,7 @@ Mimir = {}
 ---| "uniform"
 ---| "zeros"
 
----@alias HardwareBackend
----| "cpu"
----| "opencl"
----| "vulkan"
----| "auto"
+---@alias HardwareAccelMode boolean
 
 ---@alias KeywordList string[]
 
@@ -127,97 +118,119 @@ Mimir = {}
 --=============================================================================
 
 ---@class ModelConfig
----@field vocab_size? int         @Taille vocabulaire (encoder/decoder/transformer)
----@field embed_dim? int          @Dimension embeddings
----@field num_layers? int         @Nombre de couches transformer
----@field num_heads? int          @Nombre de têtes attention
----@field d_ff? int               @Dimension FFN
----@field max_seq_len? int        @Longueur max de séquence
----@field dropout? float          @Dropout (0..1)
----@field input_dim? int          @Dimension entrée (certains modèles)
----@field num_classes? int        @Nombre de classes (classif)
----@field image_channels? int     @Canaux image (CV)
----@field image_size? int         @Résolution image (CV)
+---@field type? ModelType @Injecté côté C++ lors de `Model.create()` (metadata)
+---@field dropout? float @Dropout générique (si supporté par l'architecture)
+---@field optimizer? string @"sgd"|"adam"|"adamw" (utilisé par `Model.train()`)
+---@field beta1? float
+---@field beta2? float
+---@field epsilon? float
+---@field weight_decay? float
+---@field min_lr? float
+---@field decay_rate? float
+---@field decay_steps? int
+---@field warmup_steps? int
+---@field decay_strategy? string @"none"|"cosine"|"step"|"exponential"|"linear"
 
----@class UNetConfig
----@field input_channels? int
----@field output_channels? int
----@field base_channels? int
----@field num_levels? int
----@field blocks_per_level? int
----@field use_attention? bool
----@field use_residual? bool
----@field dropout? float
-
----@class VAEConfig
+---@class BasicMLPConfig: ModelConfig
 ---@field input_dim? int
----@field latent_dim? int
----@field embed_dim? int           @Alias de input_dim
----@field encoder_hidden? int[]    @Couches cachées encoder
----@field decoder_hidden? int[]    @Couches cachées decoder
----@field activation? string       @"relu"|"gelu"|"tanh"|"sigmoid"|"swish"|"silu"
----@field kl_beta? number          @Poids KL (β-VAE)
----@field use_mean_in_infer? boolean @Si vrai: z=mu en infer
----@field seed? integer            @Seed sampling
+---@field hidden_dim? int
+---@field output_dim? int
+---@field hidden_layers? int
 
----@class ViTConfig
----@field image_size? int
----@field patch_size? int
----@field embed_dim? int
----@field num_layers? int
----@field num_heads? int
----@field mlp_ratio? float
----@field num_classes? int
-
----@class GANConfig
----@field latent_dim? int
----@field image_channels? int
----@field resolution? int
----@field gen_channels? int
----@field disc_channels? int
-
----@class DiffusionConfig
----@field image_channels? int
----@field resolution? int
----@field model_channels? int
----@field num_res_blocks? int
----@field use_attention? bool
----@field dropout? float
----@field use_bottleneck? bool
-
----@class TransformerConfig
+---@class TransformerConfig: ModelConfig
+---@field seq_len? int
+---@field d_model? int
 ---@field vocab_size? int
----@field embed_dim? int
+---@field padding_idx? int
 ---@field num_layers? int
 ---@field num_heads? int
----@field d_ff? int
----@field max_seq_len? int
----@field dropout? float
+---@field mlp_hidden? int
+---@field output_dim? int
+---@field causal? bool
 
----@class ResNetConfig
+---@class ViTConfig: ModelConfig
+---@field num_tokens? int @Nombre de tokens/patches (entrée = num_tokens*d_model)
+---@field d_model? int
+---@field num_layers? int
+---@field num_heads? int
+---@field mlp_hidden? int
+---@field output_dim? int
+---@field causal? bool
+
+---@class VAEConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field latent_dim? int
+---@field hidden_dim? int
+
+---@class ResNetConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field base_channels? int
 ---@field num_classes? int
----@field input_channels? int
+---@field blocks1? int
+---@field blocks2? int
+---@field blocks3? int
+---@field blocks4? int
 
----@class MobileNetConfig
+---@class UNetConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field base_channels? int
+---@field depth? int
+
+---@class MobileNetConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field base_channels? int
 ---@field num_classes? int
----@field width_mult? float
 
----@class FluxConfig
----@field image_resolution? int @Résolution des images (défaut: 256)
----@field latent_channels? int @Canaux de l'espace latent (défaut: 4)
----@field latent_resolution? int @Résolution de l'espace latent (défaut: 32)
----@field vae_base_channels? int @Canaux de base VAE (défaut: 128)
----@field vae_channel_mult? int[] @Multiplicateurs de canaux VAE (ex: {1,2,4,4})
----@field num_res_blocks? int @Nombre de blocs résiduels (défaut: 2)
----@field vocab_size? int @Taille du vocabulaire (défaut: 50000)
----@field text_max_length? int @Longueur max du texte (défaut: 77)
----@field text_embed_dim? int @Dimension embeddings texte (défaut: 768)
----@field transformer_dim? int @Dimension transformer (défaut: 768)
----@field num_transformer_blocks? int @Nombre de blocs transformer (défaut: 12)
----@field num_attention_heads? int @Nombre de têtes attention (défaut: 12)
----@field mlp_ratio? float @Ratio MLP (défaut: 4.0)
----@field timestep_embed_dim? int @Dimension embedding timestep (défaut: 256)
----@field num_diffusion_steps? int @Nombre de steps diffusion (défaut: 1000)
+---@class VGG16Config: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field base_channels? int
+---@field num_classes? int
+---@field fc_hidden? int
+
+---@class VGG19Config: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field base_channels? int
+---@field num_classes? int
+---@field fc_hidden? int
+
+---@class DiffusionConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field time_dim? int
+---@field hidden_dim? int
+
+---@class PonyXLDDPMConfig: ModelConfig
+---@field d_model? int
+---@field seq_len? int
+---@field max_vocab? int
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field hidden_dim? int
+---@field latent_dim? int
+---@field blur_levels? int
+---@field cfg_dropout_prob? float
+---@field cond_image_dropout_prob? float
+---@field cond_image_dropout_lr_scale? float
+---@field cond_image_dropout_noise_std? float
+
+-- NOTE: les schémas ci-dessus reflètent le registre C++ (ModelArchitectures::defaultConfig).
+-- Pour obtenir la config exacte à jour côté runtime:
+--   local cfg = Mimir.Architectures.default_config("transformer")
+--   local ok = Mimir.Model.create("transformer", cfg)
 
 --=============================================================================
 -- Stats / Structs
@@ -291,15 +304,18 @@ Mimir = {}
 ---@class MimirModelAPI
 Mimir.Model = {}
 
----Créer un modèle (définit le type + stocke une config pour build()).
----Le modèle réel est construit par `Mimir.Model.build()`.
+---Créer un modèle via le registre d'architectures (C++).
+---Le modèle est construit via le registre C++ immédiatement.
+---Note: `Mimir.Model.create()` ne fait plus allocate/init automatiquement.
+---Utilisez ensuite `Mimir.Model.allocate_params()` et `Mimir.Model.init_weights()` si nécessaire.
 ---@param model_type ModelType
----@param config? ModelConfig|UNetConfig|VAEConfig|ViTConfig|GANConfig|DiffusionConfig|TransformerConfig|ResNetConfig|MobileNetConfig|table
+---@param config? ModelConfig|BasicMLPConfig|TransformerConfig|ViTConfig|VAEConfig|ResNetConfig|UNetConfig|MobileNetConfig|VGG16Config|VGG19Config|DiffusionConfig|PonyXLDDPMConfig|table
 ---@return boolean ok
 ---@return string? err
 function Mimir.Model.create(model_type, config) end
 
----Construire le modèle courant (à partir de model_type + config passés à create()).
+---[COMPAT] Reconstruit le modèle courant via le registre.
+---Préférez `Mimir.Model.create(type, cfg)`.
 ---Retour: ok + nombre de paramètres (scalars).
 ---@return boolean ok
 ---@return integer? params
@@ -338,6 +354,7 @@ function Mimir.Model.load(dir) end
 
 ---Allouer explicitement les paramètres (si supporté).
 ---@return boolean ok
+---@return integer? params @Nombre total de paramètres alloués (si ok)
 ---@return string? err
 function Mimir.Model.allocate_params() end
 
@@ -388,7 +405,7 @@ function Mimir.Model.set_layer_io(layer_name, inputs, output) end
 
 ---Forward pass (si exposé par l'implémentation).
 ---Mode training activé par défaut pour permettre le backward pass.
----@param input TokenIds|string|table|float[] @Données d'entrée
+---@param input TokenIds|float[] @Données d'entrée (table d'entiers -> chemin token ids, table de floats -> chemin float)
 ---@param training? bool @Mode training (défaut: true) pour calculer les gradients
 ---@return float[]|nil @Sortie du modèle
 ---@return string? err
@@ -413,319 +430,38 @@ function Mimir.Model.get_gradients() end
 
 ---Step optimiseur (si exposé). Le LR peut être transmis.
 ---@param learning_rate number
+---@param opt_type? string @"sgd"|"adam"|"adamw" (défaut: "adamw")
 ---@return boolean ok
 ---@return string? err
-function Mimir.Model.optimizer_step(learning_rate) end
+function Mimir.Model.optimizer_step(learning_rate, opt_type) end
 
 ---Choisir backend hardware (CPU/OpenCL/Vulkan/Auto) si supporté.
----@param backend HardwareBackend
+---@param enable HardwareAccelMode @true pour activer l'accélération (si dispo), false pour forcer CPU
 ---@return boolean ok
 ---@return string? err
-function Mimir.Model.set_hardware(backend) end
+function Mimir.Model.set_hardware(enable) end
 
 ---Retourne les capacités détectées (AVX2/FMA/F16C/BMI2).
 ---@return HardwareCaps caps
 function Mimir.Model.hardware_caps() end
 
 --=============================================================================
--- Module: Mimir.Architectures (builders)
+-- Module: Mimir.Architectures
 --=============================================================================
 
 ---@class MimirArchitecturesAPI
 Mimir.Architectures = {}
 
----Construire un UNet dans le modèle courant.
----@param config? UNetConfig|table
----@return boolean ok
+---Lister les architectures disponibles (côté C++ registry).
+---@return string[]|nil names
 ---@return string? err
-function Mimir.Architectures.unet(config) end
+function Mimir.Architectures.available() end
 
----Construire un VAE dans le modèle courant.
----@param config? VAEConfig|table
----@return boolean ok
+---Retourner la config par défaut d'une architecture.
+---@param name string
+---@return table|nil config
 ---@return string? err
-function Mimir.Architectures.vae(config) end
-
----Construire un Vision Transformer dans le modèle courant.
----@param config? ViTConfig|table
----@return boolean ok
----@return string? err
-function Mimir.Architectures.vit(config) end
-
----Construire un GAN (generator + discriminator ou global selon impl).
----@param config? GANConfig|table
----@return boolean ok
----@return string? err
-function Mimir.Architectures.gan(config) end
-
----Construire un modèle de diffusion (DDPM-like).
----@param config? DiffusionConfig|table
----@return boolean ok
----@return string? err
-function Mimir.Architectures.diffusion(config) end
-
----Construire un transformer GPT-style (ou transformer générique).
----@param config? TransformerConfig|table
----@return boolean ok
----@return string? err
-function Mimir.Architectures.transformer(config) end
-
----Construire un ResNet (variante interne).
----@param config? ResNetConfig|table
----@return boolean ok
----@return string? err
-function Mimir.Architectures.resnet(config) end
-
----Construire un MobileNet (variante interne).
----@param config? MobileNetConfig|table
----@return boolean ok
----@return string? err
-function Mimir.Architectures.mobilenet(config) end
-
----Construire un modèle Flux (Diffusion avec VAE et text conditioning).
----@param config? FluxConfig|table
----@return boolean ok
----@return string? err
-function Mimir.Architectures.flux(config) end
-
---=============================================================================
--- Module: Mimir.Flux (API Fonctionnelle Flux)
---=============================================================================
-
----@class MimirFluxAPI
-Mimir.Flux = {}
-
----Générer une image depuis un prompt texte (API simplifiée).
----Utilise le modèle Flux global configuré.
----@param prompt string @Prompt texte décrivant l'image à générer
----@param num_steps? integer @Nombre de steps de diffusion (défaut: 50)
----@return table? image_data @Pixels de l'image générée (ou nil si erreur)
----@return string? err @Message d'erreur
----
----**Exemple:**
----```lua
---- local img, err = Mimir.Flux.generate("A beautiful sunset over mountains", 50)
---- if img then
----   print("Image générée avec succès")
---- else
----   print("Erreur:", err)
---- end
----```
-function Mimir.Flux.generate(prompt, num_steps) end
-
----Encoder une image en espace latent via le VAE.
----@param image_path string @Chemin vers l'image à encoder
----@return table? latent @Représentation latente (ou nil si erreur)
----@return string? err @Message d'erreur
----
----**Exemple:**
----```lua
---- local latent, err = Mimir.Flux.encode_image("input.png")
---- if latent then
----   print("Image encodée:", #latent, "éléments")
---- end
----```
-function Mimir.Flux.encode_image(image_path) end
-
----Décoder un vecteur latent en image via le VAE.
----@param latent table @Vecteur latent à décoder
----@return table? pixels @Pixels de l'image (RGBA, row-major)
----@return string? err @Message d'erreur
----
----**Exemple:**
----```lua
---- local pixels, err = Mimir.Flux.decode_latent(latent)
---- if pixels then
----   Mimir.Viz.add_image(pixels, width, height, 4)
---- end
----```
-function Mimir.Flux.decode_latent(latent) end
-
----Encoder un prompt texte en embeddings via le text encoder.
----@param text string @Texte à encoder
----@return table? embeddings @Embeddings textuels (ou nil si erreur)
----@return string? err @Message d'erreur
----
----**Exemple:**
----```lua
---- local embed, err = Mimir.Flux.encode_text("A cat sitting on a chair")
---- if embed then
----   print("Texte encodé:", #embed, "dimensions")
---- end
----```
-function Mimir.Flux.encode_text(text) end
-
----Définir le tokenizer pour le text encoder.
----@param tokenizer_path string @Chemin vers le fichier tokenizer.json
----@return boolean ok @true si succès
----@return string? err @Message d'erreur
----
----**Exemple:**
----```lua
---- local ok, err = Mimir.Flux.set_tokenizer("checkpoints/tokenizer.json")
---- if not ok then
----   print("Erreur tokenizer:", err)
---- end
----```
-function Mimir.Flux.set_tokenizer(tokenizer_path) end
-
---=============================================================================
--- Module: Mimir.FluxModel (API Orientée Objet Flux)
---=============================================================================
-
----@class MimirFluxModelAPI
-Mimir.FluxModel = {}
-
----Créer une nouvelle instance de FluxModel.
----@param config? FluxConfig|table @Configuration du modèle
----@return table flux_model @Instance FluxModel
----@return string? err @Message d'erreur
----
----**Exemple:**
----```lua
---- local flux_model, err = Mimir.FluxModel.new({
----   image_resolution = 256,
----   latent_channels = 4,
----   vocab_size = 50000,
----   text_embed_dim = 768
---- })
---- if not flux_model then
----   print("Erreur:", err)
---- end
----```
-function Mimir.FluxModel.new(config) end
-
----Activer le mode training (pour entraînement).
----En mode training: dropout activé, reparametrization trick VAE appliqué.
----
----**Exemple:**
----```lua
---- Mimir.FluxModel.train()
---- -- Entraînement du modèle...
----```
-function Mimir.FluxModel.train() end
-
----Activer le mode evaluation/inference.
----En mode eval: dropout désactivé, VAE déterministe (pas de bruit).
----
----**Exemple:**
----```lua
---- Mimir.FluxModel.eval()
---- local image = Mimir.FluxModel.generate("beautiful sunset", 50)
----```
-function Mimir.FluxModel.eval() end
-
----Vérifier si le modèle est en mode training.
----@return boolean is_training @true si en mode training, false si en eval
----
----**Exemple:**
----```lua
---- if Mimir.FluxModel.isTraining() then
----     print("Mode training activé")
---- else
----     print("Mode inference activé")
---- end
----```
-function Mimir.FluxModel.isTraining() end
-
----Encoder une image vers l'espace latent VAE.
----@param image number[] @Image RGB aplatie (H×W×3 valeurs entre -1 et 1)
----@return number[] latent @Vecteur latent compressé (latent_resolution²×latent_channels)
----
----**Exemple:**
----```lua
---- local image_size = 3 * 256 * 256
---- local image = {}
---- for i = 1, image_size do
----     image[i] = math.random() * 2 - 1  -- [-1, 1]
---- end
---- local latent = Mimir.FluxModel.encodeImage(image)
---- print("Latent size: " .. #latent)
----```
-function Mimir.FluxModel.encodeImage(image) end
-
----Décoder un vecteur latent vers une image RGB.
----@param latent number[] @Vecteur latent
----@return number[] image @Image RGB aplatie (H×W×3 valeurs entre -1 et 1)
----
----**Exemple:**
----```lua
---- local reconstructed = Mimir.FluxModel.decodeLatent(latent)
---- print("Image reconstruite: " .. #reconstructed .. " pixels")
----```
-function Mimir.FluxModel.decodeLatent(latent) end
-
----Tokeniser un prompt texte.
----@param prompt string @Texte à tokeniser
----@return integer[] tokens @Séquence de tokens (max text_max_length)
----
----**Exemple:**
----```lua
---- local tokens = Mimir.FluxModel.tokenizePrompt("a beautiful mountain landscape")
---- print("Nombre de tokens: " .. #tokens)
----```
-function Mimir.FluxModel.tokenizePrompt(prompt) end
-
----Encoder un prompt texte en embeddings.
----@param tokens integer[] @Séquence de tokens
----@return number[] embeddings @Embeddings texte (text_max_length × text_embed_dim)
----
----**Exemple:**
----```lua
---- local tokens = Mimir.FluxModel.tokenizePrompt("cyberpunk city")
---- local text_emb = Mimir.FluxModel.encodeText(tokens)
---- print("Text embedding size: " .. #text_emb)
----```
-function Mimir.FluxModel.encodeText(tokens) end
-
----Prédire le bruit dans un latent bruité (step de diffusion).
----@param noisy_latent number[] @Latent avec bruit
----@param text_embedding number[] @Embeddings texte pour conditioning
----@param timestep integer @Step de diffusion (0 à num_diffusion_steps)
----@return number[] predicted_noise @Bruit prédit par le modèle
----
----**Exemple:**
----```lua
---- local noise = Mimir.FluxModel.predictNoise(noisy_latent, text_emb, 500)
---- print("Bruit prédit: " .. #noise .. " valeurs")
----```
-function Mimir.FluxModel.predictNoise(noisy_latent, text_embedding, timestep) end
-
----Générer une image depuis un prompt texte (pipeline complet).
----@param prompt string @Description textuelle de l'image
----@param num_steps? integer @Nombre de steps de diffusion (défaut: 50)
----@return number[] image @Image générée RGB (H×W×3)
----
----**Exemple:**
----```lua
---- Mimir.FluxModel.eval()  -- Mode inference
---- local image = Mimir.FluxModel.generate("a serene lake at sunset", 50)
---- print("Image générée: " .. #image .. " pixels")
----```
-function Mimir.FluxModel.generate(prompt, num_steps) end
-
----Calculer la loss de diffusion pour l'entraînement.
----@param image number[] @Image RGB target
----@param tokens integer[] @Tokens du prompt
----@return number loss @Valeur de loss
----
----**Exemple:**
----```lua
---- Mimir.FluxModel.train()  -- Mode training
---- local loss = Mimir.FluxModel.computeDiffusionLoss(image, tokens)
---- print("Loss: " .. loss)
----```
-function Mimir.FluxModel.computeDiffusionLoss(image, tokens) end
-
----Définir le tokenizer pour les prompts.
----@param tokenizer_instance any @Instance du tokenizer
----
----**Exemple:**
----```lua
---- Mimir.Tokenizer.create(50000)
---- Mimir.FluxModel.setPromptTokenizer(tokenizer)
----```
-function Mimir.FluxModel.setPromptTokenizer(tokenizer_instance) end
+function Mimir.Architectures.default_config(name) end
 
 --=============================================================================
 -- Module: Mimir.Layers (placeholder / low-level)
@@ -936,9 +672,12 @@ Mimir.Dataset = {}
 ---Charger un dataset depuis un répertoire.
 ---Attendu: répertoire contenant des fichiers textes / structure interne.
 ---@param dir string
+---@param target_w? integer Largeur image cible (si images)
+---@param target_h? integer Hauteur image cible (si images)
+---@param min_modalities? integer Seuil de modalités pour valider les linkables (ex: 2 => texte+image)
 ---@return boolean ok
----@return string? err
-function Mimir.Dataset.load(dir) end
+---@return integer|string? count_or_err Nombre d'items si ok, sinon message d'erreur
+function Mimir.Dataset.load(dir, target_w, target_h, min_modalities) end
 
 ---Récupérer un item du dataset par son index (1-based).
 ---Retourne une table avec les chemins et métadonnées de l'item.
@@ -1167,12 +906,11 @@ function Mimir.Htop.enable(enabled) end
 
 ---Mettre à jour les métriques affichées dans htop.
 ---Les paramètres peuvent être passés via une table HtopMetrics ou individuellement.
----@param metrics HtopMetrics|table @Structure de métriques ou paramètres individuels
+---@param metrics? HtopMetrics|table @Structure de métriques (optionnel)
+---@param ... any @Paramètres legacy (optionnels)
 ---@return boolean ok
 ---@return string? err
-function Mimir.Htop.update(metricsatches, loss, avg_loss, lr,
-                     batch_time_ms, memory_mb, memory_freed, bps, params, timestep,
-                     kl, wass, ent, mom, spat, temp, mse) end
+function Mimir.Htop.update(metrics, ...) end
 
 ---Forcer un render (si supporté).
 ---@return boolean ok
@@ -1458,10 +1196,6 @@ function Pipeline.resume(dir) end
 Mimir.Model = Mimir.Model
 ---@type MimirArchitecturesAPI
 Mimir.Architectures = Mimir.Architectures
----@type MimirFluxAPI
-Mimir.Flux = Mimir.Flux
----@type MimirFluxModelAPI
-Mimir.FluxModel = Mimir.FluxModel
 ---@type MimirLayersAPI
 Mimir.Layers = Mimir.Layers
 ---@type MimirTokenizerAPI

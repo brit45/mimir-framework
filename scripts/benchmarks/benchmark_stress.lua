@@ -1,331 +1,274 @@
--- ================================================================
--- Mímir STRESS BENCHMARK - Force la Machine au Maximum
--- Test intensif des capacités CPU et mémoire
--- ================================================================
+-- scripts/benchmarks/benchmark_stress.lua
+-- Benchmark "loss from output-gradient" (no targets needed)
+-- Loss: L = 0.5 * sum(y^2)  => dL/dy = y
+-- So we can compute loss from loss_grad only (loss_grad == y)
 
-log("╔═══════════════════════════════════════════════════════════════════╗")
-log("║         Mímir STRESS BENCHMARK - CPU Performance Test            ║")
-log("║                  ⚠️  TEST INTENSIF - FORCE LA MACHINE            ║")
-log("╚═══════════════════════════════════════════════════════════════════╝")
+math.randomseed(1337)
 
--- Configuration INTENSE
-local config = {
-    -- Grands modèles
-    vocab_size = 50000,
-    
-    -- Tests progressifs
-    tests = {
-        {name = "Warmup", layers = 2, dim = 128, heads = 4, iterations = 5},
-        {name = "Small", layers = 4, dim = 256, heads = 8, iterations = 10},
-        {name = "Medium", layers = 6, dim = 384, heads = 12, iterations = 15},
-        {name = "Large", layers = 8, dim = 512, heads = 16, iterations = 20},
-        {name = "XL", layers = 12, dim = 768, heads = 16, iterations = 25},
-        {name = "XXL", layers = 16, dim = 1024, heads = 16, iterations = 30}
-    },
-    
-    max_seq_len = 512,
-    dropout = 0.1
+local model = Mimir.Model
+
+-- -----------------------------
+-- Helpers
+-- -----------------------------
+local function must(ok, err, ctx)
+  if ok == false or ok == nil then
+    error("❌ FAIL: " .. tostring(ctx) .. " | " .. tostring(err))
+  end
+end
+
+local function is_finite(x)
+  return x == x and x ~= math.huge and x ~= -math.huge
+end
+
+local function vec_l2_and_maxabs(v)
+  local s = 0.0
+  local m = 0.0
+  for i = 1, #v do
+    local a = v[i]
+    local aa = (a >= 0) and a or -a
+    s = s + a * a
+    if aa > m then m = aa end
+  end
+  return math.sqrt(s), m
+end
+
+local function vec_any_nan_inf(v)
+  for i = 1, #v do
+    if not is_finite(v[i]) then return true end
+  end
+  return false
+end
+
+local function make_input(cfg)
+  local n = cfg.height * cfg.width * cfg.in_channels
+  local x = {}
+  for i = 1, n do
+    x[i] = (math.random() * 2.0 - 1.0)
+  end
+  return x
+end
+
+-- Loss from gradient (since grad == output):
+-- L = 0.5 * sum(grad^2)
+local function loss_from_grad(loss_grad)
+  local s = 0.0
+  for i = 1, #loss_grad do
+    local g = loss_grad[i]
+    s = s + g * g
+  end
+  return 0.5 * s
+end
+
+local function hw_stats()
+  if model.hardware_caps then
+    local caps = model.hardware_caps()
+    if caps then
+      return string.format("AVX2=%s FMA=%s F16C=%s BMI2=%s",
+        tostring(caps.avx2), tostring(caps.fma), tostring(caps.f16c), tostring(caps.bmi2))
+    end
+  end
+  return "caps=?"
+end
+
+local function guard_stats()
+  if Mimir and Mimir.MemoryGuard and Mimir.MemoryGuard.getStats then
+    local g = Mimir.MemoryGuard.getStats()
+    if g then
+      return string.format("Guard current=%.1fMB peak=%.1fMB limit=%.1fMB usage=%.1f%%",
+        g.current or 0, g.peak or 0, g.limit or 0, g.usage or 0)
+    end
+  end
+  return "Guard stats unavailable"
+end
+
+local function alloc_stats()
+  if Mimir and Mimir.Allocator and Mimir.Allocator.getStats then
+    local a = Mimir.Allocator.getStats()
+    if a then
+      return string.format("Allocator tensors=%s loaded=%s",
+        tostring(a.tensors), tostring(a.loaded))
+    end
+  end
+  return "Allocator stats unavailable"
+end
+
+local function sep()
+  log("────────────────────────────────────────────────────────────────────────")
+end
+
+-- -----------------------------
+-- Runtime setup
+-- -----------------------------
+log("╔════════════════════════════════════════════════════════════════════╗")
+log("║        Mímir BENCH — Loss from Output Gradient (CPU torture)       ║")
+log("║   L = 0.5 * Σ(y²)  =>  dL/dy = y  (loss computed from gradients)   ║")
+log("╚════════════════════════════════════════════════════════════════════╝")
+
+-- Allocator / Guard
+if Mimir and Mimir.Allocator and Mimir.Allocator.configure then
+  local ok, err = Mimir.Allocator.configure({ max_ram_gb = 10.0, enable_compression = true })
+  if ok == false then log("⚠️ Allocator.configure failed: " .. tostring(err)) end
+end
+if Mimir and Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
+  local ok, err = Mimir.MemoryGuard.setLimit(10.0)
+  if ok == false then log("⚠️ MemoryGuard.set_limit_gb failed: " .. tostring(err)) end
+end
+if model.set_hardware then
+  local ok, err = model.set_hardware("cpu")
+  if ok == false then log("⚠️ set_hardware(cpu) failed: " .. tostring(err)) end
+end
+
+log("Hardware: " .. hw_stats())
+log(guard_stats())
+log(alloc_stats())
+sep()
+
+-- -----------------------------
+-- Test definition (BasicMLP-only, robust)
+-- -----------------------------
+local LEVELS = {
+  { name="Warmup", cfg={ input_dim=256,  hidden_dim=256,  output_dim=256,  hidden_layers=1, dropout=0.0 }, steps=200, lr=0.01 },
+  { name="Small",  cfg={ input_dim=512,  hidden_dim=512,  output_dim=512,  hidden_layers=2, dropout=0.0 }, steps=250, lr=0.008 },
+  { name="Medium", cfg={ input_dim=1024, hidden_dim=1024, output_dim=1024, hidden_layers=2, dropout=0.0 }, steps=200, lr=0.006 },
+  { name="Large",  cfg={ input_dim=2048, hidden_dim=2048, output_dim=2048, hidden_layers=3, dropout=0.0 }, steps=150, lr=0.004 },
 }
 
--- Parse arguments
-local skip_xxl = false
-if arg and #arg > 0 then
-    for i = 1, #arg do
-        if arg[i] == "--safe" then
-            log("\n🛡️  Mode SAFE activé - Limité à Large (8 layers)")
-            config.tests = {
-                config.tests[1],  -- Warmup
-                config.tests[2],  -- Small
-                config.tests[3],  -- Medium
-                config.tests[4]   -- Large
-            }
-        elseif arg[i] == "--extreme" then
-            log("\n🔥 Mode EXTREME activé - Ajout de modèles GIGANTESQUES")
-            table.insert(config.tests, {name = "ULTRA", layers = 24, dim = 1536, heads = 24, iterations = 40})
-        end
+local function run_level(L)
+  log(("TEST: %s | MLP %d -> %d (hidden=%d x %d)"):format(
+    L.name,
+    L.cfg.input_dim or 0,
+    L.cfg.output_dim or 0,
+    L.cfg.hidden_dim or 0,
+    L.cfg.hidden_layers or 0))
+
+  -- Registry-based creation
+  must(model.create("basic_mlp", L.cfg), nil, "model.create(basic_mlp)")
+
+  local t_alloc0 = os.clock()
+  must(model.allocate_params(), nil, "allocate_params")
+  local t_alloc = os.clock() - t_alloc0
+
+  local t_init0 = os.clock()
+  must(model.init_weights("xavier_uniform", 1337), nil, "init_weights")
+  local t_init = os.clock() - t_init0
+
+  local x = make_input({ height = 1, width = (L.cfg.input_dim or 0), in_channels = 1 })
+
+  local loss0, loss_last, loss_best = nil, nil, 1e30
+  local fwd_ms, bwd_ms, step_ms = 0.0, 0.0, 0.0
+
+  for s = 1, L.steps do
+    must(model.zero_grads(), nil, "zero_grads")
+
+    -- forward (training=true)
+    local t0 = os.clock()
+    local y, err = model.forward(x, true)
+    local t1 = os.clock()
+    if not y then error("forward failed: " .. tostring(err)) end
+
+    -- loss_grad = y  (because d/dy 0.5*sum(y^2) = y)
+    -- compute loss from gradients only:
+    local loss_grad = y
+    local loss = loss_from_grad(loss_grad)
+
+    if not loss0 then loss0 = loss end
+    loss_last = loss
+    if loss < loss_best then loss_best = loss end
+
+    -- backward
+    local t2 = os.clock()
+    local okb, errb = model.backward(loss_grad)
+    local t3 = os.clock()
+    if okb == false then error("backward failed: " .. tostring(errb)) end
+
+    -- gradients stats
+    local grads, gerr = model.get_gradients()
+    if not grads then error("get_gradients failed: " .. tostring(gerr)) end
+    if vec_any_nan_inf(grads) then error("NaN/Inf detected in parameter gradients") end
+    local g_l2, g_max = vec_l2_and_maxabs(grads)
+
+    -- optimizer
+    local t4 = os.clock()
+    local oks, errs = model.optimizer_step(L.lr)
+    local t5 = os.clock()
+    if oks == false then error("optimizer_step failed: " .. tostring(errs)) end
+
+    fwd_ms  = fwd_ms  + (t1 - t0) * 1000.0
+    bwd_ms  = bwd_ms  + (t3 - t2) * 1000.0
+    step_ms = step_ms + (t5 - t4) * 1000.0
+
+    if s == 1 or s % math.floor(L.steps / 5) == 0 then
+      log(string.format(
+        "  step=%4d/%d | loss=%.6f (best=%.6f) | gradL2=%.6f gradMax=%.6f",
+        s, L.steps, loss, loss_best, g_l2, g_max
+      ))
     end
+  end
+
+  -- A simple pass condition: loss must go down a bit (not necessarily huge)
+  local ok_drop = (loss_last < loss0 * 0.99)  -- -1%
+  log(string.format("Result: loss %.6f -> %.6f (best %.6f) | drop_ok=%s",
+    loss0 or 0, loss_last or 0, loss_best or 0, tostring(ok_drop)))
+
+  log(string.format("Timing(avg): fwd=%.3fms | bwd=%.3fms | opt=%.3fms | steps=%d",
+    fwd_ms / L.steps, bwd_ms / L.steps, step_ms / L.steps, L.steps
+  ))
+  log(guard_stats())
+  log(alloc_stats())
+  sep()
+
+  return {
+    name=L.name,
+    params=(model.total_params and model.total_params() or 0),
+    loss0=loss0, lossl=loss_last,
+    fwd=fwd_ms / L.steps,
+    bwd=bwd_ms / L.steps,
+    opt=step_ms / L.steps,
+    ok=ok_drop
+  }
 end
 
-log("\n📊 Configuration du stress test:")
-log("  Vocab:          " .. config.vocab_size)
-log("  Max seq length: " .. config.max_seq_len)
-log("  Niveaux:        " .. #config.tests)
-
--- Helper pour mesurer temps
-local function timer(name, func)
-    log("\n⏱️  " .. name)
-    local start = os.clock()
-    local success, result = pcall(func)
-    local elapsed = os.clock() - start
-    
-    if success then
-        log("   ✓ Temps: " .. string.format("%.3f", elapsed) .. "s")
-        return elapsed, result
-    else
-        log("   ❌ ERREUR: " .. tostring(result))
-        return nil, nil
-    end
-end
-
--- Helper pour estimer mémoire
-local function estimate_memory(layers, dim, vocab)
-    local params_per_layer = dim * dim * 4 + (dim * dim * 4 * 2)
-    local total_params = params_per_layer * layers + (vocab * dim)
-    local memory_mb = (total_params * 4) / (1024 * 1024)
-    return memory_mb, total_params
-end
-
--- Helper pour monitorer système
-local function get_system_load()
-    local handle = io.popen("top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1")
-    local cpu = handle:read("*a"):gsub("%s+", "")
-    handle:close()
-    
-    handle = io.popen("free -m | awk 'NR==2{print $3}'")
-    local mem_used = handle:read("*a"):gsub("%s+", "")
-    handle:close()
-    
-    handle = io.popen("free -m | awk 'NR==2{print $2}'")
-    local mem_total = handle:read("*a"):gsub("%s+", "")
-    handle:close()
-    
-    return tonumber(cpu) or 0, tonumber(mem_used) or 0, tonumber(mem_total) or 0
-end
-
--- ================================================================
--- Phase 0: Info Système
--- ================================================================
-log("\n" .. string.rep("=", 70))
-log("  Phase 0: Informations Système")
-log(string.rep("=", 70))
-
-local cpu_load, mem_used, mem_total = get_system_load()
-log("\n💻 État initial du système:")
-log("   CPU Load:    " .. string.format("%.1f", cpu_load) .. "%")
-log("   RAM utilisée: " .. mem_used .. " MB / " .. mem_total .. " MB")
-log("   RAM libre:    " .. (mem_total - mem_used) .. " MB")
-
--- ================================================================
--- STRESS TEST - Création de modèles progressivement plus gros
--- ================================================================
-
+-- -----------------------------
+-- Main loop
+-- -----------------------------
 local results = {}
-local total_start = os.clock()
-
-for test_idx, test in ipairs(config.tests) do
-    log("\n" .. string.rep("=", 70))
-    log("  Test " .. test_idx .. "/" .. #config.tests .. ": " .. test.name)
-    log("  Config: " .. test.layers .. "L × " .. test.dim .. "D × " .. test.heads .. "H")
-    log(string.rep("=", 70))
-    
-    local mem_estimate, params_estimate = estimate_memory(test.layers, test.dim, config.vocab_size)
-    log("\n📊 Estimation:")
-    log("   Paramètres: " .. string.format("%.1f", params_estimate / 1000000) .. " M")
-    log("   Mémoire:    " .. string.format("%.1f", mem_estimate) .. " MB")
-    
-    -- Vérifier si on a assez de RAM
-    local cpu_before, mem_before, mem_total = get_system_load()
-    local mem_available = mem_total - mem_before
-    
-    if mem_estimate > mem_available * 0.8 then
-        log("\n⚠️  ATTENTION: Mémoire insuffisante!")
-        log("   Requis:     " .. string.format("%.0f", mem_estimate) .. " MB")
-        log("   Disponible: " .. mem_available .. " MB")
-        log("   ⏭️  Test ignoré pour éviter swap/crash")
-        
-        results[test.name] = {
-            status = "SKIPPED",
-            reason = "Insufficient memory"
-        }
-        break
-    end
-    
-    local test_config = {
-        vocab_size = config.vocab_size,
-        embed_dim = test.dim,
-        num_layers = test.layers,
-        num_heads = test.heads,
-        d_ff = test.dim * 4,
-        max_seq_len = config.max_seq_len,
-        dropout = config.dropout
-    }
-    
-    -- Test 1: Création Tokenizer
-    local tok_time = timer("Tokenizer (" .. config.vocab_size .. " vocab)", function()
-        tokenizer.create(config.vocab_size)
-    end)
-    
-    -- Test 2: Création Modèle
-    local create_time, params = timer("Création modèle Transformer", function()
-        Mimir.Model.create("transformer", test_config)
-        local ok, p = Mimir.Model.build()
-        return p
-    end)
-    
-    if not create_time then
-        log("❌ Échec création modèle - STOP")
-        results[test.name] = {status = "FAILED", reason = "Model creation failed"}
-        break
-    end
-    
-    log("   📊 Paramètres réels: " .. (params or "0"))
-    
-    -- Test 3: Créations multiples (stress intensif)
-    log("\n🔥 STRESS TEST: " .. test.iterations .. " créations consécutives...")
-    local stress_start = os.clock()
-    local stress_success = 0
-    
-    for i = 1, test.iterations do
-        if i % 5 == 0 then
-            log("   Itération " .. i .. "/" .. test.iterations .. "...")
-        end
-        
-        local success = pcall(function()
-            tokenizer.create(config.vocab_size)
-            Mimir.Model.create("transformer", test_config)
-            Mimir.Model.build()
-        end)
-        
-        if success then
-            stress_success = stress_success + 1
-        else
-            log("   ⚠️  Échec itération " .. i)
-        end
-    end
-    
-    local stress_time = os.clock() - stress_start
-    local avg_time = stress_time / test.iterations
-    
-    log("   ✓ Complétés: " .. stress_success .. "/" .. test.iterations)
-    log("   ✓ Temps total: " .. string.format("%.3f", stress_time) .. "s")
-    log("   ✓ Temps moyen: " .. string.format("%.3f", avg_time) .. "s")
-    log("   ✓ Throughput: " .. string.format("%.2f", test.iterations / stress_time) .. " models/s")
-    
-    -- Test 4: Sérialisation sous charge
-    local checkpoint_path = "/tmp/mimir_stress_" .. test.name .. ".safetensors"
-    local save_time = timer("Sérialisation checkpoint", function()
-        Mimir.Serialization.save(checkpoint_path, "safetensors")
-    end)
-    
-    -- Get size
-    local size_cmd = "du -sh " .. checkpoint_path .. " 2>/dev/null | cut -f1"
-    local handle = io.popen(size_cmd)
-    local size = handle:read("*a"):gsub("%s+", "")
-    handle:close()
-    
-    if size ~= "" then
-        log("   📦 Taille checkpoint: " .. size)
-    end
-    
-    -- Cleanup
-    os.execute("rm -rf " .. checkpoint_path .. " 2>/dev/null")
-    
-    -- État système après
-    local cpu_after, mem_after, _ = get_system_load()
-    log("\n💻 État système après:")
-    log("   CPU Load:     " .. string.format("%.1f", cpu_after) .. "% (Δ " .. string.format("%+.1f", cpu_after - cpu_before) .. "%)")
-    log("   RAM utilisée: " .. mem_after .. " MB (Δ " .. (mem_after - mem_before) .. " MB)")
-    
-    -- Sauvegarder résultats
-    results[test.name] = {
-        status = "SUCCESS",
-        layers = test.layers,
-        dim = test.dim,
-        params = params or "0",
-        create_time = create_time,
-        stress_time = stress_time,
-        avg_time = avg_time,
-        iterations = test.iterations,
-        throughput = test.iterations / stress_time,
-        mem_used = mem_after - mem_before,
-        checkpoint_size = size
-    }
-    
-    -- Petite pause entre tests
-    log("\n⏸️  Pause 2s avant prochain test...")
-    os.execute("sleep 2")
-    
+for _, L in ipairs(LEVELS) do
+  local ok, ret = pcall(run_level, L)
+  if ok then
+    results[#results+1] = ret
+  else
+    log("❌ TEST FAILED: " .. L.name .. " | " .. tostring(ret))
+    sep()
+  end
 end
 
-local total_time = os.clock() - total_start
-
--- ================================================================
--- RÉSUMÉ FINAL
--- ================================================================
-log("\n" .. string.rep("=", 70))
-log("  📊 RÉSUMÉ DU STRESS TEST")
-log(string.rep("=", 70))
-
-log("\nTest              Status    Layers  Dim    Params   Temps Moy  Throughput")
-log(string.rep("-", 70))
-
-for _, test in ipairs(config.tests) do
-    local r = results[test.name]
-    if r then
-        if r.status == "SUCCESS" then
-            log(string.format("%-16s ✅ %-6s %4d   %5d   %6s   %7.3fs   %5.2f m/s",
-                test.name,
-                r.status,
-                r.layers,
-                r.dim,
-                r.params,
-                r.avg_time,
-                r.throughput))
-        elseif r.status == "SKIPPED" then
-            log(string.format("%-16s ⏭️  %-6s %4d   %5d   ---     ---       ---",
-                test.name,
-                r.status,
-                test.layers,
-                test.dim))
-        else
-            log(string.format("%-16s ❌ %-6s %4d   %5d   ---     ---       ---",
-                test.name,
-                r.status,
-                test.layers,
-                test.dim))
-        end
-    end
+-- Stress: create many tiny models to test allocator churn
+log("STRESS: create/destroy many tiny MLP models")
+local stress_n = 120
+local stress_cfg = { input_dim=256, hidden_dim=256, output_dim=256, hidden_layers=1, dropout=0.0 }
+local tS0 = os.clock()
+for i=1,stress_n do
+  model.create("basic_mlp", stress_cfg)
+  model.allocate_params()
+  model.init_weights("xavier_uniform", i)
+  local x = make_input({ height = 1, width = (stress_cfg.input_dim or 0), in_channels = 1 })
+  local y = model.forward(x, false)
+  if not y then error("stress forward failed at i="..i) end
 end
+local tS1 = os.clock()
+log(string.format("Stress done: %d models | total=%0.3fs | avg=%0.2fms/model",
+  stress_n, (tS1 - tS0), ((tS1 - tS0) * 1000.0) / stress_n
+))
+log(guard_stats())
+log(alloc_stats())
+sep()
 
-log("\n" .. string.rep("-", 70))
-log("Temps total du stress test: " .. string.format("%.2f", total_time) .. "s")
-
--- État final
-local cpu_final, mem_final, mem_total = get_system_load()
-log("\n💻 État final du système:")
-log("   CPU Load:     " .. string.format("%.1f", cpu_final) .. "%")
-log("   RAM utilisée: " .. mem_final .. " MB / " .. mem_total .. " MB")
-
--- Score de performance
-log("\n🏆 SCORE DE PERFORMANCE:")
-local successful_tests = 0
-local total_models = 0
-for _, r in pairs(results) do
-    if r.status == "SUCCESS" then
-        successful_tests = successful_tests + 1
-        total_models = total_models + r.iterations
-    end
+-- Summary
+log("SUMMARY")
+for _, r in ipairs(results) do
+  log(string.format("%-7s | params=%s | loss %.4f -> %.4f | fwd=%.3fms bwd=%.3fms opt=%.3fms | ok=%s",
+    r.name, tostring(r.params), r.loss0 or 0, r.lossl or 0, r.fwd, r.bwd, r.opt, tostring(r.ok)
+  ))
 end
+log("✅ benchmark_gradloss finished.")
 
-log("   Tests réussis:    " .. successful_tests .. "/" .. #config.tests)
-log("   Modèles créés:    " .. total_models)
-log("   Temps moyen/test: " .. string.format("%.2f", total_time / #config.tests) .. "s")
-
-if successful_tests == #config.tests then
-    log("\n🎉 EXCELLENT! Tous les tests ont réussi!")
-    log("💪 Votre machine peut gérer des gros modèles CPU-only!")
-elseif successful_tests > #config.tests / 2 then
-    log("\n👍 BON! La plupart des tests ont réussi")
-    log("💡 Considérez ajouter plus de RAM pour les très gros modèles")
-else
-    log("\n⚠️  LIMITÉ: Seulement " .. successful_tests .. " tests réussis")
-    log("💡 Votre machine est mieux adaptée aux petits/moyens modèles")
-end
-
-log("\n" .. string.rep("=", 70))
-log("\n✅ Stress test terminé!")
-log("\n📝 Options disponibles:")
-log("   --safe    : Limite à 8 layers max (évite crash)")
-log("   --extreme : Ajoute des modèles ULTRA (24 layers, 1536 dim)")
-log("\n🚀 Mímir - CPU-Only Deep Learning")
-log("💡 Aucun GPU requis, optimisé pour processeurs modernes")

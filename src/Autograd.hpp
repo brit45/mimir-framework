@@ -76,7 +76,7 @@ namespace Autograd {
     inline std::vector<float> mse_backward(const std::vector<float>& pred, 
                                            const std::vector<float>& target) {
         std::vector<float> grad(pred.size());
-        #pragma omp parallel for if(pred.size() > 512) schedule(static)
+        #pragma omp simd
         for (size_t i = 0; i < pred.size(); ++i) {
             grad[i] = 2.0f * (pred[i] - target[i]) / pred.size();
         }
@@ -91,12 +91,12 @@ namespace Autograd {
         
         // Calculer mean et std du forward pass
         float mean = 0.0f;
-        #pragma omp parallel for reduction(+:mean) if(n > 256)
+        #pragma omp simd reduction(+:mean)
         for (size_t i = 0; i < n; ++i) mean += input[i];
         mean /= n;
         
         float var = 0.0f;
-        #pragma omp parallel for reduction(+:var) if(n > 256)
+        #pragma omp simd reduction(+:var)
         for (size_t i = 0; i < n; ++i) {
             float diff = input[i] - mean;
             var += diff * diff;
@@ -109,19 +109,19 @@ namespace Autograd {
         float grad_var = 0.0f;
         float grad_mean = 0.0f;
         
-        #pragma omp parallel for reduction(+:grad_var) if(n > 256)
+        #pragma omp simd reduction(+:grad_var)
         for (size_t i = 0; i < n; ++i) {
             grad_var += grad_output[i] * (input[i] - mean);
         }
         grad_var *= -0.5f / (std * std * std);
         
-        #pragma omp parallel for reduction(+:grad_mean) if(n > 256)
+        #pragma omp simd reduction(+:grad_mean)
         for (size_t i = 0; i < n; ++i) {
             grad_mean += grad_output[i] * (-1.0f / std);
             grad_mean += grad_var * (-2.0f * (input[i] - mean) / n);
         }
         
-        #pragma omp parallel for if(n > 256) schedule(static)
+        #pragma omp simd
         for (size_t i = 0; i < n; ++i) {
             grad_input[i] = grad_output[i] / std;
             grad_input[i] += grad_var * (2.0f * (input[i] - mean) / n);

@@ -20,7 +20,6 @@ Le framework dispose maintenant d'un **système de sérialisation complet** avec
 - 🚀 **[API Lua v2.3](03-API-Reference/API_LUA_UPDATE_v2.3.0.md)** - Nouvelle API Mimir.Serialization
 - ✅ **[Validation API](03-API-Reference/SERIALIZATION_API_VALIDATED.md)** - Tests et validation
 
-**Bénéfices :** Interopérabilité Python/PyTorch, validation d'intégrité, performance optimale (850 MB/s write).
 
 ---
 
@@ -286,7 +285,7 @@ Les diagrammes sont en ASCII art pour une compatibilité maximale.
 ## 🆘 Support et Communauté
 
 - 📧 **Email** : support@mimir-framework.org
-- 💬 **Discord** : [discord.gg/mimir](https://discord.gg/mimir)
+- 💬 **Discord** : [discord.gg/mimir](../bin/mimir)
 - 🐛 **Issues** : [GitHub Issues](https://github.com/your-repo/mimir/issues)
 - 📚 **Forum** : [forum.mimir-framework.org](https://forum.mimir-framework.org)
 

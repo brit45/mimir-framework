@@ -2,19 +2,42 @@
 
 log("=== Test du Tokenizer ===\n")
 
--- 1. Créer tokenizer
-tokenizer.create(100000)
-log("✓ Tokenizer créé\n")
-
--- 2. Ajouter quelques mots
-local test_words = {"hello", "world", "machine", "learning", "neural", "network"}
-
-for _, word in ipairs(test_words) do
-    local id = tokenizer.add_token(word)
-    log(string.format("  Ajouté '%s' → ID %d", word, id))
+local function script_dir()
+    local src = debug.getinfo(1, "S").source
+    if type(src) ~= "string" then return "." end
+    if src:sub(1, 1) == "@" then src = src:sub(2) end
+    return (src:match("^(.*)/[^/]*$") or ".")
 end
 
-log(string.format("\n✓ Vocab size: %d\n", tokenizer.vocab_size()))
+local dataset_path = (arg and arg[1]) or (script_dir() .. "/fixtures/tokenizer_dataset.txt")
+
+-- 1. Créer tokenizer
+tokenizer.create(50000)
+log("✓ Tokenizer créé\n")
+
+-- 2. Entraîner le vocabulaire à partir d'un dataset texte
+log("=== Entraînement du tokenizer sur dataset ===")
+log("Dataset: " .. dataset_path)
+
+local f = io.open(dataset_path, "r")
+if not f then
+    error("Impossible d'ouvrir le dataset: " .. dataset_path)
+end
+
+local line_count = 0
+for line in f:lines() do
+    if line and #line > 0 then
+        tokenizer.ensure_vocab_from_text(line)
+        line_count = line_count + 1
+        if (line_count % 2000) == 0 then
+            log(string.format("  ... %d lignes (vocab=%d)", line_count, tokenizer.vocab_size()))
+        end
+    end
+end
+f:close()
+
+log(string.format("✓ Dataset chargé: %d lignes", line_count))
+log(string.format("✓ Vocab size après entraînement: %d\n", tokenizer.vocab_size()))
 
 -- 3. Test tokenization
 local test_texts = {

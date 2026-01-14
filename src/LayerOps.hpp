@@ -39,7 +39,7 @@ inline std::vector<float> linear_forward(
     
     // Matrix-vector multiplication: y = Wx + b
     // W shape: [out_features, in_features]
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(static_cast<long long>(out_f) * in_f > 262144)
     for (int o = 0; o < out_f; ++o) {
         float sum = 0.0f;
         const float* w_row = weights + o * in_f;
@@ -227,8 +227,8 @@ inline std::vector<float> layernorm_forward(
     const float* weights = layer.affine ? layer.getWeights() : nullptr;
     const float* bias = (layer.affine && layer.use_bias) ? 
                         (weights + N) : nullptr;
-    
-    #pragma omp parallel for schedule(static)
+
+    #pragma omp simd
     for (int i = 0; i < N; ++i) {
         float normalized = (input[i] - mean) * inv_std;
         
@@ -260,7 +260,7 @@ inline std::vector<float> softmax_forward(
     
     // Compute exp(x - max)
     float sum = 0.0f;
-    #pragma omp parallel for reduction(+:sum)
+    #pragma omp simd reduction(+:sum)
     for (int i = 0; i < N; ++i) {
         output[i] = std::exp(input[i] - max_val);
         sum += output[i];
@@ -268,7 +268,7 @@ inline std::vector<float> softmax_forward(
     
     // Normalize
     float inv_sum = 1.0f / sum;
-    #pragma omp parallel for
+    #pragma omp simd
     for (int i = 0; i < N; ++i) {
         output[i] *= inv_sum;
     }
@@ -340,7 +340,6 @@ inline std::vector<float> avgpool2d_forward(
     
     const float kernel_area = static_cast<float>(kernel_h * kernel_w);
     
-    #pragma omp parallel for collapse(2) schedule(static)
     for (int c = 0; c < in_channels; ++c) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -384,7 +383,6 @@ inline std::vector<float> global_avgpool2d_forward(
     std::vector<float> output(in_channels, 0.0f);
     const float area = static_cast<float>(height * width);
     
-    #pragma omp parallel for schedule(static)
     for (int c = 0; c < in_channels; ++c) {
         float sum = 0.0f;
         for (int h = 0; h < height; ++h) {
@@ -426,10 +424,10 @@ inline std::vector<float> groupnorm_forward(
     const float* bias = (layer.affine && layer.use_bias) ? 
                         (weights + channels) : nullptr;
     
-    #pragma omp parallel for schedule(dynamic)
     for (int g = 0; g < num_groups; ++g) {
         // Compute mean for this group
         float mean = 0.0f;
+        #pragma omp simd reduction(+:mean)
         for (int i = 0; i < group_size; ++i) {
             int idx = g * group_size + i;
             mean += input[idx];
@@ -438,6 +436,7 @@ inline std::vector<float> groupnorm_forward(
         
         // Compute variance
         float var = 0.0f;
+        #pragma omp simd reduction(+:var)
         for (int i = 0; i < group_size; ++i) {
             int idx = g * group_size + i;
             float diff = input[idx] - mean;
@@ -447,6 +446,7 @@ inline std::vector<float> groupnorm_forward(
         
         // Normalize
         float inv_std = 1.0f / std::sqrt(var + eps);
+        #pragma omp simd
         for (int i = 0; i < group_size; ++i) {
             int idx = g * group_size + i;
             float normalized = (input[idx] - mean) * inv_std;
@@ -472,8 +472,8 @@ inline std::vector<float> groupnorm_forward(
 inline std::vector<float> gelu_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     const float sqrt_2_over_pi = std::sqrt(2.0f / 3.14159265359f);
-    
-    #pragma omp parallel for schedule(static)
+
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         float x = input[i];
         float cdf = 0.5f * (1.0f + std::tanh(sqrt_2_over_pi * (x + 0.044715f * x * x * x)));
@@ -485,8 +485,8 @@ inline std::vector<float> gelu_forward(const std::vector<float>& input) {
 
 inline std::vector<float> silu_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
-    
-    #pragma omp parallel for schedule(static)
+
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         float x = input[i];
         float sigmoid = 1.0f / (1.0f + std::exp(-x));
@@ -518,8 +518,8 @@ inline std::vector<float> relu_forward(const std::vector<float>& input) {
 
 inline std::vector<float> tanh_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
-    
-    #pragma omp parallel for schedule(static)
+
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         output[i] = std::tanh(input[i]);
     }
@@ -529,8 +529,8 @@ inline std::vector<float> tanh_forward(const std::vector<float>& input) {
 
 inline std::vector<float> sigmoid_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
-    
-    #pragma omp parallel for schedule(static)
+
+    #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         output[i] = 1.0f / (1.0f + std::exp(-input[i]));
     }
@@ -559,18 +559,11 @@ inline std::vector<float> dropout_forward(
     std::mt19937 gen(rd());
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
     
-    #pragma omp parallel
-    {
-        std::mt19937 local_gen(rd() + omp_get_thread_num());
-        std::uniform_real_distribution<float> local_dist(0.0f, 1.0f);
-        
-        #pragma omp for schedule(static)
-        for (size_t i = 0; i < input.size(); ++i) {
-            if (local_dist(local_gen) > p) {
-                output[i] = input[i] * scale;
-            } else {
-                output[i] = 0.0f;
-            }
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (dist(gen) > p) {
+            output[i] = input[i] * scale;
+        } else {
+            output[i] = 0.0f;
         }
     }
     
@@ -600,7 +593,6 @@ inline std::vector<float> transpose_forward(
     
     std::vector<float> output(input.size());
     
-    #pragma omp parallel for collapse(2) if (input.size() > 10000)
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             output[j * rows + i] = input[i * cols + j];
@@ -625,44 +617,25 @@ inline std::vector<float> matmul_forward(
     }
     
     std::vector<float> C(M * N, 0.0f);
-    
-    // GEMM avec AVX2 (similaire à linear_forward)
-    #pragma omp parallel for collapse(2)
+
+    #ifdef __AVX2__
+    // Kernel AVX2/FMA optimisé (gère correctement les tails)
+    HardwareOpt::matmul_fma_saturated(C.data(), A.data(), B.data(),
+                                      static_cast<size_t>(M),
+                                      static_cast<size_t>(N),
+                                      static_cast<size_t>(K));
+    #else
+    #pragma omp parallel for schedule(static) if (static_cast<long long>(M) * N * K > 262144)
     for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
             float sum = 0.0f;
-            
-            #ifdef __AVX2__
-            __m256 sum_vec = _mm256_setzero_ps();
-            int k = 0;
-            
-            for (; k + 8 <= K; k += 8) {
-                __m256 a = _mm256_loadu_ps(&A[i * K + k]);
-                __m256 b = _mm256_loadu_ps(&B[k * N + j]);
-                sum_vec = _mm256_fmadd_ps(a, b, sum_vec);
-            }
-            
-            // Horizontal sum
-            __m128 low = _mm256_castps256_ps128(sum_vec);
-            __m128 high = _mm256_extractf128_ps(sum_vec, 1);
-            __m128 sum128 = _mm_add_ps(low, high);
-            sum128 = _mm_hadd_ps(sum128, sum128);
-            sum128 = _mm_hadd_ps(sum128, sum128);
-            sum = _mm_cvtss_f32(sum128);
-            
-            // Remainder
-            for (; k < K; ++k) {
-                sum += A[i * K + k] * B[k * N + j];
-            }
-            #else
             for (int k = 0; k < K; ++k) {
                 sum += A[i * K + k] * B[k * N + j];
             }
-            #endif
-            
             C[i * N + j] = sum;
         }
     }
+    #endif
     
     return C;
 }
@@ -753,7 +726,6 @@ inline std::vector<float> upsample_nearest_forward(
     
     std::vector<float> output(channels * out_h * out_w);
     
-    #pragma omp parallel for collapse(3)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_h; ++oh) {
             for (int ow = 0; ow < out_w; ++ow) {
@@ -785,7 +757,6 @@ inline std::vector<float> upsample_bilinear_forward(
     float scale_h = static_cast<float>(in_h) / out_h;
     float scale_w = static_cast<float>(in_w) / out_w;
     
-    #pragma omp parallel for collapse(3)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_h; ++oh) {
             for (int ow = 0; ow < out_w; ++ow) {
@@ -863,7 +834,6 @@ inline std::vector<float> permute_forward(
     std::vector<float> output(input.size());
     
     // Permute data
-    #pragma omp parallel for
     for (size_t out_idx = 0; out_idx < output.size(); ++out_idx) {
         // Convert flat index to multi-dimensional indices
         std::vector<int> out_coords(out_shape.size());
@@ -927,8 +897,14 @@ inline void matmul(
     int M, int K, int N
 ) {
     C.resize(M * N, 0.0f);
-    
-    #pragma omp parallel for collapse(2)
+
+    #ifdef __AVX2__
+    HardwareOpt::matmul_fma_saturated(C.data(), A.data(), B.data(),
+                                      static_cast<size_t>(M),
+                                      static_cast<size_t>(N),
+                                      static_cast<size_t>(K));
+    #else
+    #pragma omp parallel for schedule(static) if(static_cast<long long>(M) * N * K > 262144)
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
             float sum = 0.0f;
@@ -938,6 +914,7 @@ inline void matmul(
             C[m * N + n] = sum;
         }
     }
+    #endif
 }
 
 // Self-Attention (simplifié - single head)
@@ -971,10 +948,14 @@ inline std::vector<float> self_attention_forward(
     std::vector<float> K(seq_len * embed_dim);
     std::vector<float> V(seq_len * embed_dim);
     
-    for (int i = 0; i < seq_len * embed_dim; ++i) {
-        Q[i] = qkv[i];
-        K[i] = qkv[seq_len * embed_dim + i];
-        V[i] = qkv[2 * seq_len * embed_dim + i];
+    for (int m = 0; m < seq_len; ++m) {
+        const int base = m * qkv_dim;
+        const int out = m * embed_dim;
+        for (int k = 0; k < embed_dim; ++k) {
+            Q[out + k] = qkv[base + k];
+            K[out + k] = qkv[base + embed_dim + k];
+            V[out + k] = qkv[base + 2 * embed_dim + k];
+        }
     }
     
     // 3. Compute attention scores: Q @ K^T / sqrt(head_dim)
@@ -982,7 +963,6 @@ inline std::vector<float> self_attention_forward(
     std::vector<float> scores(seq_len * seq_len, 0.0f);
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     
-    #pragma omp parallel for collapse(2)
     for (int i = 0; i < seq_len; ++i) {
         for (int j = 0; j < seq_len; ++j) {
             if (causal && j > i) {

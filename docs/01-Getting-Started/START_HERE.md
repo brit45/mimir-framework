@@ -23,7 +23,7 @@ Mímir Framework v2.3.0
 
 ### 1️⃣ Lire la Vue d'Ensemble (5 min)
 
-**Fichier:** [README.md](README.md)
+**Fichier:** [README.md](../../README.md)
 
 **Ce que vous allez apprendre:**
 - Qu'est-ce que Mímir ?
@@ -101,7 +101,7 @@ print("✅ Modèle sauvegardé!")
 
 ### Explorer la Documentation
 
-**Fichier principal:** [DOCS_INDEX.md](DOCS_INDEX.md)
+**Fichier principal:** [DOCS_INDEX.md](../../DOCS_INDEX.md)
 
 Ce fichier contient TOUT :
 - Navigation par cas d'usage
@@ -114,50 +114,50 @@ Ce fichier contient TOUT :
 **Dossier:** [docs/01-Getting-Started/](docs/01-Getting-Started/)
 
 Guides disponibles:
-1. ✅ [Quick Start](docs/01-Getting-Started/01-Quick-Start.md) - Premier modèle en 5 minutes
-2. 📦 [Installation](docs/01-Getting-Started/02-Installation.md) - Guide complet
-3. 🛠️ [IDE Setup](docs/01-Getting-Started/03-IDE-Setup.md) - VSCode, CLion, Vim
-4. ❓ [Why CPU-Only](docs/01-Getting-Started/04-Why-CPU-Only.md) - Philosophie
-5. 🏗️ [Build Instructions](docs/01-Getting-Started/05-Build-Instructions.md) - Compilation détaillée
-6. 🔧 [Rebuild and Test](docs/01-Getting-Started/06-Rebuild-And-Test.md) - Tests
+1. ✅ [Quick Start](01-Quick-Start.md) - Premier modèle en 5 minutes
+2. 📦 [Installation](02-Installation.md) - Guide complet
+3. 🛠️ [IDE Setup](03-IDE-Setup.md) - VSCode, CLion, Vim
+4. ❓ [Why CPU-Only](04-Why-CPU-Only.md) - Philosophie
+5. 🏗️ [Build Instructions](05-Build-Instructions.md) - Compilation détaillée
+6. 🔧 [Rebuild and Test](06-Rebuild-And-Test.md) - Tests
 
 ### Créer des Modèles Avancés
 
 **Dossier:** [docs/02-User-Guide/](docs/02-User-Guide/)
 
 Guides avancés:
-- 🤖 [Model Creation](docs/02-User-Guide/02-Model-Creation.md)
-- 🎨 [Predefined Architectures](docs/02-User-Guide/03-Predefined-Architectures.md)
-- 🏋️ [Training](docs/02-User-Guide/06-Training.md)
-- 💾 [Save/Load](docs/02-User-Guide/08-Save-Load.md)
+- 🤖 [Model Creation](../02-User-Guide/02-Model-Creation.md)
+- 🎨 [Predefined Architectures](../02-User-Guide/03-Predefined-Architectures.md)
+- 🏋️ [Training](../02-User-Guide/06-Training.md)
+- 💾 [Save/Load](../02-User-Guide/08-Save-Load.md)
 
 ### Consulter les Références
 
 **Fichiers clés:**
 - 📘 [docs/03-API-Reference/](docs/03-API-Reference/) - 114 fonctions documentées
-- 📚 [docs/LAYERS_REFERENCE.md](docs/LAYERS_REFERENCE.md) - 67 layers
-- 💾 [docs/SAVE_LOAD.md](docs/SAVE_LOAD.md) - Système de sérialisation v2.3
-- ⚡ [docs/PERFORMANCE.md](docs/PERFORMANCE.md) - Benchmarks
+- 📚 [docs/LAYERS_REFERENCE.md](../03-API-Reference/LAYERS_REFERENCE.md) - 67 layers
+- 💾 [docs/SAVE_LOAD.md](docs/01-Getting-Started/05-Save-Load.md) - Système de sérialisation v2.3
+- ⚡ [docs/PERFORMANCE.md](docs/05-Advanced/PERFORMANCE.md) - Benchmarks
 
 ---
 
 ## 🎓 Parcours d'Apprentissage Recommandé
 
 ### Débutant (1-2 heures)
-1. ✅ Lire [README.md](README.md)
+1. ✅ Lire [README.md](../../README.md)
 2. ✅ Compiler et tester
 3. ✅ Créer un premier modèle
 4. ✅ Parcourir [docs/01-Getting-Started/](docs/01-Getting-Started/)
 
 ### Intermédiaire (1 journée)
-1. ✅ Lire [TECHNICAL_STATUS.md](TECHNICAL_STATUS.md)
+1. ✅ Lire [TECHNICAL_STATUS.md](../04-Architecture-Internals/TECHNICAL_STATUS.md)
 2. ✅ Explorer [docs/02-User-Guide/](docs/02-User-Guide/)
 3. ✅ Essayer les templates dans [scripts/templates/](scripts/templates/)
 4. ✅ Créer une architecture custom
 
 ### Avancé (1 semaine)
 1. ✅ Étudier [docs/04-Architecture-Internals/](docs/04-Architecture-Internals/)
-2. ✅ Lire [docs/HOWTO_ADD_LAYER.md](docs/HOWTO_ADD_LAYER.md)
+2. ✅ Lire [docs/HOWTO_ADD_LAYER.md](../06-Contributing/HOWTO_ADD_LAYER.md)
 3. ✅ Explorer le code source dans [src/](src/)
 4. ✅ Contribuer au projet
 
@@ -167,20 +167,20 @@ Guides avancés:
 
 | Document | Contenu | Quand le lire |
 |----------|---------|---------------|
-| [README.md](README.md) | Vue d'ensemble | **Premier document** |
-| [DOCS_INDEX.md](DOCS_INDEX.md) | Index complet | Navigation |
-| [TECHNICAL_STATUS.md](TECHNICAL_STATUS.md) | État technique | Comprendre le projet |
-| [CHANGELOG.md](CHANGELOG.md) | Historique | Évolution du projet |
-| [docs/SAVE_LOAD.md](docs/SAVE_LOAD.md) | Sérialisation v2.3 | Sauvegarder/charger |
-| [docs/LAYERS_REFERENCE.md](docs/LAYERS_REFERENCE.md) | 67 layers | Référence layers |
+| [README.md](../../README.md) | Vue d'ensemble | **Premier document** |
+| [DOCS_INDEX.md](../../DOCS_INDEX.md) | Index complet | Navigation |
+| [TECHNICAL_STATUS.md](../04-Architecture-Internals/TECHNICAL_STATUS.md) | État technique | Comprendre le projet |
+| [CHANGELOG.md](../../CHANGELOG.md) | Historique | Évolution du projet |
+| [docs/SAVE_LOAD.md](docs/01-Getting-Started/05-Save-Load.md) | Sérialisation v2.3 | Sauvegarder/charger |
+| [docs/LAYERS_REFERENCE.md](../03-API-Reference/LAYERS_REFERENCE.md) | 67 layers | Référence layers |
 
 ---
 
 ## 🆘 Besoin d'Aide ?
 
 ### Documentation
-- **Index complet:** [DOCS_INDEX.md](DOCS_INDEX.md)
-- **FAQ:** Voir [DOCS_INDEX.md#-faq](DOCS_INDEX.md#-faq)
+- **Index complet:** [DOCS_INDEX.md](../../DOCS_INDEX.md)
+- **FAQ:** Voir [DOCS_INDEX.md#-faq](../../DOCS_INDEX.md#-faq)
 - **Guides:** [docs/](docs/)
 
 ### Support
@@ -202,14 +202,14 @@ Guides avancés:
 - ✅ Checksums SHA256, validation d'intégrité
 - ✅ Performance: 850 MB/s write, 1200 MB/s read
 
-**Guide complet:** [docs/SAVE_LOAD.md](docs/SAVE_LOAD.md)
+**Guide complet:** [docs/SAVE_LOAD.md](docs/01-Getting-Started/05-Save-Load.md)
 
 ### 🧹 Legacy Cleanup
 - ✅ ~300 lignes de code legacy supprimées
 - ✅ Architecture optimisée `layer_weight_blocks`
 - ✅ API moderne uniquement
 
-**Détails:** [LEGACY_CLEANUP_COMPLETE.md](LEGACY_CLEANUP_COMPLETE.md)
+**Détails:** [LEGACY_CLEANUP_COMPLETE.md](../Archives/LEGACY_CLEANUP_COMPLETE.md)
 
 ---
 
@@ -227,6 +227,6 @@ Guides avancés:
 
 ---
 
-**Prêt à commencer ?** → Lisez [README.md](README.md) maintenant ! 🚀
+**Prêt à commencer ?** → Lisez [README.md](../../README.md) maintenant ! 🚀
 
 **Dernière mise à jour:** 28 décembre 2025

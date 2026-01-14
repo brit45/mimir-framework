@@ -205,22 +205,25 @@ bool RawCheckpointReader::load_architecture(
         }
         
         // Load layers structure
-        if (arch.contains("layers")) {
+        // IMPORTANT: l'architecture sauvegardée ne contient pas toutes les métadonnées
+        // (in_features/out_features, kernels, etc.). Si le caller a déjà construit
+        // l'architecture via un builder (recommandé), on ne l'écrase pas.
+        if (arch.contains("layers") && model.getLayers().empty()) {
             model.getMutableLayers().clear();
             for (const auto& layer_obj : arch["layers"]) {
-                Layer layer;
-                layer.name = layer_obj.value("name", "");
-                layer.type = layer_obj.value("type", "");
-                layer.params_count = layer_obj.value("params_count", 0);
-                model.getMutableLayers().push_back(layer);
+                const std::string name = layer_obj.value("name", "");
+                const std::string type = layer_obj.value("type", "");
+                const size_t params_count = layer_obj.value("params_count", 0);
+                Layer layer(name, type, params_count); // initialise type_enum + normalise le type
+                model.getMutableLayers().push_back(std::move(layer));
             }
+
+            // Allocate parameters based on architecture (si on vient de reconstruire)
+            model.allocateParams();
         }
         
         // Load I/O dimensions
         // Note: tw and th are read-only via width()/height(), set during model construction
-        
-        // Allocate parameters based on architecture
-        model.allocateParams();
         
         return true;
         

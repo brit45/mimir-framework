@@ -2,7 +2,6 @@
 #include "../Model.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
-#include "../Models/VAEModel.hpp"
 #include <fstream>
 #include <cmath>
 #include <iomanip>
@@ -553,9 +552,8 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     root["total_params"] = model.totalParamCount();
     root["num_layers"] = model.getLayers().size();
 
-    // Optional captured gradients (VAEModel) - used when grad_weights are reset after optimizerStep
-    const auto* vae = dynamic_cast<const VAEModel*>(&model);
-    const std::unordered_map<std::string, std::vector<float>>* captured_grads = vae ? &vae->getLastGradientsByLayer() : nullptr;
+    // Optional captured gradients: no longer supported (VAEModel removed)
+    const std::unordered_map<std::string, std::vector<float>>* captured_grads = nullptr;
     
     // Optimizer state (if requested)
     if (options.include_optimizer_state) {

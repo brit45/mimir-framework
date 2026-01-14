@@ -17,7 +17,7 @@ Le framework Mímir propose maintenant **8 architectures modernes prêtes à l'e
   - Batch normalization
 
 ```cpp
-#include "Models/ModelArchitectures.hpp"
+#include "Models/Registry/ModelArchitectures.hpp"
 using namespace ModelArchitectures;
 
 Model model;
@@ -200,7 +200,7 @@ buildMobileNetV2(model, config);
 ### Méthode 3: API C++
 
 ```cpp
-#include "Models/ModelArchitectures.hpp"
+#include "Models/Registry/ModelArchitectures.hpp"
 
 using namespace ModelArchitectures;
 

@@ -328,8 +328,8 @@ RAM (MB) = nombre_params * 4 bytes / (1024 * 1024)
 - Architecture: [MEMORY_10GB_IMPLEMENTATION.md](MEMORY_10GB_IMPLEMENTATION.md)
 - Bonnes pratiques: [docs/MEMORY_BEST_PRACTICES.md](docs/MEMORY_BEST_PRACTICES.md)
 - API: [docs/03-API-Reference/Memory-Management.md](docs/03-API-Reference/)
-- Tests: [scripts/test_10gb_limit.lua](scripts/test_10gb_limit.lua)
-- Template: [scripts/template_new_model.lua](scripts/template_new_model.lua)
+- Tests: [scripts/test_10gb_limit.lua](../../scripts/tests/test_10gb_limit.lua)
+- Template: [scripts/template_new_model.lua](../../scripts/templates/template_new_model.lua)
 
 ---
 

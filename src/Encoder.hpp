@@ -33,10 +33,22 @@ class Encoder
         // special tokens are excluded from direct token_embeddings updates (except normal tokens)
         void trainOnTextTokens(const std::vector<int> &token_ids, const std::vector<float> &target, float lr = 0.01f);
 
+        // Special embeddings: initialization + simple SGD updates
+        void ensureSpecialEmbeddings(uint64_t seed = 0x51A5EEDu);
+        void sgdUpdateSpecialEmbeddings(const std::vector<float>& grad_text, float lr,
+                           bool update_seq = true,
+                           bool update_mod = true,
+                           bool update_mag = true);
+
         // expose for checkpointing
         int dim;
         int vocab_size;
         std::vector<float> token_embeddings;
+
+        // MagikTokens: pondération des N premiers tokens de la séquence.
+        // Ces tokens (préfixe) représentent typiquement style/thème/artiste/genre/etc.
+        int magik_prefix_count = 5;
+        float magik_prefix_weight = 2.0f;
 
         // Serialization (RawFolder + SafeTensors metadata)
         json to_json() const;

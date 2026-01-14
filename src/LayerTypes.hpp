@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <stdexcept>
+#include <iostream>
 
 // ============================================================================
 // LAYER TYPE REGISTRY - Tous les types de layers supportés
@@ -106,6 +107,9 @@ enum class LayerType {
     // === Special ===
     Identity,
     Lambda,
+
+    // === Custom (Mímir) ===
+    PatchEmbed,
     
     // === Total ===
     UNKNOWN
@@ -148,6 +152,9 @@ inline std::string normalize_type(const std::string& type) {
     if (type == "Concat") return "Concat";
     if (type == "Concatenate") return "Concat";
     if (type == "Cat") return "Concat";
+
+    // Custom
+    if (type == "PatchProjection") return "PatchEmbed";
     
     // Convolution
     if (type == "ConvTranspose") return "ConvTranspose2d";
@@ -254,7 +261,10 @@ inline LayerType string_to_type(const std::string& str) {
         
         // Special
         {"Identity", LayerType::Identity},
-        {"Lambda", LayerType::Lambda}
+        {"Lambda", LayerType::Lambda},
+
+        // Custom
+        {"PatchEmbed", LayerType::PatchEmbed}
     };
     
     std::string normalized = normalize_type(str);

@@ -2,7 +2,6 @@
 #include "../Model.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
-#include "../Models/VAEModel.hpp"
 #include <fstream>
 #include <cstring>
 #include <iomanip>
@@ -58,6 +57,50 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
     owned_buffers_.clear();
     
     const auto& layers = model.getLayers();
+
+    // Architecture / shapes / config (toujours, pour traçabilité et reconstruction)
+    {
+        json arch;
+        arch["model_name"] = model.getModelName();
+        arch["total_params"] = model.totalParamCount();
+        arch["num_layers"] = layers.size();
+        arch["model_config"] = model.modelConfig;
+
+        json layers_array = json::array();
+        for (const auto& layer : layers) {
+            json layer_obj;
+            layer_obj["name"] = layer.name;
+            layer_obj["type"] = layer.type;
+            layer_obj["params_count"] = layer.params_count;
+            layer_obj["inputs"] = layer.inputs;
+            layer_obj["output"] = layer.output;
+            // Common shape fields
+            layer_obj["in_features"] = layer.in_features;
+            layer_obj["out_features"] = layer.out_features;
+            layer_obj["in_channels"] = layer.in_channels;
+            layer_obj["out_channels"] = layer.out_channels;
+            layer_obj["kernel_size"] = layer.kernel_size;
+            layer_obj["stride"] = layer.stride;
+            layer_obj["padding"] = layer.padding;
+            layer_obj["seq_len"] = layer.seq_len;
+            layer_obj["embed_dim"] = layer.embed_dim;
+            layer_obj["num_heads"] = layer.num_heads;
+            // Weight size (if allocated)
+            layer_obj["weights_size"] = layer.getWeightsSize();
+            layers_array.push_back(layer_obj);
+        }
+        arch["layers"] = layers_array;
+
+        std::string s = arch.dump();
+        owned_buffers_.push_back(std::vector<uint8_t>(s.begin(), s.end()));
+        TensorData td;
+        td.name = "model/architecture_json";
+        td.dtype = DType::Uint8;
+        td.shape = {owned_buffers_.back().size()};
+        td.byte_size = owned_buffers_.back().size();
+        td.data_ptr = owned_buffers_.back().data();
+        tensors.push_back(td);
+    }
     
     // Collect layer weight blocks (modern allocation)
     for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
@@ -180,20 +223,18 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
         }
     }
 
-    // Gradient snapshot tensors (debug-only). For now, implemented for VAEModel.
+    // Gradient snapshot tensors (debug-only).
     if (options.include_gradients) {
-        if (auto* vae = dynamic_cast<VAEModel*>(&model)) {
-            const auto& grads = vae->getLastGradientsByLayer();
-            for (const auto& kv : grads) {
-                if (kv.second.empty()) continue;
-                TensorData td;
-                td.name = "grads/" + kv.first;
-                td.dtype = DType::Float32;
-                td.shape = {kv.second.size()};
-                td.byte_size = kv.second.size() * sizeof(float);
-                td.data_ptr = kv.second.data();
-                tensors.push_back(td);
-            }
+        // Generic: layer grad_weights snapshots
+        for (const auto& layer : layers) {
+            if (layer.grad_weights.empty()) continue;
+            TensorData td;
+            td.name = "grads/" + layer.name + "/weights";
+            td.dtype = DType::Float32;
+            td.shape = {layer.grad_weights.size()};
+            td.byte_size = layer.grad_weights.size() * sizeof(float);
+            td.data_ptr = layer.grad_weights.data();
+            tensors.push_back(td);
         }
     }
     

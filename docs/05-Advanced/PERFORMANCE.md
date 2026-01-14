@@ -1,5 +1,13 @@
 # ⚡ Performance & Optimisations
 
+## Baseline (logs du dépôt)
+
+- Wall time: **(non trouvé)**
+- CPU: **1150%** (OpenMP 12 threads)
+- Max RSS: **103160 KB**
+- Perf: `4 191 871 014 557      instructions                     #    0,47  insn per cycle              (83,33%)`
+
+> Note: ces chiffres servent de **référence** pour détecter des régressions. Ils dépendent de la machine et des flags de compilation.
 Ce document décrit toutes les optimisations implémentées dans le nouveau système de layers.
 
 ---

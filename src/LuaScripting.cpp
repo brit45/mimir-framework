@@ -1,6 +1,6 @@
 #include "LuaScripting.hpp"
-#include "Models/ModelArchitectures.hpp"
-#include "Models/VAEModel.hpp"
+#include "Models/Registry/ModelArchitectures.hpp"
+#include "Models/Diffusion/PonyXLDDPMModel.hpp"
 #include "Serialization/Serialization.hpp"
 #include "Serialization/DebugJsonDump.hpp"
 #include "AdvancedRAMManager.hpp"
@@ -184,103 +184,15 @@ void LuaScripting::registerAPI() {
     
     // ========== Sous-table "Mimir.Architectures" ==========
     lua_newtable(L);
-    
-    lua_pushcfunction(L, lua_buildUNet);
-    lua_setfield(L, -2, "unet");
-    
-    lua_pushcfunction(L, lua_buildVAE);
-    lua_setfield(L, -2, "vae");
-    
-    lua_pushcfunction(L, lua_buildViT);
-    lua_setfield(L, -2, "vit");
-    
-    lua_pushcfunction(L, lua_buildGAN);
-    lua_setfield(L, -2, "gan");
-    
-    lua_pushcfunction(L, lua_buildDiffusion);
-    lua_setfield(L, -2, "diffusion");
-    
-    lua_pushcfunction(L, lua_buildTransformer);
-    lua_setfield(L, -2, "transformer");
-    
-    lua_pushcfunction(L, lua_buildResNet);
-    lua_setfield(L, -2, "resnet");
-    
-    lua_pushcfunction(L, lua_buildMobileNet);
-    lua_setfield(L, -2, "mobilenet");
-    
-    lua_pushcfunction(L, lua_buildFlux);
-    lua_setfield(L, -2, "flux");
+
+    // Registry helpers
+    lua_pushcfunction(L, lua_archAvailable);
+    lua_setfield(L, -2, "available");
+
+    lua_pushcfunction(L, lua_archDefaultConfig);
+    lua_setfield(L, -2, "default_config");
     
     lua_setfield(L, -2, "Architectures");  // Mimir.Architectures
-    
-    // ========== Sous-table "Mimir.Flux" (Flux-specific operations) ==========
-    lua_newtable(L);
-    
-    lua_pushcfunction(L, lua_fluxGenerate);
-    lua_setfield(L, -2, "generate");
-    
-    lua_pushcfunction(L, lua_fluxEncodeImage);
-    lua_setfield(L, -2, "encode_image");
-    
-    lua_pushcfunction(L, lua_fluxDecodeLatent);
-    lua_setfield(L, -2, "decode_latent");
-    
-    lua_pushcfunction(L, lua_fluxEncodeText);
-    lua_setfield(L, -2, "encode_text");
-    
-    lua_pushcfunction(L, lua_fluxSetPromptTokenizer);
-    lua_setfield(L, -2, "set_tokenizer");
-    
-    lua_setfield(L, -2, "Flux");  // Mimir.Flux
-    
-    // ========== Sous-table "Mimir.FluxModel" (API moderne orientée objet) ==========
-    lua_newtable(L);
-    
-    // Constructeur
-    lua_pushcfunction(L, lua_fluxModelNew);
-    lua_setfield(L, -2, "new");
-    
-    // Modes d'exécution
-    lua_pushcfunction(L, lua_fluxTrain);
-    lua_setfield(L, -2, "train");
-    
-    lua_pushcfunction(L, lua_fluxEval);
-    lua_setfield(L, -2, "eval");
-    
-    lua_pushcfunction(L, lua_fluxIsTraining);
-    lua_setfield(L, -2, "isTraining");
-    
-    // VAE
-    lua_pushcfunction(L, lua_fluxEncodeImage);
-    lua_setfield(L, -2, "encodeImage");
-    
-    lua_pushcfunction(L, lua_fluxDecodeLatent);
-    lua_setfield(L, -2, "decodeLatent");
-    
-    // Text processing
-    lua_pushcfunction(L, lua_fluxTokenizePrompt);
-    lua_setfield(L, -2, "tokenizePrompt");
-    
-    lua_pushcfunction(L, lua_fluxEncodeText);
-    lua_setfield(L, -2, "encodeText");
-    
-    // Diffusion
-    lua_pushcfunction(L, lua_fluxPredictNoise);
-    lua_setfield(L, -2, "predictNoise");
-    
-    lua_pushcfunction(L, lua_fluxGenerate);
-    lua_setfield(L, -2, "generate");
-    
-    // Training
-    lua_pushcfunction(L, lua_fluxComputeDiffusionLoss);
-    lua_setfield(L, -2, "computeDiffusionLoss");
-    
-    // Configuration
-    lua_pushcfunction(L, lua_fluxSetPromptTokenizer);
-    lua_setfield(L, -2, "setPromptTokenizer");
-    
-    lua_setfield(L, -2, "FluxModel");  // Mimir.FluxModel
     
     // ========== Sous-table "Mimir.Layers" ==========
     lua_newtable(L);
@@ -658,28 +570,25 @@ int LuaScripting::lua_createModel(lua_State* L) {
     // Argument: type de modèle (string)
     const char* model_type = luaL_checkstring(L, 1);
     
-    // Argument optionnel: config (table)
+    // Argument optionnel: config (table). Si absent: defaultConfig(model_type)
     json config;
     if (lua_istable(L, 2)) {
         config = luaTableToJson(L, 2);
     }
     
     try {
-        // Créer un modèle (polymorphique)
-        if (std::string(model_type) == "vae") {
-            ctx.currentModel = std::make_shared<VAEModel>();
-        } else {
-            ctx.currentModel = std::make_shared<Model>();
+        const std::string name(model_type);
+        if (!config.is_object() || config.empty()) {
+            config = ModelArchitectures::defaultConfig(name);
         }
-        
-        // Stocker le type et la config pour build()
-        ctx.modelType = std::string(model_type);
+
+        // Création + construction via registre (le réseau est défini dans la classe du modèle).
+        ctx.currentModel = ModelArchitectures::create(name, config);
+
+        ctx.modelType = name;
         ctx.modelConfig = config;
-        
-        // NOUVEAU: Transférer la config au modèle pour accès aux dimensions
-        ctx.currentModel->modelConfig = config;
-        
-        ctx.addLog("Modèle créé: " + std::string(model_type));
+
+        ctx.addLog("Modèle créé via registre: " + name);
         lua_pushboolean(L, true);
     } catch (const std::exception& e) {
         ctx.addLog("Erreur création modèle: " + std::string(e.what()));
@@ -693,235 +602,28 @@ int LuaScripting::lua_createModel(lua_State* L) {
 
 int LuaScripting::lua_buildModel(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
-    
+
     if (!ctx.currentModel) {
         lua_pushboolean(L, false);
         lua_pushstring(L, "Aucun modèle créé");
         return 2;
     }
-    
-    try {
-        // Construire selon le type
-        if (ctx.modelType == "transformer" || ctx.modelType == "encoder" || ctx.modelType == "decoder") {
-            // Transformer / Encoder / Decoder
-            ModelArchitectures::TransformerConfig tfConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("vocab_size")) 
-                    tfConfig.vocab_size = ctx.modelConfig["vocab_size"];
-                if (ctx.modelConfig.contains("embed_dim")) 
-                    tfConfig.d_model = ctx.modelConfig["embed_dim"];
-                if (ctx.modelConfig.contains("num_layers")) 
-                    tfConfig.num_layers = ctx.modelConfig["num_layers"];
-                if (ctx.modelConfig.contains("num_heads")) 
-                    tfConfig.num_heads = ctx.modelConfig["num_heads"];
-                if (ctx.modelConfig.contains("d_ff")) 
-                    tfConfig.d_ff = ctx.modelConfig["d_ff"];
-                if (ctx.modelConfig.contains("max_seq_len")) 
-                    tfConfig.max_seq_len = ctx.modelConfig["max_seq_len"];
-                if (ctx.modelConfig.contains("dropout")) 
-                    tfConfig.dropout = ctx.modelConfig["dropout"];
-            }
-            
-            ModelArchitectures::buildTransformer(*ctx.currentModel, tfConfig);
-        }
-        else if (ctx.modelType == "unet") {
-            // UNet - Segmentation / Image generation
-            ModelArchitectures::UNetConfig unetConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("input_channels"))
-                    unetConfig.input_channels = ctx.modelConfig["input_channels"];
-                if (ctx.modelConfig.contains("output_channels"))
-                    unetConfig.output_channels = ctx.modelConfig["output_channels"];
-                if (ctx.modelConfig.contains("base_channels"))
-                    unetConfig.base_channels = ctx.modelConfig["base_channels"];
-                if (ctx.modelConfig.contains("num_levels"))
-                    unetConfig.num_levels = ctx.modelConfig["num_levels"];
-                if (ctx.modelConfig.contains("blocks_per_level"))
-                    unetConfig.blocks_per_level = ctx.modelConfig["blocks_per_level"];
-                if (ctx.modelConfig.contains("use_attention"))
-                    unetConfig.use_attention = ctx.modelConfig["use_attention"];
-                if (ctx.modelConfig.contains("use_residual"))
-                    unetConfig.use_residual = ctx.modelConfig["use_residual"];
-                if (ctx.modelConfig.contains("dropout"))
-                    unetConfig.dropout = ctx.modelConfig["dropout"];
-            }
-            
-            ModelArchitectures::buildUNet(*ctx.currentModel, unetConfig);
-        }
-        else if (ctx.modelType == "vae") {
-            // VAE - Variational Autoencoder
-            ModelArchitectures::VAEConfig vaeConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("input_dim"))
-                    vaeConfig.input_dim = ctx.modelConfig["input_dim"];
-                else if (ctx.modelConfig.contains("embed_dim"))
-                    vaeConfig.input_dim = ctx.modelConfig["embed_dim"];
-                if (ctx.modelConfig.contains("latent_dim"))
-                    vaeConfig.latent_dim = ctx.modelConfig["latent_dim"];
-                if (ctx.modelConfig.contains("encoder_hidden") && ctx.modelConfig["encoder_hidden"].is_array()) {
-                    vaeConfig.encoder_hidden.clear();
-                    for (const auto& d : ctx.modelConfig["encoder_hidden"]) {
-                        vaeConfig.encoder_hidden.push_back(d);
-                    }
-                }
-                if (ctx.modelConfig.contains("decoder_hidden") && ctx.modelConfig["decoder_hidden"].is_array()) {
-                    vaeConfig.decoder_hidden.clear();
-                    for (const auto& d : ctx.modelConfig["decoder_hidden"]) {
-                        vaeConfig.decoder_hidden.push_back(d);
-                    }
-                }
-                if (ctx.modelConfig.contains("kl_beta"))
-                    vaeConfig.kl_beta = ctx.modelConfig["kl_beta"];
-                if (ctx.modelConfig.contains("use_mean_in_infer"))
-                    vaeConfig.use_mean_in_infer = ctx.modelConfig["use_mean_in_infer"];
-                if (ctx.modelConfig.contains("seed"))
-                    vaeConfig.seed = ctx.modelConfig["seed"];
-                if (ctx.modelConfig.contains("activation")) {
-                    std::string act = ctx.modelConfig["activation"].get<std::string>();
-                    std::transform(act.begin(), act.end(), act.begin(), ::tolower);
-                    if (act == "relu") vaeConfig.activation = ActivationType::RELU;
-                    else if (act == "gelu") vaeConfig.activation = ActivationType::GELU;
-                    else if (act == "tanh") vaeConfig.activation = ActivationType::TANH;
-                    else if (act == "sigmoid") vaeConfig.activation = ActivationType::SIGMOID;
-                    else if (act == "swish" || act == "silu") vaeConfig.activation = ActivationType::SWISH;
-                }
-            }
-            
-            ModelArchitectures::buildVAE(*ctx.currentModel, vaeConfig);
 
-            // Si un tokenizer/encoder existe côté contexte Lua, l'injecter dans le modèle VAE
-            if (ctx.currentTokenizer) {
-                ctx.currentModel->getMutableTokenizer() = *ctx.currentTokenizer;
-            }
-            if (ctx.currentEncoder) {
-                ctx.currentModel->getMutableEncoder() = *ctx.currentEncoder;
-                ctx.currentModel->setHasEncoder(true);
-            }
+    try {
+        // Compat: re-crée le modèle via registre (préférez Model.create(name, cfg)).
+        std::string arch = ctx.modelType;
+
+        json cfg = ctx.modelConfig;
+        if (!cfg.is_object() || cfg.empty()) {
+            cfg = ModelArchitectures::defaultConfig(arch);
         }
-        else if (ctx.modelType == "vit") {
-            // ViT - Vision Transformer
-            ModelArchitectures::ViTConfig vitConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("image_size"))
-                    vitConfig.image_size = ctx.modelConfig["image_size"];
-                if (ctx.modelConfig.contains("patch_size"))
-                    vitConfig.patch_size = ctx.modelConfig["patch_size"];
-                if (ctx.modelConfig.contains("num_classes"))
-                    vitConfig.num_classes = ctx.modelConfig["num_classes"];
-                if (ctx.modelConfig.contains("embed_dim"))
-                    vitConfig.d_model = ctx.modelConfig["embed_dim"];
-                if (ctx.modelConfig.contains("num_layers"))
-                    vitConfig.num_layers = ctx.modelConfig["num_layers"];
-                if (ctx.modelConfig.contains("num_heads"))
-                    vitConfig.num_heads = ctx.modelConfig["num_heads"];
-                if (ctx.modelConfig.contains("mlp_ratio"))
-                    vitConfig.mlp_ratio = ctx.modelConfig["mlp_ratio"];
-                if (ctx.modelConfig.contains("dropout"))
-                    vitConfig.dropout = ctx.modelConfig["dropout"];
-            }
-            
-            ModelArchitectures::buildViT(*ctx.currentModel, vitConfig);
-        }
-        else if (ctx.modelType == "generator" || ctx.modelType == "gan") {
-            // GAN Generator
-            ModelArchitectures::GANConfig ganConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("latent_dim"))
-                    ganConfig.latent_dim = ctx.modelConfig["latent_dim"];
-                if (ctx.modelConfig.contains("image_channels"))
-                    ganConfig.image_channels = ctx.modelConfig["image_channels"];
-                if (ctx.modelConfig.contains("image_size"))
-                    ganConfig.image_size = ctx.modelConfig["image_size"];
-                if (ctx.modelConfig.contains("gen_channels"))
-                    ganConfig.g_base_channels = ctx.modelConfig["gen_channels"];
-            }
-            
-            ModelArchitectures::buildGenerator(*ctx.currentModel, ganConfig);
-        }
-        else if (ctx.modelType == "discriminator") {
-            // GAN Discriminator
-            ModelArchitectures::GANConfig ganConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("image_channels"))
-                    ganConfig.image_channels = ctx.modelConfig["image_channels"];
-                if (ctx.modelConfig.contains("image_size"))
-                    ganConfig.image_size = ctx.modelConfig["image_size"];
-                if (ctx.modelConfig.contains("disc_channels"))
-                    ganConfig.d_base_channels = ctx.modelConfig["disc_channels"];
-            }
-            
-            ModelArchitectures::buildDiscriminator(*ctx.currentModel, ganConfig);
-        }
-        else if (ctx.modelType == "diffusion") {
-            // Diffusion Model
-            ModelArchitectures::DiffusionConfig diffConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("image_channels"))
-                    diffConfig.image_channels = ctx.modelConfig["image_channels"];
-                if (ctx.modelConfig.contains("image_size"))
-                    diffConfig.image_size = ctx.modelConfig["image_size"];
-                if (ctx.modelConfig.contains("model_channels"))
-                    diffConfig.base_channels = ctx.modelConfig["model_channels"];
-                if (ctx.modelConfig.contains("num_res_blocks"))
-                    diffConfig.num_res_blocks = ctx.modelConfig["num_res_blocks"];
-            }
-            
-            ModelArchitectures::buildDiffusion(*ctx.currentModel, diffConfig);
-        }
-        else if (ctx.modelType == "resnet") {
-            // ResNet
-            ModelArchitectures::ResNetConfig resnetConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("num_classes"))
-                    resnetConfig.num_classes = ctx.modelConfig["num_classes"];
-                if (ctx.modelConfig.contains("base_channels"))
-                    resnetConfig.base_channels = ctx.modelConfig["base_channels"];
-                if (ctx.modelConfig.contains("use_bottleneck"))
-                    resnetConfig.use_bottleneck = ctx.modelConfig["use_bottleneck"];
-                if (ctx.modelConfig.contains("layers") && ctx.modelConfig["layers"].is_array()) {
-                    resnetConfig.layers.clear();
-                    for (const auto& l : ctx.modelConfig["layers"]) {
-                        resnetConfig.layers.push_back(l);
-                    }
-                }
-            }
-            
-            ModelArchitectures::buildResNet(*ctx.currentModel, resnetConfig);
-        }
-        else if (ctx.modelType == "mobilenet") {
-            // MobileNet
-            ModelArchitectures::MobileNetConfig mobileConfig;
-            
-            if (!ctx.modelConfig.empty()) {
-                if (ctx.modelConfig.contains("num_classes"))
-                    mobileConfig.num_classes = ctx.modelConfig["num_classes"];
-                if (ctx.modelConfig.contains("width_mult"))
-                    mobileConfig.width_multiplier = ctx.modelConfig["width_mult"];
-                if (ctx.modelConfig.contains("resolution"))
-                    mobileConfig.resolution = ctx.modelConfig["resolution"];
-            }
-            
-            ModelArchitectures::buildMobileNetV2(*ctx.currentModel, mobileConfig);
-        }
-        else {
-            // Fallback: appeler build() par défaut
-            ctx.currentModel->build();
-        }
+
+        ctx.currentModel = ModelArchitectures::create(arch, cfg);
+        ctx.modelType = arch;
+        ctx.modelConfig = cfg;
         
-        // Allouer et initialiser les paramètres
-        size_t params = ctx.currentModel->totalParamCount();
-        if (params > 0) {
-            ctx.currentModel->allocateParams();
-            ctx.currentModel->initializeWeights("he", 0);
-        }
+        // Ne fait plus allocate/init automatiquement (utilisez Model.allocate_params / Model.init_weights).
+        size_t params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
         
         // Initialiser l'encoder si un tokenizer est présent
         if (ctx.currentTokenizer && !ctx.currentEncoder) {
@@ -963,193 +665,11 @@ int LuaScripting::lua_trainModel(lua_State* L) {
     double lr = luaL_checknumber(L, 2);
     
     ctx.addLog("Entraînement: " + std::to_string(epochs) + " epochs, LR=" + std::to_string(lr));
-    
-    // Boucle d'entraînement basique
+
     try {
-        // Spécial VAE: entraîner sur le dataset réel (DatasetItem)
-        if (ctx.modelType == "vae") {
-            auto* vae = dynamic_cast<VAEModel*>(ctx.currentModel.get());
-            if (!vae) {
-                lua_pushboolean(L, false);
-                lua_pushstring(L, "Le modèle courant n'est pas un VAEModel");
-                return 2;
-            }
-            if (ctx.currentDataset.empty()) {
-                lua_pushboolean(L, false);
-                lua_pushstring(L, "Aucun dataset chargé. Utilisez dataset.load() puis entraînez.");
-                return 2;
-            }
-
-            // Injecter tokenizer/encoder de contexte si disponibles
-            if (ctx.currentTokenizer) {
-                vae->getMutableTokenizer() = *ctx.currentTokenizer;
-            }
-            if (ctx.currentEncoder) {
-                vae->getMutableEncoder() = *ctx.currentEncoder;
-                vae->setHasEncoder(true);
-            }
-
-            // Instancier l'Optimizer à partir de la configuration
-            Optimizer opt;
-            opt.initial_lr = lr;
-            if (ctx.modelConfig.contains("optimizer")) {
-                std::string opt_type = ctx.modelConfig["optimizer"];
-                if (opt_type == "sgd" || opt_type == "SGD") opt.type = OptimizerType::SGD;
-                else if (opt_type == "adam" || opt_type == "ADAM") opt.type = OptimizerType::ADAM;
-                else opt.type = OptimizerType::ADAMW;
-            } else {
-                opt.type = OptimizerType::ADAMW;
-            }
-            if (ctx.modelConfig.contains("beta1")) opt.beta1 = ctx.modelConfig["beta1"];
-            if (ctx.modelConfig.contains("beta2")) opt.beta2 = ctx.modelConfig["beta2"];
-            if (ctx.modelConfig.contains("epsilon")) opt.eps = ctx.modelConfig["epsilon"];
-            if (ctx.modelConfig.contains("weight_decay")) opt.weight_decay = ctx.modelConfig["weight_decay"];
-            if (ctx.modelConfig.contains("min_lr")) opt.min_lr = ctx.modelConfig["min_lr"];
-            if (ctx.modelConfig.contains("decay_rate")) opt.decay_rate = ctx.modelConfig["decay_rate"];
-            if (ctx.modelConfig.contains("decay_steps")) opt.decay_steps = ctx.modelConfig["decay_steps"];
-            if (ctx.modelConfig.contains("warmup_steps")) opt.warmup_steps = ctx.modelConfig["warmup_steps"];
-
-            size_t max_items = 0;
-            if (ctx.modelConfig.contains("max_items")) {
-                max_items = static_cast<size_t>(ctx.modelConfig["max_items"].get<int>());
-            }
-            size_t max_chars = 8192;
-            if (ctx.modelConfig.contains("max_text_chars")) {
-                max_chars = static_cast<size_t>(ctx.modelConfig["max_text_chars"].get<int>());
-            }
-
-            const size_t total_batches = (max_items > 0) ? std::min(max_items, ctx.currentDataset.size()) : ctx.currentDataset.size();
-            const size_t params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
-
-            double global_loss_sum = 0.0;
-            size_t global_steps = 0;
-            bool ok = true;
-
-            size_t last_mem_mb = 0;
-
-            for (int epoch = 0; epoch < epochs; ++epoch) {
-                double epoch_loss_sum = 0.0;
-                double epoch_kl_sum = 0.0;
-                double epoch_mse_sum = 0.0;
-                size_t steps = 0;
-
-                auto t_epoch_start = std::chrono::steady_clock::now();
-
-                for (size_t i = 0; i < ctx.currentDataset.size(); ++i) {
-                    if (max_items > 0 && steps >= max_items) break;
-
-                    auto& item = ctx.currentDataset[i];
-                    if (item.text_file.empty()) continue;
-                    if (!item.loadText()) continue;
-                    if (!item.text.has_value()) continue;
-
-                    std::string txt = *item.text;
-                    if (txt.size() > max_chars) txt.resize(max_chars);
-
-                    auto toks = vae->getMutableTokenizer().tokenizeEnsure(txt);
-                    vae->getMutableEncoder().ensureVocabSize(vae->getTokenizer().getVocabSize());
-                    std::vector<float> x = vae->getEncoder().encode(toks);
-
-                    auto t0 = std::chrono::steady_clock::now();
-                    VAEModel::StepStats st = vae->trainStep(x, opt, static_cast<float>(lr));
-                    auto t1 = std::chrono::steady_clock::now();
-
-                    // Snapshot optimizer pour sérialisation/debug (état mis à jour dans optimizerStep)
-                    ctx.currentModel->setSerializedOptimizer(opt);
-
-                    const double loss = st.loss;
-                    const double mse = st.recon_loss;
-                    const double kl = st.kl_loss;
-
-                    epoch_loss_sum += loss;
-                    epoch_mse_sum += mse;
-                    epoch_kl_sum += kl;
-                    global_loss_sum += loss;
-                    steps++;
-                    global_steps++;
-
-                    // Htop update (si activé)
-                    if (ctx.asyncMonitor && (steps % 10 == 0 || steps == 1)) {
-                        const double avg = (global_steps > 0) ? (global_loss_sum / static_cast<double>(global_steps)) : loss;
-                        const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-                            // Gradients: ces valeurs sont capturées dans VAEModel::trainStep avant optimizerStep.
-                            const float grad_norm = vae->getLastGradNorm();
-                            const float grad_max = vae->getLastGradMaxAbs();
-
-                        // Mémoire: privilégier MemoryGuard (tensors), fallback RAM manager (dataset/cache)
-                        const size_t mem_guard_mb = MemoryGuard::instance().getCurrentBytes() / (1024ULL * 1024ULL);
-                        const size_t mem_ram_mb = AdvancedRAMManager::instance().getCurrentRAM() / (1024ULL * 1024ULL);
-                        const size_t mem_mb = std::max(mem_guard_mb, mem_ram_mb);
-                        const size_t freed_mb = (last_mem_mb > mem_mb) ? (last_mem_mb - mem_mb) : 0;
-                        last_mem_mb = mem_mb;
-
-                        const auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
-                            std::chrono::steady_clock::now() - t_epoch_start
-                        ).count();
-                        const float bps = (elapsed > 0.0) ? static_cast<float>(static_cast<double>(steps) / elapsed) : 0.0f;
-
-                        AsyncMonitor::Metrics m;
-                        m.epoch = epoch + 1;
-                        m.total_epochs = epochs;
-                        m.batch = static_cast<int>(steps);
-                        m.total_batches = static_cast<int>(total_batches);
-                        m.loss = static_cast<float>(loss);
-                        m.avg_loss = static_cast<float>(avg);
-                        m.lr = opt.getCurrentLR();
-                        m.batch_time_ms = static_cast<int>(dt_ms);
-                        m.memory_mb = mem_mb;
-                        m.memory_freed = freed_mb;
-                        m.bps = bps;
-                        m.params = params;
-                        m.timestep = 0.0f;
-                        m.kl = static_cast<float>(kl);
-                        m.wass = 0.0f;
-                        m.ent = 0.0f;
-                        m.mom = 0.0f;
-                        m.spat = 0.0f;
-                        m.temp = 0.0f;
-                        m.mse = static_cast<float>(mse);
-                        m.grad_norm = grad_norm;
-                        m.grad_max = grad_max;
-                        m.opt_type = static_cast<int>(opt.type);
-                        m.opt_step = static_cast<int>(opt.step);
-                        m.opt_beta1 = opt.beta1;
-                        m.opt_beta2 = opt.beta2;
-                        m.opt_eps = opt.eps;
-                        m.opt_weight_decay = opt.weight_decay;
-                        ctx.asyncMonitor->updateMetrics(m);
-                    }
-                }
-
-                if (steps == 0) {
-                    ctx.addLog("VAE: epoch " + std::to_string(epoch + 1) + " sans samples valides");
-                    continue;
-                }
-
-                const double avg_epoch = epoch_loss_sum / static_cast<double>(steps);
-                ctx.addLog(
-                    "VAE epoch " + std::to_string(epoch + 1) + "/" + std::to_string(epochs) +
-                    " | avg_loss=" + std::to_string(avg_epoch) +
-                    " | avg_mse=" + std::to_string(epoch_mse_sum / static_cast<double>(steps)) +
-                    " | avg_kl=" + std::to_string(epoch_kl_sum / static_cast<double>(steps))
-                );
-            }
-
-            lua_pushboolean(L, ok);
-            return 1;
-        }
-
-        // Default (legacy) training path
-        if (ctx.currentSequences.empty()) {
-            lua_pushboolean(L, false);
-            lua_pushstring(L, "Aucune séquence chargée. Utilisez dataset.prepare_sequences() d'abord.");
-            return 2;
-        }
-        
         // Instancier l'Optimizer à partir de la configuration
         Optimizer opt;
-        opt.initial_lr = lr;
+        opt.initial_lr = static_cast<float>(lr);
         
         // Type d'optimizer depuis la config (défaut: ADAMW)
         if (ctx.modelConfig.contains("optimizer")) {
@@ -1192,30 +712,135 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         if (ctx.modelConfig.contains("warmup_steps")) {
             opt.warmup_steps = ctx.modelConfig["warmup_steps"];
         }
+
+        // Strategy (optionnel): "none" | "cosine" | "step" | "exponential" | "linear"
+        if (ctx.modelConfig.contains("decay_strategy")) {
+            std::string s = ctx.modelConfig["decay_strategy"].get<std::string>();
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+            if (s == "none") opt.decay_strategy = LRDecayStrategy::NONE;
+            else if (s == "cosine") opt.decay_strategy = LRDecayStrategy::COSINE;
+            else if (s == "step") opt.decay_strategy = LRDecayStrategy::STEP;
+            else if (s == "exponential") opt.decay_strategy = LRDecayStrategy::EXPONENTIAL;
+            else if (s == "linear") opt.decay_strategy = LRDecayStrategy::LINEAR;
+        }
+
+        // Reprise éventuelle de l'état optimiseur (checkpoint)
+        if (const Optimizer* saved = ctx.currentModel->getSerializedOptimizer()) {
+            opt = *saved;
+            // S'assurer que lr reflète l'argument (opt.initial_lr sert de base au scheduler)
+            opt.initial_lr = static_cast<float>(lr);
+        }
         
         ctx.addLog("Optimizer configuré: type=" + std::to_string(static_cast<int>(opt.type)) + 
                    ", beta1=" + std::to_string(opt.beta1) + 
                    ", beta2=" + std::to_string(opt.beta2) + 
                    ", weight_decay=" + std::to_string(opt.weight_decay));
-        
-        for (int epoch = 0; epoch < epochs; ++epoch) {
-            float epoch_loss = 0.0f;
-            
-            // Training sur toutes les séquences
-            for (const auto& seq : ctx.currentSequences) {
-                // Forward pass (simplifié)
-                std::vector<uint8_t> dummy_output;
-                ctx.currentModel->forward(dummy_output);
-                
-                // Backward pass (simplifié)
-                ctx.currentModel->optimizerStep(opt, lr, nullptr);
+
+        // Chemin moderne: PonyXL DDPM utilise le dataset (texte+image) et un vrai backward/optimizer.
+        if (auto* pony = dynamic_cast<PonyXLDDPMModel*>(ctx.currentModel.get())) {
+            if (ctx.currentDataset.empty()) {
+                lua_pushboolean(L, false);
+                lua_pushstring(L, "Aucun dataset chargé. Utilisez dataset.load() d'abord.");
+                return 2;
             }
-            
-            ctx.addLog("Epoch " + std::to_string(epoch + 1) + "/" + std::to_string(epochs) + " completed");
+
+            const auto cfg = pony->getConfig();
+            const int target_w = std::max(1, cfg.image_w);
+            const int target_h = std::max(1, cfg.image_h);
+
+            size_t max_items = ctx.currentDataset.size();
+            if (ctx.modelConfig.contains("max_items")) {
+                const int mi = ctx.modelConfig["max_items"].get<int>();
+                if (mi > 0) max_items = std::min(max_items, static_cast<size_t>(mi));
+            }
+
+            // total_steps: chaque item fait (1 + blur_levels) optimizerStep
+            const int micro_steps = 1 + std::max(1, cfg.blur_levels);
+            const int total_steps = std::max(1, epochs) * static_cast<int>(std::max<size_t>(1, max_items)) * micro_steps;
+            opt.total_steps = total_steps;
+
+            std::vector<size_t> indices(ctx.currentDataset.size());
+            for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+            std::mt19937 rng(1337);
+
+            for (int epoch = 0; epoch < epochs; ++epoch) {
+                std::shuffle(indices.begin(), indices.end(), rng);
+
+                double loss_sum = 0.0;
+                size_t seen = 0;
+                size_t trained = 0;
+
+                for (size_t k = 0; k < indices.size() && trained < max_items; ++k) {
+                    DatasetItem& item = ctx.currentDataset[indices[k]];
+                    ++seen;
+
+                    // Besoin texte + image
+                    if (item.text_file.empty() && !item.text.has_value()) continue;
+                    if (item.image_file.empty()) continue;
+
+                    if (!item.loadText()) continue;
+                    if (!item.loadImageRGB(target_w, target_h)) continue;
+                    if (!item.text.has_value() || !item.img.has_value()) {
+                        item.unload();
+                        continue;
+                    }
+                    if (item.img_c != 3 || item.w != target_w || item.h != target_h) {
+                        item.unload();
+                        continue;
+                    }
+
+                    const std::string& prompt = item.text.value();
+                    const std::vector<uint8_t>& rgb = item.img.value();
+
+                    const float lr_base = static_cast<float>(lr);
+                    PonyXLDDPMModel::StepStats st = pony->trainStepTripleFault(prompt, rgb, target_w, target_h, opt, lr_base);
+                    loss_sum += st.loss;
+                    ++trained;
+
+                    // Libérer la RAM dataset pour éviter l'accumulation
+                    item.unload();
+
+                    if (trained % 10 == 0) {
+                        const double avg = loss_sum / static_cast<double>(trained);
+                        ctx.addLog("[ponyxl_ddpm] epoch=" + std::to_string(epoch + 1) +
+                                   " step=" + std::to_string(trained) +
+                                   " loss=" + std::to_string(avg) +
+                                   " opt_step=" + std::to_string(opt.step));
+                    }
+                }
+
+                const double avg_loss = (trained > 0) ? (loss_sum / static_cast<double>(trained)) : 0.0;
+                ctx.addLog("Epoch " + std::to_string(epoch + 1) + "/" + std::to_string(epochs) +
+                           " completed | trained=" + std::to_string(trained) + "/" + std::to_string(max_items) +
+                           " | avg_loss=" + std::to_string(avg_loss) +
+                           " | seen=" + std::to_string(seen));
+            }
+
+            // Persister l'état optimiseur pour sérialisation/checkpoints
+            ctx.currentModel->setSerializedOptimizer(opt);
+
+            lua_pushboolean(L, true);
+            lua_pushnil(L); // valeur de retour optionnelle (ex: avg_loss) - non exposée ici
+            return 2;
+        }
+
+        // Fallback legacy: nécessite des séquences préparées.
+        if (ctx.currentSequences.empty()) {
+            lua_pushboolean(L, false);
+            lua_pushstring(L, "Aucune séquence chargée. Utilisez dataset.prepare_sequences() d'abord.");
+            return 2;
         }
         
-        lua_pushboolean(L, true);
-        return 1;
+        // NOTE: ce chemin legacy ne fait pas d'apprentissage significatif pour l'instant.
+        // Il est conservé pour compatibilité (scripts anciens), mais les modèles modernes
+        // devraient fournir un chemin dataset spécifique (ex: ponyxl_ddpm ci-dessus).
+        for (int epoch = 0; epoch < epochs; ++epoch) {
+            ctx.addLog("Epoch " + std::to_string(epoch + 1) + "/" + std::to_string(epochs) + " (legacy) - no-op");
+        }
+
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Training legacy non supporté: utilisez un modèle avec chemin dataset (ex: ponyxl_ddpm).");
+        return 2;
     } catch (const std::exception& e) {
         lua_pushboolean(L, false);
         lua_pushstring(L, e.what());
@@ -1238,45 +863,6 @@ int LuaScripting::lua_inferModel(lua_State* L) {
         ctx.addLog("Inférence sur: " + std::string(input));
         
         try {
-            // VAE: retourner une reconstruction (table de floats)
-            if (ctx.modelType == "vae") {
-                auto* vae = dynamic_cast<VAEModel*>(ctx.currentModel.get());
-                if (!vae) {
-                    lua_pushnil(L);
-                    return 1;
-                }
-
-                // Injecter tokenizer/encoder de contexte si disponibles
-                if (ctx.currentTokenizer) {
-                    vae->getMutableTokenizer() = *ctx.currentTokenizer;
-                }
-                if (ctx.currentEncoder) {
-                    vae->getMutableEncoder() = *ctx.currentEncoder;
-                    vae->setHasEncoder(true);
-                }
-
-                auto tokens = vae->getMutableTokenizer().tokenizeEnsure(input);
-                if (!vae->getHasEncoder()) {
-                    // Créer un encoder par défaut si absent (embed_dim ou input_dim)
-                    int dim = 256;
-                    if (ctx.modelConfig.contains("embed_dim")) dim = ctx.modelConfig["embed_dim"];
-                    else if (ctx.modelConfig.contains("input_dim")) dim = ctx.modelConfig["input_dim"];
-                    vae->getMutableEncoder() = Encoder(dim, vae->getMutableTokenizer().getVocabSize());
-                    vae->getMutableEncoder().initRandom();
-                    vae->setHasEncoder(true);
-                }
-                vae->getMutableEncoder().ensureVocabSize(vae->getTokenizer().getVocabSize());
-                std::vector<float> x = vae->getEncoder().encode(tokens);
-                std::vector<float> recon = vae->inferReconstruction(x);
-
-                lua_createtable(L, static_cast<int>(recon.size()), 0);
-                for (size_t i = 0; i < recon.size(); ++i) {
-                    lua_pushnumber(L, recon[i]);
-                    lua_rawseti(L, -2, static_cast<int>(i + 1));
-                }
-                return 1;
-            }
-
             // Tokenize input
             std::vector<int> tokens;
             if (ctx.currentTokenizer) {
@@ -1315,6 +901,40 @@ int LuaScripting::lua_inferModel(lua_State* L) {
     }
     
     return 1;
+}
+
+// ============================================================================
+// ModelArchitectures Registry helpers (Lua)
+// ============================================================================
+
+int LuaScripting::lua_archAvailable(lua_State* L) {
+    try {
+        const auto names = ModelArchitectures::available();
+        lua_createtable(L, static_cast<int>(names.size()), 0);
+        int i = 1;
+        for (const auto& name : names) {
+            lua_pushstring(L, name.c_str());
+            lua_rawseti(L, -2, i++);
+        }
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_archDefaultConfig(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    try {
+        json cfg = ModelArchitectures::defaultConfig(name);
+        jsonToLuaTable(L, cfg);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
 }
 
 int LuaScripting::lua_saveModel(lua_State* L) {
@@ -1540,87 +1160,78 @@ int LuaScripting::lua_saveCheckpoint(lua_State* L) {
 
 int LuaScripting::lua_loadCheckpoint(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
-    
+
     if (!ctx.currentModel) {
         lua_pushboolean(L, false);
         lua_pushstring(L, "Aucun modèle créé");
         return 2;
     }
-    
+
     // Arguments: path, format (optionnel), options (optionnel)
     const char* path = luaL_checkstring(L, 1);
     const char* format_str = lua_isstring(L, 2) ? lua_tostring(L, 2) : nullptr;
-    
-    using namespace Mimir::Serialization;
-    
-    // Parse format (auto-detect if not provided)
-    CheckpointFormat format;
-    if (format_str != nullptr) {
+
+    // Parse format (or auto-detect)
+    Mimir::Serialization::CheckpointFormat format = Mimir::Serialization::CheckpointFormat::SafeTensors;
+    if (format_str == nullptr) {
+        format = Mimir::Serialization::detect_format(path);
+    } else {
         std::string fmt(format_str);
-        if (fmt == "safetensors" || fmt == "st") {
-            format = CheckpointFormat::SafeTensors;
+        if (fmt == "auto") {
+            format = Mimir::Serialization::detect_format(path);
+        } else if (fmt == "safetensors" || fmt == "st") {
+            format = Mimir::Serialization::CheckpointFormat::SafeTensors;
         } else if (fmt == "raw_folder" || fmt == "raw" || fmt == "folder") {
-            format = CheckpointFormat::RawFolder;
+            format = Mimir::Serialization::CheckpointFormat::RawFolder;
+        } else if (fmt == "debug_json" || fmt == "debug" || fmt == "json") {
+            format = Mimir::Serialization::CheckpointFormat::DebugJson;
         } else {
             lua_pushboolean(L, false);
             lua_pushstring(L, ("Format inconnu: " + fmt).c_str());
             return 2;
         }
-    } else {
-        // Auto-detect
-        format = detect_format(path);
     }
-    
+
     // Parse options from table (if provided)
-    LoadOptions options;
+    Mimir::Serialization::LoadOptions options;
     options.format = format;
-    
-    int options_idx = format_str != nullptr ? 3 : 2;
+
+    int options_idx = (format_str != nullptr) ? 3 : 2;
     if (lua_istable(L, options_idx)) {
         lua_getfield(L, options_idx, "load_tokenizer");
-        if (lua_isboolean(L, -1)) {
-            options.load_tokenizer = lua_toboolean(L, -1);
-        }
+        if (lua_isboolean(L, -1)) options.load_tokenizer = lua_toboolean(L, -1);
         lua_pop(L, 1);
-        
+
         lua_getfield(L, options_idx, "load_encoder");
-        if (lua_isboolean(L, -1)) {
-            options.load_encoder = lua_toboolean(L, -1);
-        }
+        if (lua_isboolean(L, -1)) options.load_encoder = lua_toboolean(L, -1);
         lua_pop(L, 1);
-        
+
         lua_getfield(L, options_idx, "load_optimizer");
-        if (lua_isboolean(L, -1)) {
-            options.load_optimizer = lua_toboolean(L, -1);
-        }
+        if (lua_isboolean(L, -1)) options.load_optimizer = lua_toboolean(L, -1);
         lua_pop(L, 1);
-        
+
         lua_getfield(L, options_idx, "strict_mode");
-        if (lua_isboolean(L, -1)) {
-            options.strict_mode = lua_toboolean(L, -1);
-        }
+        if (lua_isboolean(L, -1)) options.strict_mode = lua_toboolean(L, -1);
         lua_pop(L, 1);
-        
+
         lua_getfield(L, options_idx, "validate_checksums");
-        if (lua_isboolean(L, -1)) {
-            options.validate_checksums = lua_toboolean(L, -1);
-        }
+        if (lua_isboolean(L, -1)) options.validate_checksums = lua_toboolean(L, -1);
         lua_pop(L, 1);
     }
-    
+
     // Load
     std::string error;
-    bool success = load_checkpoint(*ctx.currentModel, path, options, &error);
-    
+    bool success = Mimir::Serialization::load_checkpoint(*ctx.currentModel, path, options, &error);
+
     if (success) {
         ctx.addLog("Checkpoint chargé: " + std::string(path));
         lua_pushboolean(L, true);
         return 1;
-    } else {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, error.c_str());
-        return 2;
     }
+
+    lua_pushboolean(L, false);
+    lua_pushstring(L, error.c_str());
+    return 2;
 }
 
 int LuaScripting::lua_detectFormat(lua_State* L) {
@@ -2266,7 +1877,7 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
         return 2;
     }
     
-    // Argument 1: input (table de floats)
+    // Argument 1: input (table de floats ou d'entiers)
     luaL_checktype(L, 1, LUA_TTABLE);
     
     // Argument 2 (optionnel): training (bool, défaut: true)
@@ -2275,6 +1886,43 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
         training = lua_toboolean(L, 2);
     }
     
+    // Détecter si on a une table d'entiers (tokens) ou de floats
+    bool all_int = true;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        if (!lua_isinteger(L, -1)) {
+            all_int = false;
+            lua_pop(L, 1);
+            break;
+        }
+        lua_pop(L, 1);
+    }
+
+    // Re-parcourir pour construire le vecteur
+    if (all_int) {
+        std::vector<int> input_ids;
+        lua_pushnil(L);
+        while (lua_next(L, 1) != 0) {
+            lua_Integer v = lua_tointeger(L, -1);
+            input_ids.push_back(static_cast<int>(v));
+            lua_pop(L, 1);
+        }
+        try {
+            std::vector<float> output = ctx.currentModel->forwardPass(input_ids, training);
+
+            lua_newtable(L);
+            for (size_t i = 0; i < output.size(); ++i) {
+                lua_pushnumber(L, output[i]);
+                lua_rawseti(L, -2, i + 1);
+            }
+            return 1;
+        } catch (const std::exception& e) {
+            lua_pushnil(L);
+            lua_pushstring(L, e.what());
+            return 2;
+        }
+    }
+
     std::vector<float> input;
     lua_pushnil(L);
     while (lua_next(L, 1) != 0) {
@@ -2438,949 +2086,6 @@ int LuaScripting::lua_getHardwareCaps(lua_State* L) {
     lua_setfield(L, -2, "bmi2");
     
     return 1;
-}
-
-// ============================================================================
-// ModelArchitectures API
-// ============================================================================
-
-int LuaScripting::lua_buildUNet(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::UNetConfig config;
-    
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "input_channels");
-        if (lua_isnumber(L, -1)) config.input_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "output_channels");
-        if (lua_isnumber(L, -1)) config.output_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "base_channels");
-        if (lua_isnumber(L, -1)) config.base_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_levels");
-        if (lua_isnumber(L, -1)) config.num_levels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        ModelArchitectures::buildUNet(*ctx.currentModel, config);
-        ctx.addLog("Architecture UNet construite");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildVAE(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::VAEConfig config;
-    
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "input_dim");
-        if (lua_isnumber(L, -1)) config.input_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "latent_dim");
-        if (lua_isnumber(L, -1)) config.latent_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        ModelArchitectures::buildVAE(*ctx.currentModel, config);
-        ctx.addLog("Architecture VAE construite");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildViT(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::ViTConfig config;
-    
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "image_size");
-        if (lua_isnumber(L, -1)) config.image_size = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "patch_size");
-        if (lua_isnumber(L, -1)) config.patch_size = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_classes");
-        if (lua_isnumber(L, -1)) config.num_classes = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "d_model");
-        if (lua_isnumber(L, -1)) config.d_model = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_layers");
-        if (lua_isnumber(L, -1)) config.num_layers = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        ModelArchitectures::buildViT(*ctx.currentModel, config);
-        ctx.addLog("Architecture ViT construite");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildGAN(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::GANConfig config;
-    const char* model_type = luaL_optstring(L, 1, "generator");
-    
-    if (lua_istable(L, 2)) {
-        lua_getfield(L, 2, "latent_dim");
-        if (lua_isnumber(L, -1)) config.latent_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 2, "image_size");
-        if (lua_isnumber(L, -1)) config.image_size = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        if (std::string(model_type) == "generator") {
-            ModelArchitectures::buildGenerator(*ctx.currentModel, config);
-            ctx.addLog("GAN Generator construit");
-        } else {
-            ModelArchitectures::buildDiscriminator(*ctx.currentModel, config);
-            ctx.addLog("GAN Discriminator construit");
-        }
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildDiffusion(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::DiffusionConfig config;
-    
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "image_size");
-        if (lua_isnumber(L, -1)) config.image_size = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "base_channels");
-        if (lua_isnumber(L, -1)) config.base_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        ModelArchitectures::buildDiffusion(*ctx.currentModel, config);
-        ctx.addLog("Architecture Diffusion construite");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildTransformer(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::TransformerConfig config;
-    
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "vocab_size");
-        if (lua_isnumber(L, -1)) config.vocab_size = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "d_model");
-        if (lua_isnumber(L, -1)) config.d_model = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_layers");
-        if (lua_isnumber(L, -1)) config.num_layers = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_heads");
-        if (lua_isnumber(L, -1)) config.num_heads = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        ModelArchitectures::buildTransformer(*ctx.currentModel, config);
-        ctx.addLog("Architecture Transformer construite");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildResNet(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::ResNetConfig config;
-    
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "num_classes");
-        if (lua_isnumber(L, -1)) config.num_classes = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        ModelArchitectures::buildResNet(*ctx.currentModel, config);
-        ctx.addLog("Architecture ResNet construite");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildMobileNet(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::MobileNetConfig config;
-    
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "num_classes");
-        if (lua_isnumber(L, -1)) config.num_classes = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "width_multiplier");
-        if (lua_isnumber(L, -1)) config.width_multiplier = lua_tonumber(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        ModelArchitectures::buildMobileNetV2(*ctx.currentModel, config);
-        ctx.addLog("Architecture MobileNetV2 construite");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_buildFlux(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxConfig config;
-    
-    // Lire la configuration depuis la table Lua
-    if (lua_istable(L, 1)) {
-        // Dimensions générales
-        lua_getfield(L, 1, "latent_channels");
-        if (lua_isnumber(L, -1)) config.latent_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "latent_resolution");
-        if (lua_isnumber(L, -1)) config.latent_resolution = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "image_resolution");
-        if (lua_isnumber(L, -1)) config.image_resolution = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        // VAE config
-        lua_getfield(L, 1, "vae_base_channels");
-        if (lua_isnumber(L, -1)) config.vae_base_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "vae_num_res_blocks");
-        if (lua_isnumber(L, -1)) config.vae_num_res_blocks = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        // Text conditioning
-        lua_getfield(L, 1, "text_embed_dim");
-        if (lua_isnumber(L, -1)) config.text_embed_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "text_max_length");
-        if (lua_isnumber(L, -1)) config.text_max_length = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "vocab_size");
-        if (lua_isnumber(L, -1)) config.vocab_size = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        // Transformer blocks
-        lua_getfield(L, 1, "num_transformer_blocks");
-        if (lua_isnumber(L, -1)) config.num_transformer_blocks = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "transformer_dim");
-        if (lua_isnumber(L, -1)) config.transformer_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_attention_heads");
-        if (lua_isnumber(L, -1)) config.num_attention_heads = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        // Diffusion
-        lua_getfield(L, 1, "num_timesteps");
-        if (lua_isnumber(L, -1)) config.num_timesteps = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "beta_start");
-        if (lua_isnumber(L, -1)) config.beta_start = lua_tonumber(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "beta_end");
-        if (lua_isnumber(L, -1)) config.beta_end = lua_tonumber(L, -1);
-        lua_pop(L, 1);
-    }
-    
-    try {
-        // Tenter de caster en FluxModel
-        ModelArchitectures::FluxModel* flux_model = 
-            dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-        
-        if (flux_model) {
-            flux_model->setConfig(config);
-            flux_model->buildFluxArchitecture();
-            ctx.addLog("Architecture Flux construite (FluxModel natif)");
-        } else {
-            // Sinon utiliser la fonction helper
-            ModelArchitectures::buildFlux(*ctx.currentModel, config);
-            ctx.addLog("Architecture Flux construite (Model générique)");
-        }
-        
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-// ============================================================================
-// Flux-specific Operations
-// ============================================================================
-
-int LuaScripting::lua_fluxGenerate(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    // Tenter de caster en FluxModel
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    // Arguments: prompt (string), num_steps (optional), guidance_scale (optional)
-    const char* prompt = luaL_checkstring(L, 1);
-    int num_steps = luaL_optinteger(L, 2, 50);
-    float guidance_scale = luaL_optnumber(L, 3, 7.5f);
-    
-    try {
-        ctx.addLog("Génération Flux: \"" + std::string(prompt) + 
-                   "\" (steps=" + std::to_string(num_steps) + 
-                   ", guidance=" + std::to_string(guidance_scale) + ")");
-        
-        std::vector<float> image = flux_model->generate(prompt, num_steps, guidance_scale);
-        
-        // Retourner l'image comme table Lua
-        lua_newtable(L);
-        lua_pushinteger(L, flux_model->getImageResolution());
-        lua_setfield(L, -2, "resolution");
-        lua_pushinteger(L, image.size());
-        lua_setfield(L, -2, "size");
-        
-        // Ajouter les données (optionnel, pour petites images)
-        // Pour grandes images, mieux vaut sauvegarder directement
-        
-        ctx.addLog("Génération terminée");
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushnil(L);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxEncodeImage(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    // Argument: image data (table de floats)
-    luaL_checktype(L, 1, LUA_TTABLE);
-    
-    std::vector<float> image;
-    lua_pushnil(L);
-    while (lua_next(L, 1) != 0) {
-        image.push_back(lua_tonumber(L, -1));
-        lua_pop(L, 1);
-    }
-    
-    try {
-        std::vector<float> latent = flux_model->encodeImage(image);
-        
-        // Retourner le latent comme table Lua
-        lua_newtable(L);
-        for (size_t i = 0; i < latent.size(); ++i) {
-            lua_pushnumber(L, latent[i]);
-            lua_rawseti(L, -2, i + 1);
-        }
-        
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushnil(L);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxDecodeLatent(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    // Argument: latent data (table de floats)
-    luaL_checktype(L, 1, LUA_TTABLE);
-    
-    std::vector<float> latent;
-    lua_pushnil(L);
-    while (lua_next(L, 1) != 0) {
-        latent.push_back(lua_tonumber(L, -1));
-        lua_pop(L, 1);
-    }
-    
-    try {
-        std::vector<float> image = flux_model->decodeLatent(latent);
-        
-        // Retourner l'image comme table Lua
-        lua_newtable(L);
-        for (size_t i = 0; i < image.size(); ++i) {
-            lua_pushnumber(L, image[i]);
-            lua_rawseti(L, -2, i + 1);
-        }
-        
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushnil(L);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxEncodeText(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    // Argument: text (string) ou tokens (table)
-    std::vector<int> tokens;
-    
-    if (lua_isstring(L, 1)) {
-        const char* text = lua_tostring(L, 1);
-        tokens = flux_model->tokenizePrompt(text);
-    } else if (lua_istable(L, 1)) {
-        lua_pushnil(L);
-        while (lua_next(L, 1) != 0) {
-            tokens.push_back(lua_tointeger(L, -1));
-            lua_pop(L, 1);
-        }
-    } else {
-        lua_pushnil(L);
-        lua_pushstring(L, "Argument invalide: attendu string ou table");
-        return 2;
-    }
-    
-    try {
-        std::vector<float> text_embedding = flux_model->encodeText(tokens);
-        
-        // Retourner l'embedding comme table Lua
-        lua_newtable(L);
-        for (size_t i = 0; i < text_embedding.size(); ++i) {
-            lua_pushnumber(L, text_embedding[i]);
-            lua_rawseti(L, -2, i + 1);
-        }
-        
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushnil(L);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxSetPromptTokenizer(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    // Utiliser le tokenizer du contexte
-    if (!ctx.currentTokenizer) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun tokenizer disponible");
-        return 2;
-    }
-    
-    try {
-        flux_model->setPromptTokenizer(ctx.currentTokenizer);
-        ctx.addLog("Tokenizer assigné au modèle Flux");
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxTrain(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    flux_model->train();
-    ctx.addLog("FluxModel: Mode training activé");
-    lua_pushboolean(L, true);
-    return 1;
-}
-
-int LuaScripting::lua_fluxEval(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    flux_model->eval();
-    ctx.addLog("FluxModel: Mode evaluation/inference activé");
-    lua_pushboolean(L, true);
-    return 1;
-}
-
-int LuaScripting::lua_fluxIsTraining(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushboolean(L, false);
-        return 1;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushboolean(L, false);
-        return 1;
-    }
-    
-    lua_pushboolean(L, flux_model->isTraining());
-    return 1;
-}
-
-int LuaScripting::lua_fluxTokenizePrompt(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    const char* prompt = luaL_checkstring(L, 1);
-    
-    try {
-        std::vector<int> tokens = flux_model->tokenizePrompt(prompt);
-        
-        // Retourner les tokens comme table Lua
-        lua_newtable(L);
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            lua_pushinteger(L, tokens[i]);
-            lua_rawseti(L, -2, i + 1);
-        }
-        
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushnil(L);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxPredictNoise(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    // Arguments: noisy_latent (table), text_embedding (table), timestep (int)
-    luaL_checktype(L, 1, LUA_TTABLE);
-    luaL_checktype(L, 2, LUA_TTABLE);
-    int timestep = luaL_checkinteger(L, 3);
-    
-    // Extraire noisy_latent
-    std::vector<float> noisy_latent;
-    lua_pushnil(L);
-    while (lua_next(L, 1) != 0) {
-        noisy_latent.push_back(lua_tonumber(L, -1));
-        lua_pop(L, 1);
-    }
-    
-    // Extraire text_embedding
-    std::vector<float> text_embedding;
-    lua_pushnil(L);
-    while (lua_next(L, 2) != 0) {
-        text_embedding.push_back(lua_tonumber(L, -1));
-        lua_pop(L, 1);
-    }
-    
-    try {
-        std::vector<float> predicted_noise = flux_model->predictNoise(
-            noisy_latent, text_embedding, timestep);
-        
-        // Retourner le bruit prédit comme table Lua
-        lua_newtable(L);
-        for (size_t i = 0; i < predicted_noise.size(); ++i) {
-            lua_pushnumber(L, predicted_noise[i]);
-            lua_rawseti(L, -2, i + 1);
-        }
-        
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushnil(L);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxComputeDiffusionLoss(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    if (!ctx.currentModel) {
-        lua_pushnumber(L, 0.0);
-        lua_pushstring(L, "Aucun modèle créé");
-        return 2;
-    }
-    
-    ModelArchitectures::FluxModel* flux_model = 
-        dynamic_cast<ModelArchitectures::FluxModel*>(ctx.currentModel.get());
-    
-    if (!flux_model) {
-        lua_pushnumber(L, 0.0);
-        lua_pushstring(L, "Le modèle actuel n'est pas un FluxModel");
-        return 2;
-    }
-    
-    // Arguments: image (table), tokens (table)
-    luaL_checktype(L, 1, LUA_TTABLE);
-    luaL_checktype(L, 2, LUA_TTABLE);
-    
-    // Extraire image
-    std::vector<float> image;
-    lua_pushnil(L);
-    while (lua_next(L, 1) != 0) {
-        image.push_back(lua_tonumber(L, -1));
-        lua_pop(L, 1);
-    }
-    
-    // Extraire tokens
-    std::vector<int> tokens;
-    lua_pushnil(L);
-    while (lua_next(L, 2) != 0) {
-        tokens.push_back(lua_tointeger(L, -1));
-        lua_pop(L, 1);
-    }
-    
-    try {
-        float loss = flux_model->computeDiffusionLoss(image, tokens);
-        lua_pushnumber(L, loss);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushnumber(L, 0.0);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
-}
-
-int LuaScripting::lua_fluxModelNew(lua_State* L) {
-    auto& ctx = LuaContext::getInstance();
-    
-    // Argument optionnel: configuration (table)
-    ModelArchitectures::FluxConfig config;
-    
-    if (lua_istable(L, 1)) {
-        // Lire la configuration depuis la table Lua
-        lua_getfield(L, 1, "image_resolution");
-        if (lua_isnumber(L, -1)) config.image_resolution = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "latent_channels");
-        if (lua_isnumber(L, -1)) config.latent_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "latent_resolution");
-        if (lua_isnumber(L, -1)) config.latent_resolution = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "vae_base_channels");
-        if (lua_isnumber(L, -1)) config.vae_base_channels = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_res_blocks");
-        if (lua_isnumber(L, -1)) config.vae_num_res_blocks = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "vocab_size");
-        if (lua_isnumber(L, -1)) config.vocab_size = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "text_max_length");
-        if (lua_isnumber(L, -1)) config.text_max_length = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "text_embed_dim");
-        if (lua_isnumber(L, -1)) config.text_embed_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "transformer_dim");
-        if (lua_isnumber(L, -1)) config.transformer_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_transformer_blocks");
-        if (lua_isnumber(L, -1)) config.num_transformer_blocks = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_attention_heads");
-        if (lua_isnumber(L, -1)) config.num_attention_heads = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "mlp_ratio");
-        if (lua_isnumber(L, -1)) config.mlp_ratio = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "timestep_embed_dim");
-        if (lua_isnumber(L, -1)) config.timestep_embed_dim = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        lua_getfield(L, 1, "num_timesteps");
-        if (lua_isnumber(L, -1)) config.num_timesteps = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        
-        // vae_channel_mult (array)
-        lua_getfield(L, 1, "vae_channel_mult");
-        if (lua_istable(L, -1)) {
-            config.vae_channel_mult.clear();
-            lua_pushnil(L);
-            while (lua_next(L, -2) != 0) {
-                config.vae_channel_mult.push_back(lua_tointeger(L, -1));
-                lua_pop(L, 1);
-            }
-        }
-        lua_pop(L, 1);
-    }
-    
-    try {
-        // Créer un FluxModel natif
-        auto flux_model = std::make_shared<ModelArchitectures::FluxModel>(config);
-        flux_model->setName("FluxModel");
-        flux_model->buildFluxArchitecture();
-        
-        // Stocker dans le contexte
-        ctx.currentModel = flux_model;
-        ctx.addLog("FluxModel natif créé et construit");
-        
-        lua_pushboolean(L, true);
-        return 1;
-    } catch (const std::exception& e) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, e.what());
-        return 2;
-    }
 }
 
 // ============================================================================

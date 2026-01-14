@@ -263,12 +263,14 @@ local function bench_one(level)
 
     local cfg = {
         vocab_size = vocab_size,
-        embed_dim = level.dim,
+        d_model = level.dim,
         num_layers = level.layers,
         num_heads = level.heads,
-        d_ff = level.dim * 4,
-        max_seq_len = max_seq_len,
-        dropout = 0.0
+        mlp_hidden = level.dim * 4,
+        output_dim = level.dim,
+        seq_len = max_seq_len,
+        padding_idx = 0,
+        causal = false
     }
 
     local times_build = 0.0
@@ -286,17 +288,13 @@ local function bench_one(level)
         -- unique-ish name to avoid confusion in logs; the engine may still reuse internals
         local model_name = "transformer"
 
-        -- ---- build ----
+        -- ---- build (registry create) ----
         local tb = now_s()
         local ok, err = Mimir.Model.create(model_name, cfg)
         if ok == false then
             return false, "Mimir.Model.create failed: " .. tostring(err)
         end
-        local okb, params, errb = Mimir.Model.build()
-        if okb == false then
-            return false, "Mimir.Model.build failed: " .. tostring(errb)
-        end
-        params_last = params or params_last
+        params_last = (Mimir.Model.total_params and Mimir.Model.total_params()) or params_last
         times_build = times_build + (now_s() - tb)
 
         -- ---- allocate ----

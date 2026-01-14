@@ -131,7 +131,7 @@ namespace fs = std::filesystem;
 // === constructeurs / destructeurs (déjà présents) ===
 Model::Model()
     : tokenizer(20000), encoder(64, 20000), hasTokenizer(true), hasEncoder(true),
-      max_ram_mb_(4096)
+    max_ram_mb_(0)
 {
     tw = 64; th = 64;
     // Tenter d'initialiser le compute engine
@@ -241,6 +241,34 @@ const std::vector<float>& Model::getTensor(const std::string& name) const {
     return it->second;
 }
 
+const std::vector<int>& Model::getTensorInt(const std::string& name) const {
+    auto it = tensor_store_int.find(name);
+    if (it == tensor_store_int.end()) {
+        std::cerr << "❌ ERROR: IntTensor '" << name << "' not found in IntTensorStore" << std::endl;
+        std::cerr << "Available int tensors: ";
+        for (const auto& kv : tensor_store_int) {
+            std::cerr << "'" << kv.first << "' ";
+        }
+        std::cerr << std::endl;
+        throw std::runtime_error("Int tensor not found: " + name);
+    }
+    return it->second;
+}
+
+std::vector<int>& Model::getTensorIntMutable(const std::string& name) {
+    auto it = tensor_store_int.find(name);
+    if (it == tensor_store_int.end()) {
+        std::cerr << "❌ ERROR: IntTensor '" << name << "' not found in IntTensorStore" << std::endl;
+        std::cerr << "Available int tensors: ";
+        for (const auto& kv : tensor_store_int) {
+            std::cerr << "'" << kv.first << "' ";
+        }
+        std::cerr << std::endl;
+        throw std::runtime_error("Int tensor not found: " + name);
+    }
+    return it->second;
+}
+
 std::vector<float>& Model::getTensorMutable(const std::string& name) {
     auto it = tensor_store.find(name);
     if (it == tensor_store.end()) {
@@ -259,8 +287,16 @@ void Model::storeTensor(const std::string& name, const std::vector<float>& data)
     tensor_store[name] = data;
 }
 
+void Model::storeTensorInt(const std::string& name, const std::vector<int>& data) {
+    tensor_store_int[name] = data;
+}
+
 void Model::storeTensor(const std::string& name, std::vector<float>&& data) {
     tensor_store[name] = std::move(data);
+}
+
+void Model::storeTensorInt(const std::string& name, std::vector<int>&& data) {
+    tensor_store_int[name] = std::move(data);
 }
 
 std::vector<std::string> Model::getAvailableTensors() const {
@@ -272,8 +308,225 @@ std::vector<std::string> Model::getAvailableTensors() const {
     return names;
 }
 
+std::vector<std::string> Model::getAvailableIntTensors() const {
+    std::vector<std::string> names;
+    names.reserve(tensor_store_int.size());
+    for (const auto& kv : tensor_store_int) {
+        names.push_back(kv.first);
+    }
+    return names;
+}
+
 void Model::clearTensorStore() {
     tensor_store.clear();
+}
+
+void Model::clearTensorStoreInt() {
+    tensor_store_int.clear();
+}
+
+// === Forward pass (tokens int) ===
+
+std::vector<float> Model::forwardPass(const std::vector<int> &input_ids, bool training) {
+    // Stocker les ids int dans le store dédié, puis exécuter le même graphe.
+    // Les layers Embedding liront tensor_store_int, les autres tensor_store (float).
+    if (layers.empty()) {
+        std::cerr << "⚠️  Cannot perform forward pass: no layers defined" << std::endl;
+        return std::vector<float>();
+    }
+
+    if (layer_weight_blocks.empty()) {
+        std::cerr << "⚠️  Cannot perform forward pass: weights not allocated" << std::endl;
+        std::cerr << "    Call allocate_params() and init_weights() first" << std::endl;
+        return std::vector<float>();
+    }
+
+    clearTensorStore();
+    clearTensorStoreInt();
+    storeTensorInt("x", input_ids);
+    storeTensorInt("__input__", input_ids);
+
+    if (training) {
+        forward_state.clear();
+        forward_state.is_valid = true;
+    }
+
+    std::vector<std::vector<float>> all_layer_outputs;
+    if (training) {
+        all_layer_outputs.reserve(layers.size());
+    }
+
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        const auto &layer = layers[layer_idx];
+
+        std::vector<float> layer_output;
+
+        MemoryGuard& guard = MemoryGuard::instance();
+        const size_t guard_mb = guard.getLimit() / (1024ULL * 1024ULL);
+        const size_t cap_mb = (max_ram_mb_ > 0) ? max_ram_mb_ : guard_mb;
+        RuntimeAllocator allocator(guard, cap_mb);
+
+        try {
+            if (layer.type_enum == LayerType::Embedding) {
+                std::vector<std::string> input_names = layer.inputs;
+                if (input_names.empty()) input_names = {"x"};
+                const std::vector<int>& ids = getTensorInt(input_names[0]);
+
+                const int vocab = std::max(1, layer.vocab_size);
+                const int dim = std::max(1, layer.embed_dim);
+                const int pad = layer.padding_idx;
+
+                RUNTIME_CHECK(layer.getWeights() != nullptr, "Embedding: weights not initialized");
+                RUNTIME_CHECK(static_cast<int>(layer.getWeightsSize()) >= vocab * dim, "Embedding: invalid weight size");
+
+                const float* w = layer.getWeights();
+                const size_t outN = static_cast<size_t>(ids.size()) * static_cast<size_t>(dim);
+                auto output_handle = allocator.allocate_tensor(
+                    {static_cast<int>(outN)},
+                    "float32",
+                    layer.name + "_output"
+                );
+                std::vector<float>& out = output_handle.data();
+                out.assign(outN, 0.0f);
+
+                for (size_t t = 0; t < ids.size(); ++t) {
+                    const int id = ids[t];
+                    if (pad >= 0 && id == pad) continue;
+                    if (id < 0 || id >= vocab) continue;
+                    const size_t base_w = static_cast<size_t>(id) * static_cast<size_t>(dim);
+                    const size_t base_o = t * static_cast<size_t>(dim);
+                    for (int d = 0; d < dim; ++d) {
+                        out[base_o + static_cast<size_t>(d)] = w[base_w + static_cast<size_t>(d)];
+                    }
+                }
+
+                layer_output = std::move(out);
+            } else {
+                // Pour les autres layers, reprendre le chemin float habituel:
+                // récupérer les inputs float depuis tensor_store.
+                std::vector<std::string> input_names = layer.inputs;
+                if (input_names.empty()) {
+                    input_names = {"x"};
+                }
+
+                std::vector<const std::vector<float>*> inputs;
+                inputs.reserve(input_names.size());
+                for (const auto& name : input_names) {
+                    inputs.push_back(&getTensor(name));
+                }
+
+                // Snapshot inputs for backward
+                if (training) {
+                    forward_state.layer_input_names.push_back(input_names);
+                    std::vector<std::vector<float>> snap;
+                    snap.reserve(inputs.size());
+                    for (auto* p : inputs) snap.push_back(*p);
+                    forward_state.layer_inputs_multi.push_back(std::move(snap));
+                }
+
+                const std::vector<float>& x = *inputs[0];
+
+                // Réutiliser le switch-case existant en appelant une petite lambda locale
+                // en se basant sur le même dispatch que forwardPass(float).
+                switch (layer.type_enum) {
+                    case LayerType::Linear: {
+                        layer_output = LayerOps::linear_forward(x, layer, training);
+                        break;
+                    }
+                    case LayerType::LayerNorm: {
+                        layer_output = LayerOps::layernorm_forward(x, layer, training);
+                        break;
+                    }
+                    case LayerType::GELU: {
+                        layer_output = LayerOps::gelu_forward(x);
+                        break;
+                    }
+                    case LayerType::ReLU: {
+                        layer_output = LayerOps::relu_forward(x);
+                        break;
+                    }
+                    case LayerType::Tanh: {
+                        layer_output = LayerOps::tanh_forward(x);
+                        break;
+                    }
+                    case LayerType::Sigmoid: {
+                        layer_output = LayerOps::sigmoid_forward(x);
+                        break;
+                    }
+                    case LayerType::Softmax:
+                    case LayerType::LogSoftmax: {
+                        layer_output = LayerOps::softmax_forward(x, layer);
+                        break;
+                    }
+                    case LayerType::Dropout:
+                    case LayerType::Dropout2d: {
+                        layer_output = LayerOps::dropout_forward(x, layer, training);
+                        break;
+                    }
+                    case LayerType::Add: {
+                        RUNTIME_CHECK(inputs.size() >= 2, "Add requires 2 inputs");
+                        layer_output = LayerOps::add_forward(*inputs[0], *inputs[1]);
+                        break;
+                    }
+                    case LayerType::Concat: {
+                        RUNTIME_CHECK(inputs.size() >= 2, "Concat requires >=2 inputs");
+                        std::vector<std::vector<float>> inputs_vec;
+                        inputs_vec.reserve(inputs.size());
+                        for (auto* p : inputs) inputs_vec.push_back(*p);
+                        layer_output = LayerOps::concat_forward(inputs_vec, layer.concat_axis);
+                        break;
+                    }
+                    case LayerType::MultiHeadAttention:
+                    case LayerType::SelfAttention: {
+                        RUNTIME_CHECK(layer.getWeights() != nullptr, "Attention: weights not initialized");
+                        int seq_len = layer.seq_len > 0 ? layer.seq_len : 1;
+                        int embed_dim = layer.embed_dim > 0 ? layer.embed_dim : static_cast<int>(x.size());
+                        int num_heads = layer.num_heads > 0 ? layer.num_heads : 1;
+                        bool causal = layer.causal;
+
+                        const float* weights = layer.getWeights();
+                        int qkv_size = embed_dim * embed_dim * 3;
+                        int out_size = embed_dim * embed_dim;
+                        std::vector<float> qkv_weight(weights, weights + qkv_size);
+                        std::vector<float> out_weight(weights + qkv_size, weights + qkv_size + out_size);
+
+                        if (layer.type_enum == LayerType::SelfAttention) {
+                            layer_output = LayerOps::self_attention_forward(x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal);
+                        } else {
+                            layer_output = LayerOps::multihead_attention_forward(x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal);
+                        }
+                        break;
+                    }
+                    default: {
+                        // Fallback: appeler le forward float standard en utilisant le tensor_store "x".
+                        // NOTE: on ne veut pas dupliquer tout le switch ici.
+                        // Stratégie: exécuter un forward float complet si ce layer n'est pas dans la liste.
+                        // Pour éviter un coût élevé, on force l'utilisateur à ne pas mélanger trop de types ici.
+                        RUNTIME_ERROR_STRICT(
+                            "forwardPass(int): layer type not supported in int path: " + type_to_string(layer.type_enum)
+                        );
+                        break;
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "❌ ERROR in layer " << layer_idx << " (" << layer.name
+                      << ", type: " << type_to_string(layer.type_enum) << "): "
+                      << e.what() << std::endl;
+            throw;
+        }
+
+        std::string output_name = layer.output.empty() ? "x" : layer.output;
+        storeTensor(output_name, std::move(layer_output));
+        if (training) {
+            all_layer_outputs.push_back(getTensor(output_name));
+        }
+    }
+
+    if (training) {
+        forward_state.final_output = getTensor("x");
+    }
+    return getTensor("x");
 }
 
 Layer* Model::getLayerByName(const std::string& name) {
@@ -505,9 +758,12 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
     // NOUVEAU: Utiliser les weight_blocks au lieu de params
     if (layer_weight_blocks.empty()) return;
     
-    // Utiliser le LR decay si configuré, sinon utiliser le learning_rate fourni
+    // Warmup doit fonctionner même si decay_strategy=NONE.
     float effective_lr = learning_rate;
-    if (opt.decay_strategy != LRDecayStrategy::NONE) {
+    const size_t wu = opt.warmup_steps > 0 ? static_cast<size_t>(opt.warmup_steps) : 0ULL;
+    if (wu > 0 && opt.step < wu) {
+        effective_lr = opt.getCurrentLR();
+    } else if (opt.decay_strategy != LRDecayStrategy::NONE) {
         effective_lr = opt.getCurrentLR();
     }
     
@@ -522,6 +778,7 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
         
         float* weights = layer.weight_block->getData();
         size_t weight_count = layer.getWeightsSize();
+        const size_t n = std::min(weight_count, layer.grad_weights.size());
         
         // S'assurer que les états Adam ont la bonne taille
         opt.ensure(weight_count);
@@ -529,7 +786,8 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
         switch (opt.type) {
             case OptimizerType::SGD: {
                 // SGD simple
-                for (size_t i = 0; i < weight_count && i < layer.grad_weights.size(); ++i) {
+                #pragma omp parallel for schedule(static) if(n > 8192)
+                for (size_t i = 0; i < n; ++i) {
                     float grad = layer.grad_weights[i];
                     weights[i] -= effective_lr * grad;
                     weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
@@ -545,7 +803,8 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
                 if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
                 if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
                 
-                for (size_t i = 0; i < weight_count && i < layer.grad_weights.size(); ++i) {
+                #pragma omp parallel for schedule(static) if(n > 8192)
+                for (size_t i = 0; i < n; ++i) {
                     float grad = layer.grad_weights[i];
                     
                     opt.m[i] = b1 * opt.m[i] + (1.0f - b1) * grad;
@@ -569,7 +828,8 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
                 if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
                 if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
                 
-                for (size_t i = 0; i < weight_count && i < layer.grad_weights.size(); ++i) {
+                #pragma omp parallel for schedule(static) if(n > 8192)
+                for (size_t i = 0; i < n; ++i) {
                     float grad = layer.grad_weights[i];
                     float current = weights[i];
                     
@@ -590,8 +850,9 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
             }
         }
         
-        // Réinitialiser les gradients après application
-        std::fill(layer.grad_weights.begin(), layer.grad_weights.end(), 0.0f);
+        // NOTE: ne pas réinitialiser ici.
+        // Les boucles d'entraînement modernes appellent zeroGradients() en début de step.
+        // Garder le dernier gradient permet la sérialisation/debug (include_gradients).
     }
 }
 
@@ -958,7 +1219,6 @@ void Model::computeMaxPool2D(const std::vector<float>& input, std::vector<float>
     
     if (use_hardware) {
         // Version hardware avec AVX2
-        #pragma omp parallel for collapse(3)
         for (int c = 0; c < channels; ++c) {
             for (int oh = 0; oh < out_h; ++oh) {
                 for (int ow = 0; ow < out_w; ++ow) {
@@ -1016,8 +1276,7 @@ void Model::computeAvgPool2D(const std::vector<float>& input, std::vector<float>
         // Version hardware avec AVX2
         float inv_area = 1.0f / (kernel_size * kernel_size);
         __m256 inv_vec = _mm256_set1_ps(inv_area);
-        
-        #pragma omp parallel for collapse(3)
+
         for (int c = 0; c < channels; ++c) {
             for (int oh = 0; oh < out_h; ++oh) {
                 for (int ow = 0; ow < out_w; ++ow) {
@@ -1065,18 +1324,15 @@ void Model::computeActivation(std::vector<float>& data, const std::string& activ
         if (use_hardware) {
             size_t n = data.size();
             __m256 zero = _mm256_setzero_ps();
-            
-            #pragma omp parallel for
-            for (size_t i = 0; i < n; i += 8) {
-                if (i + 8 <= n) {
-                    __m256 vals = _mm256_loadu_ps(&data[i]);
-                    vals = _mm256_max_ps(vals, zero);
-                    _mm256_storeu_ps(&data[i], vals);
-                } else {
-                    for (size_t j = i; j < n; ++j) {
-                        data[j] = std::max(0.0f, data[j]);
-                    }
-                }
+
+            const size_t vecN = n & ~static_cast<size_t>(7);
+            for (size_t i = 0; i < vecN; i += 8) {
+                __m256 vals = _mm256_loadu_ps(&data[i]);
+                vals = _mm256_max_ps(vals, zero);
+                _mm256_storeu_ps(&data[i], vals);
+            }
+            for (size_t i = vecN; i < n; ++i) {
+                data[i] = std::max(0.0f, data[i]);
             }
         } else {
             relu_inplace(data);
@@ -1107,8 +1363,7 @@ void Model::computeBatchNorm(std::vector<float>& data, const std::vector<float>&
     if (use_hardware) {
         // Version hardware avec AVX2
         __m256 eps_vec = _mm256_set1_ps(eps);
-        
-        #pragma omp parallel for
+
         for (int c = 0; c < channels; ++c) {
             float mean = running_mean[c];
             float var = running_var[c];
@@ -1192,8 +1447,7 @@ void Model::computeLayerNorm(std::vector<float>& data, const std::vector<float>&
         // Version hardware avec AVX2
         int num_groups = data.size() / normalized_size;
         __m256 eps_vec = _mm256_set1_ps(eps);
-        
-        #pragma omp parallel for
+
         for (int g = 0; g < num_groups; ++g) {
             // Calculer mean
             __m256 mean_vec = _mm256_setzero_ps();
@@ -1671,6 +1925,8 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
     // Clear et initialiser TensorStore avec l'input principal
     clearTensorStore();
     storeTensor("x", input);
+    // Alias immuable de l'entrée (utile si le graphe réutilise le nom "x" pour la sortie avec une taille différente)
+    storeTensor("__input__", input);
     
     // VALIDATION: Vérifier que tous les layers sont supportés (une seule fois)
     static bool validated = false;
@@ -1691,9 +1947,6 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
     if (training) {
         forward_state.clear();
         forward_state.is_valid = true;
-        forward_state.layer_inputs.reserve(layers.size());
-        forward_state.layer_outputs.reserve(layers.size());
-        forward_state.activations.reserve(layers.size());
     }
     
     // Conservation pour backward (à migrer vers TensorStore)
@@ -1738,16 +1991,15 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
         // Pour compatibilité: x est toujours inputs[0]
         const std::vector<float>& x = *inputs[0];
         
-        if (training) {
-            forward_state.layer_inputs.push_back(x);
-        }
-        
         std::vector<float> layer_output;
         
         // ====================================================================
         // STRICT MODE: RuntimeAllocator
         // ====================================================================
-        RuntimeAllocator allocator(MemoryGuard::instance(), max_ram_mb_);
+        MemoryGuard& guard = MemoryGuard::instance();
+        const size_t guard_mb = guard.getLimit() / (1024ULL * 1024ULL);
+        const size_t cap_mb = (max_ram_mb_ > 0) ? max_ram_mb_ : guard_mb;
+        RuntimeAllocator allocator(guard, cap_mb);
         
         // ====================================================================
         // DISPATCH PRINCIPAL VIA SWITCH/CASE SUR LayerType (MODE STRICT)
@@ -1797,8 +2049,8 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
         layer_output = output_handle.data();
         
         const float* layer_weights = layer.getWeights();
-        
-        #pragma omp parallel for schedule(dynamic)
+
+        #pragma omp parallel for schedule(static) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144)
         for (int oc = 0; oc < out_channels; ++oc) {
             for (int oh = 0; oh < out_height; ++oh) {
                 for (int ow = 0; ow < out_width; ++ow) {
@@ -1855,6 +2107,50 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
     
     case LayerType::Linear: {
         layer_output = LayerOps::linear_forward(x, layer, training);
+        break;
+    }
+
+    case LayerType::PatchEmbed: {
+        // Input layout: [text_tokens((seq_text+1)*d_model), patch_raw(num_patches*patch_dim)]
+        const int d_model = layer.embed_dim > 0 ? layer.embed_dim : layer.out_features;
+        const int seq_text = std::max(1, layer.seq_text);
+        const int num_patches = std::max(1, layer.num_patches);
+        const int patch_dim = std::max(1, layer.patch_dim);
+
+        const int text_dim = (seq_text + 1) * d_model;  // +1 pour le time token
+        const int in_dim = text_dim + num_patches * patch_dim;
+        const int out_dim = (seq_text + 1 + num_patches) * d_model;
+
+        RUNTIME_CHECK(
+            static_cast<int>(x.size()) == in_dim,
+            "PatchEmbed: input size mismatch"
+        );
+        RUNTIME_CHECK(
+            layer.getWeights() != nullptr && static_cast<int>(layer.getWeightsSize()) == (patch_dim * d_model + d_model),
+            "PatchEmbed: weights not initialized or invalid size"
+        );
+
+        layer_output.assign(static_cast<size_t>(out_dim), 0.0f);
+
+        // Copier texte + time token sans modification
+        std::copy(x.begin(), x.begin() + text_dim, layer_output.begin());
+
+        const float* w = layer.getWeights();
+        const float* b = w + patch_dim * d_model;
+        const float inv = 1.0f / std::sqrt(static_cast<float>(patch_dim));
+
+        // Projeter chaque patch: y = (x_patch * inv) @ W + b
+        for (int p = 0; p < num_patches; ++p) {
+            const int in_off = text_dim + p * patch_dim;
+            const int out_off = (seq_text + 1 + p) * d_model;
+            for (int d = 0; d < d_model; ++d) {
+                float sum = b[d];
+                for (int k = 0; k < patch_dim; ++k) {
+                    sum += (x[static_cast<size_t>(in_off + k)] * inv) * w[static_cast<size_t>(k * d_model + d)];
+                }
+                layer_output[static_cast<size_t>(out_off + d)] = sum;
+            }
+        }
         break;
     }
     
@@ -2034,8 +2330,7 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
         std::vector<float>& layer_output = output_handle.data();
         std::fill(layer_output.begin(), layer_output.end(), 
                   -std::numeric_limits<float>::infinity());
-        
-        #pragma omp parallel for schedule(static)
+
         for (int c = 0; c < in_channels; ++c) {
             for (int oh = 0; oh < out_height; ++oh) {
                 for (int ow = 0; ow < out_width; ++ow) {
@@ -2491,8 +2786,6 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
         // Pour backward: conserver aussi dans all_layer_outputs
         if (training) {
             all_layer_outputs.push_back(getTensor(output_name));
-            forward_state.layer_outputs.push_back(getTensor(output_name));
-            forward_state.activations.push_back(getTensor(output_name));
         }
         
         // Gestion des branches
@@ -2524,24 +2817,392 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
         std::cerr << "⚠️  Cannot perform backward pass: layers or weights not initialized" << std::endl;
         return grads;
     }
-    
-    std::vector<float> grad = loss_gradient;
-    
+
+    auto accumulate_grad = [](std::vector<float>& dst, const std::vector<float>& src) {
+        if (dst.empty()) {
+            dst = src;
+            return;
+        }
+        if (dst.size() != src.size()) {
+            throw std::runtime_error("Gradient accumulate: size mismatch");
+        }
+        #pragma omp simd
+        for (size_t i = 0; i < dst.size(); ++i) {
+            dst[i] += src[i];
+        }
+    };
+
+    // Gradients routés par nom de tensor (TensorStore)
+    std::unordered_map<std::string, std::vector<float>> grad_store;
+    grad_store["x"] = loss_gradient;
+
     // Backward pass à travers chaque layer (en ordre inverse)
-    for (int layer_idx = layers.size() - 1; layer_idx >= 0; --layer_idx) {
-        auto &layer = layers[layer_idx];
-        
-        const auto &layer_input = forward_state.layer_inputs[layer_idx];
-        const auto &layer_output = forward_state.layer_outputs[layer_idx];
-        const auto &activation = forward_state.activations[layer_idx];
-        
-        std::vector<float> grad_input(layer_input.size(), 0.0f);
-        
-        if (layer.type == "Conv2d" || layer.type == "ConvTranspose2d") {
+    for (int layer_idx = static_cast<int>(layers.size()) - 1; layer_idx >= 0; --layer_idx) {
+        auto &layer = layers[static_cast<size_t>(layer_idx)];
+
+        const std::string output_name = layer.output.empty() ? "x" : layer.output;
+        auto it_go = grad_store.find(output_name);
+        if (it_go == grad_store.end()) {
+            continue;
+        }
+        const std::vector<float>& grad_out = it_go->second;
+
+        std::vector<std::string> input_names = layer.inputs;
+        if (input_names.empty()) input_names = {"x"};
+
+        // Récupérer les inputs tels qu'ils étaient pendant le forward (sinon "x" peut être écrasé)
+        std::vector<const std::vector<float>*> inputs;
+        inputs.reserve(input_names.size());
+        if (static_cast<size_t>(layer_idx) < forward_state.layer_inputs_multi.size()) {
+            const auto& snap = forward_state.layer_inputs_multi[static_cast<size_t>(layer_idx)];
+            if (snap.size() == input_names.size()) {
+                for (size_t i = 0; i < snap.size(); ++i) {
+                    inputs.push_back(&snap[i]);
+                }
+            }
+        }
+        if (inputs.size() != input_names.size()) {
+            // Fallback: relire TensorStore (moins fiable si noms réutilisés)
+            inputs.clear();
+            inputs.reserve(input_names.size());
+            for (const auto& nm : input_names) {
+                inputs.push_back(&getTensor(nm));
+            }
+        }
+
+        const std::vector<float>& layer_input0 = *inputs[0];
+        std::vector<float> grad_input0(layer_input0.size(), 0.0f);
+
+        if (layer.type == "Identity") {
+            if (grad_out.size() != layer_input0.size()) {
+                std::cerr << "⚠️  Identity backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_out);
+
+        } else if (layer.type == "Add") {
+            if (inputs.size() < 2) {
+                std::cerr << "⚠️  Add backward skipped: need 2 inputs (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const std::vector<float>& in0 = *inputs[0];
+            const std::vector<float>& in1 = *inputs[1];
+            if (grad_out.size() != in0.size() || grad_out.size() != in1.size()) {
+                std::cerr << "⚠️  Add backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_out);
+            accumulate_grad(grad_store[input_names[1]], grad_out);
+
+        } else if (layer.type == "LayerNorm") {
+            if (grad_out.size() != layer_input0.size()) {
+                std::cerr << "⚠️  LayerNorm backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            const int N = static_cast<int>(layer_input0.size());
+            const float eps = layer.eps;
+
+            float mean = 0.0f;
+            #pragma omp simd reduction(+:mean)
+            for (int i = 0; i < N; ++i) mean += layer_input0[static_cast<size_t>(i)];
+            mean /= std::max(1, N);
+
+            float var = 0.0f;
+            #pragma omp simd reduction(+:var)
+            for (int i = 0; i < N; ++i) {
+                const float d = layer_input0[static_cast<size_t>(i)] - mean;
+                var += d * d;
+            }
+            var /= std::max(1, N);
+            const float inv_std = 1.0f / std::sqrt(var + eps);
+
+            const float* w = (layer.affine ? layer.getWeights() : nullptr);
+            const float* b = (layer.affine && layer.use_bias && w) ? (w + N) : nullptr;
+
+            std::vector<float> xhat(static_cast<size_t>(N));
+            #pragma omp simd
+            for (int i = 0; i < N; ++i) {
+                xhat[static_cast<size_t>(i)] = (layer_input0[static_cast<size_t>(i)] - mean) * inv_std;
+            }
+
+            std::vector<float> dxhat(static_cast<size_t>(N));
+            #pragma omp simd
+            for (int i = 0; i < N; ++i) {
+                const float gamma = (w ? w[i] : 1.0f);
+                dxhat[static_cast<size_t>(i)] = grad_out[static_cast<size_t>(i)] * gamma;
+            }
+
+            // dgamma / dbeta
+            if (w) {
+                if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                    layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+                }
+                for (int i = 0; i < N; ++i) {
+                    layer.grad_weights[static_cast<size_t>(i)] += grad_out[static_cast<size_t>(i)] * xhat[static_cast<size_t>(i)];
+                }
+                if (b) {
+                    const size_t off = static_cast<size_t>(N);
+                    for (int i = 0; i < N; ++i) {
+                        layer.grad_weights[off + static_cast<size_t>(i)] += grad_out[static_cast<size_t>(i)];
+                    }
+                }
+            }
+
+            float sum_dxhat = 0.0f;
+            float sum_dxhat_xhat = 0.0f;
+            #pragma omp simd reduction(+:sum_dxhat,sum_dxhat_xhat)
+            for (int i = 0; i < N; ++i) {
+                const float d = dxhat[static_cast<size_t>(i)];
+                sum_dxhat += d;
+                sum_dxhat_xhat += d * xhat[static_cast<size_t>(i)];
+            }
+
+            const float invN = 1.0f / std::max(1, N);
+            #pragma omp simd
+            for (int i = 0; i < N; ++i) {
+                const float d = dxhat[static_cast<size_t>(i)];
+                const float xi = xhat[static_cast<size_t>(i)];
+                grad_input0[static_cast<size_t>(i)] = inv_std * invN * (static_cast<float>(N) * d - sum_dxhat - xi * sum_dxhat_xhat);
+            }
+
+            accumulate_grad(grad_store[input_names[0]], grad_input0);
+
+        } else if (layer.type == "SelfAttention" || layer.type == "MultiHeadAttention") {
+            if (layer.getWeights() == nullptr) {
+                std::cerr << "⚠️  Attention backward skipped: weights not initialized (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            const int seq_len = layer.seq_len > 0 ? layer.seq_len : 1;
+            const int embed_dim = layer.embed_dim > 0 ? layer.embed_dim : static_cast<int>(layer_input0.size());
+            const int num_heads = layer.num_heads > 0 ? layer.num_heads : 1;
+            const bool causal = layer.causal;
+
+            if (embed_dim <= 0 || seq_len <= 0 || (embed_dim % num_heads) != 0) {
+                std::cerr << "⚠️  Attention backward invalid config (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            if (static_cast<int>(layer_input0.size()) != seq_len * embed_dim) {
+                std::cerr << "⚠️  Attention backward input size mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            if (static_cast<int>(grad_out.size()) != seq_len * embed_dim) {
+                std::cerr << "⚠️  Attention backward grad size mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            const int head_dim = embed_dim / num_heads;
+            const int qkv_dim = embed_dim * 3;
+            const int qkv_size = embed_dim * embed_dim * 3;
+            const int out_size = embed_dim * embed_dim;
+
+            const float* weights = layer.getWeights();
+            std::vector<float> W_qkv(weights, weights + qkv_size);
+            std::vector<float> W_out(weights + qkv_size, weights + qkv_size + out_size);
+
+            // Recompute qkv = X @ W_qkv (shape: [seq_len, 3*embed_dim])
+            std::vector<float> qkv(static_cast<size_t>(seq_len) * static_cast<size_t>(qkv_dim), 0.0f);
+            for (int m = 0; m < seq_len; ++m) {
+                for (int n = 0; n < qkv_dim; ++n) {
+                    float sum = 0.0f;
+                    for (int k = 0; k < embed_dim; ++k) {
+                        sum += layer_input0[static_cast<size_t>(m * embed_dim + k)] * W_qkv[static_cast<size_t>(k * qkv_dim + n)];
+                    }
+                    qkv[static_cast<size_t>(m * qkv_dim + n)] = sum;
+                }
+            }
+
+            // Split comme LayerOps::self_attention_forward: qkv layout = [seq_len, 3*embed_dim]
+            std::vector<float> Q(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim));
+            std::vector<float> Kmat(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim));
+            std::vector<float> Vmat(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim));
+            for (int m = 0; m < seq_len; ++m) {
+                const int base = m * qkv_dim;
+                const int out = m * embed_dim;
+                for (int k = 0; k < embed_dim; ++k) {
+                    Q[static_cast<size_t>(out + k)] = qkv[static_cast<size_t>(base + k)];
+                    Kmat[static_cast<size_t>(out + k)] = qkv[static_cast<size_t>(base + embed_dim + k)];
+                    Vmat[static_cast<size_t>(out + k)] = qkv[static_cast<size_t>(base + 2 * embed_dim + k)];
+                }
+            }
+
+            // scores logits + softmax probs
+            std::vector<float> probs(static_cast<size_t>(seq_len) * static_cast<size_t>(seq_len), 0.0f);
+            const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+            for (int i = 0; i < seq_len; ++i) {
+                for (int j = 0; j < seq_len; ++j) {
+                    if (causal && j > i) {
+                        probs[static_cast<size_t>(i * seq_len + j)] = -1e9f;
+                        continue;
+                    }
+                    float sum = 0.0f;
+                    for (int k = 0; k < embed_dim; ++k) {
+                        sum += Q[static_cast<size_t>(i * embed_dim + k)] * Kmat[static_cast<size_t>(j * embed_dim + k)];
+                    }
+                    probs[static_cast<size_t>(i * seq_len + j)] = sum * scale;
+                }
+            }
+            // softmax row-wise
+            for (int i = 0; i < seq_len; ++i) {
+                float maxv = -1e30f;
+                for (int j = 0; j < seq_len; ++j) {
+                    maxv = std::max(maxv, probs[static_cast<size_t>(i * seq_len + j)]);
+                }
+                float sum = 0.0f;
+                for (int j = 0; j < seq_len; ++j) {
+                    float e = std::exp(probs[static_cast<size_t>(i * seq_len + j)] - maxv);
+                    probs[static_cast<size_t>(i * seq_len + j)] = e;
+                    sum += e;
+                }
+                const float inv = 1.0f / (sum + 1e-9f);
+                for (int j = 0; j < seq_len; ++j) {
+                    probs[static_cast<size_t>(i * seq_len + j)] *= inv;
+                }
+            }
+
+            // attended = probs @ V
+            std::vector<float> attended(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
+            for (int i = 0; i < seq_len; ++i) {
+                for (int k = 0; k < embed_dim; ++k) {
+                    float sum = 0.0f;
+                    for (int j = 0; j < seq_len; ++j) {
+                        sum += probs[static_cast<size_t>(i * seq_len + j)] * Vmat[static_cast<size_t>(j * embed_dim + k)];
+                    }
+                    attended[static_cast<size_t>(i * embed_dim + k)] = sum;
+                }
+            }
+
+            // Backprop output = attended @ W_out
+            std::vector<float> dW_out(static_cast<size_t>(out_size), 0.0f);
+            std::vector<float> d_attended(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
+            // dW_out = attended^T @ grad_out
+            for (int k = 0; k < embed_dim; ++k) {
+                for (int n = 0; n < embed_dim; ++n) {
+                    float sum = 0.0f;
+                    for (int m = 0; m < seq_len; ++m) {
+                        sum += attended[static_cast<size_t>(m * embed_dim + k)] * grad_out[static_cast<size_t>(m * embed_dim + n)];
+                    }
+                    dW_out[static_cast<size_t>(k * embed_dim + n)] = sum;
+                }
+            }
+            // d_attended = grad_out @ W_out^T
+            for (int m = 0; m < seq_len; ++m) {
+                for (int k = 0; k < embed_dim; ++k) {
+                    float sum = 0.0f;
+                    for (int n = 0; n < embed_dim; ++n) {
+                        sum += grad_out[static_cast<size_t>(m * embed_dim + n)] * W_out[static_cast<size_t>(k * embed_dim + n)];
+                    }
+                    d_attended[static_cast<size_t>(m * embed_dim + k)] = sum;
+                }
+            }
+
+            // Backprop attended = probs @ V
+            std::vector<float> d_probs(static_cast<size_t>(seq_len) * static_cast<size_t>(seq_len), 0.0f);
+            std::vector<float> dV(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
+            // d_probs = d_attended @ V^T
+            for (int i = 0; i < seq_len; ++i) {
+                for (int j = 0; j < seq_len; ++j) {
+                    float sum = 0.0f;
+                    for (int k = 0; k < embed_dim; ++k) {
+                        sum += d_attended[static_cast<size_t>(i * embed_dim + k)] * Vmat[static_cast<size_t>(j * embed_dim + k)];
+                    }
+                    d_probs[static_cast<size_t>(i * seq_len + j)] = sum;
+                }
+            }
+            // dV = probs^T @ d_attended
+            for (int j = 0; j < seq_len; ++j) {
+                for (int k = 0; k < embed_dim; ++k) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < seq_len; ++i) {
+                        sum += probs[static_cast<size_t>(i * seq_len + j)] * d_attended[static_cast<size_t>(i * embed_dim + k)];
+                    }
+                    dV[static_cast<size_t>(j * embed_dim + k)] = sum;
+                }
+            }
+
+            // Backprop softmax: d_logits = p * (d_probs - dot(d_probs,p))
+            std::vector<float> d_logits(static_cast<size_t>(seq_len) * static_cast<size_t>(seq_len), 0.0f);
+            for (int i = 0; i < seq_len; ++i) {
+                float dot = 0.0f;
+                for (int j = 0; j < seq_len; ++j) {
+                    dot += d_probs[static_cast<size_t>(i * seq_len + j)] * probs[static_cast<size_t>(i * seq_len + j)];
+                }
+                for (int j = 0; j < seq_len; ++j) {
+                    float p = probs[static_cast<size_t>(i * seq_len + j)];
+                    float g = p * (d_probs[static_cast<size_t>(i * seq_len + j)] - dot);
+                    if (causal && j > i) g = 0.0f;
+                    d_logits[static_cast<size_t>(i * seq_len + j)] = g;
+                }
+            }
+
+            // Backprop logits = (Q K^T) * scale
+            std::vector<float> dQ(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
+            std::vector<float> dK(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
+            for (int i = 0; i < seq_len; ++i) {
+                for (int j = 0; j < seq_len; ++j) {
+                    const float g = d_logits[static_cast<size_t>(i * seq_len + j)] * scale;
+                    if (g == 0.0f) continue;
+                    for (int k = 0; k < embed_dim; ++k) {
+                        dQ[static_cast<size_t>(i * embed_dim + k)] += g * Kmat[static_cast<size_t>(j * embed_dim + k)];
+                        dK[static_cast<size_t>(j * embed_dim + k)] += g * Q[static_cast<size_t>(i * embed_dim + k)];
+                    }
+                }
+            }
+
+            // Assemble d_qkv (layout [seq_len, 3*embed_dim])
+            std::vector<float> d_qkv(static_cast<size_t>(seq_len) * static_cast<size_t>(qkv_dim), 0.0f);
+            for (int m = 0; m < seq_len; ++m) {
+                const int base = m * qkv_dim;
+                const int out = m * embed_dim;
+                for (int k = 0; k < embed_dim; ++k) {
+                    d_qkv[static_cast<size_t>(base + k)] = dQ[static_cast<size_t>(out + k)];
+                    d_qkv[static_cast<size_t>(base + embed_dim + k)] = dK[static_cast<size_t>(out + k)];
+                    d_qkv[static_cast<size_t>(base + 2 * embed_dim + k)] = dV[static_cast<size_t>(out + k)];
+                }
+            }
+
+            // dW_qkv = X^T @ d_qkv
+            std::vector<float> dW_qkv(static_cast<size_t>(qkv_size), 0.0f);
+            for (int k = 0; k < embed_dim; ++k) {
+                for (int n = 0; n < qkv_dim; ++n) {
+                    float sum = 0.0f;
+                    for (int m = 0; m < seq_len; ++m) {
+                        sum += layer_input0[static_cast<size_t>(m * embed_dim + k)] * d_qkv[static_cast<size_t>(m * qkv_dim + n)];
+                    }
+                    dW_qkv[static_cast<size_t>(k * qkv_dim + n)] = sum;
+                }
+            }
+
+            // dX = d_qkv @ W_qkv^T
+            for (int m = 0; m < seq_len; ++m) {
+                for (int k = 0; k < embed_dim; ++k) {
+                    float sum = 0.0f;
+                    for (int n = 0; n < qkv_dim; ++n) {
+                        sum += d_qkv[static_cast<size_t>(m * qkv_dim + n)] * W_qkv[static_cast<size_t>(k * qkv_dim + n)];
+                    }
+                    grad_input0[static_cast<size_t>(m * embed_dim + k)] = sum;
+                }
+            }
+
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+            for (int i = 0; i < qkv_size; ++i) {
+                layer.grad_weights[static_cast<size_t>(i)] += dW_qkv[static_cast<size_t>(i)];
+            }
+            for (int i = 0; i < out_size; ++i) {
+                layer.grad_weights[static_cast<size_t>(qkv_size + i)] += dW_out[static_cast<size_t>(i)];
+            }
+
+            accumulate_grad(grad_store[input_names[0]], grad_input0);
+
+        } else if (layer.type == "Conv2d" || layer.type == "ConvTranspose2d") {
             // Backward ReLU (parallélisé)
-            std::vector<float> grad_pre_relu = grad;
-            #pragma omp parallel for schedule(static)
+            std::vector<float> grad_pre_relu = grad_out;
+            #pragma omp simd
             for (size_t i = 0; i < grad_pre_relu.size(); ++i) {
+                const auto &activation = getTensor(output_name);
                 if (i < activation.size() && activation[i] <= 0.0f) {
                     grad_pre_relu[i] = 0.0f; // Gradient est 0 où ReLU a coupé
                 }
@@ -2563,7 +3224,10 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             int padding = layer.padding;
             
             // Gradient des poids: dL/dW = grad_output ⊗ input (parallélisé sur oc)
-            #pragma omp parallel for schedule(dynamic) collapse(2)
+            const size_t conv_weight_work = static_cast<size_t>(out_channels) * static_cast<size_t>(in_channels)
+                * static_cast<size_t>(kernel_size) * static_cast<size_t>(kernel_size)
+                * static_cast<size_t>(height) * static_cast<size_t>(width);
+            #pragma omp parallel for if(conv_weight_work >= 262144) schedule(static) collapse(2)
             for (int oc = 0; oc < out_channels; ++oc) {
                 for (int ic = 0; ic < in_channels; ++ic) {
                     for (int kh = 0; kh < kernel_size; ++kh) {
@@ -2580,8 +3244,8 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                                         int in_idx = ic * (height * width) + ih * width + iw;
                                         
                                         if (out_idx < static_cast<int>(grad_pre_relu.size()) &&
-                                            in_idx < static_cast<int>(layer_input.size())) {
-                                            grad_weight += grad_pre_relu[out_idx] * layer_input[in_idx];
+                                            in_idx < static_cast<int>(layer_input0.size())) {
+                                            grad_weight += grad_pre_relu[out_idx] * layer_input0[static_cast<size_t>(in_idx)];
                                         }
                                     }
                                 }
@@ -2589,7 +3253,6 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                             
                             int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
                             if (w_idx < static_cast<int>(layer.grad_weights.size())) {
-                                #pragma omp critical
                                 layer.grad_weights[w_idx] += grad_weight;
                             }
                         }
@@ -2598,7 +3261,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
             
             // Gradient de l'entrée: convolution transposée de grad avec poids flip (parallélisé)
-            #pragma omp parallel for schedule(dynamic) collapse(3)
+            const size_t conv_input_work = static_cast<size_t>(in_channels)
+                * static_cast<size_t>(height) * static_cast<size_t>(width);
+            #pragma omp parallel for if(conv_input_work >= 262144) schedule(static) collapse(3)
             for (int ic = 0; ic < in_channels; ++ic) {
                 for (int ih = 0; ih < height; ++ih) {
                     for (int iw = 0; iw < width; ++iw) {
@@ -2629,14 +3294,14 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                         }
                         
                         int in_idx = ic * (height * width) + ih * width + iw;
-                        if (in_idx < static_cast<int>(grad_input.size())) {
-                            grad_input[in_idx] = grad_sum;
+                        if (in_idx < static_cast<int>(grad_input0.size())) {
+                            grad_input0[static_cast<size_t>(in_idx)] = grad_sum;
                         }
                     }
                 }
             }
-            
-            grad = grad_input;
+
+            accumulate_grad(grad_store[input_names[0]], grad_input0);
             
         } else if (layer.type == "BatchNorm2d") {
             // NOUVEAU: Récupérer les poids et gradients depuis le weight_block
@@ -2650,16 +3315,15 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             int height = 64, width = 64;
             int spatial_size = height * width;
             const float eps = 1e-5f;
-            
-            #pragma omp parallel for schedule(dynamic)
+
             for (int c = 0; c < channels; ++c) {
                 // Calculer mean et variance pour ce canal (forward)
                 float mean = 0.0f;
                 for (int h = 0; h < height; ++h) {
                     for (int w = 0; w < width; ++w) {
                         int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(layer_input.size())) {
-                            mean += layer_input[idx];
+                        if (idx < static_cast<int>(layer_input0.size())) {
+                            mean += layer_input0[static_cast<size_t>(idx)];
                         }
                     }
                 }
@@ -2669,8 +3333,8 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 for (int h = 0; h < height; ++h) {
                     for (int w = 0; w < width; ++w) {
                         int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(layer_input.size())) {
-                            float diff = layer_input[idx] - mean;
+                        if (idx < static_cast<int>(layer_input0.size())) {
+                            float diff = layer_input0[static_cast<size_t>(idx)] - mean;
                             var += diff * diff;
                         }
                     }
@@ -2689,15 +3353,14 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 for (int h = 0; h < height; ++h) {
                     for (int w = 0; w < width; ++w) {
                         int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad.size()) && 
-                            idx < static_cast<int>(layer_input.size())) {
-                            float x_normalized = (layer_input[idx] - mean) * invstd;
-                            grad_gamma += grad[idx] * x_normalized;
+                        if (idx < static_cast<int>(grad_out.size()) && 
+                            idx < static_cast<int>(layer_input0.size())) {
+                            float x_normalized = (layer_input0[static_cast<size_t>(idx)] - mean) * invstd;
+                            grad_gamma += grad_out[static_cast<size_t>(idx)] * x_normalized;
                         }
                     }
                 }
                 if (c * 2 < static_cast<int>(layer.grad_weights.size())) {
-                    #pragma omp critical
                     layer.grad_weights[c * 2] += grad_gamma;
                 }
                 
@@ -2706,13 +3369,12 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 for (int h = 0; h < height; ++h) {
                     for (int w = 0; w < width; ++w) {
                         int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad.size())) {
-                            grad_beta += grad[idx];
+                        if (idx < static_cast<int>(grad_out.size())) {
+                            grad_beta += grad_out[static_cast<size_t>(idx)];
                         }
                     }
                 }
                 if (c * 2 + 1 < static_cast<int>(layer.grad_weights.size())) {
-                    #pragma omp critical
                     layer.grad_weights[c * 2 + 1] += grad_beta;
                 }
                 
@@ -2722,9 +3384,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 for (int h = 0; h < height; ++h) {
                     for (int w = 0; w < width; ++w) {
                         int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad.size()) && 
-                            idx < static_cast<int>(layer_input.size())) {
-                            sum_dy_xmu += grad[idx] * (layer_input[idx] - mean);
+                        if (idx < static_cast<int>(grad_out.size()) && 
+                            idx < static_cast<int>(layer_input0.size())) {
+                            sum_dy_xmu += grad_out[static_cast<size_t>(idx)] * (layer_input0[static_cast<size_t>(idx)] - mean);
                         }
                     }
                 }
@@ -2737,42 +3399,206 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 for (int h = 0; h < height; ++h) {
                     for (int w = 0; w < width; ++w) {
                         int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad_input.size()) &&
-                            idx < static_cast<int>(layer_input.size())) {
-                            float x_mu = layer_input[idx] - mean;
+                        if (idx < static_cast<int>(grad_input0.size()) &&
+                            idx < static_cast<int>(layer_input0.size())) {
+                            float x_mu = layer_input0[static_cast<size_t>(idx)] - mean;
                             float dx = inv_N * gamma * invstd * (
-                                spatial_size * grad[idx] 
+                                spatial_size * grad_out[static_cast<size_t>(idx)] 
                                 - sum_dy 
                                 - x_mu * invstd2 * sum_dy_xmu
                             );
-                            grad_input[idx] = dx;
+                            grad_input0[static_cast<size_t>(idx)] = dx;
                         }
                     }
                 }
             }
-            
-            grad = grad_input;
+
+            accumulate_grad(grad_store[input_names[0]], grad_input0);
+
+        } else if (layer.type == "Linear") {
+            // Backward Linear: y = W x + b
+            const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(layer_input0.size());
+            const int out_f = layer.out_features;
+
+            if (out_f <= 0) {
+                std::cerr << "⚠️  Linear backward skipped: out_features not set (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            if (static_cast<int>(layer_input0.size()) != in_f || static_cast<int>(grad_out.size()) != out_f) {
+                std::cerr << "⚠️  Linear backward shape mismatch (" << layer.name << ")"
+                          << " in=" << layer_input0.size() << " expected_in=" << in_f
+                          << " grad=" << grad_out.size() << " expected_out=" << out_f << std::endl;
+                continue;
+            }
+
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+
+            const float* W = layer.getWeights();
+            const bool use_bias = layer.use_bias;
+            const size_t w_count = static_cast<size_t>(in_f) * static_cast<size_t>(out_f);
+
+            // dW += grad_out ⊗ x
+            for (int o = 0; o < out_f; ++o) {
+                const float go = grad_out[static_cast<size_t>(o)];
+                const size_t row_off = static_cast<size_t>(o) * static_cast<size_t>(in_f);
+                for (int i = 0; i < in_f; ++i) {
+                    layer.grad_weights[row_off + static_cast<size_t>(i)] += go * layer_input0[static_cast<size_t>(i)];
+                }
+            }
+
+            // db += grad_out
+            if (use_bias && layer.grad_weights.size() >= w_count + static_cast<size_t>(out_f)) {
+                for (int o = 0; o < out_f; ++o) {
+                    layer.grad_weights[w_count + static_cast<size_t>(o)] += grad_out[static_cast<size_t>(o)];
+                }
+            }
+
+            // grad_input = W^T * grad_out
+            std::vector<float> grad_input(static_cast<size_t>(in_f), 0.0f);
+            for (int o = 0; o < out_f; ++o) {
+                const float go = grad_out[static_cast<size_t>(o)];
+                const float* wrow = W + static_cast<size_t>(o) * static_cast<size_t>(in_f);
+                for (int i = 0; i < in_f; ++i) {
+                    grad_input[static_cast<size_t>(i)] += wrow[static_cast<size_t>(i)] * go;
+                }
+            }
+
+            accumulate_grad(grad_store[input_names[0]], grad_input);
+
+        } else if (layer.type == "PatchEmbed") {
+            const int d_model = layer.embed_dim > 0 ? layer.embed_dim : layer.out_features;
+            const int seq_text = std::max(1, layer.seq_text);
+            const int num_patches = std::max(1, layer.num_patches);
+            const int patch_dim = std::max(1, layer.patch_dim);
+
+            const int text_dim = (seq_text + 1) * d_model;
+            const int in_dim = text_dim + num_patches * patch_dim;
+            const int out_dim = (seq_text + 1 + num_patches) * d_model;
+
+            if (static_cast<int>(layer_input0.size()) != in_dim || static_cast<int>(grad_out.size()) != out_dim) {
+                std::cerr << "⚠️  PatchEmbed backward shape mismatch (" << layer.name << ")"
+                          << " in=" << layer_input0.size() << " expected_in=" << in_dim
+                          << " grad=" << grad_out.size() << " expected_out=" << out_dim << std::endl;
+                continue;
+            }
+            if (layer.getWeights() == nullptr || static_cast<int>(layer.getWeightsSize()) != (patch_dim * d_model + d_model)) {
+                std::cerr << "⚠️  PatchEmbed backward skipped: weights not initialized/invalid (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+
+            const float* w = layer.getWeights();
+            const float inv = 1.0f / std::sqrt(static_cast<float>(patch_dim));
+
+            std::vector<float> grad_in(static_cast<size_t>(in_dim), 0.0f);
+
+            // Texte + time: identité
+            for (int i = 0; i < text_dim; ++i) {
+                grad_in[static_cast<size_t>(i)] = grad_out[static_cast<size_t>(i)];
+            }
+
+            // Patches: projection learnable
+            // Weights layout: W[patch_dim, d_model] puis b[d_model]
+            float* gradW = layer.grad_weights.data();
+            float* gradB = layer.grad_weights.data() + patch_dim * d_model;
+
+            for (int p = 0; p < num_patches; ++p) {
+                const int in_off = text_dim + p * patch_dim;
+                const int out_off = (seq_text + 1 + p) * d_model;
+
+                // db += grad_out_patch
+                for (int d = 0; d < d_model; ++d) {
+                    gradB[d] += grad_out[static_cast<size_t>(out_off + d)];
+                }
+
+                // dW += (x_patch*inv) outer grad_out_patch
+                for (int k = 0; k < patch_dim; ++k) {
+                    const float xk = layer_input0[static_cast<size_t>(in_off + k)] * inv;
+                    const size_t row = static_cast<size_t>(k) * static_cast<size_t>(d_model);
+                    for (int d = 0; d < d_model; ++d) {
+                        gradW[row + static_cast<size_t>(d)] += xk * grad_out[static_cast<size_t>(out_off + d)];
+                    }
+                }
+
+                // grad_in_patch = inv * W * grad_out_patch
+                for (int k = 0; k < patch_dim; ++k) {
+                    float acc = 0.0f;
+                    const size_t row = static_cast<size_t>(k) * static_cast<size_t>(d_model);
+                    for (int d = 0; d < d_model; ++d) {
+                        acc += w[row + static_cast<size_t>(d)] * grad_out[static_cast<size_t>(out_off + d)];
+                    }
+                    grad_in[static_cast<size_t>(in_off + k)] += acc * inv;
+                }
+            }
+
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "GELU") {
+            // Backward GELU (approx tanh), en utilisant layer_input comme pré-activation
+            if (grad_out.size() != layer_input0.size()) {
+                std::cerr << "⚠️  GELU backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            std::vector<float> grad_input;
+            grad_input.resize(layer_input0.size());
+            for (size_t i = 0; i < grad_input.size(); ++i) {
+                const float x = layer_input0[i];
+                const float c = 0.044715f;
+                const float s = std::sqrt(2.0f / 3.14159265359f);
+                const float u = s * (x + c * x * x * x);
+                const float t = std::tanh(u);
+                const float sech2 = 1.0f - t * t;
+                const float du_dx = s * (1.0f + 3.0f * c * x * x);
+                const float dgelu = 0.5f * (1.0f + t) + 0.5f * x * sech2 * du_dx;
+                grad_input[i] = grad_out[i] * dgelu;
+            }
+
+            accumulate_grad(grad_store[input_names[0]], grad_input);
             
         } else if (layer.type == "MaxPool2d") {
             // Backward MaxPool : propager le gradient au max (parallélisé)
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < grad.size(); ++i) {
+            std::vector<float> grad_input(layer_input0.size(), 0.0f);
+            #pragma omp simd
+            for (size_t i = 0; i < grad_out.size(); ++i) {
                 size_t idx1 = i * 2;
                 size_t idx2 = i * 2 + 1;
                 
-                if (idx1 < layer_input.size() && idx2 < layer_input.size()) {
-                    if (layer_input[idx1] >= layer_input[idx2]) {
-                        grad_input[idx1] = grad[i];
+                if (idx1 < layer_input0.size() && idx2 < layer_input0.size()) {
+                    if (layer_input0[idx1] >= layer_input0[idx2]) {
+                        grad_input[idx1] = grad_out[i];
                     } else {
-                        grad_input[idx2] = grad[i];
+                        grad_input[idx2] = grad_out[i];
                     }
                 }
             }
-            
-            grad = grad_input;
+
+            accumulate_grad(grad_store[input_names[0]], grad_input);
+        } else {
+            // Fallback: si non géré, on essaie au moins de propager sur l'input principal
+            if (grad_out.size() == layer_input0.size()) {
+                accumulate_grad(grad_store[input_names[0]], grad_out);
+            } else {
+                std::cerr << "⚠️  Backward not implemented for layer type '" << layer.type
+                          << "' (" << layer.name << ")" << std::endl;
+            }
         }
     }
-    
+
+    // Exposer le gradient d'entrée si présent (architecture utilisant "__input__")
+    has_last_input_gradient_ = false;
+    last_input_gradient_.clear();
+    auto it_in = grad_store.find("__input__");
+    if (it_in != grad_store.end()) {
+        last_input_gradient_ = it_in->second;
+        has_last_input_gradient_ = true;
+    }
+
     return grads;
 }
 

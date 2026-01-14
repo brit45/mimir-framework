@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(Mimir VERSION 2.1 LANGUAGES CXX)
+project(Mimir VERSION 2.3.0 LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet
@@ -15,8 +15,7 @@ option(ENABLE_SIMD "Enable SIMD optimizations (AVX2, FMA, F16C, BMI2)" ON)
 option(ENABLE_OPENMP "Enable OpenMP parallel processing" ON)
 option(ENABLE_VULKAN "Enable Vulkan Compute acceleration" ON)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
-option(BUILD_TESTS "Build test executables" ON)
-option(BUILD_EXAMPLES "Build example executables" ON)
+option(BUILD_EXAMPLES "Build example executables" OFF)
 
 # 🛡️ SÉCURITÉ MÉMOIRE: Legacy params structure (désactivé par défaut)
 # ⚠️  Activer seulement pour debug/compatibilité - consomme énormément de RAM!
@@ -155,8 +154,18 @@ set(MIMIR_SOURCES
     src/Sha256.cpp
     src/LuaScripting.cpp
     src/stb_image_impl.cpp
-    src/Models/FluxModel.cpp
-    src/Models/VAEModel.cpp
+    src/Models/Registry/ModelArchitectures.cpp
+    src/Models/MLP/BasicMLPModel.cpp
+    src/Models/Diffusion/PonyXLDDPMModel.cpp
+    src/Models/NLP/TransformerModel.cpp
+    src/Models/Vision/ViTModel.cpp
+    src/Models/Vision/VAEModel.cpp
+    src/Models/Vision/CNN/ResNetModel.cpp
+    src/Models/Vision/UNetModel.cpp
+    src/Models/Vision/CNN/MobileNetModel.cpp
+    src/Models/Vision/CNN/VGG16Model.cpp
+    src/Models/Vision/CNN/VGG19Model.cpp
+    src/Models/Diffusion/DiffusionModel.cpp
     src/Serialization/Serialization.cpp
     src/Serialization/SafeTensorsWriter.cpp
     src/Serialization/SafeTensorsReader.cpp
@@ -186,9 +195,18 @@ set(MIMIR_HEADERS
     src/HtopDisplay.hpp
     src/RuntimeAllocator.hpp
     src/LayerOpsExt.hpp
-    src/Models/ModelArchitectures.hpp
-    src/Models/FluxModel.hpp
-    src/Models/VAEModel.hpp
+    src/Models/Registry/ModelArchitectures.hpp
+    src/Models/MLP/BasicMLPModel.hpp
+    src/Models/Diffusion/PonyXLDDPMModel.hpp
+    src/Models/NLP/TransformerModel.hpp
+    src/Models/Vision/ViTModel.hpp
+    src/Models/Vision/VAEModel.hpp
+    src/Models/Vision/CNN/ResNetModel.hpp
+    src/Models/Vision/UNetModel.hpp
+    src/Models/Vision/CNN/MobileNetModel.hpp
+    src/Models/Vision/CNN/VGG16Model.hpp
+    src/Models/Vision/CNN/VGG19Model.hpp
+    src/Models/Diffusion/DiffusionModel.hpp
     src/Serialization/Serialization.hpp
     src/Serialization/SafeTensorsWriter.hpp
     src/Serialization/SafeTensorsReader.hpp
@@ -260,84 +278,7 @@ set_target_properties(mimir PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
 )
 
-# ============================================================================
-# Exécutables de démonstration
-# ============================================================================
-
-if(BUILD_EXAMPLES)
-    # Model architectures demo
-    add_executable(model_architectures_demo
-        examples/model_architectures_demo.cpp
-    )
-    target_link_libraries(model_architectures_demo PRIVATE mimir_core)
-    set_target_properties(model_architectures_demo PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
-    )
-    
-    message(STATUS "Building examples")
-endif()
-
-# ============================================================================
-# Tests avec Google Test
-# ============================================================================
-
-if(BUILD_TESTS)
-    enable_testing()
-    
-    # Télécharger et configurer Google Test
-    include(FetchContent)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG v1.14.0
-    )
-    
-    # Pour Windows: Empêcher l'override de la CRT de compilation parent
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
-    
-    # Fonction helper pour créer un test
-    function(add_mimir_test test_name test_file)
-        if(EXISTS "${CMAKE_SOURCE_DIR}/${test_file}")
-            add_executable(${test_name} ${test_file})
-            target_link_libraries(${test_name} PRIVATE mimir_core GTest::gtest_main)
-            
-            # Découverte automatique des tests avec gtest_discover_tests
-            include(GoogleTest)
-            gtest_discover_tests(${test_name})
-        endif()
-    endfunction()
-    
-    # Tests unitaires dans tests/
-    add_mimir_test(test_tensors tests/test_tensors.cpp)
-    add_mimir_test(test_tokenizer tests/test_tokenizer.cpp)
-    add_mimir_test(test_layers tests/test_layers.cpp)
-    add_mimir_test(test_autograd tests/test_autograd.cpp)
-    add_mimir_test(test_model tests/test_model.cpp)
-    add_mimir_test(test_hardware tests/test_hardware.cpp)
-    add_mimir_test(test_serialization tests/test_serialization.cpp)
-    
-    # Tests legacy dans tools/ (sans gtest)
-    if(EXISTS "${CMAKE_SOURCE_DIR}/tools/test_base_models.cpp")
-        add_executable(test_base_models tools/test_base_models.cpp)
-        target_link_libraries(test_base_models PRIVATE mimir_core)
-        add_test(NAME BaseModelsTest COMMAND test_base_models)
-    endif()
-    
-    if(EXISTS "${CMAKE_SOURCE_DIR}/tools/test_vae.cpp")
-        add_executable(test_vae tools/test_vae.cpp)
-        target_link_libraries(test_vae PRIVATE mimir_core)
-        add_test(NAME VAETest COMMAND test_vae)
-    endif()
-    
-    if(EXISTS "${CMAKE_SOURCE_DIR}/tools/benchmark_simd.cpp")
-        add_executable(benchmark_simd tools/benchmark_simd.cpp)
-        target_link_libraries(benchmark_simd PRIVATE mimir_core)
-        add_test(NAME SIMDBenchmark COMMAND benchmark_simd)
-    endif()
-    
-    message(STATUS "Building tests with Google Test")
-endif()
+message(STATUS "Tests/exemples désactivés (obsolètes)")
 
 # ============================================================================
 # Scripts Lua
@@ -385,7 +326,7 @@ install(DIRECTORY docs/
 
 message(STATUS "")
 message(STATUS "╔═══════════════════════════════════════════════════════════════╗")
-message(STATUS "║          Mímir Framework v${PROJECT_VERSION} - Configuration          ║")
+message(STATUS "║          Mímir Framework v${PROJECT_VERSION} - Configuration               ║")
 message(STATUS "╚═══════════════════════════════════════════════════════════════╝")
 message(STATUS "")
 message(STATUS "Build type:          ${CMAKE_BUILD_TYPE}")
@@ -399,7 +340,6 @@ message(STATUS "  Vulkan Compute:    ${ENABLE_VULKAN}")
 message(STATUS "  LZ4 Compression:   ${ENABLE_LZ4}")
 message(STATUS "")
 message(STATUS "Build options:")
-message(STATUS "  Tests:             ${BUILD_TESTS}")
 message(STATUS "  Examples:          ${BUILD_EXAMPLES}")
 message(STATUS "")
 message(STATUS "Install prefix:      ${CMAKE_INSTALL_PREFIX}")

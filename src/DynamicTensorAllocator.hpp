@@ -33,12 +33,15 @@ public:
         bool is_compressed = false;
         std::string cache_key;
         float* data_ptr = nullptr;  // Pointeur vers données actives
+        bool reserved = false;      // Réservation comptabilisée dans MemoryGuard
+        size_t reserved_bytes = 0;  // Bytes réservés (typiquement size*sizeof(float))
     };
     
     // Configuration
-    void configure(size_t max_ram_gb, bool enable_compression = true) {
+    void configure(size_t max_ram_gb, bool enable_compression = true, bool lazy_mode = true) {
         max_ram_bytes_ = max_ram_gb * 1024ULL * 1024ULL * 1024ULL;
         compression_enabled_ = enable_compression;
+        lazy_mode_ = lazy_mode;
         
         // Configurer MemoryGuard
         auto& guard = MemoryGuard::instance();
@@ -59,6 +62,7 @@ public:
         std::cout << "🚀 DynamicTensorAllocator configuré:" << std::endl;
         std::cout << "   - Limite RAM: " << max_ram_gb << " GB" << std::endl;
         std::cout << "   - Compression: " << (enable_compression ? "activée" : "désactivée") << std::endl;
+        std::cout << "   - Lazy mode: " << (lazy_mode_ ? "activé" : "désactivé") << std::endl;
     }
     
     // Allouer un tenseur (retourne un handle)
@@ -66,20 +70,6 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         
         size_t bytes_needed = num_elements * sizeof(float);
-        auto& guard = MemoryGuard::instance();
-        
-        // Vérifier si allocation possible
-        if (!guard.requestAllocation(bytes_needed, tag)) {
-            // Tenter éviction LRU via AdvancedRAMManager
-            std::cout << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
-            evictLRU(bytes_needed);
-            
-            // Réessayer
-            if (!guard.requestAllocation(bytes_needed, tag)) {
-                std::cerr << "❌ Impossible d'allouer tenseur même après éviction!" << std::endl;
-                return nullptr;
-            }
-        }
         
         // Créer le handle
         auto handle = std::make_unique<TensorHandle>();
@@ -88,6 +78,23 @@ public:
         handle->is_compressed = false;
         handle->cache_key = tag + "_" + std::to_string(next_id_++);
         handle->data_ptr = nullptr;
+        handle->reserved = false;
+        handle->reserved_bytes = 0;
+
+        // Mode non-lazy: réserver tout de suite (comptabilisation immédiate)
+        if (!lazy_mode_) {
+            auto& guard = MemoryGuard::instance();
+            if (!guard.requestAllocation(bytes_needed, tag)) {
+                std::cout << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
+                evictLRU(bytes_needed);
+                if (!guard.requestAllocation(bytes_needed, tag)) {
+                    std::cerr << "❌ Impossible d'allouer tenseur même après éviction!" << std::endl;
+                    return nullptr;
+                }
+            }
+            handle->reserved = true;
+            handle->reserved_bytes = bytes_needed;
+        }
         
         // Sauvegarder la clé avant le move
         std::string cache_key = handle->cache_key;
@@ -109,13 +116,29 @@ public:
         
         // Charger depuis AdvancedRAMManager ou allouer
         auto& ram_mgr = AdvancedRAMManager::instance();
+
+        // Mode lazy: réserver au moment du chargement réel
+        if (lazy_mode_ && !handle->reserved) {
+            const size_t bytes_needed = handle->size * sizeof(float);
+            auto& guard = MemoryGuard::instance();
+            if (!guard.requestAllocation(bytes_needed, handle->cache_key)) {
+                std::cout << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
+                evictLRU(bytes_needed);
+                if (!guard.requestAllocation(bytes_needed, handle->cache_key)) {
+                    std::cerr << "❌ Impossible d'allouer tenseur même après éviction!" << std::endl;
+                    return nullptr;
+                }
+            }
+            handle->reserved = true;
+            handle->reserved_bytes = bytes_needed;
+        }
         
         if (handle->is_compressed) {
             // Décompresser depuis RAMManager
             auto data = ram_mgr.get(handle->cache_key);
             if (data.has_value()) {
                 // ⚠️ IMPORTANT: malloc direct bypass MemoryGuard!
-                // Mais l'allocation a déjà été comptabilisée dans allocateTensor()
+                // La comptabilisation est faite via handle->reserved/_bytes (lazy ou non-lazy)
                 handle->data_ptr = reinterpret_cast<float*>(
                     malloc(handle->size * sizeof(float)));
                 if (handle->data_ptr) {
@@ -130,7 +153,7 @@ public:
         } else {
             // Allocation fraîche
             // ⚠️ IMPORTANT: malloc direct bypass MemoryGuard!
-            // Mais l'allocation a déjà été comptabilisée dans allocateTensor()
+            // La comptabilisation est faite via handle->reserved/_bytes (lazy ou non-lazy)
             handle->data_ptr = reinterpret_cast<float*>(
                 malloc(handle->size * sizeof(float)));
             if (handle->data_ptr) {
@@ -168,8 +191,12 @@ public:
             handle->is_compressed = true;
             
             // Mettre à jour MemoryGuard
-            auto& guard = MemoryGuard::instance();
-            guard.releaseAllocation(handle->size * sizeof(float));
+            if (handle->reserved) {
+                auto& guard = MemoryGuard::instance();
+                guard.releaseAllocation(handle->reserved_bytes);
+                handle->reserved = false;
+                handle->reserved_bytes = 0;
+            }
         }
     }
     
@@ -186,7 +213,13 @@ public:
         if (handle->data_ptr) {
             free(handle->data_ptr);
             handle->data_ptr = nullptr;
-            guard.releaseAllocation(handle->size * sizeof(float));
+        }
+
+        // Libérer la réservation (qu'il y ait eu chargement ou non)
+        if (handle->reserved) {
+            guard.releaseAllocation(handle->reserved_bytes);
+            handle->reserved = false;
+            handle->reserved_bytes = 0;
         }
         
         // Libérer depuis RAMManager
@@ -269,6 +302,7 @@ private:
     std::mutex mutex_;
     size_t max_ram_bytes_ = 10ULL * 1024 * 1024 * 1024;
     bool compression_enabled_ = true;
+    bool lazy_mode_ = true;
     size_t next_id_ = 0;
     uint64_t access_counter_ = 0;
     

@@ -145,11 +145,11 @@ Tous les tests passent:
 
 ## 📖 Documentation
 
-- [Guide complet](docs/00-INDEX.md)
-- [Guide de démarrage](docs/01-Getting-Started/01-Quick-Start.md)
-- [API Lua complète](docs/03-API-Reference/00-API-Complete.md)
-- [Scripts README](scripts/README.md)
-- [CHANGELOG](CHANGELOG.md)
+- [Guide complet](../00-INDEX.md)
+- [Guide de démarrage](../01-Getting-Started/01-Quick-Start.md)
+- [API Lua complète](../03-API-Reference/00-API-Complete.md)
+- [Scripts README](../../scripts/README.md)
+- [CHANGELOG](../../CHANGELOG.md)
 
 ---
 

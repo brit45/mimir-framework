@@ -2,7 +2,6 @@
 #include "../Model.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
-#include "../Models/VAEModel.hpp"
 #include "../Sha256.hpp"
 #include <fstream>
 #include <iomanip>
@@ -179,20 +178,18 @@ std::vector<RawCheckpointWriter::TensorData> RawCheckpointWriter::collect_tensor
         }
     }
 
-    // Gradient snapshot tensors (debug only). For now, implemented for VAEModel.
+    // Gradient snapshot tensors (debug only).
     if (options.include_gradients) {
-        if (auto* vae = dynamic_cast<VAEModel*>(&model)) {
-            const auto& grads = vae->getLastGradientsByLayer();
-            for (const auto& kv : grads) {
-                if (kv.second.empty()) continue;
-                TensorData td;
-                td.name = "grads/" + kv.first;
-                td.dtype = DType::Float32;
-                td.shape = {kv.second.size()};
-                td.byte_size = kv.second.size() * sizeof(float);
-                td.data_ptr = kv.second.data();
-                tensors.push_back(td);
-            }
+        // Generic: layer grad_weights snapshots
+        for (const auto& layer : layers) {
+            if (layer.grad_weights.empty()) continue;
+            TensorData td;
+            td.name = "grads/" + layer.name + "/weights";
+            td.dtype = DType::Float32;
+            td.shape = {layer.grad_weights.size()};
+            td.byte_size = layer.grad_weights.size() * sizeof(float);
+            td.data_ptr = layer.grad_weights.data();
+            tensors.push_back(td);
         }
     }
     
@@ -323,6 +320,7 @@ bool RawCheckpointWriter::save_architecture(
         arch["model_name"] = model.getModelName();
         arch["total_params"] = model.totalParamCount();
         arch["num_layers"] = model.getLayers().size();
+        arch["model_config"] = model.modelConfig;
         
         // Save layer info
         json layers_array = json::array();
@@ -331,6 +329,20 @@ bool RawCheckpointWriter::save_architecture(
             layer_obj["name"] = layer.name;
             layer_obj["type"] = layer.type;
             layer_obj["params_count"] = layer.params_count;
+            layer_obj["inputs"] = layer.inputs;
+            layer_obj["output"] = layer.output;
+            // Common shape fields
+            layer_obj["in_features"] = layer.in_features;
+            layer_obj["out_features"] = layer.out_features;
+            layer_obj["in_channels"] = layer.in_channels;
+            layer_obj["out_channels"] = layer.out_channels;
+            layer_obj["kernel_size"] = layer.kernel_size;
+            layer_obj["stride"] = layer.stride;
+            layer_obj["padding"] = layer.padding;
+            layer_obj["seq_len"] = layer.seq_len;
+            layer_obj["embed_dim"] = layer.embed_dim;
+            layer_obj["num_heads"] = layer.num_heads;
+            layer_obj["weights_size"] = layer.getWeightsSize();
             layers_array.push_back(layer_obj);
         }
         arch["layers"] = layers_array;

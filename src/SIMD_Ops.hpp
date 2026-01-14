@@ -9,6 +9,17 @@
 
 namespace SIMD {
 
+inline float hsum256_ps(__m256 v) {
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 sum128 = _mm_add_ps(lo, hi);
+    __m128 shuf = _mm_movehdup_ps(sum128);
+    __m128 sums = _mm_add_ps(sum128, shuf);
+    shuf = _mm_movehl_ps(shuf, sums);
+    sums = _mm_add_ss(sums, shuf);
+    return _mm_cvtss_f32(sums);
+}
+
 // Matrix multiplication optimisée avec FMA SATURÉ (utilise HardwareOpt)
 // A: [M x K], B: [K x N], C: [M x N]
 inline void matmul_avx2(float* C, const float* A, const float* B, 
@@ -23,7 +34,7 @@ inline void matmul_transpose_avx2(float* C, const float* A, const float* B,
                                    size_t M, size_t N, size_t K) {
     std::memset(C, 0, M * N * sizeof(float));
     
-    #pragma omp parallel for collapse(2) schedule(dynamic)
+    #pragma omp parallel for if(M * N * K > 262144) schedule(static)
     for (size_t i = 0; i < M; ++i) {
         for (size_t j = 0; j < N; ++j) {
             __m256 sum = _mm256_setzero_ps();
@@ -35,16 +46,8 @@ inline void matmul_transpose_avx2(float* C, const float* A, const float* B,
                 __m256 b_vec = _mm256_loadu_ps(&B[j * K + k]);
                 sum = _mm256_fmadd_ps(a_vec, b_vec, sum);
             }
-            
-            // Horizontal sum
-            __m128 sum_high = _mm256_extractf128_ps(sum, 1);
-            __m128 sum_low = _mm256_castps256_ps128(sum);
-            __m128 sum128 = _mm_add_ps(sum_low, sum_high);
-            __m128 shuf = _mm_movehdup_ps(sum128);
-            __m128 sums = _mm_add_ps(sum128, shuf);
-            shuf = _mm_movehl_ps(shuf, sums);
-            sums = _mm_add_ss(sums, shuf);
-            float result = _mm_cvtss_f32(sums);
+
+            float result = hsum256_ps(sum);
             
             // Process remaining elements
             for (; k < K; ++k) {
@@ -58,35 +61,28 @@ inline void matmul_transpose_avx2(float* C, const float* A, const float* B,
 
 // Element-wise operations avec AVX2
 inline void add_vectors_avx2(float* C, const float* A, const float* B, size_t N) {
-    #pragma omp parallel for if(N > 2048) schedule(static)
-    for (size_t i = 0; i < N; i += 8) {
-        if (i + 8 <= N) {
-            __m256 a = _mm256_loadu_ps(&A[i]);
-            __m256 b = _mm256_loadu_ps(&B[i]);
-            __m256 c = _mm256_add_ps(a, b);
-            _mm256_storeu_ps(&C[i], c);
-        } else {
-            // Fallback pour les derniers éléments
-            for (size_t j = i; j < N; ++j) {
-                C[j] = A[j] + B[j];
-            }
-        }
+    const size_t vecN = N & ~static_cast<size_t>(7);
+    for (size_t i = 0; i < vecN; i += 8) {
+        __m256 a = _mm256_loadu_ps(&A[i]);
+        __m256 b = _mm256_loadu_ps(&B[i]);
+        __m256 c = _mm256_add_ps(a, b);
+        _mm256_storeu_ps(&C[i], c);
+    }
+    for (size_t i = vecN; i < N; ++i) {
+        C[i] = A[i] + B[i];
     }
 }
 
 inline void mul_vectors_avx2(float* C, const float* A, const float* B, size_t N) {
-    #pragma omp parallel for if(N > 2048) schedule(static)
-    for (size_t i = 0; i < N; i += 8) {
-        if (i + 8 <= N) {
-            __m256 a = _mm256_loadu_ps(&A[i]);
-            __m256 b = _mm256_loadu_ps(&B[i]);
-            __m256 c = _mm256_mul_ps(a, b);
-            _mm256_storeu_ps(&C[i], c);
-        } else {
-            for (size_t j = i; j < N; ++j) {
-                C[j] = A[j] * B[j];
-            }
-        }
+    const size_t vecN = N & ~static_cast<size_t>(7);
+    for (size_t i = 0; i < vecN; i += 8) {
+        __m256 a = _mm256_loadu_ps(&A[i]);
+        __m256 b = _mm256_loadu_ps(&B[i]);
+        __m256 c = _mm256_mul_ps(a, b);
+        _mm256_storeu_ps(&C[i], c);
+    }
+    for (size_t i = vecN; i < N; ++i) {
+        C[i] = A[i] * B[i];
     }
 }
 
@@ -95,9 +91,8 @@ inline void gelu_forward_avx2(float* out, const float* in, size_t N) {
     const float c1 = 0.7978845608f;  // sqrt(2/pi)
     const float c2 = 0.044715f;
     
-    #pragma omp parallel for if(N > 1024) schedule(static)
-    for (size_t i = 0; i < N; i += 8) {
-        if (i + 8 <= N) {
+    const size_t vecN = N & ~static_cast<size_t>(7);
+    for (size_t i = 0; i < vecN; i += 8) {
             __m256 x = _mm256_loadu_ps(&in[i]);
             __m256 half = _mm256_set1_ps(0.5f);
             __m256 one = _mm256_set1_ps(1.0f);
@@ -130,13 +125,10 @@ inline void gelu_forward_avx2(float* out, const float* in, size_t N) {
             __m256 result = _mm256_mul_ps(half, _mm256_mul_ps(x, one_plus_tanh));
             
             _mm256_storeu_ps(&out[i], result);
-        } else {
-            // Fallback
-            for (size_t j = i; j < N; ++j) {
-                float x = in[j];
-                out[j] = x * 0.5f * (1.0f + std::tanh(c1 * (x + c2 * x * x * x)));
-            }
-        }
+    }
+    for (size_t i = vecN; i < N; ++i) {
+        float x = in[i];
+        out[i] = x * 0.5f * (1.0f + std::tanh(c1 * (x + c2 * x * x * x)));
     }
 }
 
@@ -144,14 +136,14 @@ inline void gelu_forward_avx2(float* out, const float* in, size_t N) {
 inline void softmax_avx2(float* out, const float* in, size_t N) {
     // Find max for numerical stability avec OpenMP reduction
     float max_val = in[0];
-    #pragma omp parallel for reduction(max:max_val) if(N > 512)
+    #pragma omp simd reduction(max:max_val)
     for (size_t i = 1; i < N; ++i) {
         if (in[i] > max_val) max_val = in[i];
     }
     
     // Compute exp(x - max)
     float sum = 0.0f;
-    #pragma omp parallel for reduction(+:sum) if(N > 512)
+    #pragma omp simd reduction(+:sum)
     for (size_t i = 0; i < N; ++i) {
         out[i] = std::exp(in[i] - max_val);
         sum += out[i];
@@ -159,41 +151,39 @@ inline void softmax_avx2(float* out, const float* in, size_t N) {
     
     // Normalize
     float inv_sum = 1.0f / sum;
-    #pragma omp parallel for if(N > 1024) schedule(static)
-    for (size_t i = 0; i < N; i += 8) {
-        if (i + 8 <= N) {
-            __m256 vals = _mm256_loadu_ps(&out[i]);
-            __m256 scale = _mm256_set1_ps(inv_sum);
-            __m256 result = _mm256_mul_ps(vals, scale);
-            _mm256_storeu_ps(&out[i], result);
-        } else {
-            for (size_t j = i; j < N; ++j) {
-                out[j] *= inv_sum;
-            }
-        }
+    const size_t vecN = N & ~static_cast<size_t>(7);
+    for (size_t i = 0; i < vecN; i += 8) {
+        __m256 vals = _mm256_loadu_ps(&out[i]);
+        __m256 scale = _mm256_set1_ps(inv_sum);
+        __m256 result = _mm256_mul_ps(vals, scale);
+        _mm256_storeu_ps(&out[i], result);
+    }
+    for (size_t i = vecN; i < N; ++i) {
+        out[i] *= inv_sum;
     }
 }
 
 // Dot product optimisé
 inline float dot_product_avx2(const float* A, const float* B, size_t N) {
-    __m256 sum = _mm256_setzero_ps();
+    __m256 sum0 = _mm256_setzero_ps();
+    __m256 sum1 = _mm256_setzero_ps();
     
     size_t i = 0;
+    for (; i + 16 <= N; i += 16) {
+        __m256 a0 = _mm256_loadu_ps(&A[i]);
+        __m256 b0 = _mm256_loadu_ps(&B[i]);
+        __m256 a1 = _mm256_loadu_ps(&A[i + 8]);
+        __m256 b1 = _mm256_loadu_ps(&B[i + 8]);
+        sum0 = _mm256_fmadd_ps(a0, b0, sum0);
+        sum1 = _mm256_fmadd_ps(a1, b1, sum1);
+    }
     for (; i + 8 <= N; i += 8) {
         __m256 a = _mm256_loadu_ps(&A[i]);
         __m256 b = _mm256_loadu_ps(&B[i]);
-        sum = _mm256_fmadd_ps(a, b, sum);
+        sum0 = _mm256_fmadd_ps(a, b, sum0);
     }
-    
-    // Horizontal sum
-    __m128 sum_high = _mm256_extractf128_ps(sum, 1);
-    __m128 sum_low = _mm256_castps256_ps128(sum);
-    __m128 sum128 = _mm_add_ps(sum_low, sum_high);
-    __m128 shuf = _mm_movehdup_ps(sum128);
-    __m128 sums = _mm_add_ps(sum128, shuf);
-    shuf = _mm_movehl_ps(shuf, sums);
-    sums = _mm_add_ss(sums, shuf);
-    float result = _mm_cvtss_f32(sums);
+
+    float result = hsum256_ps(_mm256_add_ps(sum0, sum1));
     
     // Remaining elements
     for (; i < N; ++i) {
