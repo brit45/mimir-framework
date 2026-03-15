@@ -1,0 +1,45 @@
+#version 450
+
+// Linear forward:
+// output[b, o] = dot(input[b, :], weights[o, :]) + bias[o]
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer InBuf {
+    float input_data[];
+};
+
+layout(std430, binding = 1) readonly buffer WeightsBuf {
+    float weights_data[];
+};
+
+layout(std430, binding = 2) readonly buffer BiasBuf {
+    float bias_data[];
+};
+
+layout(std430, binding = 3) writeonly buffer OutBuf {
+    float out_data[];
+};
+
+layout(push_constant) uniform Dims {
+    uint batch;
+    uint in_f;
+    uint out_f;
+} pc;
+
+void main() {
+    const uint b = gl_GlobalInvocationID.x;
+    const uint o = gl_GlobalInvocationID.y;
+    if (b >= pc.batch || o >= pc.out_f) {
+        return;
+    }
+
+    float acc = bias_data[o];
+    const uint in_base = b * pc.in_f;
+    const uint w_base = o * pc.in_f;
+    for (uint k = 0; k < pc.in_f; ++k) {
+        acc += input_data[in_base + k] * weights_data[w_base + k];
+    }
+
+    out_data[b * pc.out_f + o] = acc;
+}

@@ -51,10 +51,11 @@ void ViTModel::buildInto(Model& model, const Config& cfg) {
     for (int i = 0; i < layers; ++i) {
         const std::string p = "vit/block" + std::to_string(i + 1);
 
-        model.push(p + "/ln1", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(in_dim));
+        model.push(p + "/ln1", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
         if (auto* L = model.getLayerByName(p + "/ln1")) {
             L->inputs = {x};
             L->output = p + "/ln1_out";
+            L->in_features = d_model; // LN par token (groupes)
             L->affine = true;
             L->use_bias = true;
         }
@@ -76,19 +77,21 @@ void ViTModel::buildInto(Model& model, const Config& cfg) {
             L->output = p + "/res1";
         }
 
-        model.push(p + "/ln2", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(in_dim));
+        model.push(p + "/ln2", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
         if (auto* L = model.getLayerByName(p + "/ln2")) {
             L->inputs = {p + "/res1"};
             L->output = p + "/ln2_out";
+            L->in_features = d_model; // LN par token (groupes)
             L->affine = true;
             L->use_bias = true;
         }
 
-        model.push(p + "/mlp_fc1", "Linear", sat_mul(static_cast<size_t>(in_dim), static_cast<size_t>(mlp_hidden)) + static_cast<size_t>(mlp_hidden));
+        model.push(p + "/mlp_fc1", "Linear", sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(mlp_hidden)) + static_cast<size_t>(mlp_hidden));
         if (auto* L = model.getLayerByName(p + "/mlp_fc1")) {
             L->inputs = {p + "/ln2_out"};
             L->output = p + "/mlp_h";
-            L->in_features = in_dim;
+            L->seq_len = tokens;
+            L->in_features = d_model;
             L->out_features = mlp_hidden;
             L->use_bias = true;
         }
@@ -99,12 +102,13 @@ void ViTModel::buildInto(Model& model, const Config& cfg) {
             L->output = p + "/mlp_h_act";
         }
 
-        model.push(p + "/mlp_fc2", "Linear", sat_mul(static_cast<size_t>(mlp_hidden), static_cast<size_t>(in_dim)) + static_cast<size_t>(in_dim));
+        model.push(p + "/mlp_fc2", "Linear", sat_mul(static_cast<size_t>(mlp_hidden), static_cast<size_t>(d_model)) + static_cast<size_t>(d_model));
         if (auto* L = model.getLayerByName(p + "/mlp_fc2")) {
             L->inputs = {p + "/mlp_h_act"};
             L->output = p + "/mlp_out";
+            L->seq_len = tokens;
             L->in_features = mlp_hidden;
-            L->out_features = in_dim;
+            L->out_features = d_model;
             L->use_bias = true;
         }
 
@@ -117,11 +121,19 @@ void ViTModel::buildInto(Model& model, const Config& cfg) {
         x = p + "/res2";
     }
 
-    model.push("vit/head", "Linear", sat_mul(static_cast<size_t>(in_dim), static_cast<size_t>(out_dim)) + static_cast<size_t>(out_dim));
-    if (auto* L = model.getLayerByName("vit/head")) {
+    model.push("vit/pool", "TokenMeanPool", 0);
+    if (auto* L = model.getLayerByName("vit/pool")) {
         L->inputs = {x};
+        L->output = "vit/pooled";
+        L->seq_len = tokens;
+        L->embed_dim = d_model;
+    }
+
+    model.push("vit/head", "Linear", sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(out_dim)) + static_cast<size_t>(out_dim));
+    if (auto* L = model.getLayerByName("vit/head")) {
+        L->inputs = {"vit/pooled"};
         L->output = "x";
-        L->in_features = in_dim;
+        L->in_features = d_model;
         L->out_features = out_dim;
         L->use_bias = true;
     }

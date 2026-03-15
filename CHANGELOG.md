@@ -5,6 +5,19 @@ Toutes les modifications notables du Mímir Framework sont documentées ici.
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [2.4.0] - 2026-03-15
+
+### 🧹 Release de maintenance
+
+#### Modifié
+- Documentation mise à jour (révision 2026-03-15)
+- Scripts Lua : README corrigé + ajout d'un smoke test de sérialisation
+- Stub IDE Lua (`mimir-api.lua`) synchronisé et bump de version
+- Template Lua mis à jour (v2.4)
+
+#### Packaging
+- Ajout/renforcement des exclusions `.gitignore` (artefacts build/logs/datasets/secrets, exports Insomnia, graphs)
+
 ## [2.3.0] - 2025-12-28
 
 ### 💾 Sérialisation Moderne

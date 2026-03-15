@@ -175,7 +175,7 @@ std::string get_mimir_version() {
             return version;
         }
     }
-    return "2.3.0";  // Default version
+    return "2.4.0";  // Default version
 }
 
 std::string get_git_commit() {

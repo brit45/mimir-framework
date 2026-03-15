@@ -39,7 +39,7 @@ bool RawCheckpointReader::load(
         }
         
         // Load architecture
-        if (!load_architecture(root.string(), model, error)) {
+        if (!load_architecture(root.string(), model, options, error)) {
             return false;
         }
         
@@ -176,6 +176,7 @@ bool RawCheckpointReader::load_manifest(
 bool RawCheckpointReader::load_architecture(
     const std::string& root,
     Model& model,
+    const LoadOptions& options,
     std::string* error
 ) {
     try {
@@ -200,8 +201,20 @@ bool RawCheckpointReader::load_architecture(
         file >> arch;
         
         // Load basic info
-        if (arch.contains("model_name")) {
+        if (options.apply_model_name && arch.contains("model_name")) {
             model.setModelName(arch["model_name"].get<std::string>());
+        }
+
+        // Load model config (critical for downstream consumers relying on model.modelConfig)
+        if (options.apply_model_config && arch.contains("model_config")) {
+            try {
+                model.modelConfig = arch["model_config"];
+            } catch (...) {
+                if (error) {
+                    *error = "Invalid model_config in architecture.json";
+                }
+                return false;
+            }
         }
         
         // Load layers structure

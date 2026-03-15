@@ -1,7 +1,42 @@
+#!/usr/bin/env mimir --lua
 -- ================================================================
 -- Mímir Benchmark Script - CPU Performance Tests
 -- (Updated for registry-based architectures + int-token forward)
 -- ================================================================
+
+-- ================================================================
+-- Runtime setup (template)
+-- ================================================================
+local function safe_call(fn, ...)
+    if type(fn) ~= "function" then return false, "missing fn" end
+    return fn(...)
+end
+
+local function configure_runtime(limit_gb)
+    limit_gb = limit_gb or 10.0
+
+    if Mimir and Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
+        local ok, err = safe_call(Mimir.MemoryGuard.setLimit, limit_gb)
+        if ok == false then log("⚠️ MemoryGuard.setLimit failed: " .. tostring(err)) end
+    end
+
+    if Mimir and Mimir.Allocator and Mimir.Allocator.configure then
+        local ok, err = safe_call(Mimir.Allocator.configure, {
+            max_ram_gb = limit_gb,
+            enable_compression = true,
+            swap_strategy = "lru",
+        })
+        if ok == false then log("⚠️ Allocator.configure failed: " .. tostring(err)) end
+    end
+
+    if Mimir and Mimir.Model and Mimir.Model.set_hardware then
+        -- Selon versions: bool (true/false) ou string ("auto"/"cpu").
+        local ok = select(1, pcall(Mimir.Model.set_hardware, true))
+        if not ok then pcall(Mimir.Model.set_hardware, "auto") end
+    end
+end
+
+configure_runtime(10.0)
 
 log("╔═══════════════════════════════════════════════════════════════════╗")
 log("║           Mímir Framework - Suite de Benchmarks (v2.3+)          ║")
@@ -57,6 +92,16 @@ local function timer(name, func)
     return elapsed
 end
 
+local Tokenizer = (Mimir and Mimir.Tokenizer) or tokenizer
+local function tokenizer_create(vocab)
+    if Tokenizer and Tokenizer.create then
+        local ok, err = safe_call(Tokenizer.create, vocab)
+        if ok == false then error("Tokenizer.create failed: " .. tostring(err)) end
+        return true
+    end
+    error("Tokenizer.create not available")
+end
+
 -- ================================================================
 -- Benchmark 1: Tokenizer
 -- ================================================================
@@ -65,7 +110,7 @@ log("  Benchmark 1: Tokenizer Performance")
 log(string.rep("=", 70))
 
 timer("Création tokenizer (" .. config.vocab_size .. " tokens)", function()
-    tokenizer.create(config.vocab_size)
+    tokenizer_create(config.vocab_size)
 end)
 
 -- Helper: Transformer config (registry)
@@ -93,8 +138,20 @@ log(string.rep("=", 70))
 local small_config = make_transformer_cfg(config.d_model_small, config.num_layers_small, 4)
 
 timer("Transformer " .. config.num_layers_small .. "L x " .. config.d_model_small .. "D", function()
-    tokenizer.create(config.vocab_size)
-    Mimir.Model.create("transformer", small_config)
+    tokenizer_create(config.vocab_size)
+
+    local cfg = small_config
+    if Mimir and Mimir.Architectures and Mimir.Architectures.default_config then
+        local base = Mimir.Architectures.default_config("transformer")
+        if type(base) == "table" then
+            for k, v in pairs(cfg) do base[k] = v end
+            cfg = base
+        end
+    end
+
+    Mimir.Model.create("transformer", cfg)
+    Mimir.Model.allocate_params()
+    Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
@@ -108,8 +165,20 @@ log(string.rep("=", 70))
 local medium_config = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
 
 timer("Transformer " .. config.num_layers_medium .. "L x " .. config.d_model_medium .. "D", function()
-    tokenizer.create(config.vocab_size)
-    Mimir.Model.create("transformer", medium_config)
+    tokenizer_create(config.vocab_size)
+
+    local cfg = medium_config
+    if Mimir and Mimir.Architectures and Mimir.Architectures.default_config then
+        local base = Mimir.Architectures.default_config("transformer")
+        if type(base) == "table" then
+            for k, v in pairs(cfg) do base[k] = v end
+            cfg = base
+        end
+    end
+
+    Mimir.Model.create("transformer", cfg)
+    Mimir.Model.allocate_params()
+    Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
@@ -124,8 +193,20 @@ if mode ~= "quick" then
     local large_config = make_transformer_cfg(config.d_model_large, config.num_layers_large, 16)
 
     timer("Transformer " .. config.num_layers_large .. "L x " .. config.d_model_large .. "D", function()
-        tokenizer.create(config.vocab_size)
-        Mimir.Model.create("transformer", large_config)
+        tokenizer_create(config.vocab_size)
+
+        local cfg = large_config
+        if Mimir and Mimir.Architectures and Mimir.Architectures.default_config then
+            local base = Mimir.Architectures.default_config("transformer")
+            if type(base) == "table" then
+                for k, v in pairs(cfg) do base[k] = v end
+                cfg = base
+            end
+        end
+
+        Mimir.Model.create("transformer", cfg)
+        Mimir.Model.allocate_params()
+        Mimir.Model.init_weights("xavier", 42)
         log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
     end)
 end
@@ -138,18 +219,22 @@ log("  Benchmark 5: Transformer causal vs non-causal")
 log(string.rep("=", 70))
 
 timer("Transformer non-causal", function()
-    tokenizer.create(config.vocab_size)
+    tokenizer_create(config.vocab_size)
     local cfg = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
     cfg.causal = false
     Mimir.Model.create("transformer", cfg)
+    Mimir.Model.allocate_params()
+    Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
 timer("Transformer causal", function()
-    tokenizer.create(config.vocab_size)
+    tokenizer_create(config.vocab_size)
     local cfg = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
     cfg.causal = true
     Mimir.Model.create("transformer", cfg)
+    Mimir.Model.allocate_params()
+    Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
 end)
 
@@ -163,7 +248,7 @@ log(string.rep("=", 70))
 local checkpoint_path = "/tmp/mimir_benchmark_checkpoint"
 local checkpoint_path_st = checkpoint_path .. ".safetensors"
 
-tokenizer.create(config.vocab_size)
+tokenizer_create(config.vocab_size)
 Mimir.Model.create("transformer", small_config)
 Mimir.Model.allocate_params()
 Mimir.Model.init_weights("xavier", 42)
@@ -174,18 +259,21 @@ end)
 
 local size_cmd = "du -sh " .. checkpoint_path_st .. " 2>/dev/null | cut -f1"
 local handle = io.popen(size_cmd)
-local size = handle:read("*a"):gsub("%s+", "")
-handle:close()
-if size ~= "" then log("   📦 Taille: " .. size) end
+if handle then
+    local out = handle:read("*a") or ""
+    handle:close()
+    local size = out:gsub("%s+", "")
+    if size ~= "" then log("   📦 Taille: " .. size) end
+end
 
 timer("Load checkpoint", function()
-    tokenizer.create(config.vocab_size)
+    tokenizer_create(config.vocab_size)
     Mimir.Model.create("transformer", small_config)
     Mimir.Model.allocate_params()
     Mimir.Serialization.load(checkpoint_path_st)
 end)
 
-os.execute("rm -rf " .. checkpoint_path .. " 2>/dev/null")
+pcall(os.remove, checkpoint_path_st)
 
 -- ================================================================
 -- Benchmark 7: Estimation Mémoire

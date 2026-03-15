@@ -9,8 +9,8 @@
 #include <immintrin.h>  // AVX2
 #include "LayerTypes.hpp"  // Enum central des types de layers
 
-// Forward declaration
-struct tensor;
+// Needed for inline access to weight_block storage
+#include "tensors.hpp"
 
 // ============================================================================
 // Énumérations et structures
@@ -229,15 +229,30 @@ struct Layer {
     }
     
     // Accesseur pour récupérer les données du weight_block
-    float* getWeights();
-    const float* getWeights() const;
-    size_t getWeightsSize() const;
+    inline float* getWeights() {
+        if (weight_block) return weight_block->getData();
+        return weights.data();
+    }
+
+    inline const float* getWeights() const {
+        if (weight_block) return weight_block->getData();
+        return weights.data();
+    }
+
+    inline size_t getWeightsSize() const {
+        // Hot-path: when using unified weight blocks, params_count is the authoritative size.
+        // This avoids calling tensor::getSize() in tight loops.
+        if (weight_block) return params_count ? params_count : weight_block->getSize();
+        return weights.size();
+    }
     
     // Helper: obtenir kernel effectif (kernel_size prend priorité)
     int get_kernel_h() const { return kernel_h > 0 ? kernel_h : (kernel_size > 0 ? kernel_size : 3); }
     int get_kernel_w() const { return kernel_w > 0 ? kernel_w : (kernel_size > 0 ? kernel_size : 3); }
-    int get_stride_h() const { return stride_h > 0 ? stride_h : stride; }
-    int get_stride_w() const { return stride_w > 0 ? stride_w : stride; }
+    // NOTE: stride_h/stride_w valent 1 par défaut. Si on n'a configuré que `stride`,
+    // on doit utiliser `stride` (sinon le stride reste bloqué à 1).
+    int get_stride_h() const { return (stride_h != 1) ? stride_h : stride; }
+    int get_stride_w() const { return (stride_w != 1) ? stride_w : stride; }
     int get_pad_h() const { return pad_h > 0 ? pad_h : padding; }
     int get_pad_w() const { return pad_w > 0 ? pad_w : padding; }
     

@@ -128,7 +128,7 @@ size_t tensor::getSize() const {
 // TensorSystem (OpenCL)
 // ============================================================================
 
-
+#ifdef ENABLE_OPENCL
 const char *TensorSystem::weightKernelSource = R"CLC(
 // Approximation rapide de tanh (Padé, 2× plus rapide que tanh natif)
 inline float fast_tanh(float x) {
@@ -222,6 +222,7 @@ static void printBuildLog(cl_program prog, cl_device_id device) {
     clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
     std::cerr << "OpenCL build log:\n" << log << "\n";
 }
+#endif
 
 TensorSystem::TensorSystem()
     : platform_id(nullptr), device_id(nullptr),
@@ -230,14 +231,20 @@ TensorSystem::TensorSystem()
 {}
 
 TensorSystem::~TensorSystem() {
+#ifdef ENABLE_OPENCL
     if (kernel) { clReleaseKernel(kernel); kernel = nullptr; }
     if (program) { clReleaseProgram(program); program = nullptr; }
     if (command_queue) { clReleaseCommandQueue(command_queue); command_queue = nullptr; }
     if (context) { clReleaseContext(context); context = nullptr; }
+#endif
 }
 
 // Build OpenCL kernel from source (assumes context & device_id are valid)
 bool TensorSystem::buildKernel(const char* kernelSource) {
+#ifndef ENABLE_OPENCL
+    (void)kernelSource;
+    return false;
+#else
     cl_int err = CL_SUCCESS;
     size_t src_len = std::strlen(kernelSource);
     program = clCreateProgramWithSource(context, 1, &kernelSource, &src_len, &err);
@@ -262,9 +269,15 @@ bool TensorSystem::buildKernel(const char* kernelSource) {
         return false;
     }
     return true;
+#endif
 }
 
 bool TensorSystem::initialize() {
+#ifndef ENABLE_OPENCL
+    // Build sans OpenCL: on considère l'initialisation OK et on utilisera la voie CPU.
+    initialized = true;
+    return true;
+#else
     cl_int err = CL_SUCCESS;
     cl_uint num_platforms = 0;
     err = clGetPlatformIDs(0, nullptr, &num_platforms);
@@ -350,6 +363,7 @@ bool TensorSystem::initialize() {
 
     initialized = true;
     return true;
+#endif
 }
 
 bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
@@ -361,6 +375,7 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
     if (n == 0) return true;
 
     // If OpenCL is available and kernel prepared, try GPU path
+#ifdef ENABLE_OPENCL
     if (context && command_queue && program && kernel) {
         cl_int err = CL_SUCCESS;
 
@@ -431,6 +446,7 @@ bool TensorSystem::computeWeights(std::vector<tensor>& tensors) {
 
         return true;
     }
+#endif
 
     // CPU fallback
     for (size_t i = 0; i < n; ++i) {

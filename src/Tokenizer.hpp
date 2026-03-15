@@ -14,6 +14,12 @@ class Tokenizer {
 public:
     Tokenizer(size_t max_vocab = 4096);
 
+    // Limite supérieure de vocab (capacité d'ajout). Si le vocab atteint maxVocab,
+    // addToken/tokenizeEnsure retombent sur <UNK>.
+    size_t getMaxVocab() const;
+    // Fixe maxVocab. Si new_max < vocab.size(), on clamp à vocab.size().
+    void setMaxVocab(size_t new_max);
+
     // vocab manipulation
     int addToken(const std::string &tok);
     void ensureVocabFromText(const std::string &text);
@@ -33,6 +39,8 @@ public:
     int getSeqId() const;
     int getModId() const;
     int getMagId() const;
+    int getBosId() const;
+    int getEosId() const;
 
     // accessors used elsewhere in the project
     size_t getVocabSize() const;

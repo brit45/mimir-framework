@@ -98,6 +98,214 @@ static inline void resizeNearest(const unsigned char *src, int iw, int ih, int c
     }
 }
 
+// Redimensionnement bilinéaire (déterministe) pour images u8 interleavées.
+// Utile surtout en downscale pour éviter les artefacts de nearest-neighbor.
+static inline void resizeBilinear(const unsigned char* src, int iw, int ih, int channels,
+                                  unsigned char* dst, int ow, int oh)
+{
+    if (!src || !dst || iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0 || channels <= 0) return;
+
+    // Cas dégénérés: fallback nearest.
+    if (iw == 1 || ih == 1 || ow == 1 || oh == 1) {
+        resizeNearest(src, iw, ih, channels, dst, ow, oh);
+        return;
+    }
+
+    const float sx = (float)iw / (float)ow;
+    const float sy = (float)ih / (float)oh;
+
+    for (int y = 0; y < oh; ++y) {
+        const float fy = ((float)y + 0.5f) * sy - 0.5f;
+        int y0 = (int)std::floor(fy);
+        float wy = fy - (float)y0;
+        if (y0 < 0) { y0 = 0; wy = 0.0f; }
+        int y1 = y0 + 1;
+        if (y1 >= ih) { y1 = ih - 1; }
+
+        for (int x = 0; x < ow; ++x) {
+            const float fx = ((float)x + 0.5f) * sx - 0.5f;
+            int x0 = (int)std::floor(fx);
+            float wx = fx - (float)x0;
+            if (x0 < 0) { x0 = 0; wx = 0.0f; }
+            int x1 = x0 + 1;
+            if (x1 >= iw) { x1 = iw - 1; }
+
+            const unsigned char* p00 = src + ((y0 * iw + x0) * channels);
+            const unsigned char* p10 = src + ((y0 * iw + x1) * channels);
+            const unsigned char* p01 = src + ((y1 * iw + x0) * channels);
+            const unsigned char* p11 = src + ((y1 * iw + x1) * channels);
+
+            unsigned char* out = dst + ((y * ow + x) * channels);
+
+            const float w00 = (1.0f - wx) * (1.0f - wy);
+            const float w10 = wx * (1.0f - wy);
+            const float w01 = (1.0f - wx) * wy;
+            const float w11 = wx * wy;
+
+            for (int c = 0; c < channels; ++c) {
+                const float v =
+                    w00 * (float)p00[c] +
+                    w10 * (float)p10[c] +
+                    w01 * (float)p01[c] +
+                    w11 * (float)p11[c];
+                int iv = (int)std::lround(v);
+                iv = std::clamp(iv, 0, 255);
+                out[c] = (unsigned char)iv;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resize haute qualité (bicubique). Pour RGB, on travaille en linéaire sRGB
+// afin d'éviter les artefacts gamma visibles sur les gradients.
+// ---------------------------------------------------------------------------
+
+static inline float __srgb_u8_to_linear_f(unsigned char u) {
+    const float s = (float)u / 255.0f;
+    // sRGB exact piecewise
+    if (s <= 0.04045f) return s / 12.92f;
+    return std::pow((s + 0.055f) / 1.055f, 2.4f);
+}
+
+static inline unsigned char __linear_f_to_srgb_u8(float l) {
+    l = std::clamp(l, 0.0f, 1.0f);
+    float s = 0.0f;
+    if (l <= 0.0031308f) s = 12.92f * l;
+    else s = 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f;
+    int v = (int)std::lround(s * 255.0f);
+    v = std::clamp(v, 0, 255);
+    return (unsigned char)v;
+}
+
+static inline float __cubic_catmull_rom(float x) {
+    x = std::fabs(x);
+    if (x <= 1.0f) {
+        return (1.5f * x - 2.5f) * x * x + 1.0f;
+    }
+    if (x < 2.0f) {
+        return ((-0.5f * x + 2.5f) * x - 4.0f) * x + 2.0f;
+    }
+    return 0.0f;
+}
+
+// Bicubique générique sur u8 (sans correction gamma). Stable et déterministe.
+static inline void resizeBicubicU8(const unsigned char* src, int iw, int ih, int channels,
+                                   unsigned char* dst, int ow, int oh)
+{
+    if (!src || !dst || iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0 || channels <= 0) return;
+    if (iw == ow && ih == oh) {
+        std::memcpy(dst, src, (size_t)iw * (size_t)ih * (size_t)channels);
+        return;
+    }
+
+    const float sx = (float)iw / (float)ow;
+    const float sy = (float)ih / (float)oh;
+
+    for (int y = 0; y < oh; ++y) {
+        const float fy = ((float)y + 0.5f) * sy - 0.5f;
+        const int iy = (int)std::floor(fy);
+
+        float wy[4];
+        for (int j = -1; j <= 2; ++j) {
+            wy[j + 1] = __cubic_catmull_rom((float)(iy + j) - fy);
+        }
+
+        for (int x = 0; x < ow; ++x) {
+            const float fx = ((float)x + 0.5f) * sx - 0.5f;
+            const int ix = (int)std::floor(fx);
+
+            float wx[4];
+            for (int i = -1; i <= 2; ++i) {
+                wx[i + 1] = __cubic_catmull_rom((float)(ix + i) - fx);
+            }
+
+            unsigned char* out = dst + ((y * ow + x) * channels);
+
+            for (int c = 0; c < channels; ++c) {
+                float acc = 0.0f;
+                float wsum = 0.0f;
+
+                for (int j = -1; j <= 2; ++j) {
+                    int syi = iy + j;
+                    syi = std::clamp(syi, 0, ih - 1);
+                    const float wyj = wy[j + 1];
+                    for (int i = -1; i <= 2; ++i) {
+                        int sxi = ix + i;
+                        sxi = std::clamp(sxi, 0, iw - 1);
+                        const float w = wyj * wx[i + 1];
+                        const unsigned char* p = src + ((syi * iw + sxi) * channels);
+                        acc += w * (float)p[c];
+                        wsum += w;
+                    }
+                }
+
+                if (wsum != 0.0f) acc /= wsum;
+                int iv = (int)std::lround(acc);
+                iv = std::clamp(iv, 0, 255);
+                out[c] = (unsigned char)iv;
+            }
+        }
+    }
+}
+
+// Bicubique RGB en linéaire sRGB (meilleure qualité perçue, surtout en downscale).
+static inline void resizeBicubicRGB_SRGBLinear(const unsigned char* src, int iw, int ih,
+                                               unsigned char* dst, int ow, int oh)
+{
+    if (!src || !dst || iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0) return;
+    if (iw == ow && ih == oh) {
+        std::memcpy(dst, src, (size_t)iw * (size_t)ih * 3ULL);
+        return;
+    }
+
+    // LUT sRGB->lin (256) pour accélérer.
+    float lut[256];
+    for (int i = 0; i < 256; ++i) lut[i] = __srgb_u8_to_linear_f((unsigned char)i);
+
+    const float sx = (float)iw / (float)ow;
+    const float sy = (float)ih / (float)oh;
+
+    for (int y = 0; y < oh; ++y) {
+        const float fy = ((float)y + 0.5f) * sy - 0.5f;
+        const int iy = (int)std::floor(fy);
+
+        float wy[4];
+        for (int j = -1; j <= 2; ++j) {
+            wy[j + 1] = __cubic_catmull_rom((float)(iy + j) - fy);
+        }
+
+        for (int x = 0; x < ow; ++x) {
+            const float fx = ((float)x + 0.5f) * sx - 0.5f;
+            const int ix = (int)std::floor(fx);
+
+            float wx[4];
+            for (int i = -1; i <= 2; ++i) {
+                wx[i + 1] = __cubic_catmull_rom((float)(ix + i) - fx);
+            }
+
+            unsigned char* out = dst + ((y * ow + x) * 3);
+            for (int c = 0; c < 3; ++c) {
+                float acc = 0.0f;
+                float wsum = 0.0f;
+                for (int j = -1; j <= 2; ++j) {
+                    int syi = std::clamp(iy + j, 0, ih - 1);
+                    const float wyj = wy[j + 1];
+                    for (int i = -1; i <= 2; ++i) {
+                        int sxi = std::clamp(ix + i, 0, iw - 1);
+                        const float w = wyj * wx[i + 1];
+                        const unsigned char* p = src + ((syi * iw + sxi) * 3);
+                        acc += w * lut[p[c]];
+                        wsum += w;
+                    }
+                }
+                if (wsum != 0.0f) acc /= wsum;
+                out[c] = __linear_f_to_srgb_u8(acc);
+            }
+        }
+    }
+}
+
 enum Modality : unsigned
 {
     MOD_NONE = 0,
@@ -240,8 +448,10 @@ static inline void write_u32_le(std::ofstream &f, uint32_t v)
 // Gestionnaire global de mémoire RAM pour le dataset
 struct DatasetMemoryManager {
     static DatasetMemoryManager& instance() {
-        static DatasetMemoryManager mgr;
-        return mgr;
+        // Leaky singleton: évite les crashs d'ordre de destruction des statics
+        // quand des DatasetItem sont détruits pendant l'atexit.
+        static DatasetMemoryManager* mgr = new DatasetMemoryManager();
+        return *mgr;
     }
     
     size_t max_ram_bytes = 10ULL * 1024 * 1024 * 1024; // 10 GB par défaut
@@ -306,9 +516,13 @@ struct DatasetItem {
     
     // Données (chargées à la demande avec gestion RAM)
     std::optional<std::string> text;
-    std::optional<std::vector<uint8_t>> img;
-    std::optional<std::vector<uint8_t>> audio_bytes;
-    std::optional<std::vector<uint8_t>> video_bytes;
+    std::vector<uint8_t> img;
+    std::vector<uint8_t> audio_bytes;
+    std::vector<uint8_t> video_bytes;
+
+    bool img_loaded = false;
+    bool audio_loaded = false;
+    bool video_loaded = false;
     
     // Métadonnées
     int w = 0, h = 0;
@@ -317,11 +531,8 @@ struct DatasetItem {
     // Tracking RAM et LRU
     mutable uint64_t last_access_time = 0;
     mutable size_t estimated_ram_usage = 0;
-    
-    ~DatasetItem() {
-        // Libérer la RAM trackée à la destruction
-        unload();
-    }
+
+    ~DatasetItem();
     
     // Libère toutes les données chargées
     void unload() {
@@ -331,17 +542,23 @@ struct DatasetItem {
             mgr.trackDeallocation((void*)text->data());
             text.reset();
         }
-        if (img.has_value()) {
-            mgr.trackDeallocation((void*)img->data());
-            img.reset();
+        if (img_loaded) {
+            void* ptr = img.empty() ? nullptr : (void*)img.data();
+            if (ptr) mgr.trackDeallocation(ptr);
+            std::vector<uint8_t>().swap(img);
+            img_loaded = false;
         }
-        if (audio_bytes.has_value()) {
-            mgr.trackDeallocation((void*)audio_bytes->data());
-            audio_bytes.reset();
+        if (audio_loaded) {
+            void* ptr = audio_bytes.empty() ? nullptr : (void*)audio_bytes.data();
+            if (ptr) mgr.trackDeallocation(ptr);
+            std::vector<uint8_t>().swap(audio_bytes);
+            audio_loaded = false;
         }
-        if (video_bytes.has_value()) {
-            mgr.trackDeallocation((void*)video_bytes->data());
-            video_bytes.reset();
+        if (video_loaded) {
+            void* ptr = video_bytes.empty() ? nullptr : (void*)video_bytes.data();
+            if (ptr) mgr.trackDeallocation(ptr);
+            std::vector<uint8_t>().swap(video_bytes);
+            video_loaded = false;
         }
         
         estimated_ram_usage = 0;
@@ -358,19 +575,19 @@ struct DatasetItem {
             } catch (...) {}
         }
         
-        if (!image_file.empty() && !img.has_value()) {
+        if (!image_file.empty() && !img_loaded) {
             // Estimation basée sur la taille cible
             const size_t c = (img_c > 0) ? static_cast<size_t>(img_c) : 1ULL;
             total += (size_t)w * (size_t)h * c;
         }
         
-        if (!audio_file.empty() && !audio_bytes.has_value()) {
+        if (!audio_file.empty() && !audio_loaded) {
             try {
                 total += fs::file_size(audio_file);
             } catch (...) {}
         }
         
-        if (!video_file.empty() && !video_bytes.has_value()) {
+        if (!video_file.empty() && !video_loaded) {
             try {
                 total += fs::file_size(video_file);
             } catch (...) {}
@@ -425,7 +642,7 @@ struct DatasetItem {
     }
     
     bool loadImage(int target_w, int target_h) {
-        if (img.has_value()) {
+        if (img_loaded) {
             touch();
             return true;
         }
@@ -450,7 +667,8 @@ struct DatasetItem {
             stbi_image_free(data);
             
             std::vector<unsigned char> dst((size_t)target_w * (size_t)target_h * 3);
-            resizeNearest(src.data(), w_img, h_img, 3, dst.data(), target_w, target_h);
+            // Resize haute qualité avant conversion grayscale.
+            resizeBicubicRGB_SRGBLinear(src.data(), w_img, h_img, dst.data(), target_w, target_h);
             
             std::vector<uint8_t> grayscale((size_t)target_w * (size_t)target_h);
             for (int yy = 0; yy < target_h; ++yy) {
@@ -463,7 +681,8 @@ struct DatasetItem {
             
             size_t actual_size = grayscale.size();
             img = std::move(grayscale);
-            mgr.trackAllocation((void*)img->data(), actual_size);
+            img_loaded = true;
+            mgr.trackAllocation((void*)img.data(), actual_size);
             estimated_ram_usage += actual_size;
             
             w = target_w;
@@ -480,7 +699,7 @@ struct DatasetItem {
     // Charge une image en RGB (3 canaux) et la redimensionne en nearest.
     // Ne modifie pas loadImage() (grayscale) pour préserver la compatibilité.
     bool loadImageRGB(int target_w, int target_h) {
-        if (img.has_value() && img_c == 3 && w == target_w && h == target_h) {
+        if (img_loaded && img_c == 3 && w == target_w && h == target_h) {
             touch();
             return true;
         }
@@ -504,17 +723,20 @@ struct DatasetItem {
             stbi_image_free(data);
 
             std::vector<uint8_t> dst((size_t)target_w * (size_t)target_h * 3);
-            resizeNearest(src.data(), w_img, h_img, 3, dst.data(), target_w, target_h);
+            // Resize haute qualité (bicubique en linéaire sRGB) pour préserver au mieux les détails.
+            resizeBicubicRGB_SRGBLinear(src.data(), w_img, h_img, dst.data(), target_w, target_h);
 
             // Si on avait déjà une image chargée, décrémenter l'ancien tracking
-            if (img.has_value()) {
-                mgr.trackDeallocation((void*)img->data());
-                estimated_ram_usage -= img->size();
+            if (img_loaded) {
+                void* ptr = img.empty() ? nullptr : (void*)img.data();
+                if (ptr) mgr.trackDeallocation(ptr);
+                if (estimated_ram_usage >= img.size()) estimated_ram_usage -= img.size();
             }
 
             const size_t actual_size = dst.size();
             img = std::move(dst);
-            mgr.trackAllocation((void*)img->data(), actual_size);
+            img_loaded = true;
+            mgr.trackAllocation((void*)img.data(), actual_size);
             estimated_ram_usage += actual_size;
 
             w = target_w;
@@ -528,7 +750,7 @@ struct DatasetItem {
     }
     
     bool loadAudio() {
-        if (audio_bytes.has_value()) {
+        if (audio_loaded) {
             touch();
             return true;
         }
@@ -552,7 +774,8 @@ struct DatasetItem {
             
             size_t actual_size = data.size();
             audio_bytes = std::move(data);
-            mgr.trackAllocation((void*)audio_bytes->data(), actual_size);
+            audio_loaded = true;
+            mgr.trackAllocation((void*)audio_bytes.data(), actual_size);
             estimated_ram_usage += actual_size;
             touch();
             
@@ -563,9 +786,9 @@ struct DatasetItem {
     }
     
     bool loadVideo() {
-        if (video_bytes.has_value()) {
+        if (video_loaded) {
             touch();
-            return false; // Pas assez de RAM
+            return true;
         }
         if (video_file.empty()) return false;
         
@@ -587,7 +810,8 @@ struct DatasetItem {
             
             size_t actual_size = data.size();
             video_bytes = std::move(data);
-            mgr.trackAllocation((void*)video_bytes->data(), actual_size);
+            video_loaded = true;
+            mgr.trackAllocation((void*)video_bytes.data(), actual_size);
             estimated_ram_usage += actual_size;
             touch();
             
@@ -619,8 +843,7 @@ struct DatasetItem {
     
     // Helper: vérifie si des données sont chargées
     bool isLoaded() const {
-        return text.has_value() || img.has_value() || 
-               audio_bytes.has_value() || video_bytes.has_value();
+        return text.has_value() || img_loaded || audio_loaded || video_loaded;
     }
 };
 
@@ -659,7 +882,7 @@ public:
             auto& item = items[idx];
             
             // Charger selon les modalités disponibles
-            if (!item.image_file.empty() && !item.img.has_value()) {
+            if (!item.image_file.empty() && !item.img_loaded) {
                 if (!item.loadImage(target_w, target_h)) {
                     all_loaded = false;
                 }
@@ -738,16 +961,26 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
 
     std::cout << "\n📂 Indexation du dataset (lazy loading activé)..." << std::endl;
 
-    // Phase 1: Indexer tous les fichiers par nom de base (sans extension)
-    std::unordered_map<std::string, std::vector<fs::path>> files_by_basename;
+    // Phase 1: Indexer tous les fichiers par clé "linkable".
+    // IMPORTANT: on utilise le chemin *relatif* sans extension (et pas seulement le basename)
+    // pour éviter les collisions quand plusieurs sous-dossiers contiennent le même stem.
+    std::unordered_map<std::string, std::vector<fs::path>> files_by_key;
     
     for (auto &p : fs::recursive_directory_iterator(root_dir))
     {
         try {
             if (!p.is_regular_file()) continue;
             const auto path = p.path();
-            std::string basename = path.stem().string();  // nom sans extension
-            files_by_basename[basename].push_back(path);
+
+            fs::path rel = path;
+            try {
+                rel = fs::relative(path, root_dir);
+            } catch (...) {
+                // fallback: garder le path tel quel
+            }
+            rel.replace_extension("");
+            const std::string key = rel.generic_string();
+            files_by_key[key].push_back(path);
         } catch (...) {
             continue;
         }
@@ -757,12 +990,55 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     size_t total_linkables = 0;
     size_t valid_items = 0;
     
-    for (const auto &[basename, paths] : files_by_basename)
+    auto extLower = [](const fs::path& p) -> std::string {
+        std::string e = p.extension().string();
+        std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return e;
+    };
+
+    auto isBetterText = [&](const fs::path& candidate, const std::string& current_path) -> bool {
+        if (current_path.empty()) return true;
+        const std::string ce = extLower(candidate);
+        const std::string curE = extLower(fs::path(current_path));
+
+        auto rank = [](const std::string& e) -> int {
+            if (e == ".txt") return 0;
+            if (e == ".md") return 1;
+            if (e == ".json") return 2;
+            if (e == ".csv") return 3;
+            return 10;
+        };
+        const int r1 = rank(ce);
+        const int r2 = rank(curE);
+        if (r1 != r2) return r1 < r2;
+        return candidate.string() < current_path;
+    };
+
+    auto isBetterImage = [&](const fs::path& candidate, const std::string& current_path) -> bool {
+        if (current_path.empty()) return true;
+        const std::string ce = extLower(candidate);
+        const std::string curE = extLower(fs::path(current_path));
+
+        auto rank = [](const std::string& e) -> int {
+            if (e == ".png") return 0;
+            if (e == ".jpg" || e == ".jpeg") return 1;
+            if (e == ".webp") return 2;
+            if (e == ".bmp") return 3;
+            if (e == ".tiff" || e == ".tif") return 4;
+            return 10;
+        };
+        const int r1 = rank(ce);
+        const int r2 = rank(curE);
+        if (r1 != r2) return r1 < r2;
+        return candidate.string() < current_path;
+    };
+
+    for (const auto &[key, paths] : files_by_key)
     {
         if (paths.empty()) continue;
         
         DatasetItem item;
-        item.name = basename;
+        item.name = key;
         item.is_linked = (paths.size() > 1);
         item.w = target_w;  // Stocker la taille cible
         item.h = target_h;
@@ -775,10 +1051,14 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
             const std::string pathstr = path.string();
             
             if (std::regex_search(pathstr, re_image)) {
-                item.image_file = pathstr;
+                if (isBetterImage(path, item.image_file)) {
+                    item.image_file = pathstr;
+                }
             }
             else if (std::regex_search(pathstr, re_text)) {
-                item.text_file = pathstr;
+                if (isBetterText(path, item.text_file)) {
+                    item.text_file = pathstr;
+                }
             }
             else if (std::regex_search(pathstr, re_audio)) {
                 item.audio_file = pathstr;

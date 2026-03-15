@@ -4,17 +4,29 @@ log("╔════════════════════════
 log("║ BasicMLP Training Bench (API optimizer_step) - loss should decrease║")
 log("╚════════════════════════════════════════════════════════════════════╝")
 
+math.randomseed(42)
+
 -- ======================================================================
 -- 0) Memory safety (optionnel mais recommandé)
 -- ======================================================================
+if Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
+  local ok, err = Mimir.MemoryGuard.setLimit(4.0)
+  if ok == false then log("⚠️ MemoryGuard.setLimit failed: " .. tostring(err)) end
+end
 Mimir.Allocator.configure({
   max_ram_gb = 4.0,
-  enable_compression = true
+  enable_compression = true,
+  swap_strategy = "lru",
 })
 log("🛡️  MemoryGuard / Allocator configured (4 GB, compression ON)")
 
+if Mimir.Model and Mimir.Model.set_hardware then
+  local ok = select(1, pcall(Mimir.Model.set_hardware, true))
+  if not ok then log("⚠️ set_hardware(true) failed") end
+end
+
 -- ======================================================================
--- 1) Build model : Single Conv2d (3x3, same padding)
+-- 1) Build model (BasicMLP)
 -- ======================================================================
 log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 log("1) Build model (BasicMLP)")
@@ -32,7 +44,7 @@ local ok, err = Mimir.Model.create("basic_mlp", {
 assert(ok ~= false, tostring(err or "Model.create(basic_mlp) failed"))
 
 assert(Mimir.Model.allocate_params())
-assert(Mimir.Model.init_weights("xavier_uniform", 42))
+assert(Mimir.Model.init_weights("xavier", 42))
 
 log("✓ Model ready | params=" .. tostring(Mimir.Model.total_params()))
 
@@ -159,21 +171,35 @@ log("4) Sauvegarde")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 local snapshot_path = "mimir_conv_snapshot"
-local success1 = Mimir.Serialization.save(snapshot_path, "raw_folder", {
-    include_gradients = true,
-    include_optimizer_state = true,
-    max_values_per_tensor = 10,
-    include_checksums = true,
-    include_weight_deltas = true,  -- Pas encore de deltas
-    include_git_info = true,
-    save_tokenizer = true,
-    save_encoder = true
-})
+local success1 = false
+if Mimir.Serialization and Mimir.Serialization.save then
+  local ok, ret = pcall(function()
+    return Mimir.Serialization.save(snapshot_path, "raw_folder", {
+      include_gradients = true,
+      include_optimizer_state = true,
+      max_values_per_tensor = 10,
+      include_checksums = true,
+      include_weight_deltas = true,
+      include_git_info = true,
+      save_tokenizer = true,
+      save_encoder = true,
+    })
+  end)
+  if ok then success1 = ret end
+
+  if not success1 then
+    -- Fallback minimal (au cas où l'impl n'accepte pas les options avancées)
+    local ok2, ret2 = pcall(function()
+      return Mimir.Serialization.save(snapshot_path, "raw_folder")
+    end)
+    if ok2 then success1 = ret2 end
+  end
+end
 
 if success1 then
-    log("✓ Snapshot sauvegardé (Enhanced Debug JSON v1.1.0): " .. snapshot_path)
+  log("✓ Snapshot sauvegardé: " .. snapshot_path)
 else
-    log("⚠️  Échec sauvegarde snapshot")
+  log("⚠️  Échec sauvegarde snapshot")
 end
 
 log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

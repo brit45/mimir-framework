@@ -235,6 +235,44 @@ bool SafeTensorsReader::apply_tensors_to_model(
         for (const auto& tensor : tensors) {
             tensor_map[tensor.name] = &tensor;
         }
+
+        // Load architecture/config JSON (if present)
+        {
+            auto it = tensor_map.find("model/architecture_json");
+            if (it != tensor_map.end()) {
+                const ParsedTensor* tensor = it->second;
+                if (tensor->dtype == DType::Uint8) {
+                    const size_t n = tensor->data_end - tensor->data_begin;
+                    std::vector<uint8_t> buf(n);
+                    if (!load_tensor_data(path, data_offset, *tensor, buf.data(), buf.size(), error)) {
+                        return false;
+                    }
+                    try {
+                        std::string s(reinterpret_cast<const char*>(buf.data()), buf.size());
+                        json arch = json::parse(s);
+                        if (options.apply_model_name && arch.contains("model_name")) {
+                            model.setModelName(arch["model_name"].get<std::string>());
+                        }
+                        if (options.apply_model_config && arch.contains("model_config")) {
+                            model.modelConfig = arch["model_config"];
+                        }
+                    } catch (...) {
+                        if (options.strict_mode) {
+                            if (error) {
+                                *error = "Invalid model/architecture_json";
+                            }
+                            return false;
+                        }
+                        // Backward compatibility: ignore invalid JSON in non-strict mode
+                    }
+                } else if (options.strict_mode) {
+                    if (error) {
+                        *error = "Invalid dtype for model/architecture_json";
+                    }
+                    return false;
+                }
+            }
+        }
         
         // Load layer weight blocks
         for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {

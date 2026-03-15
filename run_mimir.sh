@@ -3,7 +3,7 @@
 # Configuration OpenMP (override possible via env)
 NPROC=$(nproc 2>/dev/null || echo 4)
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$NPROC}"
-export OMP_PROC_BIND=true
+export OMP_PROC_BIND=false
 export OMP_PLACES=cores
 export OMP_SCHEDULE="static"
 

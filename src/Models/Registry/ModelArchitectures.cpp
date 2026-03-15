@@ -1,22 +1,37 @@
 #include "ModelArchitectures.hpp"
 
 #include "Models/MLP/BasicMLPModel.hpp"
-#include "Models/Diffusion/PonyXLDDPMModel.hpp"
 #include "Models/NLP/TransformerModel.hpp"
+#include "Models/NLP/VAETextModel.hpp"
 #include "Models/Vision/ViTModel.hpp"
 #include "Models/Vision/VAEModel.hpp"
+#include "Models/Vision/VAEConvModel.hpp"
+#include "Models/Vision/GanLatentModel.hpp"
 #include "Models/Vision/CNN/ResNetModel.hpp"
 #include "Models/Vision/UNetModel.hpp"
 #include "Models/Vision/CNN/MobileNetModel.hpp"
 #include "Models/Vision/CNN/VGG16Model.hpp"
 #include "Models/Vision/CNN/VGG19Model.hpp"
+#include "Models/Vision/CNN/VGG16FeatModel.hpp"
 #include "Models/Diffusion/DiffusionModel.hpp"
+#include "Models/Diffusion/CondDiffusionModel.hpp"
+#include "Models/Diffusion/PonyXLDDPMModel.hpp"
+#include "Models/Diffusion/SD35Model.hpp"
+#include "Models/Vision/PatchDiscriminatorModel.hpp"
 
 #include <algorithm>
 #include <memory>
 #include <stdexcept>
 
 namespace ModelArchitectures {
+
+namespace {
+static inline std::string canonicalArchName(const std::string& name) {
+    // Alias convivial: "SD3.5" -> "sd3_5".
+    if (name == "sd3.5" || name == "SD3.5" || name == "sd3_5" || name == "SD3_5") return "sd3_5";
+    return name;
+}
+} // namespace
 
 Registry& Registry::instance() {
     static Registry inst;
@@ -36,7 +51,8 @@ void Registry::registerArchitecture(Entry entry) {
 
 const Entry* Registry::find(const std::string& name) const {
     ensureBuiltinsRegistered();
-    auto it = entries_.find(name);
+    const std::string key = canonicalArchName(name);
+    auto it = entries_.find(key);
     if (it == entries_.end()) return nullptr;
     return &it->second;
 }
@@ -52,7 +68,8 @@ std::vector<std::string> Registry::list() const {
 
 json Registry::defaultConfig(const std::string& name) const {
     ensureBuiltinsRegistered();
-    auto it = entries_.find(name);
+    const std::string key = canonicalArchName(name);
+    auto it = entries_.find(key);
     if (it == entries_.end()) {
         throw std::runtime_error("ModelArchitectures::defaultConfig: unknown architecture: " + name);
     }
@@ -107,51 +124,6 @@ static json basicMlpDefaultConfigJson() {
     };
 }
 
-static PonyXLDDPMModel::Config ponyCfgFromJson(const json& cfg) {
-
-    PonyXLDDPMModel::Config out;
-    
-    out.d_model = jget<int>(cfg, "d_model", out.d_model);
-    out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
-    out.max_vocab = jget<int>(cfg, "max_vocab", out.max_vocab);
-
-    out.image_w = jget<int>(cfg, "image_w", out.image_w);
-    out.image_h = jget<int>(cfg, "image_h", out.image_h);
-    out.image_c = jget<int>(cfg, "image_c", out.image_c);
-
-    out.hidden_dim = jget<int>(cfg, "hidden_dim", out.hidden_dim);
-    out.latent_dim = jget<int>(cfg, "latent_dim", out.latent_dim);
-
-    out.blur_levels = jget<int>(cfg, "blur_levels", out.blur_levels);
-    out.cfg_dropout_prob = jget<float>(cfg, "cfg_dropout_prob", out.cfg_dropout_prob);
-    out.cond_image_dropout_prob = jget<float>(cfg, "cond_image_dropout_prob", out.cond_image_dropout_prob);
-    out.cond_image_dropout_lr_scale = jget<float>(cfg, "cond_image_dropout_lr_scale", out.cond_image_dropout_lr_scale);
-    out.cond_image_dropout_noise_std = jget<float>(cfg, "cond_image_dropout_noise_std", out.cond_image_dropout_noise_std);
-
-    out.dropout = jget<float>(cfg, "dropout", out.dropout);
-    return out;
-}
-
-static json ponyDefaultConfigJson() {
-    PonyXLDDPMModel::Config d;
-    return json{
-        {"d_model", d.d_model},
-        {"seq_len", d.seq_len},
-        {"max_vocab", d.max_vocab},
-        {"image_w", d.image_w},
-        {"image_h", d.image_h},
-        {"image_c", d.image_c},
-        {"hidden_dim", d.hidden_dim},
-        {"latent_dim", d.latent_dim},
-        {"blur_levels", d.blur_levels},
-        {"cfg_dropout_prob", d.cfg_dropout_prob},
-        {"cond_image_dropout_prob", d.cond_image_dropout_prob},
-        {"cond_image_dropout_lr_scale", d.cond_image_dropout_lr_scale},
-        {"cond_image_dropout_noise_std", d.cond_image_dropout_noise_std},
-        {"dropout", d.dropout},
-    };
-}
-
 static TransformerModel::Config transformerCfgFromJson(const json& cfg) {
     TransformerModel::Config out;
     out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
@@ -171,6 +143,79 @@ static json transformerDefaultConfigJson() {
     return json{{"seq_len", d.seq_len}, {"d_model", d.d_model}, {"vocab_size", d.vocab_size}, {"padding_idx", d.padding_idx}, {"num_layers", d.num_layers}, {"num_heads", d.num_heads}, {"mlp_hidden", d.mlp_hidden}, {"output_dim", d.output_dim}, {"causal", d.causal}};
 }
 
+static VAETextModel::Config vaeTextCfgFromJson(const json& cfg) {
+    VAETextModel::Config out;
+    out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
+    out.padding_idx = jget<int>(cfg, "padding_idx", out.padding_idx);
+    out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.num_layers = jget<int>(cfg, "num_layers", out.num_layers);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+    out.latent_tokens = jget<int>(cfg, "latent_tokens", out.latent_tokens);
+    out.proj_dim = jget<int>(cfg, "proj_dim", out.proj_dim);
+    out.stochastic_latent = jget<bool>(cfg, "stochastic_latent", out.stochastic_latent);
+    out.dropout = jget<float>(cfg, "dropout", out.dropout);
+    return out;
+}
+
+static json vaeTextDefaultConfigJson() {
+    VAETextModel::Config d;
+    const int latent_dim = std::max(1, d.latent_tokens * d.d_model);
+    const int logits_dim = std::max(1, d.seq_len * d.vocab_size);
+    const int output_dim = logits_dim + 2 * latent_dim + 2 * std::max(1, d.proj_dim);
+    return json{
+        {"vocab_size", d.vocab_size},
+        {"padding_idx", d.padding_idx},
+        {"seq_len", d.seq_len},
+        {"d_model", d.d_model},
+        {"num_layers", d.num_layers},
+        {"num_heads", d.num_heads},
+        {"mlp_hidden", d.mlp_hidden},
+        {"latent_tokens", d.latent_tokens},
+        {"latent_dim", latent_dim},
+        {"proj_dim", d.proj_dim},
+        {"stochastic_latent", d.stochastic_latent},
+        {"dropout", d.dropout},
+
+        // Training helper defaults (Model::trainStepVAEText)
+        {"image_dim", logits_dim},
+        {"output_dim", output_dim},
+        {"target_tensor", "vae_text/target"},
+        {"align_weight", 0.0},
+        {"kl_beta", 0.01},
+        {"kl_warmup_steps", 0},
+        {"recon_loss", "ce"},
+        {"logvar_clip_min", -6.0},
+        {"logvar_clip_max", 2.0},
+    };
+}
+
+static json vaeTextDecodeDefaultConfigJson() {
+    VAETextModel::Config d;
+    const int latent_dim = std::max(1, d.latent_tokens * d.d_model);
+    const int logits_dim = std::max(1, d.seq_len * d.vocab_size);
+    return json{
+        {"vocab_size", d.vocab_size},
+        {"padding_idx", d.padding_idx},
+        {"seq_len", d.seq_len},
+        {"d_model", d.d_model},
+        {"num_layers", d.num_layers},
+        {"num_heads", d.num_heads},
+        {"mlp_hidden", d.mlp_hidden},
+        {"latent_tokens", d.latent_tokens},
+        {"latent_dim", latent_dim},
+        {"proj_dim", d.proj_dim},
+        {"stochastic_latent", d.stochastic_latent},
+        {"dropout", d.dropout},
+
+        // Decoder-only I/O
+        {"input_dim", latent_dim},
+        {"image_dim", logits_dim},
+        {"output_dim", logits_dim},
+    };
+}
+
 static ViTModel::Config vitCfgFromJson(const json& cfg) {
     ViTModel::Config out;
     out.num_tokens = jget<int>(cfg, "num_tokens", out.num_tokens);
@@ -188,6 +233,125 @@ static json vitDefaultConfigJson() {
     return json{{"num_tokens", d.num_tokens}, {"d_model", d.d_model}, {"num_layers", d.num_layers}, {"num_heads", d.num_heads}, {"mlp_hidden", d.mlp_hidden}, {"output_dim", d.output_dim}, {"causal", d.causal}};
 }
 
+static PonyXLDDPMModel::Config ponyxlDdpmCfgFromJson(const json& cfg) {
+    PonyXLDDPMModel::Config out;
+
+    out.seed = jget<int>(cfg, "seed", out.seed);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.max_vocab = jget<int>(cfg, "max_vocab", out.max_vocab);
+    out.text_ctx_len = jget<int>(cfg, "text_ctx_len", out.text_ctx_len);
+    out.text_bottleneck_meanpool = jget<bool>(cfg, "text_bottleneck_meanpool", out.text_bottleneck_meanpool);
+
+    out.latent_seq_len = jget<int>(cfg, "latent_seq_len", out.latent_seq_len);
+    out.latent_in_dim = jget<int>(cfg, "latent_in_dim", out.latent_in_dim);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+
+    out.sdxl_time_cond = jget<bool>(cfg, "sdxl_time_cond", out.sdxl_time_cond);
+    out.unet_layers = jget<int>(cfg, "unet_layers", out.unet_layers);
+    out.text_layers = jget<int>(cfg, "text_layers", out.text_layers);
+    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+
+    out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
+    out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
+    out.unet_depth = jget<int>(cfg, "unet_depth", out.unet_depth);
+
+    out.image_w = jget<int>(cfg, "image_w", out.image_w);
+    out.image_h = jget<int>(cfg, "image_h", out.image_h);
+    out.image_c = jget<int>(cfg, "image_c", out.image_c);
+
+    out.ddpm_steps = jget<int>(cfg, "ddpm_steps", out.ddpm_steps);
+    out.ddpm_beta_start = jget<float>(cfg, "ddpm_beta_start", out.ddpm_beta_start);
+    out.ddpm_beta_end = jget<float>(cfg, "ddpm_beta_end", out.ddpm_beta_end);
+    out.ddpm_steps_per_image = jget<int>(cfg, "ddpm_steps_per_image", out.ddpm_steps_per_image);
+
+    out.recon_loss = jget<std::string>(cfg, "recon_loss", out.recon_loss);
+
+    out.peltier_noise = jget<bool>(cfg, "peltier_noise", out.peltier_noise);
+    out.peltier_mix = jget<float>(cfg, "peltier_mix", out.peltier_mix);
+    out.peltier_blur_radius = jget<int>(cfg, "peltier_blur_radius", out.peltier_blur_radius);
+
+    out.vae_arch = jget<std::string>(cfg, "vae_arch", out.vae_arch);
+    out.vae_checkpoint = jget<std::string>(cfg, "vae_checkpoint", out.vae_checkpoint);
+    out.vae_scale = jget<float>(cfg, "vae_scale", out.vae_scale);
+    out.vae_base_channels = jget<int>(cfg, "vae_base_channels", out.vae_base_channels);
+
+    out.cfg_dropout_prob = jget<float>(cfg, "cfg_dropout_prob", out.cfg_dropout_prob);
+    out.max_text_chars = jget<int>(cfg, "max_text_chars", out.max_text_chars);
+    out.dropout = jget<float>(cfg, "dropout", out.dropout);
+
+    // Captions structurées
+    out.caption_structured_enable = jget<bool>(cfg, "caption_structured_enable", out.caption_structured_enable);
+    out.caption_structured_canonicalize = jget<bool>(cfg, "caption_structured_canonicalize", out.caption_structured_canonicalize);
+    out.caption_tags_dropout_prob = jget<float>(cfg, "caption_tags_dropout_prob", out.caption_tags_dropout_prob);
+    out.caption_contexte_dropout_prob = jget<float>(cfg, "caption_contexte_dropout_prob", out.caption_contexte_dropout_prob);
+    out.caption_mentalite_dropout_prob = jget<float>(cfg, "caption_mentalite_dropout_prob", out.caption_mentalite_dropout_prob);
+    out.caption_texte_dropout_prob = jget<float>(cfg, "caption_texte_dropout_prob", out.caption_texte_dropout_prob);
+
+    out.viz_ddpm_every_steps = jget<int>(cfg, "viz_ddpm_every_steps", out.viz_ddpm_every_steps);
+    out.viz_ddpm_num_steps = jget<int>(cfg, "viz_ddpm_num_steps", out.viz_ddpm_num_steps);
+
+    return out;
+}
+
+static json ponyxlDdpmDefaultConfigJson() {
+    PonyXLDDPMModel::Config d;
+    return json{
+        {"seed", d.seed},
+        {"d_model", d.d_model},
+        {"max_vocab", d.max_vocab},
+        {"text_ctx_len", d.text_ctx_len},
+        {"text_bottleneck_meanpool", d.text_bottleneck_meanpool},
+
+        {"latent_seq_len", d.latent_seq_len},
+        {"latent_in_dim", d.latent_in_dim},
+        {"num_heads", d.num_heads},
+
+        {"sdxl_time_cond", d.sdxl_time_cond},
+        {"unet_layers", d.unet_layers},
+        {"text_layers", d.text_layers},
+        {"mlp_hidden", d.mlp_hidden},
+
+        {"latent_h", d.latent_h},
+        {"latent_w", d.latent_w},
+        {"unet_depth", d.unet_depth},
+
+        {"image_w", d.image_w},
+        {"image_h", d.image_h},
+        {"image_c", d.image_c},
+
+        {"ddpm_steps", d.ddpm_steps},
+        {"ddpm_beta_start", d.ddpm_beta_start},
+        {"ddpm_beta_end", d.ddpm_beta_end},
+        {"ddpm_steps_per_image", d.ddpm_steps_per_image},
+
+        {"recon_loss", d.recon_loss},
+
+        {"peltier_noise", d.peltier_noise},
+        {"peltier_mix", d.peltier_mix},
+        {"peltier_blur_radius", d.peltier_blur_radius},
+
+        {"vae_arch", d.vae_arch},
+        {"vae_checkpoint", d.vae_checkpoint},
+        {"vae_scale", d.vae_scale},
+        {"vae_base_channels", d.vae_base_channels},
+
+        {"cfg_dropout_prob", d.cfg_dropout_prob},
+        {"max_text_chars", d.max_text_chars},
+        {"dropout", d.dropout},
+
+        // Captions structurées
+        {"caption_structured_enable", d.caption_structured_enable},
+        {"caption_structured_canonicalize", d.caption_structured_canonicalize},
+        {"caption_tags_dropout_prob", d.caption_tags_dropout_prob},
+        {"caption_contexte_dropout_prob", d.caption_contexte_dropout_prob},
+        {"caption_mentalite_dropout_prob", d.caption_mentalite_dropout_prob},
+        {"caption_texte_dropout_prob", d.caption_texte_dropout_prob},
+
+        {"viz_ddpm_every_steps", d.viz_ddpm_every_steps},
+        {"viz_ddpm_num_steps", d.viz_ddpm_num_steps},
+    };
+}
+
 static VAEModel::Config vaeCfgFromJson(const json& cfg) {
     VAEModel::Config out;
     out.image_w = jget<int>(cfg, "image_w", out.image_w);
@@ -201,6 +365,45 @@ static VAEModel::Config vaeCfgFromJson(const json& cfg) {
 static json vaeDefaultConfigJson() {
     VAEModel::Config d;
     return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"latent_dim", d.latent_dim}, {"hidden_dim", d.hidden_dim}};
+}
+
+static VAEConvModel::Config vaeConvCfgFromJson(const json& cfg) {
+    VAEConvModel::Config out;
+    out.image_w = jget<int>(cfg, "image_w", out.image_w);
+    out.image_h = jget<int>(cfg, "image_h", out.image_h);
+    out.image_c = jget<int>(cfg, "image_c", out.image_c);
+    out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
+    out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
+    out.latent_c = jget<int>(cfg, "latent_c", out.latent_c);
+    out.base_channels = jget<int>(cfg, "base_channels", out.base_channels);
+
+    // Latent stochasticity (reparameterization noise)
+    out.stochastic_latent = jget<bool>(cfg, "stochastic_latent", out.stochastic_latent);
+
+    // Optional text conditioning
+    out.text_cond = jget<bool>(cfg, "text_cond", out.text_cond);
+    out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
+    out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
+    out.text_d_model = jget<int>(cfg, "text_d_model", out.text_d_model);
+    out.proj_dim = jget<int>(cfg, "proj_dim", out.proj_dim);
+    return out;
+}
+
+static json vaeConvDefaultConfigJson() {
+    VAEConvModel::Config d;
+    return json{{"image_w", d.image_w},
+                {"image_h", d.image_h},
+                {"image_c", d.image_c},
+                {"latent_h", d.latent_h},
+                {"latent_w", d.latent_w},
+                {"latent_c", d.latent_c},
+                {"base_channels", d.base_channels},
+                {"stochastic_latent", d.stochastic_latent},
+                {"text_cond", d.text_cond},
+                {"vocab_size", d.vocab_size},
+                {"seq_len", d.seq_len},
+                {"text_d_model", d.text_d_model},
+                {"proj_dim", d.proj_dim}};
 }
 
 static ResNetModel::Config resnetCfgFromJson(const json& cfg) {
@@ -284,6 +487,35 @@ static json vgg19DefaultConfigJson() {
     return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}, {"num_classes", d.num_classes}, {"fc_hidden", d.fc_hidden}};
 }
 
+static VGG16FeatModel::Config vgg16FeatCfgFromJson(const json& cfg) {
+    VGG16FeatModel::Config out;
+    out.image_w = jget<int>(cfg, "image_w", out.image_w);
+    out.image_h = jget<int>(cfg, "image_h", out.image_h);
+    out.image_c = jget<int>(cfg, "image_c", out.image_c);
+    out.base_channels = jget<int>(cfg, "base_channels", out.base_channels);
+    return out;
+}
+
+static json vgg16FeatDefaultConfigJson() {
+    VGG16FeatModel::Config d;
+    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}};
+}
+
+static PatchDiscriminatorModel::Config patchDiscCfgFromJson(const json& cfg) {
+    PatchDiscriminatorModel::Config out;
+    out.image_w = jget<int>(cfg, "image_w", out.image_w);
+    out.image_h = jget<int>(cfg, "image_h", out.image_h);
+    out.image_c = jget<int>(cfg, "image_c", out.image_c);
+    out.base_channels = jget<int>(cfg, "base_channels", out.base_channels);
+    out.num_down = jget<int>(cfg, "num_down", out.num_down);
+    return out;
+}
+
+static json patchDiscDefaultConfigJson() {
+    PatchDiscriminatorModel::Config d;
+    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}, {"num_down", d.num_down}};
+}
+
 static DiffusionModel::Config diffusionCfgFromJson(const json& cfg) {
     DiffusionModel::Config out;
     out.image_w = jget<int>(cfg, "image_w", out.image_w);
@@ -300,11 +532,97 @@ static json diffusionDefaultConfigJson() {
     return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"time_dim", d.time_dim}, {"hidden_dim", d.hidden_dim}, {"dropout", d.dropout}};
 }
 
+static GanLatentModel::Config ganLatentCfgFromJson(const json& cfg) {
+    GanLatentModel::Config out;
+    out.prompt_dim = jget<int>(cfg, "prompt_dim", out.prompt_dim);
+    out.noise_dim = jget<int>(cfg, "noise_dim", out.noise_dim);
+    out.latent_dim = jget<int>(cfg, "latent_dim", out.latent_dim);
+    out.hidden_dim = jget<int>(cfg, "hidden_dim", out.hidden_dim);
+    out.num_hidden_layers = jget<int>(cfg, "num_hidden_layers", out.num_hidden_layers);
+    out.dropout = jget<float>(cfg, "dropout", out.dropout);
+    return out;
+}
+
+static json ganLatentDefaultConfigJson() {
+    GanLatentModel::Config d;
+    return json{{"prompt_dim", d.prompt_dim},
+                {"noise_dim", d.noise_dim},
+                {"latent_dim", d.latent_dim},
+                {"hidden_dim", d.hidden_dim},
+                {"num_hidden_layers", d.num_hidden_layers},
+                {"dropout", d.dropout}};
+}
+
+static CondDiffusionModel::Config condDiffusionCfgFromJson(const json& cfg) {
+    CondDiffusionModel::Config out;
+    out.prompt_dim = jget<int>(cfg, "prompt_dim", out.prompt_dim);
+    out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
+    out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
+    out.latent_c = jget<int>(cfg, "latent_c", out.latent_c);
+    out.time_dim = jget<int>(cfg, "time_dim", out.time_dim);
+    out.hidden_dim = jget<int>(cfg, "hidden_dim", out.hidden_dim);
+    out.dropout = jget<float>(cfg, "dropout", out.dropout);
+    return out;
+}
+
+static json condDiffusionDefaultConfigJson() {
+    CondDiffusionModel::Config d;
+    return json{{"prompt_dim", d.prompt_dim},
+                {"latent_w", d.latent_w},
+                {"latent_h", d.latent_h},
+                {"latent_c", d.latent_c},
+                {"time_dim", d.time_dim},
+                {"hidden_dim", d.hidden_dim},
+                {"dropout", d.dropout}};
+}
+
+static SD35Model::Config sd35CfgFromJson(const json& cfg) {
+    SD35Model::Config out;
+    out.stub_only = jget<bool>(cfg, "stub_only", out.stub_only);
+    out.q_len = jget<int>(cfg, "q_len", out.q_len);
+    out.kv_len = jget<int>(cfg, "kv_len", out.kv_len);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.num_layers = jget<int>(cfg, "num_layers", out.num_layers);
+    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+    out.causal = jget<bool>(cfg, "causal", out.causal);
+
+    // Compat: si un ancien config passait input_dim/output_dim, on peut en déduire
+    // q_len/kv_len seulement si d_model est fourni et que l'input est divisible.
+    // (On garde un comportement safe: si ambigu, on ignore.)
+    const int legacy_input_dim = jget<int>(cfg, "input_dim", 0);
+    if (legacy_input_dim > 0 && out.d_model > 0) {
+        const int dm = std::max(1, out.d_model);
+        const int total_tokens = legacy_input_dim / dm;
+        if (total_tokens * dm == legacy_input_dim && total_tokens >= 2) {
+            // Heuristique: split moitié/moitié
+            out.q_len = std::max(1, total_tokens / 2);
+            out.kv_len = std::max(1, total_tokens - out.q_len);
+        }
+    }
+    return out;
+}
+
+static json sd35DefaultConfigJson() {
+    SD35Model::Config d;
+    return json{
+        {"stub_only", d.stub_only},
+        {"q_len", d.q_len},
+        {"kv_len", d.kv_len},
+        {"d_model", d.d_model},
+        {"num_heads", d.num_heads},
+        {"num_layers", d.num_layers},
+        {"mlp_hidden", d.mlp_hidden},
+        {"causal", d.causal},
+    };
+}
+
 } // namespace
 
 std::shared_ptr<Model> Registry::create(const std::string& name, const json& config) const {
     ensureBuiltinsRegistered();
-    auto it = entries_.find(name);
+    const std::string key = canonicalArchName(name);
+    auto it = entries_.find(key);
     if (it == entries_.end()) {
         throw std::runtime_error("ModelArchitectures::create: unknown architecture: " + name);
     }
@@ -316,7 +634,7 @@ std::shared_ptr<Model> Registry::create(const std::string& name, const json& con
 
     // Standardize metadata for serialization/rebuild.
     if (!cfg.is_object()) cfg = json::object();
-    cfg["type"] = name;
+    cfg["type"] = key;
 
     auto model = it->second.create(cfg);
     if (!model) {
@@ -343,19 +661,6 @@ void Registry::ensureBuiltinsRegistered() const {
         );
 
         entries_.emplace(
-            "ponyxl_ddpm",
-            Entry{
-                "ponyxl_ddpm",
-                "PonyXL DDPM (texte + image bruitée + timestep -> prédiction de bruit)",
-                ponyDefaultConfigJson(),
-                [](const json& cfg) -> std::shared_ptr<Model> {
-                    auto m = std::make_shared<PonyXLDDPMModel>();
-                    m->buildFromConfig(ponyCfgFromJson(cfg));
-                    return m;
-                },
-            });
-
-        entries_.emplace(
             "transformer",
             Entry{
                 "transformer",
@@ -364,6 +669,34 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<TransformerModel>();
                     m->buildFromConfig(transformerCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "vae_text",
+            Entry{
+                "vae_text",
+                "VAEText (text_ids -> recon||mu||logvar||img_proj||text_proj)",
+                vaeTextDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<VAETextModel>();
+                    m->buildFromConfig(vaeTextCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "vae_text_decode",
+            Entry{
+                "vae_text_decode",
+                "VAEText decoder-only (input=z latent, output=logits seq_len*vocab)",
+                vaeTextDecodeDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<Model>();
+                    VAETextModel::buildDecoderInto(*m, vaeTextCfgFromJson(cfg));
                     return m;
                 },
             }
@@ -392,6 +725,34 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<VAEModel>();
                     m->buildFromConfig(vaeCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "vae_conv",
+            Entry{
+                "vae_conv",
+                "Convolutional VAE (output packs recon||mu||logvar; spatial latent)",
+                vaeConvDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<VAEConvModel>();
+                    m->buildFromConfig(vaeConvCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "vae_conv_decode",
+            Entry{
+                "vae_conv_decode",
+                "Convolutional VAE decoder-only (input=z latent, output=recon RGB)",
+                vaeConvDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<Model>();
+                    VAEConvModel::buildDecoderInto(*m, vaeConvCfgFromJson(cfg));
                     return m;
                 },
             }
@@ -468,6 +829,48 @@ void Registry::ensureBuiltinsRegistered() const {
         );
 
         entries_.emplace(
+            "vgg16_feat",
+            Entry{
+                "vgg16_feat",
+                "VGG16 feature extractor (GAP features for perceptual loss)",
+                vgg16FeatDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<VGG16FeatModel>();
+                    m->buildFromConfig(vgg16FeatCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "patch_discriminator",
+            Entry{
+                "patch_discriminator",
+                "PatchGAN-like discriminator (image -> patch logits)",
+                patchDiscDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<PatchDiscriminatorModel>();
+                    m->buildFromConfig(patchDiscCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "ponyxl_ddpm",
+            Entry{
+                "ponyxl_ddpm",
+                "PonyXL SDXL-like DDPM latent diffusion (trainStepSdxlLatentDiffusion)",
+                ponyxlDdpmDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<PonyXLDDPMModel>();
+                    m->buildFromConfig(ponyxlDdpmCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
             "diffusion",
             Entry{
                 "diffusion",
@@ -476,6 +879,48 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<DiffusionModel>();
                     m->buildFromConfig(diffusionCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "gan_latent",
+            Entry{
+                "gan_latent",
+                "GAN-like latent generator (baseline MLP: input=prompt||noise -> latent)",
+                ganLatentDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<GanLatentModel>();
+                    m->buildFromConfig(ganLatentCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "cond_diffusion",
+            Entry{
+                "cond_diffusion",
+                "Conditional diffusion epsilon predictor (baseline MLP: input=prompt||t_embed||x_t)",
+                condDiffusionDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<CondDiffusionModel>();
+                    m->buildFromConfig(condDiffusionCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "sd3_5",
+            Entry{
+                "sd3_5",
+                "Stable Diffusion 3.5 (placeholder: registry + skeleton model)",
+                sd35DefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<SD35Model>();
+                    m->buildFromConfig(sd35CfgFromJson(cfg));
                     return m;
                 },
             }

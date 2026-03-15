@@ -2,12 +2,59 @@
 -- Serveur HTTP + WebSocket minimal pour piloter Mímir via REST (GET/POST/PUT/PATCH/DELETE)
 -- Dépendances: LuaSocket (luasocket)
 -- Usage (Lua système):   lua scripts/api_ws_server.lua
--- Usage (si mimir expose require + LuaSocket): ./bin/mimir scripts/api_ws_server.lua
+-- Usage (avec Mímir):    ./bin/mimir --lua scripts/api_ws_server.lua -- --host 127.0.0.1 --port 8088
+-- Alias flags: --api-host/--api-port
 
-local HOST = os.getenv("MIMIR_API_HOST") or "127.0.0.1"
-local PORT = tonumber(os.getenv("MIMIR_API_PORT") or "8088")
+local Args
+local opts = {}
+do
+  local ok_args, mod_or_err = pcall(dofile, "scripts/modules/args.lua")
+  if ok_args and type(mod_or_err) == "table" and type(mod_or_err.parse) == "function" then
+    Args = mod_or_err
+    opts = Args.parse(arg) or {}
+  end
+end
 
-local SERVER_NAME = "mimir-lua-api"
+local function opt_str(key, default)
+  if type(opts) ~= "table" then return default end
+  local v = opts[key]
+  if v == nil and key:find("-", 1, true) then
+    v = opts[key:gsub("-", "_")]
+  elseif v == nil then
+    v = opts[key:gsub("_", "-")]
+  end
+  if v == nil or v == true then return default end
+  return tostring(v)
+end
+
+local function opt_int(key, default)
+  local v = opt_str(key, nil)
+  if v == nil then return default end
+  local n = tonumber(v)
+  if n == nil then return default end
+  return math.floor(n)
+end
+
+local function opt_bool(key, default)
+  if type(opts) ~= "table" then return default end
+  local v = opts[key]
+  if v == nil and key:find("-", 1, true) then
+    v = opts[key:gsub("-", "_")]
+  elseif v == nil then
+    v = opts[key:gsub("_", "-")]
+  end
+  if v == nil then return default end
+  if type(v) == "boolean" then return v end
+  local s = tostring(v):lower()
+  if s == "1" or s == "true" or s == "yes" or s == "on" then return true end
+  if s == "0" or s == "false" or s == "no" or s == "off" then return false end
+  return default
+end
+
+local HOST = opt_str("host", opt_str("api-host", "127.0.0.1"))
+local PORT = opt_int("port", opt_int("api-port", 8088))
+
+local SERVER_NAME = opt_str("server-name", "mimir-lua-api")
 
 local function safe_read_file(path)
   local f = io.open(path, "rb")
@@ -21,6 +68,43 @@ end
 local SERVER_VERSION = safe_read_file("VERSION") or safe_read_file("./VERSION") or "unknown"
 
 -- =========================
+-- Auth / TLS options
+-- =========================
+local function opt_file_str(key)
+  local path = opt_str(key, nil)
+  if not path or path == "" then return nil end
+  return safe_read_file(path)
+end
+
+-- Auth modes:
+-- - off: no auth
+-- - token: Authorization: Bearer <token> (or query ?token=... for WS/browser)
+-- - api_key: X-API-Key: <key> (or query ?api_key=...)
+-- - either: accept either token or api key
+local AUTH_MODE = (opt_str("auth", "off") or "off"):lower()
+local AUTH_TOKEN = opt_str("auth-token", nil) or opt_file_str("auth-token-file")
+local API_KEY = opt_str("api-key", nil) or opt_file_str("api-key-file")
+local AUTH_SKIP_PATHS = opt_str("auth-skip-paths", "/health,/help")
+
+local TLS_ENABLED = opt_bool("tls", false) or opt_bool("https", false)
+local TLS_CERT_FILE = opt_str("tls-cert", "")
+local TLS_KEY_FILE = opt_str("tls-key", "")
+
+-- =========================
+-- CORS (pour UI web)
+-- =========================
+-- Par défaut, on active CORS pour simplifier l'usage depuis une page web.
+-- Flags:
+--   --cors true|false
+--   --cors-origin "*" | "reflect" | "http://localhost:5173" | "null"
+local CORS_ENABLED = opt_bool("cors", true)
+local CORS_ORIGIN = opt_str("cors-origin", "*")
+local CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+local CORS_ALLOW_HEADERS = "Content-Type, Authorization, X-API-Key, Accept"
+local CORS_EXPOSE_HEADERS = "X-Response-Time-Ms"
+local CORS_MAX_AGE = "600"
+
+-- =========================
 -- Dépendances (LuaSocket)
 -- =========================
 local ok_socket, socket = pcall(require, "socket")
@@ -29,6 +113,14 @@ if not ok_socket then
     "LuaSocket manquant: installez-le (ex: `luarocks install luasocket`) " ..
     "ou lancez ce script avec un Lua qui l'a. Détail: " .. tostring(socket)
   )
+end
+
+local ssl
+do
+  local ok_ssl, mod_or_err = pcall(require, "ssl")
+  if ok_ssl then
+    ssl = mod_or_err
+  end
 end
 
 local function now_seconds()
@@ -379,6 +471,8 @@ local function http_response(status, headers, body)
     [200] = "OK",
     [201] = "Created",
     [204] = "No Content",
+    [401] = "Unauthorized",
+    [403] = "Forbidden",
     [400] = "Bad Request",
     [404] = "Not Found",
     [405] = "Method Not Allowed",
@@ -399,6 +493,92 @@ local function http_response(status, headers, body)
 end
 
 -- =========================
+-- Auth helpers
+-- =========================
+local function secure_equals(a, b)
+  if type(a) ~= "string" or type(b) ~= "string" then return false end
+  if #a ~= #b then return false end
+  local diff = 0
+  for i2 = 1, #a do
+    diff = diff | (a:byte(i2) ~ b:byte(i2))
+  end
+  return diff == 0
+end
+
+local function csv_to_set(csv)
+  local set = {}
+  if type(csv) ~= "string" or csv == "" then return set end
+  for item in csv:gmatch("[^,]+") do
+    local v = trim(item)
+    if v ~= "" then set[v] = true end
+  end
+  return set
+end
+
+local AUTH_SKIP_SET = csv_to_set(AUTH_SKIP_PATHS)
+
+local function extract_bearer(headers)
+  if type(headers) ~= "table" then return nil end
+  local a = headers["authorization"]
+  if type(a) ~= "string" or a == "" then return nil end
+  local scheme, token = a:match("^(%S+)%s+(.+)$")
+  if not scheme or not token then return nil end
+  scheme = scheme:lower()
+  if scheme ~= "bearer" and scheme ~= "token" then return nil end
+  return trim(token)
+end
+
+local function extract_api_key(headers)
+  if type(headers) ~= "table" then return nil end
+  local k = headers["x-api-key"]
+  if type(k) ~= "string" or k == "" then return nil end
+  return trim(k)
+end
+
+local function auth_enabled()
+  return AUTH_MODE ~= "off"
+end
+
+local function auth_mode_valid()
+  return AUTH_MODE == "off" or AUTH_MODE == "token" or AUTH_MODE == "api_key" or AUTH_MODE == "either"
+end
+
+local function auth_check(method, clean_path, headers, query)
+  if not auth_mode_valid() then
+    return false, 500, { ["Content-Type"] = "application/json" }, json_encode({ ok = false, error = "auth mode invalide", detail = AUTH_MODE })
+  end
+
+  if not auth_enabled() then
+    return true
+  end
+
+  if AUTH_SKIP_SET[clean_path] then
+    return true
+  end
+
+  local want_token = AUTH_MODE == "token" or AUTH_MODE == "either"
+  local want_key = AUTH_MODE == "api_key" or AUTH_MODE == "either"
+
+  local provided_token = extract_bearer(headers) or (type(query) == "table" and (query.token or query.bearer) or nil)
+  local provided_key = extract_api_key(headers) or (type(query) == "table" and (query.api_key or query.apikey or query.key) or nil)
+
+  local token_ok = (want_token and type(AUTH_TOKEN) == "string" and AUTH_TOKEN ~= "" and type(provided_token) == "string" and secure_equals(provided_token, AUTH_TOKEN))
+  local key_ok = (want_key and type(API_KEY) == "string" and API_KEY ~= "" and type(provided_key) == "string" and secure_equals(provided_key, API_KEY))
+
+  if token_ok or key_ok then
+    return true
+  end
+
+  local hdrs = {
+    ["Content-Type"] = "application/json",
+  }
+  if want_token then
+    hdrs["WWW-Authenticate"] = 'Bearer realm="mimir"'
+  end
+  return false, 401, hdrs, json_encode({ ok = false, error = "unauthorized" })
+end
+
+-- =========================
 -- Framework dispatcher
 -- =========================
 local function mimir_available()
@@ -412,8 +592,11 @@ local function framework_info()
     caps.model = type(Mimir.Model) == "table"
     caps.model_create = type(Mimir.Model.create) == "function"
     caps.model_build = type(Mimir.Model.build) == "function"
+    caps.model_allocate_params = type(Mimir.Model.allocate_params) == "function"
     caps.model_infer = type(Mimir.Model.infer) == "function"
     caps.model_forward = type(Mimir.Model.forward) == "function"
+    caps.model_init_weights = type(Mimir.Model.init_weights) == "function"
+    caps.model_train = type(Mimir.Model.train) == "function"
     caps.serialization = type(Mimir.Serialization) == "table"
     caps.serialization_save = type(Mimir.Serialization) == "table" and type(Mimir.Serialization.save) == "function"
     caps.serialization_load = type(Mimir.Serialization) == "table" and type(Mimir.Serialization.load) == "function"
@@ -464,6 +647,18 @@ local function api_handle(method, path, headers, body)
   local clean_path, query = parse_query(path)
   local content_type = (headers["content-type"] or ""):lower()
 
+  -- CORS preflight: ne doit pas être bloqué par l'auth, sinon le navigateur échoue avant la requête réelle.
+  if method == "OPTIONS" then
+    return 200, { ["Content-Type"] = "application/json" }, json_encode({ ok = true })
+  end
+
+  do
+    local ok_auth, status, hdrs, resp = auth_check(method, clean_path, headers, query)
+    if not ok_auth then
+      return status, hdrs, resp
+    end
+  end
+
   local json_body = nil
   if body and body ~= "" and content_type:find("application/json", 1, true) then
     local ok, decoded = pcall(json_decode, body)
@@ -482,13 +677,26 @@ local function api_handle(method, path, headers, body)
     return ok_json({
       ok = true,
       server = { name = SERVER_NAME, version = SERVER_VERSION, host = HOST, port = PORT, lua = _VERSION },
+      security = {
+        tls = TLS_ENABLED,
+        auth = {
+          mode = AUTH_MODE,
+          enabled = auth_enabled(),
+          skip_paths = AUTH_SKIP_PATHS,
+          accepted = {
+            bearer = (AUTH_MODE == "token" or AUTH_MODE == "either"),
+            api_key = (AUTH_MODE == "api_key" or AUTH_MODE == "either"),
+            query_for_ws = true,
+          },
+        },
+      },
       routes = {
         { method = "GET", path = "/health", desc = "Santé + disponibilité de Mimir" },
         { method = "GET", path = "/help", desc = "Liste des routes du serveur" },
         { method = "GET", path = "/architectures", desc = "Liste des architectures disponibles (registry)" },
         { method = "GET", path = "/architectures/default_config", desc = "Config par défaut", query = { model_type = "transformer" } },
         { method = "GET", path = "/hardware", desc = "Capacités hardware détectées (AVX2/FMA/F16C/BMI2)" },
-        { method = "PUT", path = "/hardware", desc = "Choisir backend hardware", body = { backend = "cpu|opencl|vulkan|auto" } },
+        { method = "PUT", path = "/hardware", desc = "Activer/désactiver l'accélération matérielle (API actuelle)", body = { enable = true } },
         { method = "GET", path = "/allocator", desc = "Stats allocator (DynamicTensorAllocator)" },
         { method = "PATCH", path = "/allocator", desc = "Configurer allocator", body = { max_ram_gb = 10.0, enable_compression = true } },
         { method = "DELETE", path = "/allocator", desc = "Ack + GC (pas de reset allocator exposé)" },
@@ -503,7 +711,7 @@ local function api_handle(method, path, headers, body)
       },
       websocket = {
         path = "/ws",
-        desc = "WebSocket: envoyer {method, path, body} en JSON et recevoir {status, response, _meta}",
+        desc = "WebSocket: envoyer {method, path, body} en JSON et recevoir {status, response, _meta}. Auth possible via header Authorization/X-API-Key ou query ?token=.../?api_key=...",
         example_message = { method = "GET", path = "/health" },
       }
     })
@@ -545,12 +753,43 @@ local function api_handle(method, path, headers, body)
     if not mimir_available() or type(Mimir.Model.set_hardware) ~= "function" then
       return ok_json({ ok = false, error = "Mimir.Model.set_hardware indisponible" }, 500)
     end
-    local backend = json_body and json_body.backend or (query.backend)
-    if not backend or backend == "" then
-      return ok_json({ ok = false, error = "backend requis" }, 400)
+    local function parse_bool(v)
+      if type(v) == "boolean" then return v end
+      if type(v) == "number" then return v ~= 0 end
+      if type(v) == "string" then
+        local s = v:lower()
+        if s == "1" or s == "true" or s == "yes" or s == "on" then return true end
+        if s == "0" or s == "false" or s == "no" or s == "off" then return false end
+      end
+      return nil
     end
-    local ok, err = Mimir.Model.set_hardware(backend)
-    return ok_json({ ok = ok, error = err })
+
+    -- API réelle (src/LuaScripting.cpp): set_hardware(enable: bool)
+    -- Compat REST: accepte aussi backend="cpu"|"auto" (map en bool), mais ne choisit pas OpenCL/Vulkan spécifiquement.
+    local enable = (type(json_body) == "table") and parse_bool(json_body.enable) or nil
+    if enable == nil then enable = parse_bool(query.enable) end
+
+    if enable == nil then
+      local backend = (type(json_body) == "table") and json_body.backend or query.backend
+      if type(backend) == "string" and backend ~= "" then
+        local b = backend:lower()
+        if b == "cpu" then enable = false
+        elseif b == "auto" then enable = true
+        else
+          return ok_json({ ok = false, error = "backend non supporté par l'API actuelle", detail = "Utilisez {enable=true|false} (set_hardware(bool))" }, 400)
+        end
+      end
+    end
+
+    if enable == nil then
+      return ok_json({ ok = false, error = "enable requis", detail = "body: {enable:true|false} ou query ?enable=true" }, 400)
+    end
+
+    local ok_call, ok_or_err, err2 = pcall(Mimir.Model.set_hardware, enable)
+    if not ok_call then
+      return ok_json({ ok = false, error = tostring(ok_or_err) }, 500)
+    end
+    return ok_json({ ok = ok_or_err ~= false, enabled = enable, error = err2 })
   end
 
   if method == "PATCH" and clean_path == "/allocator" then
@@ -601,8 +840,12 @@ local function api_handle(method, path, headers, body)
     if not mimir_available() then
       return ok_json({ ok = false, error = "Mimir indisponible" }, 500)
     end
-    local ok, params, err = Mimir.Model.build()
-    return ok_json({ ok = ok, params = params, error = err })
+    -- API actuelle: build() -> (ok, params_or_err)
+    local ok, params_or_err = Mimir.Model.build()
+    if ok then
+      return ok_json({ ok = true, params = params_or_err })
+    end
+    return ok_json({ ok = false, error = params_or_err }, 500)
   end
 
   if method == "POST" and clean_path == "/model/init_weights" then
@@ -778,6 +1021,16 @@ local function handle_websocket(client, req)
     return
   end
 
+  local clean_path, query = parse_query(req.path or "/ws")
+  do
+    local ok_auth, status, hdrs, resp = auth_check("GET", clean_path, req.headers or {}, query)
+    if not ok_auth then
+      client:send(http_response(status, hdrs, resp))
+      client:close()
+      return
+    end
+  end
+
   local accept = ws_accept_key(key)
   local resp = table.concat({
     "HTTP/1.1 101 Switching Protocols",
@@ -854,15 +1107,47 @@ local function handle_websocket(client, req)
 end
 
 local function serve_forever()
+  if TLS_ENABLED then
+    if not ssl then
+      error("TLS demandé (--tls/--https) mais LuaSec n'est pas disponible (module 'ssl').")
+    end
+    if TLS_CERT_FILE == "" or TLS_KEY_FILE == "" then
+      error("TLS activé mais --tls-cert et --tls-key sont requis.")
+    end
+  end
+
   local server = assert(socket.bind(HOST, PORT))
   server:settimeout(0)
-  print(string.format("[api] listening on http://%s:%d (ws: /ws) name=%s version=%s lua=%s", HOST, PORT, SERVER_NAME, SERVER_VERSION, _VERSION))
+  local scheme = TLS_ENABLED and "https" or "http"
+  print(string.format("[api] listening on %s://%s:%d (ws: /ws) name=%s version=%s lua=%s", scheme, HOST, PORT, SERVER_NAME, SERVER_VERSION, _VERSION))
 
   while true do
     local client = server:accept()
     if client then
       local t0 = now_seconds()
       local request_id = next_request_id()
+
+      if TLS_ENABLED then
+        client:settimeout(10)
+        local wrapped, werr = ssl.wrap(client, {
+          mode = "server",
+          protocol = "tlsv1_2",
+          key = TLS_KEY_FILE,
+          certificate = TLS_CERT_FILE,
+          options = { "all" },
+        })
+        if not wrapped then
+          client:close()
+          goto continue
+        end
+        local ok_hs, herr = wrapped:dohandshake()
+        if not ok_hs then
+          wrapped:close()
+          goto continue
+        end
+        client = wrapped
+      end
+
       local req, err = read_http_request(client)
       if not req then
         local t1 = now_seconds()
@@ -893,6 +1178,36 @@ local function serve_forever()
           hdrs = hdrs or {}
           hdrs["X-Response-Time-Ms"] = tostring(latency_ms)
 
+          -- En-têtes de durcissement côté API
+          hdrs["X-Content-Type-Options"] = hdrs["X-Content-Type-Options"] or "nosniff"
+          hdrs["X-Frame-Options"] = hdrs["X-Frame-Options"] or "DENY"
+          hdrs["Referrer-Policy"] = hdrs["Referrer-Policy"] or "no-referrer"
+          hdrs["Cache-Control"] = hdrs["Cache-Control"] or "no-store"
+          if TLS_ENABLED then
+            hdrs["Strict-Transport-Security"] = hdrs["Strict-Transport-Security"] or "max-age=31536000"
+          end
+
+          -- CORS (utile quand la page web est sur un autre origin, y compris file://)
+          if CORS_ENABLED then
+            local origin = req.headers["origin"]
+            local allow_origin = CORS_ORIGIN
+            if allow_origin == "reflect" then
+              if type(origin) == "string" and origin ~= "" then
+                allow_origin = origin
+                -- Indique au cache/proxy que la réponse dépend de Origin
+                hdrs["Vary"] = hdrs["Vary"] or "Origin"
+              else
+                allow_origin = "*"
+              end
+            end
+
+            hdrs["Access-Control-Allow-Origin"] = allow_origin
+            hdrs["Access-Control-Allow-Methods"] = CORS_ALLOW_METHODS
+            hdrs["Access-Control-Allow-Headers"] = CORS_ALLOW_HEADERS
+            hdrs["Access-Control-Expose-Headers"] = CORS_EXPOSE_HEADERS
+            hdrs["Access-Control-Max-Age"] = CORS_MAX_AGE
+          end
+
           local meta = {
             request_id = request_id,
             method = req.method,
@@ -915,6 +1230,8 @@ local function serve_forever()
     else
       socket.sleep(0.01)
     end
+
+    ::continue::
   end
 end
 

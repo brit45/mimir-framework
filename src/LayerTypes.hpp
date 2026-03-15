@@ -54,6 +54,7 @@ enum class LayerType {
     GlobalAvgPool2d,
     MaxPool1d,
     AvgPool1d,
+    TokenMeanPool,
     
     // === Dropout / Regularization ===
     Dropout,
@@ -74,6 +75,9 @@ enum class LayerType {
     Subtract,
     Multiply,
     Divide,
+
+    // === VAE / Probabilistic ===
+    Reparameterize,
     
     // === Tensor Operations ===
     Concat,
@@ -209,6 +213,7 @@ inline LayerType string_to_type(const std::string& str) {
         {"GlobalAvgPool2d", LayerType::GlobalAvgPool2d},
         {"MaxPool1d", LayerType::MaxPool1d},
         {"AvgPool1d", LayerType::AvgPool1d},
+        {"TokenMeanPool", LayerType::TokenMeanPool},
         
         // Dropout
         {"Dropout", LayerType::Dropout},
@@ -229,6 +234,9 @@ inline LayerType string_to_type(const std::string& str) {
         {"Subtract", LayerType::Subtract},
         {"Multiply", LayerType::Multiply},
         {"Divide", LayerType::Divide},
+
+        // VAE
+        {"Reparameterize", LayerType::Reparameterize},
         
         // Tensor ops
         {"Concat", LayerType::Concat},
@@ -321,6 +329,7 @@ inline std::string type_to_string(LayerType type) {
         case LayerType::GlobalAvgPool2d: return "GlobalAvgPool2d";
         case LayerType::MaxPool1d: return "MaxPool1d";
         case LayerType::AvgPool1d: return "AvgPool1d";
+        case LayerType::TokenMeanPool: return "TokenMeanPool";
         
         // Dropout
         case LayerType::Dropout: return "Dropout";
@@ -397,7 +406,7 @@ inline std::vector<std::string> get_all_supported_types() {
         "BatchNorm2d", "BatchNorm1d", "LayerNorm", "GroupNorm", "InstanceNorm2d", "RMSNorm",
         "ReLU", "LeakyReLU", "GELU", "SiLU", "Tanh", "Sigmoid", "Softmax", "LogSoftmax", 
         "Softplus", "Mish", "HardSigmoid", "HardSwish",
-        "MaxPool2d", "AvgPool2d", "AdaptiveAvgPool2d", "GlobalAvgPool2d", "MaxPool1d", "AvgPool1d",
+        "MaxPool2d", "AvgPool2d", "AdaptiveAvgPool2d", "GlobalAvgPool2d", "MaxPool1d", "AvgPool1d", "TokenMeanPool",
         "Dropout", "Dropout2d", "AlphaDropout",
         "Flatten", "Reshape", "Transpose", "Permute", "Squeeze", "Unsqueeze", "View",
         "Add", "Subtract", "Multiply", "Divide",

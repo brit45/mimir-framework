@@ -1,5 +1,5 @@
 
-.PHONY: all build clean mk-video build-docs
+.PHONY: all build build-static clean mk-video build-docs
 
 FLAGS= -ffp-contract=fast \
 	-funroll-loops \
@@ -7,7 +7,23 @@ FLAGS= -ffp-contract=fast \
 	-fno-math-errno \
 	-mf16c \
 	-mbmi2 \
-	-DUSE_HUGEPAGES \
+	-DUSE_HUGEPAGES
+
+DOCS_OUTPUT_DIR := docs/output
+DOCS_PDF := $(DOCS_OUTPUT_DIR)/Documentation_Mimir-FRAMEWORK.pdf
+DOCS_HTML := $(DOCS_OUTPUT_DIR)/Documentation_Mimir-FRAMEWORK.html
+
+# Sources doc (nouvelle structure).
+# Ordre: index -> getting started -> user guide -> API -> internals -> advanced -> contributing.
+DOCS_SOURCES := \
+	docs/00-INDEX.md \
+	$(sort $(wildcard docs/01-Getting-Started/*.md)) \
+	$(sort $(wildcard docs/02-User-Guide/*.md)) \
+	$(sort $(wildcard docs/03-API-Reference/*.md)) \
+	$(sort $(wildcard docs/04-Architecture-Internals/*.md)) \
+	$(sort $(wildcard docs/05-Advanced/*.md)) \
+	$(sort $(wildcard docs/06-Contributing/*.md)) \
+	docs/graphs/README.md
 
 all: build
 
@@ -15,6 +31,11 @@ build:
 	@echo "🏗️  Build via CMake (recommandé)"
 	@cmake -S . -B build
 	@cmake --build build -j
+
+build-static:
+	@echo "🏗️  Build statique: mimir_static (sortie dans ./bin)"
+	@cmake -S . -B build_static -DBUILD_MIMIR_STATIC=ON
+	@cmake --build build_static -j --target mimir_static
 
 
 
@@ -34,12 +55,13 @@ build-docs:
 	@echo "📚 Génération de la documentation PDF..."
 	@if ! command -v pandoc >/dev/null 2>&1; then \
 		echo "❌ Erreur: pandoc n'est pas installé"; \
-		echo "   Installer avec: sudo apt install pandoc texlive-latex-base texlive-latex-extra"; \
+		echo "   Installer avec: sudo apt install pandoc texlive-xetex texlive-latex-extra"; \
 		exit 1; \
 	fi
-	@mkdir -p docs/output
-	@pandoc docs/index.md docs/README.md docs/Model.md docs/Tokenizer.md docs/Encoder.md docs/HtopDisplay.md docs/Sha256.md docs/Helpers.md docs/Tensor.md docs/Visualizer.md \
-		-o docs/output/Documentation_Tensor.pdf \
+	@mkdir -p $(DOCS_OUTPUT_DIR)
+	@set -e; \
+	if pandoc $(DOCS_SOURCES) \
+		-o $(DOCS_PDF) \
 		--pdf-engine=xelatex \
 		--toc \
 		--toc-depth=3 \
@@ -48,29 +70,29 @@ build-docs:
 		-V fontsize=11pt \
 		-V documentclass=report \
 		--highlight-style=tango \
-		--title-prefix "openTensor" \
-		2>&1 || { \
-			echo "⚠️  pdflatex non disponible, tentative avec wkhtmltopdf..."; \
-			if command -v wkhtmltopdf >/dev/null 2>&1; then \
-				pandoc docs/index.md docs/README.md docs/Model.md docs/Tokenizer.md docs/Encoder.md docs/HtopDisplay.md docs/Sha256.md docs/Helpers.md docs/Tensor.md docs/Visualizer.md \
-					-o docs/output/Documentation_Tensor.pdf \
-					--pdf-engine=wkhtmltopdf \
-					--toc \
-					--toc-depth=3; \
-			else \
-				echo "❌ Aucun moteur PDF disponible"; \
-				echo "   Génération HTML à la place..."; \
-				pandoc docs/index.md docs/README.md docs/Model.md docs/Tokenizer.md docs/Encoder.md docs/HtopDisplay.md docs/Sha256.md docs/Helpers.md docs/Tensor.md docs/Visualizer.md \
-					-o docs/output/Documentation_Tensor.html \
-					--toc \
-					--toc-depth=3 \
-					--standalone \
-					--css=https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.1.0/github-markdown.min.css; \
-				echo "✓ Documentation HTML générée: docs/output/Documentation_Tensor.pdf"; \
-				exit 0; \
-			fi; \
-		}
-	@if [ -f docs/output/Documentation_Tensor.html ]; then \
-		echo "✓ Documentation PDF générée: docs/output/Documentation_Tensor.pdf"; \
-		ls -lh docs/output/Documentation_Tensor.*| awk '{print "  Taille:", $$5}'; \
-	fi
+		--title-prefix "Mimir Framework"; then \
+		echo "✓ Documentation PDF générée: $(DOCS_PDF)"; \
+		ls -lh $(DOCS_PDF) | awk '{print "  Taille:", $$5}'; \
+		exit 0; \
+	fi; \
+	echo "⚠️  Échec xelatex, tentative wkhtmltopdf..."; \
+	if command -v wkhtmltopdf >/dev/null 2>&1; then \
+		pandoc $(DOCS_SOURCES) \
+			-o $(DOCS_PDF) \
+			--pdf-engine=wkhtmltopdf \
+			--toc \
+			--toc-depth=3; \
+		echo "✓ Documentation PDF générée: $(DOCS_PDF)"; \
+		ls -lh $(DOCS_PDF) | awk '{print "  Taille:", $$5}'; \
+		exit 0; \
+	fi; \
+	echo "❌ Aucun moteur PDF disponible (xelatex/wkhtmltopdf)"; \
+	echo "   Génération HTML à la place..."; \
+	pandoc $(DOCS_SOURCES) \
+		-o $(DOCS_HTML) \
+		--toc \
+		--toc-depth=3 \
+		--standalone \
+		--css=https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.1.0/github-markdown.min.css; \
+	echo "✓ Documentation HTML générée: $(DOCS_HTML)"; \
+	ls -lh $(DOCS_HTML) | awk '{print "  Taille:", $$5}'

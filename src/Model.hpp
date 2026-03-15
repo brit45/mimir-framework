@@ -3,8 +3,10 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
 #include <filesystem>
 #include <optional>
+#include <cstdint>
 #include "include/json.hpp"
 #include "Helpers.hpp"    // contient MagicToken, DatasetItem, loadDataset, imageToEmbedding, write_u32_le
 #include "tensors.hpp"
@@ -37,6 +39,17 @@ enum class OptimizerType {
 // Optimizer (Adam-like) state with LR decay
 struct Optimizer {
     OptimizerType type = OptimizerType::ADAM;
+
+    // Adam moments are stored per parameter block (stable within a run) using the
+    // base pointer of the parameter buffer as key.
+    struct MomentBlock {
+        std::vector<float> m;
+        std::vector<float> v;
+    };
+    std::unordered_map<std::uintptr_t, MomentBlock> mv_by_param_ptr;
+
+    // Flat legacy state used for checkpoint save/load.
+    // The runtime optimizerStep uses mv_by_param_ptr.
     std::vector<float> m;
     std::vector<float> v;
     float beta1 = 0.9f;
@@ -57,6 +70,14 @@ struct Optimizer {
     void ensure(size_t n) {
         if (m.size() < n) m.resize(n, 0.0f);
         if (v.size() < n) v.resize(n, 0.0f);
+    }
+
+    MomentBlock& ensureMomentsFor(const float* param_ptr, size_t n) {
+        const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(param_ptr);
+        MomentBlock& blk = mv_by_param_ptr[key];
+        if (blk.m.size() < n) blk.m.resize(n, 0.0f);
+        if (blk.v.size() < n) blk.v.resize(n, 0.0f);
+        return blk;
     }
     
     // Calcule le learning rate actuel avec decay
@@ -112,6 +133,11 @@ public:
     Model();
     virtual ~Model();
 
+    // Freeze/unfreeze parameters: when frozen, any training operation that would
+    // mutate params/gradients (backward/optimizer/weight init) is blocked.
+    void freezeParameters(bool freeze = true) { params_frozen_ = freeze; }
+    bool parametersFrozen() const { return params_frozen_; }
+
     void setDensity(double d);
     double getDensity() const;
 
@@ -136,8 +162,116 @@ public:
     
     // Nouveau forward/backward pass complet
     std::vector<float> forwardPass(const std::vector<float> &input, bool training = true);
+
+    // Variante "view": évite la copie/allocation du std::vector de sortie.
+    // Le buffer retourné appartient au TensorStore interne (valide jusqu'au prochain forward).
+    const std::vector<float>& forwardPassView(const std::vector<float> &input, bool training = true);
+
+    // Convenience: forward with explicit (encoded prompt, image) and a seed.
+    // The seed is used to make stochastic ops (e.g. Dropout in training) deterministic.
+    std::vector<float> forwardPromptImageSeed(const std::vector<float>& prompt_vec,
+                                              const std::vector<float>& image_vec,
+                                              uint32_t seed,
+                                              bool training = false);
     // Nouveau: forward en entrée tokens int (Embedding consomme des ids)
     std::vector<float> forwardPass(const std::vector<int> &input_ids, bool training = true);
+
+    // Variante "view": évite la copie/allocation du std::vector de sortie.
+    const std::vector<float>& forwardPassView(const std::vector<int> &input_ids, bool training = true);
+
+    // Nouveau: forward multi-entrées (floats + ids) via TensorStore.
+    // Utile pour des archis qui combinent des tenseurs float (ex: latent) et des ids int (ex: texte).
+    std::vector<float> forwardPassNamed(const std::unordered_map<std::string, std::vector<float>>& float_inputs,
+                                        const std::unordered_map<std::string, std::vector<int>>& int_inputs,
+                                        bool training = true);
+
+    // Variante "view": évite la copie/allocation du std::vector de sortie.
+    const std::vector<float>& forwardPassNamedView(const std::unordered_map<std::string, std::vector<float>>& float_inputs,
+                                                   const std::unordered_map<std::string, std::vector<int>>& int_inputs,
+                                                   bool training = true);
+
+    // ========================================================================
+    // Viz taps: capture d'images intermédiaires par bloc/layer (best-effort)
+    // ========================================================================
+    struct VizFrame {
+        std::vector<uint8_t> pixels; // généralement grayscale
+        int w = 0;
+        int h = 0;
+        int channels = 1;
+        std::string label;
+    };
+
+    void setVizTapsEnabled(bool enabled) { viz_taps_enabled_ = enabled; }
+    bool isVizTapsEnabled() const { return viz_taps_enabled_; }
+    int getVizTapsMaxSide() const { return viz_taps_max_side_; }
+    void setVizTapsLimits(int max_frames, int max_side) {
+        viz_taps_max_frames_ = std::max(0, max_frames);
+        viz_taps_max_side_ = std::max(1, max_side);
+    }
+    // Permet à des modèles spécialisés d'ajouter des vignettes (recon/dénoise/etc.).
+    // Respecte le mode enabled, la déduplication par label, et évince en fin de liste si plein.
+    void addVizTapFrame(VizFrame vf);
+    void clearVizTaps() { viz_taps_.clear(); }
+    std::vector<VizFrame> consumeVizTaps() {
+        auto out = std::move(viz_taps_);
+        viz_taps_.clear();
+        return out;
+    }
+
+    // Variante trainStep pour forwardPassNamed.
+    // Calcule loss (MSE) puis backward+optimizerStep.
+    struct StepStats {
+        float loss = 0.0f;
+        float grad_norm = 0.0f;
+        float grad_max_abs = 0.0f;
+
+        // Métriques de divergence / cohérence (best-effort) basées sur prediction vs target.
+        float kl_divergence = 0.0f;
+        float wasserstein = 0.0f;
+        float entropy_diff = 0.0f;
+        float moment_mismatch = 0.0f;
+        float spatial_coherence = 0.0f;
+        float temporal_consistency = 0.0f;
+    };
+    StepStats trainStepNamed(const std::unordered_map<std::string, std::vector<float>>& float_inputs,
+                             const std::unordered_map<std::string, std::vector<int>>& int_inputs,
+                             const std::vector<float>& target,
+                             Optimizer& opt,
+                             float learning_rate);
+
+    // VAE helper: assumes the model output packs [recon(image_dim), mu(latent_dim), logvar(latent_dim)].
+    struct VAEStepStats {
+        float loss = 0.0f;
+        // Reconstruction metric (historical name kept for compatibility).
+        // Depending on modelConfig["recon_loss"], this may be MSE or L1/MAE.
+        float mse = 0.0f;
+        float kl = 0.0f;
+        // Monitoring/marker metrics computed on recon vs target image.
+        float wass = 0.0f;
+        float temp = 0.0f;
+        float align = 0.0f; // loss d'alignement image/texte (si activé)
+        float kl_beta_effective = 0.0f;
+        int latent_dim = 0;
+        float grad_norm = 0.0f;
+        float grad_max_abs = 0.0f;
+    };
+    VAEStepStats trainStepVAE(const std::vector<float>& x, Optimizer& opt, float learning_rate);
+
+    // VAE texte: output packs [recon(image_dim), mu(latent_dim), logvar(latent_dim), img_proj(proj_dim), text_proj(proj_dim)]
+    // Loss: recon (MSE/L1 via modelConfig["recon_loss"]) + beta*KL + align_weight*(1-cos(img_proj, text_proj))
+    VAEStepStats trainStepVAEText(const std::vector<float>& x,
+                                 const std::vector<int>& text_ids,
+                                 Optimizer& opt,
+                                 float learning_rate);
+
+    // Accumulate gradients for VAE (no zeroGradients, no optimizerStep). Use grad_scale=1/accum_steps.
+    VAEStepStats backwardStepVAE(const std::vector<float>& x, Optimizer& opt, float grad_scale = 1.0f);
+
+    // Accumulate gradients for VAE+text (no zeroGradients, no optimizerStep). Use grad_scale=1/accum_steps.
+    VAEStepStats backwardStepVAEText(const std::vector<float>& x,
+                                     const std::vector<int>& text_ids,
+                                     Optimizer& opt,
+                                     float grad_scale = 1.0f);
     Gradients backwardPass(const std::vector<float> &loss_gradient);
     // Gradient d'entrée capturé au dernier backward (si l'architecture route "__input__")
     bool hasLastInputGradient() const { return has_last_input_gradient_; }
@@ -146,6 +280,12 @@ public:
     Gradients getGradients() const;  // Récupère les gradients actuels
     float computeLoss(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
     std::vector<float> computeLossGradient(const std::vector<float> &prediction, const std::vector<float> &target, const std::string &loss_type = "mse");
+
+    // Version in-place: réutilise le buffer de sortie (évite les allocations répétées).
+    void computeLossGradientInto(const std::vector<float> &prediction,
+                                 const std::vector<float> &target,
+                                 std::vector<float> &gradient,
+                                 const std::string &loss_type = "mse");
     
     void push(const std::string &name, const std::string &type, size_t params_count);
     void optimizerStep(Optimizer &opt, float learning_rate, const Gradients* gradients = nullptr);
@@ -165,7 +305,7 @@ public:
 
 
         // Optional training state (for checkpoint/debug)
-        void setSerializedOptimizer(const Optimizer& opt) { serialized_optimizer_ = opt; }
+        void setSerializedOptimizer(Optimizer opt);
         const Optimizer* getSerializedOptimizer() const { return serialized_optimizer_ ? &(*serialized_optimizer_) : nullptr; }
         Optimizer* getMutableSerializedOptimizer() { return serialized_optimizer_ ? &(*serialized_optimizer_) : nullptr; }
         void clearSerializedOptimizer() { serialized_optimizer_.reset(); }
@@ -186,7 +326,9 @@ public:
     const std::vector<Layer>& getLayers() const { return layers; }
     std::vector<Layer>& getMutableLayers() { return layers; }
     bool getHasEncoder() const { return hasEncoder; }
-    void setHasEncoder(bool val) { hasEncoder = val; }
+    // Invariant framework: tous les modèles doivent avoir un encoder.
+    // On autorise uniquement l'activation explicite; ignorer les tentatives de désactivation.
+    void setHasEncoder(bool val) { if (val) hasEncoder = true; }
     const std::string& getModelName() const { return model_name; }
     void setModelName(const std::string& name) { model_name = name; }
 
@@ -194,8 +336,11 @@ public:
     bool saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch);
     bool packToSafetensor(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors) const;
     bool tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, Encoder &outEnc, std::vector<MagicToken> &outMagic);
+                            bool hasOpenCLCompute() const;
 
+                            bool initializeOpenCLComputeEngine();
     // ============================= 
+                            void shutdownOpenCLComputeEngine();
     //           Helpers
     // =============================
 
@@ -321,6 +466,13 @@ public:
     std::vector<float> last_input_gradient_;
     bool has_last_input_gradient_ = false;
 
+    // Aux models used by some training steps (perceptual/adversarial).
+    // Stored here to avoid rebuild/alloc each step.
+    std::shared_ptr<Model> aux_perceptual_;
+    std::shared_ptr<Model> aux_discriminator_;
+    Optimizer aux_discriminator_opt_{};
+    bool aux_discriminator_opt_inited_ = false;
+
     static void conv2d_same(const std::vector<float> &in, std::vector<float> &out, int W, int H, const std::vector<float> &kernel, int ksize);
 
     static inline void add_inplace(std::vector<float> &a, const std::vector<float> &b)
@@ -419,10 +571,17 @@ public:
         // Multi-input: liste des inputs (copiés) par layer, dans l'ordre de layer.inputs
         std::vector<std::vector<std::vector<float>>> layer_inputs_multi;
 
+        // Multi-input: tailles des inputs par layer (utile quand on ne snapshot pas les valeurs)
+        std::vector<std::vector<size_t>> layer_input_sizes_multi;
+
         // Multi-input: noms des inputs utilisés au forward (après défaut "x")
         std::vector<std::vector<std::string>> layer_input_names;
 
         std::vector<std::vector<float>> layer_outputs;
+
+        // Masques optionnels pour le backward (ex: ReLU/Dropout). Un masque non vide signifie "keep/active".
+        std::vector<std::vector<uint8_t>> layer_output_masks;
+
         std::vector<std::vector<float>> activations;
         std::vector<float> final_output;
         bool is_valid = false;
@@ -430,8 +589,10 @@ public:
         void clear() {
             layer_inputs.clear();
             layer_inputs_multi.clear();
+            layer_input_sizes_multi.clear();
             layer_input_names.clear();
             layer_outputs.clear();
+            layer_output_masks.clear();
             activations.clear();
             final_output.clear();
             is_valid = false;
@@ -447,6 +608,10 @@ public:
     std::unordered_map<std::string, std::vector<float>> tensor_store;
     // Nouveau: TensorStore d'IDs (int) pour layers type Embedding
     std::unordered_map<std::string, std::vector<int>> tensor_store_int;
+
+    // Entrées additionnelles (utilisées par forwardPassNamed, consommées par forwardPass(float)).
+    std::optional<std::unordered_map<std::string, std::vector<float>>> pending_float_inputs_;
+    std::optional<std::unordered_map<std::string, std::vector<int>>> pending_int_inputs_;
     
     // Helper pour récupérer un tensor (avec erreur explicite si manquant)
     const std::vector<float>& getTensor(const std::string& name) const;
@@ -454,6 +619,10 @@ public:
 
     const std::vector<int>& getTensorInt(const std::string& name) const;
     std::vector<int>& getTensorIntMutable(const std::string& name);
+
+    // Safe existence checks (évite les logs d'erreur dans getTensor*).
+    bool hasTensor(const std::string& name) const;
+    bool hasTensorInt(const std::string& name) const;
     
     // Helper pour stocker un tensor
     void storeTensor(const std::string& name, const std::vector<float>& data);
@@ -473,6 +642,19 @@ public:
     // Helper pour récupérer un layer par nom
     Layer* getLayerByName(const std::string& name);
 
+    // Buffers scratch pour éviter les allocations dans les hot paths (forward/train step)
+    std::vector<const std::vector<float>*> scratch_input_ptrs_;
+    std::vector<float> scratch_embedding_ids_tmp_;
+    std::vector<int> scratch_embedding_ids_fallback_;
+    std::vector<float> scratch_loss_grad_;
+    std::vector<float> scratch_packed_grad_;
+
+    // Viz taps state
+    bool viz_taps_enabled_ = false;
+    int viz_taps_max_frames_ = 12;
+    int viz_taps_max_side_ = 64;
+    std::vector<VizFrame> viz_taps_;
+
 protected:
     std::vector<Layer> layers;
     int tw = 64, th = 64;
@@ -491,4 +673,7 @@ protected:
     // IMPORTANT: éviter toute ré-assignation implicite après build/allocation.
     size_t max_ram_mb_ = 0;
     // MemoryGuard est un singleton, on utilise une référence via instance()
+
+    // When true, blocks any op that would mutate weights/grad buffers.
+    bool params_frozen_ = false;
 };

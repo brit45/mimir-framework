@@ -31,7 +31,7 @@ using json = nlohmann::json;
  *   },
  *   "__metadata__": {
  *     "format": "safetensors",
- *     "mimir_version": "2.3.0",
+ *     "mimir_version": "2.4.0",
  *     ...
  *   }
  * }

@@ -1,0 +1,74 @@
+digraph VAEConv {
+  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", fontsize=18, labelloc="t", label="VAEConv (text_cond=false) — structure réseau"];
+  node  [shape=box, style="rounded,filled", fillcolor="#F7F7F7", color="#444444", fontname="Helvetica", fontsize=11];
+  edge  [color="#444444", arrowsize=0.8, penwidth=1.2];
+
+  // ===== Inputs =====
+  subgraph cluster_inputs {
+    label="Entrée";
+    color="#BBBBBB";
+    input_img [label="__input__\nimage vector (H*W*C)", fillcolor="#E8F0FE"];
+  }
+
+  // ===== Image in + encoder =====
+  subgraph cluster_encoder {
+    label="Encodeur image";
+    color="#BBBBBB";
+    raw_in    [label="Identity\nvae_conv/raw_in"];
+    reshape   [label="Reshape\nvae_conv/in_reshape\n(HWC)"];
+    to_chw    [label="Permute\nvae_conv/in_to_chw\nHWC→CHW"];
+
+    enc_in    [label="Conv2d + SiLU\nvae_conv/enc/conv_in\n(C→base)"];
+    enc_down  [label="Downsample bloc ×N\nConv2d(stride=2)+SiLU\nvae_conv/enc/down*", fillcolor="#F1F8E9"];
+    enc_proj  [label="Conv2d + SiLU\nvae_conv/enc/proj"];
+    mu        [label="Conv2d(k=1)\nvae_conv/enc/mu\n(cur_c→LC)", fillcolor="#E3F2FD"];
+    logvar    [label="Conv2d(k=1)\nvae_conv/enc/logvar\n(cur_c→LC)", fillcolor="#E3F2FD"];
+  }
+
+  // ===== Latent =====
+  subgraph cluster_latent {
+    label="Latent";
+    color="#BBBBBB";
+    reparam   [label="Reparameterize\nvae_conv/reparam\n(mu, logvar)→z"];
+    z         [label="z (LC×LH×LW)\nvae_conv/z", fillcolor="#EDE7F6"];
+  }
+
+  // ===== Decoder =====
+  subgraph cluster_decoder {
+    label="Décodeur image";
+    color="#BBBBBB";
+    dec_in    [label="Conv2d + SiLU\nvae_conv/dec/conv_in\n(LC→base)"];
+    dec_up    [label="Upsample bloc ×N\nUpsampleNearest×2 → Conv2d+SiLU\nvae_conv/dec/up*", fillcolor="#F1F8E9"];
+    dec_out   [label="Conv2d\nvae_conv/dec/out\n(base→C)"];
+    dec_tanh  [label="Tanh\nvae_conv/dec/tanh"];
+    recon_to_hwc [label="Permute\nvae_conv/recon_to_hwc\nCHW→HWC"];
+    recon     [label="recon (HWC vector)\nvae_conv/recon", fillcolor="#E8F0FE"];
+  }
+
+  // ===== Output packing =====
+  subgraph cluster_output {
+    label="Sortie (packing)";
+    color="#BBBBBB";
+    out_concat [label="Concat\nvae_conv/out_concat\n[recon, mu, logvar]", fillcolor="#E8F0FE"];
+    out_x      [label="x (output vector)\nrecon || mu || logvar", fillcolor="#E8F0FE"];
+  }
+
+  // ----- Edges: image encoder -----
+  input_img -> raw_in -> reshape -> to_chw -> enc_in -> enc_down -> enc_proj;
+  enc_proj -> mu;
+  enc_proj -> logvar;
+
+  // ----- Edges: latent -----
+  mu -> reparam;
+  logvar -> reparam;
+  reparam -> z;
+
+  // ----- Edges: decoder -----
+  z -> dec_in -> dec_up -> dec_out -> dec_tanh -> recon_to_hwc -> recon;
+
+  // ----- Output pack -----
+  recon -> out_concat;
+  mu -> out_concat;
+  logvar -> out_concat;
+  out_concat -> out_x;
+}

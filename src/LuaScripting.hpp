@@ -6,6 +6,7 @@ extern "C" {
 #include <lauxlib.h>
 }
 #include <string>
+#include <vector>
 #include <memory>
 #include "Model.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
@@ -26,6 +27,9 @@ class LuaScripting {
 public:
     LuaScripting();
     ~LuaScripting();
+
+    // Injecter les arguments (équivalent au `arg` de l'interpréteur Lua)
+    void setArgs(const std::string& script_path, const std::vector<std::string>& script_args);
 
     // Charger et exécuter un script Lua
     bool loadScript(const std::string& filepath);
@@ -73,9 +77,23 @@ private:
     static int lua_pushLayer(lua_State* L);
     static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
+    static int lua_ponyxlDdpmTrainStep(lua_State* L);
+    static int lua_ponyxlDdpmValidateStep(lua_State* L);
+    static int lua_ponyxlDdpmVizReconstructStep(lua_State* L);
+    static int lua_ponyxlDdpmSetVaeScale(lua_State* L);
+    static int lua_ponyxlDdpmGetVaeScale(lua_State* L);
+    static int lua_ponyxlDdpmVaeMuMoments(lua_State* L);
+    static int lua_forwardPromptImageSeed(lua_State* L);
+
+    // === Image IO helpers (Lua) ===
+    // Charge une image depuis le disque via stb_image et renvoie des pixels RGB u8.
+    static int lua_readImageRGBU8(lua_State* L);
     static int lua_encodePrompt(lua_State* L);
     static int lua_backwardPass(lua_State* L);
     static int lua_optimizerStep(lua_State* L);
+    static int lua_getOptimizer(lua_State* L);
+    static int lua_setOptimizer(lua_State* L);
+    static int lua_resetOptimizerState(lua_State* L);
     static int lua_zeroGradients(lua_State* L);
     static int lua_getGradients(lua_State* L);
     static int lua_setHardwareAccel(lua_State* L);
@@ -110,6 +128,7 @@ private:
     static int lua_vizUpdate(lua_State* L);
     static int lua_vizAddImage(lua_State* L);
     static int lua_vizUpdateMetrics(lua_State* L);
+    static int lua_vizSetValidation(lua_State* L);
     static int lua_vizAddLossPoint(lua_State* L);
     static int lua_vizClear(lua_State* L);
     static int lua_vizSetEnabled(lua_State* L);
@@ -120,6 +139,8 @@ private:
     static int lua_tokenize(lua_State* L);
     static int lua_detokenize(lua_State* L);
     static int lua_getVocabSize(lua_State* L);
+    static int lua_getMaxVocab(lua_State* L);
+    static int lua_setMaxVocab(lua_State* L);
     static int lua_saveTokenizer(lua_State* L);
     static int lua_loadTokenizer(lua_State* L);
     
@@ -178,6 +199,11 @@ private:
     static int lua_loadDataset(lua_State* L);
     static int lua_getDataset(lua_State* L);
     static int lua_prepareSequences(lua_State* L);
+
+    // === Database API (dataset loader with caching builder) ===
+    // Usage: Mimir.Database.load(dir, w, h, min_modalities).cache(cache_path?, max_ram_mb?, lazy_loading?)
+    static int lua_databaseLoad(lua_State* L);
+    static int lua_databaseLoad_cache(lua_State* L);
     
     // === Utilitaires ===
     static int lua_print(lua_State* L);
@@ -189,6 +215,11 @@ private:
     static json luaTableToJson(lua_State* L, int index);
     static void jsonToLuaTable(lua_State* L, const json& j);
 };
+
+// ============================================================================
+// NOTE (TUX/htop): quand HtopDisplay est actif, écrire sur stdout casse le rendu.
+// Les logs sont conservés en mémoire (ctx.logs) mais ne sont pas imprimés.
+// ============================================================================
 
 // ============================================================================
 // Singleton global pour accès depuis les callbacks Lua
@@ -219,9 +250,12 @@ public:
     
     // Logs
     std::vector<std::string> logs;
+    bool suppress_stdout_logs = false;
     void addLog(const std::string& msg) {
         logs.push_back(msg);
-        std::cout << msg << std::endl;
+        if (!suppress_stdout_logs) {
+            std::cout << msg << std::endl;
+        }
     }
     
 private:

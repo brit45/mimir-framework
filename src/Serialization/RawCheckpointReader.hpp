@@ -56,6 +56,7 @@ private:
     bool load_architecture(
         const std::string& root,
         Model& model,
+        const LoadOptions& options,
         std::string* error
     );
     

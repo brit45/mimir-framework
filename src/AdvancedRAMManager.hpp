@@ -18,77 +18,83 @@
 #include <optional>
 #include <functional>
 
-// Compression LZ4 - Vraie implémentation
+#include <filesystem>
+#include <fstream>
+
+// Compression LZ4 (optionnelle)
+#ifdef ENABLE_LZ4
 #include <lz4.h>
+#endif
 
 namespace LZ4Compression {
+#ifdef ENABLE_LZ4
     inline std::vector<uint8_t> compress(const std::vector<uint8_t>& data) {
         if (data.empty()) return {};
-        
-        // Calculer la taille max du buffer compressé
+
         int src_size = static_cast<int>(data.size());
         int max_dst_size = LZ4_compressBound(src_size);
-        
-        // Buffer pour les données compressées
+
         std::vector<uint8_t> compressed(max_dst_size + 4); // +4 pour le header
-        
-        // Écrire la taille originale dans le header (4 bytes)
+
         compressed[0] = (src_size >> 0) & 0xFF;
         compressed[1] = (src_size >> 8) & 0xFF;
         compressed[2] = (src_size >> 16) & 0xFF;
         compressed[3] = (src_size >> 24) & 0xFF;
-        
-        // Compresser avec LZ4
+
         int compressed_size = LZ4_compress_default(
             reinterpret_cast<const char*>(data.data()),
             reinterpret_cast<char*>(compressed.data() + 4),
             src_size,
             max_dst_size
         );
-        
+
         if (compressed_size <= 0) {
-            // Échec de compression - retourner les données originales
             return data;
         }
-        
-        // Redimensionner au vrai size (header + données compressées)
+
         compressed.resize(compressed_size + 4);
         return compressed;
     }
-    
+
     inline std::vector<uint8_t> decompress(const std::vector<uint8_t>& compressed) {
         if (compressed.size() < 4) return {};
-        
-        // Lire la taille originale depuis le header
-        int original_size = 
+
+        int original_size =
             (int)compressed[0] |
             ((int)compressed[1] << 8) |
             ((int)compressed[2] << 16) |
             ((int)compressed[3] << 24);
-        
-        if (original_size <= 0 || original_size > 1000000000) { // Max 1GB
+
+        if (original_size <= 0 || original_size > 1000000000) {
             return {};
         }
-        
-        // Buffer pour les données décompressées
+
         std::vector<uint8_t> decompressed(original_size);
-        
-        // Décompresser
+
         int decompressed_size = LZ4_decompress_safe(
             reinterpret_cast<const char*>(compressed.data() + 4),
             reinterpret_cast<char*>(decompressed.data()),
             static_cast<int>(compressed.size() - 4),
             original_size
         );
-        
+
         if (decompressed_size != original_size) {
             std::cerr << "⚠️  Erreur décompression LZ4: " << decompressed_size << " vs " << original_size << std::endl;
             return {};
         }
-        
+
         return decompressed;
     }
-    
+#else
+    inline std::vector<uint8_t> compress(const std::vector<uint8_t>& data) {
+        return data;
+    }
+
+    inline std::vector<uint8_t> decompress(const std::vector<uint8_t>& data) {
+        return data;
+    }
+#endif
+
     inline float compressionRatio(size_t original, size_t compressed) {
         return original > 0 ? (float)compressed / (float)original : 1.0f;
     }
@@ -138,6 +144,8 @@ public:
         bool enable_async_loading = true;
         bool enable_prediction = true;
         bool enable_statistics = true;
+        bool enable_disk_spill = true;                 // Eviction non-destructive (sur disque)
+        std::string spill_dir = ".mimir_spill";        // Dossier spill
         size_t preload_queue_size = 128; // Nombre d'items à précharger
         size_t worker_threads = 4;
     };
@@ -146,6 +154,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         config_ = cfg;
         max_ram_bytes_ = cfg.max_ram_bytes;
+
+        // Préparer le dossier de spill
+        if (config_.enable_disk_spill) {
+            try {
+                std::filesystem::create_directories(config_.spill_dir);
+            } catch (...) {
+                std::cerr << "⚠️  AdvancedRAMManager: impossible de créer spill_dir='" << config_.spill_dir << "'" << std::endl;
+                config_.enable_disk_spill = false;
+            }
+        }
         
         // Démarrer les threads si async activé
         if (cfg.enable_async_loading && !async_thread_running_) {
@@ -222,7 +240,7 @@ public:
         // Vérifier la capacité
         if (!canAllocate(required)) {
             // Éviction LRU
-            evictLRU(required);
+            evictLRU(required, &key);
             
             if (!canAllocate(required)) {
                 return false; // Impossible même après éviction
@@ -234,6 +252,9 @@ public:
         info.data = std::move(storage_data);
         info.original_size = data.size();
         info.is_compressed = is_compressed;
+        info.on_disk = false;
+        info.disk_path.clear();
+        info.stored_bytes = required;
         info.access_count = 0;
         info.last_access = getCurrentTimestamp();
         
@@ -261,6 +282,25 @@ public:
         auto& info = it->second;
         info.last_access = getCurrentTimestamp();
         info.access_count++;
+
+        // Reload depuis disque si nécessaire
+        if (info.on_disk && info.data.empty()) {
+            const size_t bytes_needed = info.stored_bytes;
+            if (!canAllocate(bytes_needed)) {
+                evictLRU(bytes_needed, &key);
+            }
+            if (!canAllocate(bytes_needed)) {
+                return std::nullopt;
+            }
+
+            std::vector<uint8_t> loaded;
+            if (!readSpillFile(info.disk_path, loaded)) {
+                return std::nullopt;
+            }
+            info.data = std::move(loaded);
+            current_ram_bytes_ += info.data.size();
+            peak_ram_bytes_ = std::max(peak_ram_bytes_, current_ram_bytes_);
+        }
         
         // Statistiques d'accès
         if (config_.enable_statistics) {
@@ -283,7 +323,17 @@ public:
         
         auto it = allocations_.find(key);
         if (it != allocations_.end()) {
-            current_ram_bytes_ -= it->second.data.size();
+            if (!it->second.data.empty()) {
+                current_ram_bytes_ -= it->second.data.size();
+            }
+            if (it->second.on_disk && !it->second.disk_path.empty()) {
+                safeRemoveSpillFile(it->second.disk_path);
+                if (current_disk_bytes_ >= it->second.stored_bytes) {
+                    current_disk_bytes_ -= it->second.stored_bytes;
+                } else {
+                    current_disk_bytes_ = 0;
+                }
+            }
             allocations_.erase(it);
         }
     }
@@ -465,9 +515,15 @@ public:
     // Nettoyage
     void clear() {
         std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [_, info] : allocations_) {
+            if (info.on_disk && !info.disk_path.empty()) {
+                safeRemoveSpillFile(info.disk_path);
+            }
+        }
         allocations_.clear();
         access_stats_.clear();
         current_ram_bytes_ = 0;
+        current_disk_bytes_ = 0;
     }
     
     // Arrêt propre des workers (à appeler avant la fin du programme)
@@ -481,14 +537,124 @@ public:
     
 private:
     AdvancedRAMManager() = default;
-    
+
     struct AllocationInfo {
         std::vector<uint8_t> data;
         size_t original_size = 0;
         bool is_compressed = false;
+        bool on_disk = false;
+        std::string disk_path;
+        size_t stored_bytes = 0; // bytes stockés (data.size() si en RAM, sinon taille du fichier spill)
         uint64_t last_access = 0;
         size_t access_count = 0;
     };
+
+    static inline std::string hex_u64(uint64_t v) {
+        static const char* hex = "0123456789abcdef";
+        std::string out(16, '0');
+        for (int i = 15; i >= 0; --i) {
+            out[static_cast<size_t>(i)] = hex[v & 0xFULL];
+            v >>= 4;
+        }
+        return out;
+    }
+
+    std::string makeSpillPath(const std::string& key) const {
+        const uint64_t h = static_cast<uint64_t>(std::hash<std::string>{}(key));
+        std::filesystem::path dir(config_.spill_dir);
+        std::filesystem::path name("mimir_spill_" + hex_u64(h) + ".bin");
+        return (dir / name).string();
+    }
+
+    static inline bool writeSpillFile(const std::string& path, const std::vector<uint8_t>& data) {
+        try {
+            const std::filesystem::path p(path);
+            const std::filesystem::path tmp = p.string() + ".tmp";
+            {
+                std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+                if (!f) return false;
+                if (!data.empty()) {
+                    f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+                }
+                f.flush();
+                if (!f) return false;
+            }
+            std::error_code ec;
+            std::filesystem::rename(tmp, p, ec);
+            if (ec) {
+                std::filesystem::remove(tmp, ec);
+                return false;
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    static inline bool readSpillFile(const std::string& path, std::vector<uint8_t>& out) {
+        try {
+            std::ifstream f(path, std::ios::binary);
+            if (!f) return false;
+            f.seekg(0, std::ios::end);
+            std::streamsize sz = f.tellg();
+            if (sz < 0) return false;
+            f.seekg(0, std::ios::beg);
+            out.assign(static_cast<size_t>(sz), 0);
+            if (sz > 0) {
+                f.read(reinterpret_cast<char*>(out.data()), sz);
+                if (!f) return false;
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    static inline void safeRemoveSpillFile(const std::string& path) {
+        try {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            (void)ec;
+        } catch (...) {
+        }
+    }
+
+    bool spillToDisk(const std::string& key, AllocationInfo& info) {
+        if (!config_.enable_disk_spill) return false;
+        if (info.data.empty()) {
+            // Rien à libérer en RAM. On considère que c'est déjà "spillé".
+            if (!info.on_disk) {
+                info.on_disk = true;
+                info.disk_path = makeSpillPath(key);
+            }
+            return true;
+        }
+
+        if (!info.on_disk || info.disk_path.empty()) {
+            info.disk_path = makeSpillPath(key);
+        }
+
+        if (!writeSpillFile(info.disk_path, info.data)) {
+            return false;
+        }
+
+        // Mise à jour comptage disque
+        if (!info.on_disk) {
+            current_disk_bytes_ += info.data.size();
+        } else {
+            // déjà sur disque: on ne sait pas si la taille a changé; best-effort
+            if (current_disk_bytes_ >= info.stored_bytes) current_disk_bytes_ -= info.stored_bytes;
+            current_disk_bytes_ += info.data.size();
+        }
+        info.on_disk = true;
+        info.stored_bytes = info.data.size();
+
+        // Libérer RAM
+        current_ram_bytes_ -= info.data.size();
+        info.data.clear();
+        info.data.shrink_to_fit();
+        return true;
+    }
     
     struct PreloadTask {
         std::string key;
@@ -509,6 +675,8 @@ private:
     size_t cache_hits_compressed_ = 0;
     size_t cache_hits_uncompressed_ = 0;
     size_t cache_misses_ = 0;
+
+    size_t current_disk_bytes_ = 0;
     
     std::unordered_map<std::string, AllocationInfo> allocations_;
     std::unordered_map<std::string, AccessStats> access_stats_;
@@ -527,10 +695,11 @@ private:
         return (current_ram_bytes_ + bytes) <= max_ram_bytes_;
     }
     
-    void evictLRU(size_t bytes_needed) {
+    void evictLRU(size_t bytes_needed, const std::string* exclude_key = nullptr) {
         // Trier par last_access (LRU)
         std::vector<std::pair<std::string, uint64_t>> items;
         for (const auto& [key, info] : allocations_) {
+            if (exclude_key && key == *exclude_key) continue;
             items.push_back({key, info.last_access});
         }
         
@@ -545,8 +714,33 @@ private:
             
             auto it = allocations_.find(key);
             if (it != allocations_.end()) {
-                freed += it->second.data.size();
-                current_ram_bytes_ -= it->second.data.size();
+                auto& info = it->second;
+
+                // Si déjà spillé mais encore résident en RAM, on peut juste dropper data.
+                if (info.on_disk && !info.data.empty()) {
+                    freed += info.data.size();
+                    current_ram_bytes_ -= info.data.size();
+                    info.data.clear();
+                    info.data.shrink_to_fit();
+                    count++;
+                    total_evictions_++;
+                    continue;
+                }
+
+                // Sinon tenter spill-to-disk si activé
+                if (!info.on_disk && config_.enable_disk_spill) {
+                    const size_t before = info.data.size();
+                    if (spillToDisk(key, info)) {
+                        freed += before;
+                        count++;
+                        total_evictions_++;
+                        continue;
+                    }
+                }
+
+                // Fallback destructif
+                freed += info.data.size();
+                current_ram_bytes_ -= info.data.size();
                 allocations_.erase(it);
                 count++;
                 total_evictions_++;

@@ -13,6 +13,21 @@ Tokenizer::Tokenizer(size_t max_vocab_)
     initializeUnderstandingDictionaries();
 }
 
+size_t Tokenizer::getMaxVocab() const {
+    return maxVocab;
+}
+
+void Tokenizer::setMaxVocab(size_t new_max) {
+    const size_t cur = vocab.size();
+    maxVocab = std::max(new_max, cur);
+    // Best-effort: keep hash tables reasonably sized.
+    try {
+        vocab.reserve(std::min<size_t>(maxVocab, maxVocab));
+        reverse_vocab.reserve(std::min<size_t>(maxVocab, maxVocab));
+    } catch (...) {
+    }
+}
+
 int Tokenizer::addToken(const std::string &tok)
 {
     auto it = vocab.find(tok);
@@ -46,6 +61,8 @@ int Tokenizer::getUnkId() const { auto it = vocab.find("<UNK>"); return it != vo
 int Tokenizer::getSeqId() const { auto it = vocab.find("<SEQ>"); return it != vocab.end() ? it->second : -1; }
 int Tokenizer::getModId() const { auto it = vocab.find("<MOD>"); return it != vocab.end() ? it->second : -1; }
 int Tokenizer::getMagId() const { auto it = vocab.find("<MAG>"); return it != vocab.end() ? it->second : -1; }
+int Tokenizer::getBosId() const { auto it = vocab.find("<BOS>"); return it != vocab.end() ? it->second : -1; }
+int Tokenizer::getEosId() const { auto it = vocab.find("<EOS>"); return it != vocab.end() ? it->second : -1; }
 
 size_t Tokenizer::getVocabSize() const { return vocab.size(); }
 
@@ -77,13 +94,6 @@ std::vector<std::string> Tokenizer::splitTokens(const std::string &text) const
 {
     std::vector<std::string> out;
     std::string cur;
-    
-    auto isPunctuation = [](unsigned char c) -> bool {
-        return (c >= 33 && c <= 47) ||   // ! " # $ % & ' ( ) * + , - . /
-               (c >= 58 && c <= 64) ||   // : ; < = > ? @
-               (c >= 91 && c <= 96) ||   // [ \\ ] ^ _ `
-               (c >= 123 && c <= 126);   // { | } ~
-    };
     
     auto isAccentedChar = [](unsigned char c) -> bool {
         return c >= 128;  // UTF-8 multi-byte characters (accents, unicode)
@@ -281,7 +291,14 @@ std::vector<int> Tokenizer::tokenize(const std::string &text) const
     auto toks = splitTokens(text);
     int unk = getUnkId();
     if (unk < 0) unk = 0;
-    out.reserve(toks.size());
+
+    const int bos = getBosId();
+    const int eos = getEosId();
+    const bool use_bos_eos = (bos >= 0 && eos >= 0);
+
+    out.reserve(toks.size() + (use_bos_eos ? 2 : 0));
+    if (use_bos_eos) out.push_back(bos);
+
     for (const auto &w : toks) {
         std::string n = normalizeToken(w);
         if (n.empty()) continue;
@@ -289,6 +306,8 @@ std::vector<int> Tokenizer::tokenize(const std::string &text) const
         if (it != vocab.end()) out.push_back(it->second);
         else out.push_back(unk);
     }
+
+    if (use_bos_eos) out.push_back(eos);
     return out;
 }
 
@@ -296,13 +315,22 @@ std::vector<int> Tokenizer::tokenizeEnsure(const std::string &text)
 {
     std::vector<int> out;
     auto toks = splitTokens(text);
-    out.reserve(toks.size());
+
+    const int bos = getBosId();
+    const int eos = getEosId();
+    const bool use_bos_eos = (bos >= 0 && eos >= 0);
+
+    out.reserve(toks.size() + (use_bos_eos ? 2 : 0));
+    if (use_bos_eos) out.push_back(bos);
+
     for (const auto &w : toks) {
         std::string n = normalizeToken(w);
         if (n.empty()) continue;
         int id = addToken(n);
         out.push_back(id);
     }
+
+    if (use_bos_eos) out.push_back(eos);
     return out;
 }
 
@@ -424,7 +452,46 @@ void Tokenizer::setMaxSequenceLength(int max_len) {
 
 std::vector<int> Tokenizer::padSequence(const std::vector<int>& tokens, int target_len) const {
     int len = (target_len < 0) ? maxSequenceLength : target_len;
-    std::vector<int> padded = tokens;
+
+    if (len <= 0) return {};
+
+    const int pad_id = getPadId();
+    const int bos = getBosId();
+    const int eos = getEosId();
+    const bool use_bos_eos = (len >= 2 && bos >= 0 && eos >= 0);
+
+    // Travail sur un contenu sans BOS/EOS, puis on reconstruit.
+    size_t start = 0;
+    size_t end = tokens.size();
+    if (use_bos_eos) {
+        if (start < end && tokens[start] == bos) ++start;
+        if (end > start && tokens[end - 1] == eos) --end;
+    }
+
+    std::vector<int> content;
+    if (end > start) {
+        content.assign(tokens.begin() + static_cast<std::ptrdiff_t>(start), tokens.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+
+    std::vector<int> padded;
+    padded.reserve(static_cast<size_t>(len));
+
+    if (use_bos_eos) {
+        padded.push_back(bos);
+        const int content_cap = std::max(0, len - 2);
+        if (static_cast<int>(content.size()) > content_cap) {
+            content.resize(static_cast<size_t>(content_cap));
+        }
+        padded.insert(padded.end(), content.begin(), content.end());
+        while (static_cast<int>(padded.size()) < (len - 1)) {
+            padded.push_back(pad_id);
+        }
+        padded.push_back(eos);
+        return padded;
+    }
+
+    // Fallback: padding/troncature classique.
+    padded = tokens;
     
     // Tronquer si trop long
     if (padded.size() > static_cast<size_t>(len)) {
@@ -432,7 +499,6 @@ std::vector<int> Tokenizer::padSequence(const std::vector<int>& tokens, int targ
     }
     
     // Padding si trop court
-    int pad_id = getPadId();
     while (padded.size() < static_cast<size_t>(len)) {
         padded.push_back(pad_id);
     }
@@ -460,8 +526,8 @@ void Tokenizer::printVocabStats() const {
     std::cout << "\n📊 Statistiques du Vocabulaire" << std::endl;
     std::cout << "================================" << std::endl;
     std::cout << "  Taille actuelle : " << vocabSize << " / " << maxVocab << std::endl;
-    std::cout << "  Tokens spéciaux : 5 (<PAD>, <UNK>, <SEQ>, <MOD>, <MAG>)" << std::endl;
-    std::cout << "  Tokens utilisateur : " << (vocabSize - 5) << std::endl;
+    std::cout << "  Tokens spéciaux : 7 (<PAD>, <UNK>, <SEQ>, <MOD>, <MAG>, <BOS>, <EOS>)" << std::endl;
+    std::cout << "  Tokens utilisateur : " << (vocabSize > 7 ? (vocabSize - 7) : 0) << std::endl;
     std::cout << "  Max séquence : " << maxSequenceLength << std::endl;
     
     // Afficher les 10 premiers tokens

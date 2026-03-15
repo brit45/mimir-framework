@@ -45,6 +45,10 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["output_dim"] = out_dim;
     model.modelConfig["causal"] = cfg.causal;
 
+    // Encoder externe: utilisé pour fournir mag/mod (broadcast add).
+    // Il doit avoir exactement d_model dimensions.
+    model.getMutableEncoder().ensureDim(d_model);
+
     // Input: int ids stored in IntTensorStore under "__input__" by forwardPass(ids)
     // Embedding: ids -> float[seq_len * d_model]
     model.push("transformer/tok_embed", "Embedding", static_cast<size_t>(vocab) * static_cast<size_t>(d_model));
@@ -56,7 +60,30 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
         L->padding_idx = cfg.padding_idx;
     }
 
-    std::string x = "transformer/in";
+    // Injecter mag/mod (embeddings spéciaux Encoder) dans le flux token embeddings.
+    // Add supporte le broadcast: (seq_len*d_model) + (d_model).
+    model.push("transformer/mag_in", "Identity", 0);
+    if (auto* L = model.getLayerByName("transformer/mag_in")) {
+        L->inputs = {"mag"};
+        L->output = "transformer/mag_vec";
+    }
+    model.push("transformer/add_mag", "Add", 0);
+    if (auto* L = model.getLayerByName("transformer/add_mag")) {
+        L->inputs = {"transformer/in", "transformer/mag_vec"};
+        L->output = "transformer/in_plus_mag";
+    }
+    model.push("transformer/mod_in", "Identity", 0);
+    if (auto* L = model.getLayerByName("transformer/mod_in")) {
+        L->inputs = {"mod"};
+        L->output = "transformer/mod_vec";
+    }
+    model.push("transformer/add_mod", "Add", 0);
+    if (auto* L = model.getLayerByName("transformer/add_mod")) {
+        L->inputs = {"transformer/in_plus_mag", "transformer/mod_vec"};
+        L->output = "transformer/in_plus_mag_mod";
+    }
+
+    std::string x = "transformer/in_plus_mag_mod";
 
     for (int i = 0; i < layers; ++i) {
         const std::string p = "transformer/block" + std::to_string(i + 1);

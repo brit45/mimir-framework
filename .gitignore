@@ -16,10 +16,14 @@ dataset_cache.json
 build/
 dist/
 
+# Variantes locales de build (ex: build_sfml, build_static, build_verify...)
+build_*/
+
 # Datasets et données
 datasets/
 datasets.old/
 datasets*/
+dataset*/
 data/
 *.h5
 *.hdf5
@@ -27,6 +31,7 @@ data/
 
 # Checkpoints et modèles sauvegardés
 checkpoints/
+checkpoint/
 checkpoint_*/
 epoch_*/
 *.ckpt
@@ -96,6 +101,9 @@ cmake-build-*/
 *.bak
 *.cache
 
+# Logs (générés par les scripts)
+logs/
+
 # Fichiers de sortie
 output_*.avi
 generated_*.pgm
@@ -139,10 +147,25 @@ docs/output/
 generated_*
 output_*
 
+# Graphes/artefacts de viz
+graph*.png
+
 # Fichiers de configuration locaux
 config_local.json
 .env
 .env.local
+
+# Secrets
+secrets/
+
+# Mimir spill
+.mimir_spill/
+
+# API client export (Insomnia)
+insomnia_mimir_api.json
+
+# Tools/aux (captioning)
+caption_tool/
 
 # Fichiers de backup
 *.backup

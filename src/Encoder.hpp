@@ -21,6 +21,11 @@ class Encoder
         // set mag embedding from MagicToken (map 8-d embed -> encoder dim)
         void setMagicFromToken(const MagicToken &mt);
 
+        // getters for special embeddings (seq/mod/mag)
+        const std::vector<float>& getSeqEmbedding() const { return seq_embedding; }
+        const std::vector<float>& getModEmbedding() const { return mod_embedding; }
+        const std::vector<float>& getMagEmbedding() const { return mag_embedding; }
+
         // expose special embeddings (optional)
         void setSeqEmbedding(const std::vector<float> &v);
         void setModEmbedding(const std::vector<float> &v);
@@ -35,6 +40,11 @@ class Encoder
 
         // Special embeddings: initialization + simple SGD updates
         void ensureSpecialEmbeddings(uint64_t seed = 0x51A5EEDu);
+
+        // Ensure Encoder dimension matches a model requirement.
+        // Safe for freshly-constructed encoders (no token embeddings allocated).
+        // If token embeddings are already present and dim mismatches, throws.
+        void ensureDim(int required_dim, uint64_t seed = 0x51A5EEDu);
         void sgdUpdateSpecialEmbeddings(const std::vector<float>& grad_text, float lr,
                            bool update_seq = true,
                            bool update_mod = true,

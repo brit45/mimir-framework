@@ -27,12 +27,13 @@ BasicMLPModel::StepStats BasicMLPModel::trainStep(const std::vector<float>& inpu
 
     zeroGradients();
 
-    std::vector<float> prediction = forwardPass(input, true);
+    const std::vector<float>& prediction = forwardPassView(input, true);
 
     StepStats stats;
     stats.loss = computeLoss(prediction, target, "mse");
 
-    std::vector<float> loss_grad = computeLossGradient(prediction, target, "mse");
+    static thread_local std::vector<float> loss_grad;
+    computeLossGradientInto(prediction, target, loss_grad, "mse");
     backwardPass(loss_grad);
 
     double sum_sq = 0.0;

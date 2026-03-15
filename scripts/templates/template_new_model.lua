@@ -1,6 +1,6 @@
 #!/usr/bin/env lua
 -- ══════════════════════════════════════════════════════════════
---  TEMPLATE SCRIPT - Mímir Framework v2.3.0
+--  TEMPLATE SCRIPT - Mímir Framework v2.4.0
 --  Utilisez ce template pour créer vos propres modèles
 --  
 --  📚 Synchronisé avec l'API Lua exposée par src/LuaScripting.cpp
@@ -10,7 +10,9 @@
 local RUN_TAG = "my_model"
 
 ---@type ModelType Type du modèle à construire (doit correspondre au registry C++)
-local MODEL_TYPE = "ponyxl_ddpm"
+-- Astuce: vous pouvez surcharger l'archi via env:
+--   MIMIR_ARCH=ponyxl_sdxl_stub ./bin/mimir --lua scripts/templates/template_new_model.lua
+local MODEL_TYPE = os.getenv("MIMIR_ARCH") or "t2i_autoencoder"
 
 -- Récupérer une config par défaut depuis le registry C++
 ---@type table|nil, string?
@@ -26,8 +28,9 @@ CONFIG.max_vocab = CONFIG.max_vocab or 50000
 CONFIG.image_w = CONFIG.image_w or 256
 CONFIG.image_h = CONFIG.image_h or 256
 CONFIG.image_c = CONFIG.image_c or 4
-CONFIG.d_model = CONFIG.d_model or 256
-CONFIG.embed_dim = CONFIG.embed_dim or CONFIG.d_model -- utilisé si un Encoder est créé côté C++
+-- Convention moderne: d_model (certaines archis legacy utilisent encore embed_dim)
+CONFIG.d_model = CONFIG.d_model or CONFIG.embed_dim or 256
+CONFIG.embed_dim = CONFIG.embed_dim or CONFIG.d_model -- legacy (compat)
 
 -- Training (consommés par vos scripts, pas forcément par le binding)
 CONFIG.batch_size = CONFIG.batch_size or 8
@@ -35,8 +38,9 @@ CONFIG.learning_rate = CONFIG.learning_rate or 1e-4
 CONFIG.epochs = CONFIG.epochs or 1
 
 log("╔════════════════════════════════════════════════════════╗")
-log("║      Template Script - Mímir Framework v2.3.0          ║")
+log("║      Template Script - Mímir Framework v2.4.0          ║")
 log("╚════════════════════════════════════════════════════════╝")
+log("Arch: " .. tostring(MODEL_TYPE))
 
 -- ══════════════════════════════════════════════════════════════
 --  ÉTAPE 1: CONFIGURATION SYSTÈME (OBLIGATOIRE!)
@@ -254,7 +258,7 @@ log("━━━━━━━━━━━━━━━━━━━━━━━━━
 -- end
 --
 -- -- Préparer les séquences pour le training
--- local ok_prep, err_prep = Mimir.Dataset.prepare_sequences(CONFIG.max_seq_len)
+-- local ok_prep, err_prep = Mimir.Dataset.prepare_sequences(CONFIG.seq_len)
 -- if not ok_prep then
 --     log("❌ Échec de la préparation des séquences: " .. (err_prep or "unknown"))
 --     os.exit(1)
@@ -374,11 +378,11 @@ log("  • Mimir.Serialization.save(path, format, options) → ok")
 log("  • Mimir.Serialization.load(path, format, options) → ok")
 
 -- ══════════════════════════════════════════════════════════════
---  ÉTAPE 9: SAUVEGARDE (NOUVELLE API v2.3.0)
+--  ÉTAPE 9: SAUVEGARDE (NOUVELLE API v2.4.0)
 -- ══════════════════════════════════════════════════════════════
 
 log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-log("  9. Sauvegarde (Serialization API v2.3)")
+log("  9. Sauvegarde (Serialization API v2.4)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 -- Sauvegarder le modèle avec la nouvelle API (décommenter si besoin)
@@ -406,7 +410,7 @@ log("━━━━━━━━━━━━━━━━━━━━━━━━━
 -- -- Mimir.Serialization.save("debug/" .. RUN_TAG .. ".json", "debug_json")
 
 log("⚠️  Sauvegarde non configurée (décommentez le code ci-dessus si besoin)")
-log("📚 Voir docs/03-API-Reference/SAVE_LOAD.md pour plus d'informations")
+log("📚 Voir docs/03-API-Reference/02-Serialization.md et docs/03-API-Reference/16-Serialization.md")
 
 -- ══════════════════════════════════════════════════════════════
 --  RÉSUMÉ FINAL
@@ -437,15 +441,16 @@ log("  4. Sauvegarder les checkpoints (étape 9)")
 
 log("\n📚 Documentation:")
 log("  • mimir-api.lua - Référence API complète (16 modules)")
-log("  • docs/MULTI_INPUT_SUPPORT.md - Multi-input et branches")
+log("  • docs/00-INDEX.md - Index principal (point d'entrée)")
 log("  • docs/02-User-Guide/ - Guides utilisateur")
-log("  • docs/03-API-Reference/ - Documentation API")
+log("  • docs/03-API-Reference/10-Model.md - Multi-input (forward map) + patterns")
+log("  • docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md - Mapping Lua ↔ C++ (dont set_layer_io)")
 log("  • README.md - Vue d'ensemble")
 
-log("\n🆕 Nouveautés v2.3.0:")
+log("\n🆕 Nouveautés v2.4.0:")
 log("  • Mode Strict activé (0 pass-through)")
 log("  • Support multi-input avec Mimir.Model.set_layer_io()")
 log("  • Résidual & skip connections")
 log("  • 115+ fonctions API documentées")
 
-log("\n✨ Bon apprentissage avec Mímir Framework v2.3.0! ✨\n")
+log("\n✨ Bon apprentissage avec Mímir Framework v2.4.0! ✨\n")

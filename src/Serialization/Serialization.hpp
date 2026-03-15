@@ -61,6 +61,12 @@ struct LoadOptions {
     bool load_encoder = true;
     bool strict_mode = true;        // Fail on missing tensors
     bool validate_checksums = true;
+
+    // When checkpoints include architecture/config metadata, callers sometimes
+    // want to load ONLY weights into an already-constructed model (e.g. load a
+    // standalone VAE checkpoint into a composite model).
+    bool apply_model_name = true;
+    bool apply_model_config = true;
 };
 
 // ============================================================================

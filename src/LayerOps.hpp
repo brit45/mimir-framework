@@ -9,6 +9,7 @@
 #include <immintrin.h>
 #include "Layers.hpp"
 #include "HardwareOpt.hpp"
+#include "RngContext.hpp"
 
 // ============================================================================
 // LAYER OPERATIONS - Forward pass pour tous les types de layers
@@ -25,6 +26,7 @@ inline std::vector<float> linear_forward(
     const Layer& layer,
     bool training = true
 ) {
+    (void)training;
     const int in_f = layer.in_features > 0 ? layer.in_features : input.size();
     const int out_f = layer.out_features;
     
@@ -34,17 +36,55 @@ inline std::vector<float> linear_forward(
     
     const float* weights = layer.getWeights();
     const float* bias = layer.use_bias ? (weights + in_f * out_f) : nullptr;
-    
-    std::vector<float> output(out_f, 0.0f);
-    
-    // Matrix-vector multiplication: y = Wx + b
-    // W shape: [out_features, in_features]
+
+    // Mode séquence: input = [seq_len, in_f] aplati, output = [seq_len, out_f] aplati
+    if (layer.seq_len > 0 && static_cast<int>(input.size()) == layer.seq_len * in_f) {
+        const int seq_len = layer.seq_len;
+        std::vector<float> output(static_cast<size_t>(seq_len) * static_cast<size_t>(out_f), 0.0f);
+
+        #pragma omp parallel for schedule(static) if(static_cast<long long>(seq_len) * out_f * in_f > 262144)
+        for (int t = 0; t < seq_len; ++t) {
+            const float* x = &input[static_cast<size_t>(t) * static_cast<size_t>(in_f)];
+            float* y = &output[static_cast<size_t>(t) * static_cast<size_t>(out_f)];
+
+            for (int o = 0; o < out_f; ++o) {
+                float sum = 0.0f;
+                const float* w_row = weights + o * in_f;
+
+                int i = 0;
+                #ifdef __AVX2__
+                __m256 acc = _mm256_setzero_ps();
+                for (; i + 8 <= in_f; i += 8) {
+                    __m256 w = _mm256_loadu_ps(w_row + i);
+                    __m256 xv = _mm256_loadu_ps(x + i);
+                    acc = _mm256_fmadd_ps(w, xv, acc);
+                }
+                __m128 hi = _mm256_extractf128_ps(acc, 1);
+                __m128 lo = _mm256_castps256_ps128(acc);
+                __m128 sum128 = _mm_add_ps(hi, lo);
+                sum128 = _mm_hadd_ps(sum128, sum128);
+                sum128 = _mm_hadd_ps(sum128, sum128);
+                sum = _mm_cvtss_f32(sum128);
+                #endif
+
+                for (; i < in_f; ++i) {
+                    sum += w_row[i] * x[i];
+                }
+                if (bias) sum += bias[o];
+                y[o] = sum;
+            }
+        }
+
+        return output;
+    }
+
+    // Fallback historique: vector -> vector
+    std::vector<float> output(static_cast<size_t>(out_f), 0.0f);
     #pragma omp parallel for schedule(static) if(static_cast<long long>(out_f) * in_f > 262144)
     for (int o = 0; o < out_f; ++o) {
         float sum = 0.0f;
         const float* w_row = weights + o * in_f;
-        
-        // Vectorized dot product
+
         int i = 0;
         #ifdef __AVX2__
         __m256 acc = _mm256_setzero_ps();
@@ -53,7 +93,6 @@ inline std::vector<float> linear_forward(
             __m256 x = _mm256_loadu_ps(&input[i]);
             acc = _mm256_fmadd_ps(w, x, acc);
         }
-        // Horizontal sum
         __m128 hi = _mm256_extractf128_ps(acc, 1);
         __m128 lo = _mm256_castps256_ps128(acc);
         __m128 sum128 = _mm_add_ps(hi, lo);
@@ -61,18 +100,13 @@ inline std::vector<float> linear_forward(
         sum128 = _mm_hadd_ps(sum128, sum128);
         sum = _mm_cvtss_f32(sum128);
         #endif
-        
-        // Remaining elements
+
         for (; i < in_f; ++i) {
             sum += w_row[i] * input[i];
         }
-        
-        // Add bias
         if (bias) sum += bias[o];
-        
-        output[o] = sum;
+        output[static_cast<size_t>(o)] = sum;
     }
-    
     return output;
 }
 
@@ -109,26 +143,58 @@ inline std::vector<float> add_forward(
     const std::vector<float>& input1,
     const std::vector<float>& input2
 ) {
-    if (input1.size() != input2.size()) {
-        throw std::runtime_error("Add: input sizes must match");
+    // Broadcast support (minimal et sûr):
+    // - tailles égales: élément-wise
+    // - un des deux est scalaire (size=1): broadcast
+    // - l'un divise exactement l'autre: répétition (ex: (d_model) + (seq_len*d_model))
+    if (input1.empty() || input2.empty()) {
+        throw std::runtime_error("Add: inputs must be non-empty");
     }
-    
-    std::vector<float> output(input1.size());
-    
-    size_t i = 0;
-    #ifdef __AVX2__
-    for (; i + 8 <= input1.size(); i += 8) {
-        __m256 a = _mm256_loadu_ps(&input1[i]);
-        __m256 b = _mm256_loadu_ps(&input2[i]);
-        __m256 c = _mm256_add_ps(a, b);
-        _mm256_storeu_ps(&output[i], c);
+
+    if (input1.size() == input2.size()) {
+        std::vector<float> output(input1.size());
+        size_t i = 0;
+        #ifdef __AVX2__
+        for (; i + 8 <= input1.size(); i += 8) {
+            __m256 a = _mm256_loadu_ps(&input1[i]);
+            __m256 b = _mm256_loadu_ps(&input2[i]);
+            __m256 c = _mm256_add_ps(a, b);
+            _mm256_storeu_ps(&output[i], c);
+        }
+        #endif
+        for (; i < input1.size(); ++i) {
+            output[i] = input1[i] + input2[i];
+        }
+        return output;
     }
-    #endif
-    
-    for (; i < input1.size(); ++i) {
-        output[i] = input1[i] + input2[i];
+
+    const std::vector<float>* big = &input1;
+    const std::vector<float>* small = &input2;
+    if (input2.size() > input1.size()) {
+        big = &input2;
+        small = &input1;
     }
-    
+
+    const size_t big_n = big->size();
+    const size_t small_n = small->size();
+
+    if (small_n == 1) {
+        const float s = (*small)[0];
+        std::vector<float> output(big_n);
+        for (size_t i = 0; i < big_n; ++i) {
+            output[i] = (*big)[i] + s;
+        }
+        return output;
+    }
+
+    if ((big_n % small_n) != 0) {
+        throw std::runtime_error("Add: input sizes must match or be broadcastable");
+    }
+
+    std::vector<float> output(big_n);
+    for (size_t i = 0; i < big_n; ++i) {
+        output[i] = (*big)[i] + (*small)[i % small_n];
+    }
     return output;
 }
 
@@ -200,47 +266,55 @@ inline std::vector<float> layernorm_forward(
     const Layer& layer,
     bool training = true
 ) {
-    const int N = input.size();
+    (void)training;
+    const int N = static_cast<int>(input.size());
     const float eps = layer.eps;
-    
-    // Compute mean
-    float mean = 0.0f;
-    #pragma omp simd reduction(+:mean)
-    for (int i = 0; i < N; ++i) {
-        mean += input[i];
-    }
-    mean /= N;
-    
-    // Compute variance
-    float var = 0.0f;
-    #pragma omp simd reduction(+:var)
-    for (int i = 0; i < N; ++i) {
-        float diff = input[i] - mean;
-        var += diff * diff;
-    }
-    var /= N;
-    
-    // Normalize
-    std::vector<float> output(N);
-    float inv_std = 1.0f / std::sqrt(var + eps);
-    
-    const float* weights = layer.affine ? layer.getWeights() : nullptr;
-    const float* bias = (layer.affine && layer.use_bias) ? 
-                        (weights + N) : nullptr;
 
-    #pragma omp simd
-    for (int i = 0; i < N; ++i) {
-        float normalized = (input[i] - mean) * inv_std;
-        
-        // Apply affine transform if enabled
-        if (weights) {
-            normalized = normalized * weights[i];
-            if (bias) normalized += bias[i];
-        }
-        
-        output[i] = normalized;
+    // Nouveau mode (séquence / groupes) si in_features est configuré:
+    // - normalized_size = layer.in_features
+    // - applique LN indépendamment sur chaque groupe
+    const int normalized = (layer.in_features > 0) ? layer.in_features : N;
+    if (normalized <= 0 || (N % normalized) != 0) {
+        throw std::runtime_error("LayerNorm: invalid normalized_size");
     }
-    
+    const int groups = N / normalized;
+
+    std::vector<float> output(static_cast<size_t>(N));
+
+    const float* weights = layer.affine ? layer.getWeights() : nullptr;
+    const float* bias = (layer.affine && layer.use_bias) ? (weights + normalized) : nullptr;
+
+    for (int g = 0; g < groups; ++g) {
+        const int base = g * normalized;
+
+        float mean = 0.0f;
+        #pragma omp simd reduction(+:mean)
+        for (int i = 0; i < normalized; ++i) {
+            mean += input[base + i];
+        }
+        mean /= static_cast<float>(normalized);
+
+        float var = 0.0f;
+        #pragma omp simd reduction(+:var)
+        for (int i = 0; i < normalized; ++i) {
+            const float diff = input[base + i] - mean;
+            var += diff * diff;
+        }
+        var /= static_cast<float>(normalized);
+
+        const float inv_std = 1.0f / std::sqrt(var + eps);
+
+        #pragma omp simd
+        for (int i = 0; i < normalized; ++i) {
+            float v = (input[base + i] - mean) * inv_std;
+            if (weights) {
+                v *= weights[i];
+                if (bias) v += bias[i];
+            }
+            output[static_cast<size_t>(base + i)] = v;
+        }
+    }
+
     return output;
 }
 
@@ -555,8 +629,7 @@ inline std::vector<float> dropout_forward(
     const float scale = 1.0f / (1.0f - p);
     
     std::vector<float> output(input.size());
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    auto& gen = MimirRng::generator();
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
     
     for (size_t i = 0; i < input.size(); ++i) {
@@ -958,32 +1031,53 @@ inline std::vector<float> self_attention_forward(
         }
     }
     
-    // 3. Compute attention scores: Q @ K^T / sqrt(head_dim)
-    // Shape: [seq_len, seq_len]
-    std::vector<float> scores(seq_len * seq_len, 0.0f);
-    float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    
-    for (int i = 0; i < seq_len; ++i) {
-        for (int j = 0; j < seq_len; ++j) {
-            if (causal && j > i) {
-                scores[i * seq_len + j] = -1e9f;  // Mask future tokens
-                continue;
+    // 3-5. Multi-head attention (compute row-by-row to avoid huge allocations)
+    std::vector<float> attended(seq_len * embed_dim, 0.0f);
+    std::vector<float> attn_row(static_cast<size_t>(seq_len));
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    for (int h = 0; h < num_heads; ++h) {
+        const int head_off = h * head_dim;
+        for (int i = 0; i < seq_len; ++i) {
+            float max_val = -1e30f;
+            for (int j = 0; j < seq_len; ++j) {
+                if (causal && j > i) {
+                    attn_row[static_cast<size_t>(j)] = -1e9f;
+                    continue;
+                }
+
+                float dot = 0.0f;
+                const int qi = i * embed_dim + head_off;
+                const int kj = j * embed_dim + head_off;
+                for (int k = 0; k < head_dim; ++k) {
+                    dot += Q[qi + k] * K[kj + k];
+                }
+                const float s = dot * scale;
+                attn_row[static_cast<size_t>(j)] = s;
+                if (s > max_val) max_val = s;
             }
-            
+
             float sum = 0.0f;
-            for (int k = 0; k < embed_dim; ++k) {
-                sum += Q[i * embed_dim + k] * K[j * embed_dim + k];
+            for (int j = 0; j < seq_len; ++j) {
+                const float e = std::exp(attn_row[static_cast<size_t>(j)] - max_val);
+                attn_row[static_cast<size_t>(j)] = e;
+                sum += e;
             }
-            scores[i * seq_len + j] = sum * scale;
+            const float inv_sum = 1.0f / (sum + 1e-9f);
+            for (int j = 0; j < seq_len; ++j) {
+                attn_row[static_cast<size_t>(j)] *= inv_sum;
+            }
+
+            const int out_i = i * embed_dim + head_off;
+            for (int k = 0; k < head_dim; ++k) {
+                float acc = 0.0f;
+                for (int j = 0; j < seq_len; ++j) {
+                    acc += attn_row[static_cast<size_t>(j)] * V[j * embed_dim + head_off + k];
+                }
+                attended[out_i + k] = acc;
+            }
         }
     }
-    
-    // 4. Apply softmax
-    softmax_inplace(scores, seq_len, seq_len);
-    
-    // 5. Apply attention to values: scores @ V
-    std::vector<float> attended(seq_len * embed_dim);
-    matmul(scores, V, attended, seq_len, seq_len, embed_dim);
     
     // 6. Output projection
     std::vector<float> output(seq_len * embed_dim);
@@ -1018,11 +1112,97 @@ inline std::vector<float> cross_attention_forward(
     int query_len,
     int kv_len,
     int embed_dim,
-    int num_heads = 1
+    int num_heads = 1,
+    bool causal = false
 ) {
-    // Similar to self-attention but K,V come from different source
-    // Simplified implementation
-    return query_input;  // TODO: implement properly
+    if (embed_dim % num_heads != 0) {
+        throw std::runtime_error("CrossAttention: embed_dim must be divisible by num_heads");
+    }
+    const int head_dim = embed_dim / num_heads;
+
+    if (query_len <= 0 || kv_len <= 0 || embed_dim <= 0) {
+        throw std::runtime_error("CrossAttention: invalid dimensions");
+    }
+    if (query_input.size() != static_cast<size_t>(query_len * embed_dim)) {
+        throw std::runtime_error("CrossAttention: query_input size mismatch");
+    }
+    if (kv_input.size() != static_cast<size_t>(kv_len * embed_dim)) {
+        throw std::runtime_error("CrossAttention: kv_input size mismatch");
+    }
+
+    // 1) Projections: Q = query @ Wq, KV = kv @ Wkv (produces K||V)
+    std::vector<float> Q(query_len * embed_dim);
+    matmul(query_input, q_weight, Q, query_len, embed_dim, embed_dim);
+
+    std::vector<float> KV(kv_len * (2 * embed_dim));
+    matmul(kv_input, kv_weight, KV, kv_len, embed_dim, 2 * embed_dim);
+
+    std::vector<float> K(kv_len * embed_dim);
+    std::vector<float> V(kv_len * embed_dim);
+    for (int m = 0; m < kv_len; ++m) {
+        const int base = m * (2 * embed_dim);
+        const int out = m * embed_dim;
+        for (int k = 0; k < embed_dim; ++k) {
+            K[out + k] = KV[base + k];
+            V[out + k] = KV[base + embed_dim + k];
+        }
+    }
+
+    // 2) Multi-head attention: for each head, for each query token i:
+    //    softmax((Q_i^h · K_j^h)/sqrt(head_dim)) over j, then weighted sum of V_j^h.
+    std::vector<float> attended(query_len * embed_dim, 0.0f);
+    std::vector<float> attn_row(static_cast<size_t>(kv_len));
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    for (int h = 0; h < num_heads; ++h) {
+        const int head_off = h * head_dim;
+        for (int i = 0; i < query_len; ++i) {
+            // Compute unnormalized scores for this (head, i)
+            float max_val = -1e30f;
+            for (int j = 0; j < kv_len; ++j) {
+                if (causal && j > i) {
+                    attn_row[static_cast<size_t>(j)] = -1e9f;
+                    continue;
+                }
+                float dot = 0.0f;
+                const int qi = i * embed_dim + head_off;
+                const int kj = j * embed_dim + head_off;
+                for (int k = 0; k < head_dim; ++k) {
+                    dot += Q[qi + k] * K[kj + k];
+                }
+                const float s = dot * scale;
+                attn_row[static_cast<size_t>(j)] = s;
+                if (s > max_val) max_val = s;
+            }
+
+            // Softmax normalize
+            float sum = 0.0f;
+            for (int j = 0; j < kv_len; ++j) {
+                const float e = std::exp(attn_row[static_cast<size_t>(j)] - max_val);
+                attn_row[static_cast<size_t>(j)] = e;
+                sum += e;
+            }
+            const float inv_sum = 1.0f / (sum + 1e-9f);
+            for (int j = 0; j < kv_len; ++j) {
+                attn_row[static_cast<size_t>(j)] *= inv_sum;
+            }
+
+            // Weighted sum of V into attended
+            const int out_i = i * embed_dim + head_off;
+            for (int k = 0; k < head_dim; ++k) {
+                float acc = 0.0f;
+                for (int j = 0; j < kv_len; ++j) {
+                    acc += attn_row[static_cast<size_t>(j)] * V[j * embed_dim + head_off + k];
+                }
+                attended[out_i + k] = acc;
+            }
+        }
+    }
+
+    // 3) Output projection
+    std::vector<float> output(query_len * embed_dim);
+    matmul(attended, out_weight, output, query_len, embed_dim, embed_dim);
+    return output;
 }
 
 } // namespace LayerOps

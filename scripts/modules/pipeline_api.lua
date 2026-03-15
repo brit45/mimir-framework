@@ -26,6 +26,82 @@ local function ensure_mimir()
     end
 end
 
+local function tokenizer_create(vocab_size)
+    if type(Mimir.Tokenizer) ~= "table" or type(Mimir.Tokenizer.create) ~= "function" then
+        return true
+    end
+    local ok_tok, err_tok = Mimir.Tokenizer.create(vocab_size)
+    if ok_tok == false then
+        return false, err_tok
+    end
+    return true
+end
+
+local function dataset_load(dataset_path, ...)
+    if type(Mimir.Dataset) ~= "table" or type(Mimir.Dataset.load) ~= "function" then
+        return false, "Dataset API indisponible"
+    end
+    local ok_ds, n_or_err = Mimir.Dataset.load(dataset_path, ...)
+    if ok_ds == false then
+        return false, n_or_err
+    end
+    return true, n_or_err
+end
+
+local function build_allocate_init(init, seed)
+    if type(Mimir.Model.build) ~= "function" then
+        return false, "Model.build indisponible"
+    end
+    local ok_build, params_or_err = Mimir.Model.build()
+    if not ok_build then
+        return false, params_or_err
+    end
+
+    if type(Mimir.Model.allocate_params) == "function" then
+        local ok_alloc, err_alloc = Mimir.Model.allocate_params()
+        if not ok_alloc then
+            return false, err_alloc
+        end
+    end
+
+    if type(Mimir.Model.init_weights) == "function" then
+        local ok_init, err_init = Mimir.Model.init_weights(init or "xavier", seed or 1337)
+        if not ok_init then
+            return false, err_init
+        end
+    end
+
+    return true, params_or_err
+end
+
+local function model_train(epochs, lr)
+    if type(Mimir.Model.train) ~= "function" then
+        return false, "Model.train indisponible"
+    end
+    local ok_train, err_train = Mimir.Model.train(epochs, lr)
+    if ok_train == false then
+        return false, err_train
+    end
+    return true
+end
+
+local function infer_save_format(path)
+    if type(path) ~= "string" then return "raw_folder" end
+    if path:match("%.safetensors$") then return "safetensors" end
+    return "raw_folder"
+end
+
+local function serialization_save(path, format, options)
+    if type(Mimir.Serialization) ~= "table" or type(Mimir.Serialization.save) ~= "function" then
+        return false, "Serialization.save indisponible"
+    end
+    local ok_save, err_save = Mimir.Serialization.save(path, format, options)
+    if ok_save == false then
+        return false, err_save
+    end
+    return true
+end
+
 local function try_arch_default_config(model_type)
     if type(_G.Mimir) ~= "table" then return nil end
     if type(Mimir.Architectures) ~= "table" then return nil end
@@ -117,20 +193,26 @@ function Pipeline.Transformer(config)
         log("🏗️  Construction du pipeline Transformer...")
         
         -- Créer tokenizer
-        Mimir.Tokenizer.create(self.config.vocab_size)
+        local ok_tok, err_tok = tokenizer_create(self.config.vocab_size)
+        if not ok_tok then
+            return false, err_tok
+        end
         self.tokenizer = true
         
         -- Créer modèle
-        Mimir.Model.create("transformer", self.config)
-        local ok, params = Mimir.Model.build()
-        
-        if ok then
-            self.model = true
-            log("✓ Modèle construit: " .. params .. " paramètres")
-            return true, params
+        local ok_create, err_create = Mimir.Model.create("transformer", self.config)
+        if not ok_create then
+            return false, err_create
         end
-        
-        return false, "Échec construction"
+
+        local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
+        if not ok_build then
+            return false, params_or_err
+        end
+
+        self.model = true
+        log("✓ Modèle construit: " .. tostring(params_or_err) .. " paramètres")
+        return true, params_or_err
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
@@ -142,13 +224,19 @@ function Pipeline.Transformer(config)
         log("🎓 Entraînement du modèle...")
         
         -- Charger dataset
-        Mimir.Dataset.load(dataset_path)
+        local ok_ds, err_ds = dataset_load(dataset_path)
+        if not ok_ds then
+            return false, err_ds
+        end
         if type(Mimir.Dataset) == "table" and type(Mimir.Dataset.prepare_sequences) == "function" then
             Mimir.Dataset.prepare_sequences(self.config.seq_len)
         end
         
         -- Entraîner
-        Mimir.Model.train(epochs or 10, lr or 0.0003)
+        local ok_train, err_train = model_train(epochs or 10, lr or 0.0003)
+        if not ok_train then
+            return false, err_train
+        end
         
         self.trained = true
         log("✓ Entraînement terminé")
@@ -167,9 +255,13 @@ function Pipeline.Transformer(config)
         if not self.model then
             return false, "Modèle non construit"
         end
-        
-        Mimir.Serialization.save(path, "safetensors")
-        log("✓ Pipeline sauvegardé: " .. path)
+
+        local fmt = infer_save_format(path)
+        local ok_save, err_save = serialization_save(path, fmt, { include_git_info = true, include_checksums = true })
+        if not ok_save then
+            return false, err_save
+        end
+        log("✓ Pipeline sauvegardé: " .. tostring(path))
         return true
     end
     
@@ -202,16 +294,19 @@ function Pipeline.UNet(config)
         ensure_mimir()
         log("🏗️  Construction du pipeline UNet...")
         
-        Mimir.Model.create("unet", self.config)
-        local ok, params = Mimir.Model.build()
-        
-        if ok then
-            self.model = true
-            log("✓ UNet construit: " .. params .. " paramètres")
-            return true, params
+        local ok_create, err_create = Mimir.Model.create("unet", self.config)
+        if not ok_create then
+            return false, err_create
         end
-        
-        return false
+
+        local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
+        if not ok_build then
+            return false, params_or_err
+        end
+
+        self.model = true
+        log("✓ UNet construit: " .. tostring(params_or_err) .. " paramètres")
+        return true, params_or_err
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
@@ -221,8 +316,14 @@ function Pipeline.UNet(config)
         end
         
         log("🎓 Entraînement UNet...")
-        Mimir.Dataset.load(dataset_path)
-        Mimir.Model.train(epochs or 50, lr or 0.001)
+        local ok_ds, err_ds = dataset_load(dataset_path)
+        if not ok_ds then
+            return false, err_ds
+        end
+        local ok_train, err_train = model_train(epochs or 50, lr or 0.001)
+        if not ok_train then
+            return false, err_train
+        end
         
         self.trained = true
         return true
@@ -238,7 +339,11 @@ function Pipeline.UNet(config)
     end
     
     pipe.save = function(self, path)
-        Mimir.Serialization.save(path, "safetensors")
+        local fmt = infer_save_format(path)
+        local ok_save, err_save = serialization_save(path, fmt, { include_git_info = true, include_checksums = true })
+        if not ok_save then
+            return false, err_save
+        end
         return true
     end
     
@@ -277,22 +382,31 @@ function Pipeline.VAE(config)
         ensure_mimir()
         log("🏗️  Construction du pipeline VAE...")
         
-        Mimir.Model.create("vae", self.config)
-        local ok, params = Mimir.Model.build()
-        
-        if ok then
-            self.model = true
-            log("✓ VAE construit: " .. params .. " paramètres")
-            return true, params
+        local ok_create, err_create = Mimir.Model.create("vae", self.config)
+        if not ok_create then
+            return false, err_create
         end
-        
-        return false
+
+        local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
+        if not ok_build then
+            return false, params_or_err
+        end
+
+        self.model = true
+        log("✓ VAE construit: " .. tostring(params_or_err) .. " paramètres")
+        return true, params_or_err
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement VAE...")
-        Mimir.Dataset.load(dataset_path)
-        Mimir.Model.train(epochs or 100, lr or 0.001)
+        local ok_ds, err_ds = dataset_load(dataset_path)
+        if not ok_ds then
+            return false, err_ds
+        end
+        local ok_train, err_train = model_train(epochs or 100, lr or 0.001)
+        if not ok_train then
+            return false, err_train
+        end
         
         self.trained = true
         return true
@@ -354,22 +468,31 @@ function Pipeline.ViT(config)
         ensure_mimir()
         log("🏗️  Construction du pipeline ViT...")
         
-        Mimir.Model.create("vit", self.config)
-        local ok, params = Mimir.Model.build()
-        
-        if ok then
-            self.model = true
-            log("✓ ViT construit: " .. params .. " paramètres")
-            return true, params
+        local ok_create, err_create = Mimir.Model.create("vit", self.config)
+        if not ok_create then
+            return false, err_create
         end
-        
-        return false
+
+        local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
+        if not ok_build then
+            return false, params_or_err
+        end
+
+        self.model = true
+        log("✓ ViT construit: " .. tostring(params_or_err) .. " paramètres")
+        return true, params_or_err
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement ViT...")
-        Mimir.Dataset.load(dataset_path)
-        Mimir.Model.train(epochs or 300, lr or 0.001)
+        local ok_ds, err_ds = dataset_load(dataset_path)
+        if not ok_ds then
+            return false, err_ds
+        end
+        local ok_train, err_train = model_train(epochs or 300, lr or 0.001)
+        if not ok_train then
+            return false, err_train
+        end
         
         self.trained = true
         return true
@@ -451,22 +574,31 @@ function Pipeline.Diffusion(config)
         ensure_mimir()
         log("🏗️  Construction du pipeline Diffusion...")
         
-        Mimir.Model.create("diffusion", self.config)
-        local ok, params = Mimir.Model.build()
-        
-        if ok then
-            self.model = true
-            log("✓ Diffusion construit: " .. params .. " paramètres")
-            return true, params
+        local ok_create, err_create = Mimir.Model.create("diffusion", self.config)
+        if not ok_create then
+            return false, err_create
         end
-        
-        return false
+
+        local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
+        if not ok_build then
+            return false, params_or_err
+        end
+
+        self.model = true
+        log("✓ Diffusion construit: " .. tostring(params_or_err) .. " paramètres")
+        return true, params_or_err
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement Diffusion...")
-        Mimir.Dataset.load(dataset_path)
-        Mimir.Model.train(epochs or 1000, lr or 0.0001)
+        local ok_ds, err_ds = dataset_load(dataset_path)
+        if not ok_ds then
+            return false, err_ds
+        end
+        local ok_train, err_train = model_train(epochs or 1000, lr or 0.0001)
+        if not ok_train then
+            return false, err_train
+        end
         
         self.trained = true
         return true
@@ -514,22 +646,31 @@ function Pipeline.ResNet(config)
         ensure_mimir()
         log("🏗️  Construction du pipeline ResNet...")
         
-        Mimir.Model.create("resnet", self.config)
-        local ok, params = Mimir.Model.build()
-        
-        if ok then
-            self.model = true
-            log("✓ ResNet construit: " .. params .. " paramètres")
-            return true, params
+        local ok_create, err_create = Mimir.Model.create("resnet", self.config)
+        if not ok_create then
+            return false, err_create
         end
-        
-        return false
+
+        local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
+        if not ok_build then
+            return false, params_or_err
+        end
+
+        self.model = true
+        log("✓ ResNet construit: " .. tostring(params_or_err) .. " paramètres")
+        return true, params_or_err
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement ResNet...")
-        Mimir.Dataset.load(dataset_path)
-        Mimir.Model.train(epochs or 90, lr or 0.1)
+        local ok_ds, err_ds = dataset_load(dataset_path)
+        if not ok_ds then
+            return false, err_ds
+        end
+        local ok_train, err_train = model_train(epochs or 90, lr or 0.1)
+        if not ok_train then
+            return false, err_train
+        end
         
         self.trained = true
         return true
@@ -567,23 +708,32 @@ function Pipeline.MobileNet(config)
         ensure_mimir()
         log("🏗️  Construction du pipeline MobileNet...")
         
-        Mimir.Model.create("mobilenet", self.config)
-        local ok, params = Mimir.Model.build()
-        
-        if ok then
-            self.model = true
-            log("✓ MobileNet construit: " .. params .. " paramètres")
-            log("  Optimisé pour CPU/Edge devices")
-            return true, params
+        local ok_create, err_create = Mimir.Model.create("mobilenet", self.config)
+        if not ok_create then
+            return false, err_create
         end
-        
-        return false
+
+        local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
+        if not ok_build then
+            return false, params_or_err
+        end
+
+        self.model = true
+        log("✓ MobileNet construit: " .. tostring(params_or_err) .. " paramètres")
+        log("  Optimisé pour CPU/Edge devices")
+        return true, params_or_err
     end
     
     pipe.train = function(self, dataset_path, epochs, lr)
         log("🎓 Entraînement MobileNet...")
-        Mimir.Dataset.load(dataset_path)
-        Mimir.Model.train(epochs or 150, lr or 0.045)
+        local ok_ds, err_ds = dataset_load(dataset_path)
+        if not ok_ds then
+            return false, err_ds
+        end
+        local ok_train, err_train = model_train(epochs or 150, lr or 0.045)
+        if not ok_train then
+            return false, err_train
+        end
         
         self.trained = true
         return true

@@ -1,3 +1,4 @@
+#!/usr/bin/env mimir --lua
 -- scripts/benchmarks/benchmark_stress.lua
 -- Benchmark "loss from output-gradient" (no targets needed)
 -- Loss: L = 0.5 * sum(y^2)  => dL/dy = y
@@ -6,6 +7,32 @@
 math.randomseed(1337)
 
 local model = Mimir.Model
+
+-- -----------------------------
+-- Runtime setup (modern v2.3)
+-- -----------------------------
+local function configure_runtime(limit_gb)
+  limit_gb = limit_gb or 10.0
+
+  if Mimir and Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
+    local ok, err = Mimir.MemoryGuard.setLimit(limit_gb)
+    if ok == false then log("⚠️ MemoryGuard.setLimit failed: " .. tostring(err)) end
+  end
+
+  if Mimir and Mimir.Allocator and Mimir.Allocator.configure then
+    local ok, err = Mimir.Allocator.configure({
+      max_ram_gb = limit_gb,
+      enable_compression = true,
+      swap_strategy = "lru",
+    })
+    if ok == false then log("⚠️ Allocator.configure failed: " .. tostring(err)) end
+  end
+
+  if model and model.set_hardware then
+    local ok = select(1, pcall(model.set_hardware, true))
+    if not ok then log("⚠️ set_hardware(true) failed") end
+  end
+end
 
 -- -----------------------------
 -- Helpers
@@ -71,22 +98,32 @@ local function hw_stats()
 end
 
 local function guard_stats()
-  if Mimir and Mimir.MemoryGuard and Mimir.MemoryGuard.getStats then
-    local g = Mimir.MemoryGuard.getStats()
-    if g then
-      return string.format("Guard current=%.1fMB peak=%.1fMB limit=%.1fMB usage=%.1f%%",
-        g.current or 0, g.peak or 0, g.limit or 0, g.usage or 0)
+  if Mimir and Mimir.MemoryGuard then
+    local fn = Mimir.MemoryGuard["getStats"] or Mimir.MemoryGuard["get_stats"]
+    if type(fn) == "function" then
+      local g = fn()
+      if g then
+        return string.format("Guard current=%.1fMB peak=%.1fMB limit=%.1fMB usage=%.1f%%",
+          g["current_mb"] or g["current"] or 0,
+          g["peak_mb"] or g["peak"] or 0,
+          g["limit_mb"] or g["limit"] or 0,
+          g["usage_percent"] or g["usage"] or 0)
+      end
     end
   end
   return "Guard stats unavailable"
 end
 
 local function alloc_stats()
-  if Mimir and Mimir.Allocator and Mimir.Allocator.getStats then
-    local a = Mimir.Allocator.getStats()
-    if a then
-      return string.format("Allocator tensors=%s loaded=%s",
-        tostring(a.tensors), tostring(a.loaded))
+  if Mimir and Mimir.Allocator then
+    local fn = Mimir.Allocator["getStats"] or Mimir.Allocator["get_stats"]
+    if type(fn) == "function" then
+      local a = fn()
+      if a then
+        return string.format("Allocator tensors=%s loaded=%s",
+          tostring(a["tensor_count"] or a["tensors"] or a["num_tensors"] or "?"),
+          tostring(a["loaded_count"] or a["loaded"] or a["loaded_tensors"] or "?"))
+      end
     end
   end
   return "Allocator stats unavailable"
@@ -104,19 +141,7 @@ log("║        Mímir BENCH — Loss from Output Gradient (CPU torture)       �
 log("║   L = 0.5 * Σ(y²)  =>  dL/dy = y  (loss computed from gradients)   ║")
 log("╚════════════════════════════════════════════════════════════════════╝")
 
--- Allocator / Guard
-if Mimir and Mimir.Allocator and Mimir.Allocator.configure then
-  local ok, err = Mimir.Allocator.configure({ max_ram_gb = 10.0, enable_compression = true })
-  if ok == false then log("⚠️ Allocator.configure failed: " .. tostring(err)) end
-end
-if Mimir and Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
-  local ok, err = Mimir.MemoryGuard.setLimit(10.0)
-  if ok == false then log("⚠️ MemoryGuard.set_limit_gb failed: " .. tostring(err)) end
-end
-if model.set_hardware then
-  local ok, err = model.set_hardware("cpu")
-  if ok == false then log("⚠️ set_hardware(cpu) failed: " .. tostring(err)) end
-end
+configure_runtime(10.0)
 
 log("Hardware: " .. hw_stats())
 log(guard_stats())
@@ -149,7 +174,7 @@ local function run_level(L)
   local t_alloc = os.clock() - t_alloc0
 
   local t_init0 = os.clock()
-  must(model.init_weights("xavier_uniform", 1337), nil, "init_weights")
+  must(model.init_weights("xavier", 1337), nil, "init_weights")
   local t_init = os.clock() - t_init0
 
   local x = make_input({ height = 1, width = (L.cfg.input_dim or 0), in_channels = 1 })
@@ -250,7 +275,7 @@ local tS0 = os.clock()
 for i=1,stress_n do
   model.create("basic_mlp", stress_cfg)
   model.allocate_params()
-  model.init_weights("xavier_uniform", i)
+  model.init_weights("xavier", i)
   local x = make_input({ height = 1, width = (stress_cfg.input_dim or 0), in_channels = 1 })
   local y = model.forward(x, false)
   if not y then error("stress forward failed at i="..i) end

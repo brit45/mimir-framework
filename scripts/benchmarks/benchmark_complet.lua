@@ -1,4 +1,5 @@
--- scripts/benchmark_full.lua
+#!/usr/bin/env mimir --lua
+-- scripts/benchmarks/benchmark_complet.lua
 -- ╔════════════════════════════════════════════════════════════════════╗
 -- ║     Mímir Framework - Full Benchmark Suite (CPU-FIRST, v2.3+)     ║
 -- ║  Stress: build/alloc/init + forward compute + multi-input + I/O   ║
@@ -31,39 +32,56 @@ local function hr(title)
   log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 end
 
+local function get_guard_stats()
+  if not (Mimir and Mimir.MemoryGuard) then return nil end
+  local fn = Mimir.MemoryGuard["getStats"] or Mimir.MemoryGuard["get_stats"]
+  if type(fn) == "function" then return fn() end
+  return nil
+end
+
+local function get_memory_stats()
+  if not (Mimir and Mimir.Memory) then return nil end
+  local fn = Mimir.Memory["getStats"] or Mimir.Memory["get_stats"]
+  if type(fn) == "function" then return fn() end
+  return nil
+end
+
+local function get_allocator_stats()
+  if not (Mimir and Mimir.Allocator) then return nil end
+  local fn = Mimir.Allocator["getStats"] or Mimir.Allocator["get_stats"]
+  if type(fn) == "function" then return fn() end
+  return nil
+end
+
 local function guard_snapshot(tag)
-  if Mimir.MemoryGuard and Mimir.MemoryGuard.getStats then
-    local s = Mimir.MemoryGuard.getStats()
-    if s then
-      log(string.format("🧠 Guard snapshot: %s | current=%s | peak=%s | limit=%s | usage=%.1f%%",
-        tag,
-        fmt_mb(s.current_mb or s.current or 0),
-        fmt_mb(s.peak_mb or s.peak or 0),
-        fmt_mb(s.limit_mb or s.limit or 0),
-        (s.usage_percent or 0)
-      ))
-    end
+  local s = get_guard_stats()
+  if s then
+    log(string.format("🧠 Guard snapshot: %s | current=%s | peak=%s | limit=%s | usage=%.1f%%",
+      tag,
+      fmt_mb(s["current_mb"] or s["current"] or 0),
+      fmt_mb(s["peak_mb"] or s["peak"] or 0),
+      fmt_mb(s["limit_mb"] or s["limit"] or 0),
+      (s["usage_percent"] or s["usage"] or 0)
+    ))
   end
-  if Mimir.Memory and Mimir.Memory.get_stats then
-    local m = Mimir.Memory.get_stats()
-    if m then
-      log(string.format("🧠 MemoryMgr snapshot: %s | current=%s | peak=%s | usage=%.1f%%",
-        tag,
-        fmt_mb(m.current_mb or m.current or 0),
-        fmt_mb(m.peak_mb or m.peak or 0),
-        (m.usage_percent or 0)
-      ))
-    end
+
+  local m = get_memory_stats()
+  if m then
+    log(string.format("🧠 MemoryMgr snapshot: %s | current=%s | peak=%s | usage=%.1f%%",
+      tag,
+      fmt_mb(m["current_mb"] or m["current"] or 0),
+      fmt_mb(m["peak_mb"] or m["peak"] or 0),
+      (m["usage_percent"] or m["usage"] or 0)
+    ))
   end
-  if Mimir.Allocator and Mimir.Allocator.get_stats then
-    local a = Mimir.Allocator.get_stats()
-    if a then
-      log(string.format("🧠 Allocator snapshot: %s | tensors=%s | loaded=%s",
-        tag,
-        tostring(a.tensor_count or a.tensors or a.num_tensors or "?"),
-        tostring(a.loaded_count or a.loaded or a.loaded_tensors or "?")
-      ))
-    end
+
+  local a = get_allocator_stats()
+  if a then
+    log(string.format("🧠 Allocator snapshot: %s | tensors=%s | loaded=%s",
+      tag,
+      tostring(a["tensor_count"] or a["tensors"] or a["num_tensors"] or "?"),
+      tostring(a["loaded_count"] or a["loaded"] or a["loaded_tensors"] or "?")
+    ))
   end
 end
 
@@ -193,6 +211,14 @@ if Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
 end
 if Mimir.Allocator and Mimir.Allocator.configure then
   local ok, err = Mimir.Allocator.configure(CFG.allocator)
+  if ok == false then
+    log("⚠️ Allocator.configure failed with extended config: " .. tostring(err))
+    ok, err = Mimir.Allocator.configure({
+      max_ram_gb = CFG.allocator.max_ram_gb,
+      enable_compression = CFG.allocator.enable_compression,
+      swap_strategy = CFG.allocator.swap_strategy,
+    })
+  end
   assert_ok(ok, err, "Mimir.Allocator.configure")
   log("🚀 DynamicTensorAllocator configured (compression=" .. tostring(CFG.allocator.enable_compression) .. ")")
 end
@@ -231,7 +257,6 @@ local function bench_model_build_alloc_init(model_type, cfg, init_method, seed)
 
   return {
     params = total_params,
-    build_ms = (Mimir.Model.build and (nil)) or 0,
     alloc_ms = (a1 - a0),
     init_ms  = (i1 - i0),
     total_ms = total

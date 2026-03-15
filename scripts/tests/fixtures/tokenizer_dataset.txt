@@ -1,7 +1,0 @@
-hello world
-machine learning et réseaux de neurones
-le tokenizer doit apprendre un vocabulaire depuis un dataset texte
-ceci est une ligne de test pour enrichir le corpus
-neural network training
-bonjour le monde
-apprentissage automatique et modèle de langage

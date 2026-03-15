@@ -72,8 +72,12 @@ public:
         : data_(ptr), size_bytes_(bytes), tag_(tag), guard_(guard) {}
     
     ~BufferHandle() {
-        if (guard_ && data_) {
-            // Libération automatique
+        if (data_) {
+            delete[] data_;
+            data_ = nullptr;
+        }
+        if (guard_) {
+            // Libération automatique (tracking)
             guard_->releaseAllocation(size_bytes_);
         }
     }
@@ -92,7 +96,11 @@ public:
     BufferHandle& operator=(BufferHandle&& other) noexcept {
         if (this != &other) {
             // Release current
-            if (guard_ && data_) guard_->releaseAllocation(size_bytes_);
+            if (data_) {
+                delete[] data_;
+                data_ = nullptr;
+            }
+            if (guard_) guard_->releaseAllocation(size_bytes_);
             
             data_ = other.data_;
             size_bytes_ = other.size_bytes_;

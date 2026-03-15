@@ -115,6 +115,27 @@ void Encoder::ensureSpecialEmbeddings(uint64_t seed)
     init_if_empty(mag_embedding, 0x0F0F0F0Fu);
 }
 
+void Encoder::ensureDim(int required_dim, uint64_t seed)
+{
+    if (required_dim <= 0) return;
+    if (dim == required_dim) {
+        ensureSpecialEmbeddings(seed);
+        return;
+    }
+
+    // Ne pas détruire un encoder déjà chargé/entraîné.
+    if (vocab_size > 0 || !token_embeddings.empty()) {
+        throw std::runtime_error(
+            "Encoder::ensureDim: dim mismatch (have=" + std::to_string(dim) +
+            ", need=" + std::to_string(required_dim) +
+            "). Refusing to resize because token embeddings are already allocated."
+        );
+    }
+
+    dim = required_dim;
+    ensureSpecialEmbeddings(seed);
+}
+
 void Encoder::sgdUpdateSpecialEmbeddings(const std::vector<float>& grad_text, float lr,
                                         bool update_seq, bool update_mod, bool update_mag)
 {
@@ -151,10 +172,45 @@ void Encoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
     vocab_size = static_cast<int>(new_vocab_size);
 }
 
-void Encoder::setMagicFromToken(const MagicToken & /*mt*/)
+static inline uint32_t mix_u32(uint32_t x) {
+    // Simple mix (xorshift + avalanching) for deterministic pseudo-random weights.
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+void Encoder::setMagicFromToken(const MagicToken &mt)
 {
-    // Best-effort: pas d'initialisation implicite. L'appelant peut définir via setMagEmbedding.
-    mag_embedding.clear();
+    ensureSpecialEmbeddings();
+    mag_embedding.assign(static_cast<size_t>(dim), 0.0f);
+
+    const uint32_t base_seed = mix_u32(mt.seed ^ (mt.modality_mask * 0x9e3779b1u) ^ 0xC0FFEEu);
+
+    // Project 8-d embed -> dim with small, deterministic pseudo-random weights.
+    // Goal: stable conditioning vector, not huge magnitude.
+    for (int d = 0; d < dim; ++d) {
+        float acc = 0.0f;
+        for (int i = 0; i < 8; ++i) {
+            uint32_t h = mix_u32(base_seed ^ (static_cast<uint32_t>(d + 1) * 0xA341316Cu) ^ (static_cast<uint32_t>(i + 1) * 0xC8013EA4u));
+            // [-0.1, 0.1]
+            float w = (static_cast<int>(h % 20001u) - 10000) / 10000.0f;
+            w *= 0.1f;
+            acc += mt.embed[i] * w;
+        }
+        mag_embedding[static_cast<size_t>(d)] = acc;
+    }
+
+    // Normalize (best-effort) to keep scale consistent across modalities.
+    double ss = 0.0;
+    for (float v : mag_embedding) ss += static_cast<double>(v) * static_cast<double>(v);
+    const double n = std::sqrt(ss);
+    if (n > 1e-12) {
+        const float inv = static_cast<float>(1.0 / n);
+        for (float &v : mag_embedding) v *= inv;
+    }
 }
 
 void Encoder::setSeqEmbedding(const std::vector<float> &v)

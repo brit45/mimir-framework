@@ -362,13 +362,14 @@ const int normalized_size = layer.target_shape.empty() ?
     
     // Normalize
     const float* weights = layer.getWeights();
+    const size_t weights_size = (layer.affine && weights) ? layer.getWeightsSize() : 0;
     
     #pragma omp simd
     for (size_t i = 0; i < input.size(); ++i) {
         output[i] = input[i] / rms;
         
         // Apply gamma (weight) if available
-        if (layer.affine && weights && i < layer.getWeightsSize()) {
+        if (weights_size && i < weights_size) {
             output[i] *= weights[i];
         }
     }
@@ -400,6 +401,7 @@ inline std::vector<float> conv1d_forward(
     
     std::vector<float> output(output_size, 0.0f);
     const float* weights = layer.getWeights();
+    const int weights_size = static_cast<int>(layer.getWeightsSize());
     const float* bias = layer.use_bias ? 
                         (weights + out_channels * in_channels * kernel_size) : nullptr;
     
@@ -418,7 +420,7 @@ inline std::vector<float> conv1d_forward(
                         int w_idx = ((oc * in_channels + ic) * kernel_size) + k;
                         
                         if (in_idx < static_cast<int>(input.size()) &&
-                            w_idx < static_cast<int>(layer.getWeightsSize())) {
+                            w_idx < weights_size) {
                             sum += input[in_idx] * weights[w_idx];
                         }
                     }
@@ -454,6 +456,7 @@ inline std::vector<float> depthwise_conv2d_forward(
     
     std::vector<float> output(output_size, 0.0f);
     const float* weights = layer.getWeights();
+    const int weights_size = static_cast<int>(layer.getWeightsSize());
     const float* bias = layer.use_bias ? (weights + channels * kernel_size * kernel_size) : nullptr;
     
     // Each channel processed independently
@@ -474,7 +477,7 @@ inline std::vector<float> depthwise_conv2d_forward(
                             int w_idx = c * (kernel_size * kernel_size) + kh * kernel_size + kw;
                             
                             if (in_idx < static_cast<int>(input.size()) &&
-                                w_idx < static_cast<int>(layer.getWeightsSize())) {
+                                w_idx < weights_size) {
                                 sum += input[in_idx] * weights[w_idx];
                             }
                         }

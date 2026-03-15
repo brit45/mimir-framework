@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(Mimir VERSION 2.3.0 LANGUAGES CXX)
+project(Mimir VERSION 2.4.0 LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet
@@ -14,8 +14,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(ENABLE_SIMD "Enable SIMD optimizations (AVX2, FMA, F16C, BMI2)" ON)
 option(ENABLE_OPENMP "Enable OpenMP parallel processing" ON)
 option(ENABLE_VULKAN "Enable Vulkan Compute acceleration" ON)
+option(ENABLE_OPENCL "Enable OpenCL GPU compute" ON)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
+option(ENABLE_SFML "Enable SFML visualization" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
+
+# Build d'un binaire statique (sans dépendances dynamiques) : nécessite les variantes *.a
+# des libs système (Lua, libstdc++, etc.). Sur certaines distros, un binaire 100% statique
+# peut ne pas être possible sans musl.
+option(BUILD_MIMIR_STATIC "Build fully static mimir_static binary (Linux only)" OFF)
 
 # 🛡️ SÉCURITÉ MÉMOIRE: Legacy params structure (désactivé par défaut)
 # ⚠️  Activer seulement pour debug/compatibilité - consomme énormément de RAM!
@@ -102,11 +109,68 @@ if(ENABLE_VULKAN)
     find_package(Vulkan)
     if(Vulkan_FOUND)
         message(STATUS "Vulkan found: ${Vulkan_VERSION}")
-        add_definitions(-DENABLE_VULKAN)
         include_directories(${Vulkan_INCLUDE_DIRS})
     else()
         message(WARNING "Vulkan not found - Vulkan Compute disabled")
         set(ENABLE_VULKAN OFF)
+    endif()
+endif()
+
+# Vulkan shaders (SPIR-V) - best-effort
+if(ENABLE_VULKAN)
+    option(MIMIR_FETCH_GLSLANG "Fetch and build glslangValidator locally if not found" ON)
+
+    find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
+    set(_MIMIR_GLSLANG_VALIDATOR_CMD "")
+
+    if(GLSLANG_VALIDATOR)
+        message(STATUS "glslangValidator found: ${GLSLANG_VALIDATOR}")
+        set(_MIMIR_GLSLANG_VALIDATOR_CMD "${GLSLANG_VALIDATOR}")
+    elseif(MIMIR_FETCH_GLSLANG)
+        message(STATUS "glslangValidator not found - fetching glslang to build it locally")
+        include(FetchContent)
+        # Keep glslang build lean; we only need the validator binary.
+        set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
+        set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+        set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+        set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+
+        FetchContent_Declare(glslang
+            GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+            # Known-good commit (can be updated later if needed)
+            GIT_TAG 617ecc40dc1d2e64b2796198769ef035d73b9e16
+        )
+        FetchContent_MakeAvailable(glslang)
+
+        # glslang builds the CLI as target `glslang-standalone` (OUTPUT_NAME: glslang)
+        # and creates a post-build symlink `glslangValidator`. Use the target directly.
+        if(TARGET glslang-standalone)
+            set(_MIMIR_GLSLANG_VALIDATOR_CMD $<TARGET_FILE:glslang-standalone>)
+        endif()
+    endif()
+
+    if(_MIMIR_GLSLANG_VALIDATOR_CMD)
+        set(MIMIR_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/shaders")
+        set(MIMIR_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
+        file(MAKE_DIRECTORY "${MIMIR_SHADER_OUT_DIR}")
+
+        set(SHADER_LINEAR_SRC "${MIMIR_SHADER_SRC_DIR}/linear_forward.comp")
+        set(SHADER_LINEAR_SPV "${MIMIR_SHADER_OUT_DIR}/linear_forward.comp.spv")
+
+        add_custom_command(
+            OUTPUT "${SHADER_LINEAR_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_LINEAR_SRC}" -o "${SHADER_LINEAR_SPV}"
+            DEPENDS "${SHADER_LINEAR_SRC}"
+            COMMENT "Compiling Vulkan shader linear_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_target(mimir_shaders ALL DEPENDS "${SHADER_LINEAR_SPV}")
+        if(TARGET glslang-standalone)
+            add_dependencies(mimir_shaders glslang-standalone)
+        endif()
+    else()
+        message(WARNING "No glslangValidator available - Vulkan shaders will not be compiled (runtime will fallback to CPU).")
     endif()
 endif()
 
@@ -115,7 +179,6 @@ if(ENABLE_LZ4)
     find_library(LZ4_LIBRARY NAMES lz4)
     if(LZ4_LIBRARY)
         message(STATUS "LZ4 found: ${LZ4_LIBRARY}")
-        add_definitions(-DENABLE_LZ4)
     else()
         message(WARNING "LZ4 not found - compression disabled")
         set(ENABLE_LZ4 OFF)
@@ -126,19 +189,24 @@ endif()
 find_package(Threads REQUIRED)
 
 # SFML (visualisation)
-find_package(SFML 2.5 COMPONENTS graphics window system)
-if(SFML_FOUND)
-    message(STATUS "SFML found: ${SFML_VERSION}")
-else()
-    message(WARNING "SFML not found - Visualization may be limited")
+if(ENABLE_SFML)
+    find_package(SFML 2.5 COMPONENTS graphics window system)
+    if(SFML_FOUND)
+        message(STATUS "SFML found: ${SFML_VERSION}")
+    else()
+        message(WARNING "SFML not found - Visualization may be limited")
+    endif()
 endif()
 
 # OpenCL (calcul GPU)
-find_library(OPENCL_LIBRARY NAMES OpenCL)
-if(OPENCL_LIBRARY)
-    message(STATUS "OpenCL found: ${OPENCL_LIBRARY}")
-else()
-    message(WARNING "OpenCL not found - GPU compute disabled")
+if(ENABLE_OPENCL)
+    find_library(OPENCL_LIBRARY NAMES OpenCL)
+    if(OPENCL_LIBRARY)
+        message(STATUS "OpenCL found: ${OPENCL_LIBRARY}")
+    else()
+        message(WARNING "OpenCL not found - GPU compute disabled")
+        set(ENABLE_OPENCL OFF)
+    endif()
 endif()
 
 # ============================================================================
@@ -153,19 +221,27 @@ set(MIMIR_SOURCES
     src/tensors.cpp
     src/Sha256.cpp
     src/LuaScripting.cpp
+    src/Helpers.cpp
     src/stb_image_impl.cpp
     src/Models/Registry/ModelArchitectures.cpp
     src/Models/MLP/BasicMLPModel.cpp
-    src/Models/Diffusion/PonyXLDDPMModel.cpp
     src/Models/NLP/TransformerModel.cpp
+    src/Models/NLP/VAETextModel.cpp
     src/Models/Vision/ViTModel.cpp
     src/Models/Vision/VAEModel.cpp
+    src/Models/Vision/VAEConvModel.cpp
+    src/Models/Vision/GanLatentModel.cpp
     src/Models/Vision/CNN/ResNetModel.cpp
     src/Models/Vision/UNetModel.cpp
     src/Models/Vision/CNN/MobileNetModel.cpp
     src/Models/Vision/CNN/VGG16Model.cpp
     src/Models/Vision/CNN/VGG19Model.cpp
+    src/Models/Vision/CNN/VGG16FeatModel.cpp
+    src/Models/Vision/PatchDiscriminatorModel.cpp
     src/Models/Diffusion/DiffusionModel.cpp
+    src/Models/Diffusion/CondDiffusionModel.cpp
+    src/Models/Diffusion/SD35Model.cpp
+    src/Models/Diffusion/PonyXLDDPMModel.cpp
     src/Serialization/Serialization.cpp
     src/Serialization/SafeTensorsWriter.cpp
     src/Serialization/SafeTensorsReader.cpp
@@ -197,16 +273,22 @@ set(MIMIR_HEADERS
     src/LayerOpsExt.hpp
     src/Models/Registry/ModelArchitectures.hpp
     src/Models/MLP/BasicMLPModel.hpp
-    src/Models/Diffusion/PonyXLDDPMModel.hpp
     src/Models/NLP/TransformerModel.hpp
+    src/Models/NLP/VAETextModel.hpp
     src/Models/Vision/ViTModel.hpp
     src/Models/Vision/VAEModel.hpp
+    src/Models/Vision/GanLatentModel.hpp
     src/Models/Vision/CNN/ResNetModel.hpp
     src/Models/Vision/UNetModel.hpp
     src/Models/Vision/CNN/MobileNetModel.hpp
     src/Models/Vision/CNN/VGG16Model.hpp
     src/Models/Vision/CNN/VGG19Model.hpp
+    src/Models/Vision/CNN/VGG16FeatModel.hpp
+    src/Models/Vision/PatchDiscriminatorModel.hpp
     src/Models/Diffusion/DiffusionModel.hpp
+    src/Models/Diffusion/CondDiffusionModel.hpp
+    src/Models/Diffusion/SD35Model.hpp
+    src/Models/Diffusion/PonyXLDDPMModel.hpp
     src/Serialization/Serialization.hpp
     src/Serialization/SafeTensorsWriter.hpp
     src/Serialization/SafeTensorsReader.hpp
@@ -216,14 +298,26 @@ set(MIMIR_HEADERS
     src/stb_image.h
 )
 
+# Variante de sources sans SFML (utile pour builds headless / statiques)
+set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})
+list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML src/Visualizer.cpp)
+
 # ============================================================================
 # Bibliothèque principale Mímir
 # ============================================================================
 
-add_library(mimir_core STATIC
-    ${MIMIR_SOURCES}
-    ${MIMIR_HEADERS}
-)
+if(ENABLE_SFML AND SFML_FOUND)
+    add_library(mimir_core STATIC
+        ${MIMIR_SOURCES}
+        ${MIMIR_HEADERS}
+    )
+    target_compile_definitions(mimir_core PUBLIC ENABLE_SFML)
+else()
+    add_library(mimir_core STATIC
+        ${MIMIR_SOURCES_NO_SFML}
+        ${MIMIR_HEADERS}
+    )
+endif()
 
 target_include_directories(mimir_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -249,22 +343,27 @@ if(ENABLE_OPENMP AND OpenMP_CXX_FOUND)
 endif()
 
 if(ENABLE_VULKAN AND Vulkan_FOUND)
+    target_compile_definitions(mimir_core PUBLIC ENABLE_VULKAN)
     target_link_libraries(mimir_core PUBLIC Vulkan::Vulkan)
 endif()
 
+if(ENABLE_OPENCL AND OPENCL_LIBRARY)
+    target_compile_definitions(mimir_core PUBLIC ENABLE_OPENCL)
+    target_link_libraries(mimir_core PUBLIC ${OPENCL_LIBRARY})
+endif()
+
 if(ENABLE_LZ4 AND LZ4_LIBRARY)
+    target_compile_definitions(mimir_core PUBLIC ENABLE_LZ4)
     target_link_libraries(mimir_core PUBLIC ${LZ4_LIBRARY})
 endif()
 
 # SFML (visualisation)
-if(SFML_FOUND)
+if(ENABLE_SFML AND SFML_FOUND)
     target_link_libraries(mimir_core PUBLIC sfml-graphics sfml-window sfml-system)
 endif()
 
 # OpenCL (calcul GPU)
-if(OPENCL_LIBRARY)
-    target_link_libraries(mimir_core PUBLIC ${OPENCL_LIBRARY})
-endif()
+# (déjà géré via ENABLE_OPENCL)
 
 # ============================================================================
 # Exécutable principal
@@ -273,10 +372,85 @@ endif()
 add_executable(mimir src/main.cpp)
 target_link_libraries(mimir PRIVATE mimir_core)
 
+# Copier les shaders compilés à côté du binaire (best-effort)
+if(TARGET mimir_shaders)
+    add_dependencies(mimir mimir_shaders)
+    add_custom_command(TARGET mimir POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:mimir>/shaders"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/linear_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/linear_forward.comp.spv"
+        COMMENT "Copy Vulkan shaders to bin/shaders"
+    )
+endif()
+
 # Installation dans bin/
 set_target_properties(mimir PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
 )
+
+# ==========================================================================
+# Exécutable statique (optionnel) : mimir_static
+# ==========================================================================
+
+if(BUILD_MIMIR_STATIC)
+    # Trouver la lib Lua statique si possible (évite le lien contre liblua*.so)
+    set(_MIMIR_OLD_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+    find_library(LUA_STATIC_LIBRARY NAMES lua5.3 lua)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ${_MIMIR_OLD_FIND_LIBRARY_SUFFIXES})
+
+    if(NOT LUA_STATIC_LIBRARY)
+        message(WARNING "BUILD_MIMIR_STATIC=ON mais liblua statique introuvable (*.a). Tentative avec ${LUA_LIBRARIES} (peut échouer).")
+    else()
+        message(STATUS "Lua static library: ${LUA_STATIC_LIBRARY}")
+    endif()
+
+    # Variante minimale de la lib (évite Vulkan/SFML/OpenCL/LZ4/OpenMP par défaut)
+    # pour maximiser les chances d'un lien 100% statique.
+    add_library(mimir_core_static STATIC
+        ${MIMIR_SOURCES_NO_SFML}
+        ${MIMIR_HEADERS}
+    )
+
+    target_include_directories(mimir_core_static PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/include
+    )
+
+    if(MIMIR_ENABLE_LEGACY_PARAMS)
+        target_compile_definitions(mimir_core_static PRIVATE MIMIR_ENABLE_LEGACY_PARAMS)
+    endif()
+
+    if(LUA_STATIC_LIBRARY)
+        target_link_libraries(mimir_core_static PUBLIC
+            ${LUA_STATIC_LIBRARY}
+            Threads::Threads
+        )
+    else()
+        target_link_libraries(mimir_core_static PUBLIC
+            ${LUA_LIBRARIES}
+            Threads::Threads
+        )
+    endif()
+
+    add_executable(mimir_static src/main.cpp)
+    target_link_libraries(mimir_static PRIVATE mimir_core_static)
+
+    set_target_properties(mimir_static PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+    )
+
+    if(UNIX AND NOT APPLE)
+        # Tente un lien 100% statique. Si ça échoue, il manque probablement des *.a
+        # (ex: liblua, libgomp, libc, etc.).
+        target_link_options(mimir_static PRIVATE -static -static-libgcc -static-libstdc++)
+        set_target_properties(mimir_static PROPERTIES
+            LINK_SEARCH_START_STATIC ON
+            LINK_SEARCH_END_STATIC ON
+        )
+    endif()
+endif()
 
 message(STATUS "Tests/exemples désactivés (obsolètes)")
 
@@ -296,6 +470,12 @@ file(COPY ${LUA_SCRIPTS} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/scripts)
 install(TARGETS mimir
     RUNTIME DESTINATION bin
 )
+
+if(BUILD_MIMIR_STATIC)
+    install(TARGETS mimir_static
+        RUNTIME DESTINATION bin
+    )
+endif()
 
 # Installer la bibliothèque
 install(TARGETS mimir_core
