@@ -33,6 +33,20 @@ static inline std::string canonicalArchName(const std::string& name) {
 }
 } // namespace
 
+// Merge helper for cfgFromConfig (keep behavior consistent with Registry::create).
+static void mergeIntoCfg(json& base, const json& overrides) {
+    if (!base.is_object() || !overrides.is_object()) return;
+    for (auto it = overrides.begin(); it != overrides.end(); ++it) {
+        const std::string& key = it.key();
+        const json& val = it.value();
+        if (base.contains(key) && base[key].is_object() && val.is_object()) {
+            mergeIntoCfg(base[key], val);
+        } else {
+            base[key] = val;
+        }
+    }
+}
+
 Registry& Registry::instance() {
     static Registry inst;
     return inst;
@@ -618,6 +632,78 @@ static json sd35DefaultConfigJson() {
 }
 
 } // namespace
+
+std::string resolveArchitectureFromConfig(const json& full_config, const std::string& default_arch) {
+    std::string arch = default_arch;
+    if (!full_config.is_object()) return arch;
+
+    auto pickString = [&](const char* key) -> std::string {
+        auto it = full_config.find(key);
+        if (it != full_config.end() && it->is_string()) return it->get<std::string>();
+        return std::string();
+    };
+
+    {
+        std::string a = pickString("architecture");
+        if (!a.empty()) return a;
+    }
+    {
+        std::string t = pickString("type");
+        if (!t.empty()) return t;
+    }
+
+    // Fallback: config.model.{architecture|type}
+    auto mit = full_config.find("model");
+    if (mit != full_config.end() && mit->is_object()) {
+        const json& m = *mit;
+        auto ait = m.find("architecture");
+        if (ait != m.end() && ait->is_string()) return ait->get<std::string>();
+        auto tit = m.find("type");
+        if (tit != m.end() && tit->is_string()) return tit->get<std::string>();
+    }
+
+    return arch;
+}
+
+json cfgFromConfig(const json& full_config, std::string* out_arch, const std::string& default_arch) {
+    const std::string arch = resolveArchitectureFromConfig(full_config, default_arch);
+    if (out_arch) *out_arch = arch;
+
+    // Start from default config for the selected architecture.
+    json cfg = ModelArchitectures::defaultConfig(arch);
+
+    // Flatten the common override sections into the root config (so buildFromConfig sees them).
+    if (full_config.is_object()) {
+        auto it_model = full_config.find("model");
+        if (it_model != full_config.end() && it_model->is_object()) {
+            mergeIntoCfg(cfg, *it_model);
+        }
+
+        auto it_arch = full_config.find(arch);
+        if (it_arch != full_config.end() && it_arch->is_object()) {
+            mergeIntoCfg(cfg, *it_arch);
+        }
+
+        // Preserve all parent keys verbatim so the framework can read them later.
+        // This intentionally includes `model` and the architecture section name.
+        for (auto it = full_config.begin(); it != full_config.end(); ++it) {
+            cfg[it.key()] = it.value();
+        }
+    }
+
+    return cfg;
+}
+
+std::shared_ptr<Model> createFromConfig(const json& full_config,
+                                        json* out_cfg,
+                                        std::string* out_arch,
+                                        const std::string& default_arch) {
+    std::string arch;
+    json cfg = cfgFromConfig(full_config, &arch, default_arch);
+    if (out_arch) *out_arch = arch;
+    if (out_cfg) *out_cfg = cfg;
+    return ModelArchitectures::create(arch, cfg);
+}
 
 std::shared_ptr<Model> Registry::create(const std::string& name, const json& config) const {
     ensureBuiltinsRegistered();

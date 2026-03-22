@@ -391,10 +391,10 @@ json Tokenizer::to_json() const
         // Sauvegarder vocab directement (token -> id)
         json vocab_obj = json::object();
         for (const auto& [token, id] : vocab) {
-            // Sanitize control chars
-            std::string s = token;
-            for (char &c : s) if (static_cast<unsigned char>(c) <= 0x1F) c = ' ';
-            vocab_obj[s] = id;
+            // IMPORTANT: keep tokens verbatim. JSON dumping will escape control chars
+            // (e.g. "\n", "\t") in a reversible way. Replacing them by spaces
+            // would introduce key collisions and lose vocabulary entries.
+            vocab_obj[token] = id;
         }
         j["vocab"] = std::move(vocab_obj);
     } catch (const std::exception &e) {

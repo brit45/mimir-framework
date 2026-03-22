@@ -5391,8 +5391,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             "float32",
             layer.name + "_output"
         );
-        std::vector<float>& layer_output = output_handle.data();
-        layer_output = x;
+        std::vector<float>& out = output_handle.data();
+        out = x;
         
         float mean = 0.0f;
         for (float val : x) mean += val;
@@ -5408,12 +5408,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         
         const float* layer_weights = layer.getWeights();
         
-        for (size_t i = 0; i < layer_output.size(); ++i) {
-            layer_output[i] = (layer_output[i] - mean) / std;
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = (out[i] - mean) / std;
             if (layer.affine && i < layer.getWeightsSize()) {
-                layer_output[i] *= layer_weights[i];
+                out[i] *= layer_weights[i];
             }
         }
+
+        layer_output = out;
         
         break;
     }
@@ -5504,29 +5506,27 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // ====================================================================
     
     case LayerType::MaxPool2d: {
-        RUNTIME_CHECK(
-            layer.get_kernel_h() > 0,
-            "MaxPool2d: kernel_size must be set"
-        );
-        
         const int kernel_size = layer.get_kernel_h();
         const int in_channels = layer.in_channels > 0 ? layer.in_channels : 64;
         const int height = layer.input_height > 0 ? layer.input_height : 64;
         const int width = layer.input_width > 0 ? layer.input_width : 64;
         const int stride = layer.get_stride_h();
         const int padding = layer.get_pad_h();
-        
+
+        RUNTIME_CHECK(kernel_size > 0, "MaxPool2d: kernel_size must be > 0");
+        RUNTIME_CHECK(stride > 0, "MaxPool2d: stride must be > 0");
+
         const int out_height = (height + 2 * padding - kernel_size) / stride + 1;
         const int out_width = (width + 2 * padding - kernel_size) / stride + 1;
-        
+        RUNTIME_CHECK(out_height > 0 && out_width > 0, "MaxPool2d: output dimensions must be > 0");
+
         auto output_handle = allocator.allocate_tensor(
             {in_channels, out_height, out_width},
             "float32",
             layer.name + "_output"
         );
-        std::vector<float>& layer_output = output_handle.data();
-        std::fill(layer_output.begin(), layer_output.end(), 
-                  -std::numeric_limits<float>::infinity());
+        std::vector<float>& out = output_handle.data();
+        std::fill(out.begin(), out.end(), -std::numeric_limits<float>::infinity());
 
         for (int c = 0; c < in_channels; ++c) {
             for (int oh = 0; oh < out_height; ++oh) {
@@ -5548,10 +5548,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     }
                     
                     int out_idx = c * (out_height * out_width) + oh * out_width + ow;
-                    layer_output[out_idx] = max_val;
+                    out[out_idx] = max_val;
                 }
             }
         }
+
+        // Copy into the returned buffer for consistency with other ops.
+        layer_output = out;
         break;
     }
     

@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.15)
+
+function(mimir_add_test test_name src_file)
+    add_executable(${test_name} ${src_file})
+    target_compile_features(${test_name} PRIVATE cxx_std_17)
+    target_link_libraries(${test_name} PRIVATE mimir_core)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 15)
+endfunction()
+
+mimir_add_test(LRDecayTest.Warmup               test_lr_decay_warmup.cpp)
+mimir_add_test(LRDecayTest.Boundaries           test_lr_decay_boundaries.cpp)
+mimir_add_test(SerializationTest.RoundTrip      test_serialization_roundtrip.cpp)
+mimir_add_test(SerializationTest.Deterministic  test_serialization_deterministic.cpp)
+mimir_add_test(SerializationTest.CorruptedInput test_serialization_corrupted.cpp)
+
+mimir_add_test(RegistryTest.CfgFromConfig        test_registry_cfg_from_config.cpp)
+mimir_add_test(RegistryTest.CreateFromConfig     test_registry_create_from_config.cpp)
+mimir_add_test(LuaTest.CreateFromConfig          test_lua_create_from_config.cpp)
+
+mimir_add_test(FrameworkTest.TokenizerBasics      test_tokenizer_basics.cpp)
+mimir_add_test(FrameworkTest.TokenizerBPE         test_tokenizer_bpe.cpp)
+mimir_add_test(FrameworkTest.EncoderBasics        test_encoder_basics.cpp)
+mimir_add_test(FrameworkTest.MemoryGuard          test_memory_guard.cpp)
+mimir_add_test(FrameworkTest.OverrideParsing      test_override_parsing.cpp)
+mimir_add_test(RegistryTest.Aliases               test_registry_aliases.cpp)
+mimir_add_test(LuaTest.ApiBasics                  test_lua_api_basics.cpp)
+mimir_add_test(LuaTest.CreateFromConfigErrors     test_lua_create_from_config_errors.cpp)
+
+mimir_add_test(SerializationTest.SafeTensorsModel test_serialization_safetensors_model.cpp)
+mimir_add_test(SerializationTest.RawFolderModel   test_serialization_rawfolder_model.cpp)
+mimir_add_test(SerializationTest.StrictMissingAssets test_serialization_strict_missing_assets.cpp)
+
+mimir_add_test(FrameworkTest.TokenizerJsonControlChars test_tokenizer_json_control_chars.cpp)
+mimir_add_test(FrameworkTest.OverrideErrors           test_override_errors.cpp)
+
+mimir_add_test(RuntimeTest.NamedRouting              test_layers_named_routing.cpp)
+mimir_add_test(RuntimeTest.EmbeddingIntInputs         test_runtime_embedding_int_inputs.cpp)
+mimir_add_test(RuntimeTest.ResidualMerge              test_runtime_residual_merge.cpp)
+mimir_add_test(RuntimeTest.AllLayerTypes              test_layers_all_types.cpp)
+mimir_add_test(ModelTest.WeightBlocks                test_model_weight_blocks.cpp)
+mimir_add_test(ModelTest.TrainStepFreeze             test_model_train_step_freeze.cpp)

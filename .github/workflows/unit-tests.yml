@@ -1,0 +1,52 @@
+name: unit-tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            ninja-build \
+            g++ \
+            liblua5.3-dev \
+            liblz4-dev
+
+      - name: Configure (CMake)
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMIMIR_ENABLE_TESTS=ON \
+            -DENABLE_VULKAN=OFF \
+            -DENABLE_OPENCL=OFF \
+            -DENABLE_SFML=OFF \
+            -DENABLE_OPENMP=ON \
+            -DENABLE_LZ4=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run unit tests (CTest)
+        run: ctest --test-dir build --output-on-failure --timeout 30
+
+      - name: Upload CTest logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTestsFailed.log
+            build/CTestTestfile.cmake

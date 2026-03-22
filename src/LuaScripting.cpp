@@ -143,6 +143,9 @@ void LuaScripting::registerAPI() {
     // Gestion basique
     lua_pushcfunction(L, lua_createModel);
     lua_setfield(L, -2, "create");
+
+    lua_pushcfunction(L, lua_createModelFromConfig);
+    lua_setfield(L, -2, "create_from_config");
     
     lua_pushcfunction(L, lua_buildModel);
     lua_setfield(L, -2, "build");
@@ -677,6 +680,43 @@ int LuaScripting::lua_createModel(lua_State* L) {
     }
     
     return 1;
+}
+
+int LuaScripting::lua_createModelFromConfig(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+
+    // Argument: config complète (table)
+    luaL_checktype(L, 1, LUA_TTABLE);
+    json full = luaTableToJson(L, 1);
+
+    try {
+        std::string arch;
+        json cfg;
+        ctx.currentModel = ModelArchitectures::createFromConfig(full, &cfg, &arch);
+
+        // Propager les assets déjà présents.
+        if (ctx.currentTokenizer) {
+            ctx.currentModel->setTokenizer(*ctx.currentTokenizer);
+        }
+        if (ctx.currentEncoder) {
+            ctx.currentModel->setEncoder(*ctx.currentEncoder);
+        }
+
+        ctx.currentConfig = full;
+        ctx.modelType = arch;
+        ctx.modelConfig = cfg;
+
+        ctx.addLog("Modèle créé via registre depuis config: " + arch);
+
+        lua_pushboolean(L, true);
+        lua_pushstring(L, arch.c_str());
+        return 2;
+    } catch (const std::exception& e) {
+        ctx.addLog("Erreur création modèle depuis config: " + std::string(e.what()));
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
 }
 
 int LuaScripting::lua_buildModel(lua_State* L) {

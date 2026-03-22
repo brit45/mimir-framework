@@ -59,6 +59,7 @@ private:
     
     // === Model API ===
     static int lua_createModel(lua_State* L);
+    static int lua_createModelFromConfig(lua_State* L);
     static int lua_buildModel(lua_State* L);
     static int lua_trainModel(lua_State* L);
     static int lua_inferModel(lua_State* L);

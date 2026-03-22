@@ -431,7 +431,7 @@ public:
     void requestStopTraining() {}
     bool consumeStopTrainingRequested() { return false; }
 
-    void addGeneratedImage(const std::vector<uint8_t>&, const std::string&) {}
+    void addGeneratedImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
 
     void setDatasetImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
     void setDatasetText(const std::string&, const std::string&, const std::string&) {}

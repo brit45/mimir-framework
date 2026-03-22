@@ -339,14 +339,24 @@ inline std::vector<float> softmax_forward(
         output[i] = std::exp(input[i] - max_val);
         sum += output[i];
     }
-    
-    // Normalize
-    float inv_sum = 1.0f / sum;
+
+    // Normalize (or log-normalize)
+    const float inv_sum = 1.0f / sum;
+    if (layer.type_enum == LayerType::LogSoftmax) {
+        // log_softmax(x) = (x - max) - log(sum(exp(x-max)))
+        const float log_denom = std::log(sum);
+        #pragma omp simd
+        for (int i = 0; i < N; ++i) {
+            output[i] = (input[i] - max_val) - log_denom;
+        }
+        return output;
+    }
+
     #pragma omp simd
     for (int i = 0; i < N; ++i) {
         output[i] *= inv_sum;
     }
-    
+
     return output;
 }
 

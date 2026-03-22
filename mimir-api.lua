@@ -367,9 +367,9 @@ function write_file(path, content) end
 ---@field ddpm_beta_start? float
 ---@field ddpm_beta_end? float
 ---@field ddpm_steps_per_image? int @Nb updates diffusion par image (1=standard)
----@field peltier_noise? bool @Bruit gaussien mixé avec composante floutée
----@field peltier_mix? float @Mix [0..1] (0=blanc, 1=flouté)
----@field peltier_blur_radius? int @Rayon box blur (0=off)
+---@field peltier_noise? bool @DÉPRÉCIÉ/IGNORÉ: ancien "bruit peltier" (corrélé). DDPM latent standard utilise eps~N(0,I).
+---@field peltier_mix? float @DÉPRÉCIÉ/IGNORÉ
+---@field peltier_blur_radius? int @DÉPRÉCIÉ/IGNORÉ
 ---@field vae_arch? string @Archi VAE externe (ex: "vae_conv")
 ---@field vae_checkpoint? string @Chemin checkpoint VAE
 ---@field vae_scale? float @Échelle latents VAE

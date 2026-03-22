@@ -221,6 +221,7 @@ set(MIMIR_SOURCES
     src/tensors.cpp
     src/Sha256.cpp
     src/LuaScripting.cpp
+    src/ConfigOverrides.cpp
     src/Helpers.cpp
     src/stb_image_impl.cpp
     src/Models/Registry/ModelArchitectures.cpp
@@ -453,6 +454,18 @@ if(BUILD_MIMIR_STATIC)
 endif()
 
 message(STATUS "Tests/exemples désactivés (obsolètes)")
+
+# ============================================================================
+# Tests unitaires (CTest)
+# ============================================================================
+
+option(MIMIR_ENABLE_TESTS "Build unit tests (CTest)" OFF)
+if(MIMIR_ENABLE_TESTS)
+    include(CTest)
+    if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMakeLists.txt")
+        add_subdirectory(Tests)
+    endif()
+endif()
 
 # ============================================================================
 # Scripts Lua
