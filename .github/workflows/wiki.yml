@@ -1,0 +1,256 @@
+name: Publish Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/wiki.yml"
+  workflow_dispatch:
+
+jobs:
+  publish-wiki:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and publish wiki pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, re, shutil, subprocess, sys, pathlib
+
+          REPO         = os.environ["REPO"]
+          GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+          WIKI_URL    = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{REPO}.wiki.git"
+          DOCS_ROOT   = pathlib.Path("docs")
+          WIKI_DIR    = pathlib.Path("/tmp/wiki")
+
+          # ── Section directory → human prefix ──────────────────────────────────
+          SECTION_PREFIX = {
+              "01-Getting-Started":        "Getting-Started",
+              "02-User-Guide":             "User-Guide",
+              "03-API-Reference":          "API-Reference",
+              "04-Architecture-Internals": "Architecture-Internals",
+              "05-Advanced":               "Advanced",
+              "06-Contributing":           "Contributing",
+          }
+
+          # ── Human-readable section titles for _Sidebar.md ────────────────────
+          SECTION_TITLE = {
+              "01-Getting-Started":        "Getting Started",
+              "02-User-Guide":             "User Guide",
+              "03-API-Reference":          "API Reference",
+              "04-Architecture-Internals": "Architecture Internals",
+              "05-Advanced":               "Advanced",
+              "06-Contributing":           "Contributing",
+          }
+
+          def strip_num(name: str) -> str:
+              """Remove leading NN- numeric prefix from a filename or dir name."""
+              return re.sub(r"^\d+-", "", name)
+
+          def wiki_page_name(rel: pathlib.PurePosixPath) -> str:
+              """
+              Convert a docs-relative path to a wiki page name (no extension).
+              docs/00-INDEX.md           → Home
+              docs/01-Getting-Started/01-Quick-Start.md → Getting-Started-01-Quick-Start
+
+              The numeric prefix is kept in the filename portion so that files
+              sharing the same human name (e.g. two Serialization pages) remain
+              distinct wiki pages.
+              """
+              parts = list(rel.parts)
+              if len(parts) == 1:
+                  stem = pathlib.Path(parts[0]).stem
+                  if parts[0] == "00-INDEX.md":
+                      return "Home"
+                  return strip_num(stem)
+              # section file – keep the numeric prefix in the filename part
+              section_dir = parts[0]
+              file_stem   = pathlib.Path(parts[1]).stem
+              prefix      = SECTION_PREFIX.get(section_dir, strip_num(section_dir))
+              return f"{prefix}-{file_stem}"
+
+          def fix_links(content: str, rel_doc_path: pathlib.PurePosixPath) -> str:
+              """
+              Rewrite markdown links so they point to wiki page names.
+                - Relative .md links → wiki page name (no extension)
+                - src/ links         → absolute GitHub source URL
+                - External / anchor  → untouched
+              """
+              base_dir = rel_doc_path.parent
+
+              def replace(m):
+                  text = m.group(1)
+                  link = m.group(2)
+
+                  # Leave anchors, external URLs, image extensions intact
+                  if (link.startswith("#")
+                          or link.startswith("http://")
+                          or link.startswith("https://")):
+                      return m.group(0)
+
+                  # Separate path from optional #anchor fragment
+                  anchor = ""
+                  if "#" in link:
+                      link, anchor = link.split("#", 1)
+                      anchor = "#" + anchor
+
+                  if not link:          # pure anchor like [text](#section)
+                      return m.group(0)
+
+                  path_obj = pathlib.PurePosixPath(link)
+
+                  # Source-code links (relative paths ending outside docs/)
+                  resolved = (base_dir / path_obj).as_posix()
+                  # Normalise /../ etc.
+                  try:
+                      norm = pathlib.PurePosixPath(
+                          pathlib.Path("/dummy/" + resolved).resolve().relative_to("/dummy")
+                      )
+                  except (ValueError, RuntimeError):
+                      return m.group(0)
+
+                  norm_s = norm.as_posix()
+
+                  # If the resolved path starts with "docs/" → wiki link
+                  if norm_s.startswith("docs/"):
+                      inner = pathlib.PurePosixPath(norm_s[len("docs/"):])
+                      page  = wiki_page_name(inner)
+                      return f"[{text}]({page}{anchor})"
+
+                  # If the link is a plain relative path without docs/ prefix
+                  # but ends in .md, check if it's relative to current section
+                  if path_obj.suffix == ".md":
+                      # Try to resolve relative to this file's dir inside docs
+                      candidate = (DOCS_ROOT / base_dir / path_obj).resolve()
+                      try:
+                          inner = pathlib.PurePosixPath(
+                              candidate.relative_to(DOCS_ROOT.resolve())
+                          )
+                          page = wiki_page_name(inner)
+                          return f"[{text}]({page}{anchor})"
+                      except ValueError:
+                          pass
+
+                  # Source code references (src/, scripts/, etc.) → absolute GitHub URL
+                  if (norm_s.startswith("src/")
+                          or norm_s.startswith("scripts/")
+                          or norm_s.startswith("Tests/")):
+                      gh_url = f"https://github.com/{REPO}/blob/main/{norm_s}"
+                      return f"[{text}]({gh_url})"
+
+                  return m.group(0)
+
+              return re.sub(r"\[([^\]]+)\]\(([^)]*)\)", replace, content)
+
+          # ── Clone wiki ────────────────────────────────────────────────────────
+          if WIKI_DIR.exists():
+              shutil.rmtree(WIKI_DIR)
+          result = subprocess.run(
+              ["git", "clone", WIKI_URL, str(WIKI_DIR)],
+              capture_output=True, text=True
+          )
+          if result.returncode != 0:
+              print("Wiki repository not yet initialised — creating empty dir.")
+              WIKI_DIR.mkdir(parents=True)
+              subprocess.run(["git", "init"], cwd=WIKI_DIR, check=True)
+              subprocess.run(
+                  ["git", "remote", "add", "origin", WIKI_URL],
+                  cwd=WIKI_DIR, check=True
+              )
+
+          # ── Remove old wiki pages (keep .git) ────────────────────────────────
+          for f in WIKI_DIR.iterdir():
+              if f.name != ".git":
+                  f.unlink() if f.is_file() else shutil.rmtree(f)
+
+          # ── Collect docs files in order ───────────────────────────────────────
+          ordered_sections = [
+              "01-Getting-Started",
+              "02-User-Guide",
+              "03-API-Reference",
+              "04-Architecture-Internals",
+              "05-Advanced",
+              "06-Contributing",
+          ]
+
+          # (section_dir_or_None, rel_path_relative_to_docs)
+          docs_files: list[tuple[str | None, pathlib.PurePosixPath]] = []
+
+          # Root index
+          if (DOCS_ROOT / "00-INDEX.md").is_file():
+              docs_files.append((None, pathlib.PurePosixPath("00-INDEX.md")))
+
+          for sec in ordered_sections:
+              sec_dir = DOCS_ROOT / sec
+              if not sec_dir.is_dir():
+                  continue
+              for md in sorted(sec_dir.glob("*.md")):
+                  docs_files.append(
+                      (sec, pathlib.PurePosixPath(f"{sec}/{md.name}"))
+                  )
+
+          # ── Copy files with link rewriting ────────────────────────────────────
+          # sidebar_entries maps section dir → list of (wiki_page_name, human_display)
+          SidebarEntry = tuple[str, str]
+          sidebar_entries: dict[str, list[SidebarEntry]] = {}
+
+          for sec, rel in docs_files:
+              page_name = wiki_page_name(rel)
+              src = DOCS_ROOT / rel
+              content = src.read_text(encoding="utf-8")
+              content = fix_links(content, rel)
+              (WIKI_DIR / f"{page_name}.md").write_text(content, encoding="utf-8")
+
+              if sec is not None:
+                  display = strip_num(pathlib.Path(rel.name).stem).replace("-", " ")
+                  sidebar_entries.setdefault(sec, []).append((page_name, display))
+
+          # ── Generate _Sidebar.md ──────────────────────────────────────────────
+          sidebar_lines = ["## Navigation\n", "**[[Home]]**\n"]
+          for sec in ordered_sections:
+              entries = sidebar_entries.get(sec, [])
+              if not entries:
+                  continue
+              title = SECTION_TITLE.get(sec, strip_num(sec))
+              sidebar_lines.append(f"\n### {title}\n")
+              for page_name, display in entries:
+                  sidebar_lines.append(f"- [[{display}|{page_name}]]\n")
+
+          (WIKI_DIR / "_Sidebar.md").write_text("".join(sidebar_lines), encoding="utf-8")
+
+          # ── Commit and push ───────────────────────────────────────────────────
+          subprocess.run(
+              ["git", "config", "user.name",  "github-actions[bot]"],
+              cwd=WIKI_DIR, check=True
+          )
+          subprocess.run(
+              ["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"],
+              cwd=WIKI_DIR, check=True
+          )
+          subprocess.run(["git", "add", "-A"], cwd=WIKI_DIR, check=True)
+          status = subprocess.run(
+              ["git", "diff", "--staged", "--quiet"],
+              cwd=WIKI_DIR
+          )
+          if status.returncode != 0:
+              subprocess.run(
+                  ["git", "commit", "-m", "docs: sync wiki from docs/ [skip ci]"],
+                  cwd=WIKI_DIR, check=True
+              )
+              subprocess.run(
+                  ["git", "push", "origin", "HEAD"],
+                  cwd=WIKI_DIR, check=True
+              )
+              print("Wiki updated successfully.")
+          else:
+              print("Wiki already up to date — nothing to push.")
+          PYEOF
