@@ -534,6 +534,7 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     json root;
     
     // Version and format
+    root["format"] = "mimir_debug_dump";
     root["format_version"] = "1.1.0";
     root["timestamp"] = std::time(nullptr);
     root["model_name"] = model.getModelName();
