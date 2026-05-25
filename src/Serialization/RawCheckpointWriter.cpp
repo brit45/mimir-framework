@@ -347,6 +347,13 @@ bool RawCheckpointWriter::save_architecture(
         arch["total_params"] = model.totalParamCount();
         arch["num_layers"] = model.getLayers().size();
         arch["model_config"] = model.modelConfig;
+        {
+            DType dt = DType::Float32;
+            try { dt = string_to_dtype(model.getDefaultDType()); } catch (...) {}
+            if (dt != DType::Float16 && dt != DType::BFloat16 && dt != DType::Float64)
+                dt = DType::Float32;
+            arch["model_config"]["dtype"] = dtype_to_string(dt);
+        }
         
         // Save layer info
         json layers_array = json::array();

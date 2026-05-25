@@ -40,6 +40,7 @@ epoch_*/
 
 # Outils et environnements virtuels
 tools/
+!scripts/tools/
 venv/
 env/
 .venv/

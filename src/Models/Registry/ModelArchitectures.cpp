@@ -394,6 +394,15 @@ static VAEConvModel::Config vaeConvCfgFromJson(const json& cfg) {
     // Latent stochasticity (reparameterization noise)
     out.stochastic_latent = jget<bool>(cfg, "stochastic_latent", out.stochastic_latent);
 
+    // Blocs optionnels
+    out.use_attention      = jget<bool>(cfg, "use_attention", out.use_attention);
+    out.use_attn           = jget<bool>(cfg, "use_attn", out.use_attn);
+    out.enc_norm           = jget<std::string>(cfg, "enc_norm", out.enc_norm);
+    out.enc_gn_groups      = jget<int>(cfg, "enc_gn_groups", out.enc_gn_groups);
+    out.attn_heads         = jget<int>(cfg, "attn_heads", out.attn_heads);
+    out.resnet_max_tokens  = jget<int>(cfg, "resnet_max_tokens", out.resnet_max_tokens);
+    out.attn_max_tokens    = jget<int>(cfg, "attn_max_tokens", out.attn_max_tokens);
+
     // Optional text conditioning
     out.text_cond = jget<bool>(cfg, "text_cond", out.text_cond);
     out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
@@ -413,6 +422,13 @@ static json vaeConvDefaultConfigJson() {
                 {"latent_c", d.latent_c},
                 {"base_channels", d.base_channels},
                 {"stochastic_latent", d.stochastic_latent},
+                {"use_attention", d.use_attention},
+                {"use_attn", d.use_attn},
+                {"enc_norm", d.enc_norm},
+                {"enc_gn_groups", d.enc_gn_groups},
+                {"attn_heads", d.attn_heads},
+                {"resnet_max_tokens", d.resnet_max_tokens},
+                {"attn_max_tokens", d.attn_max_tokens},
                 {"text_cond", d.text_cond},
                 {"vocab_size", d.vocab_size},
                 {"seq_len", d.seq_len},

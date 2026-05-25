@@ -34,6 +34,26 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
 
     const bool text_cond = cfg.text_cond;
     const bool stochastic_latent = cfg.stochastic_latent;
+
+    // Options blocs optionnels
+    const bool use_resnet   = cfg.use_attention;
+    const bool use_attn     = cfg.use_attn;
+    const std::string enc_norm_str = cfg.enc_norm;  // "none" | "groupnorm" | "layernorm"
+    const int enc_gn_groups_val    = std::max(1, cfg.enc_gn_groups);
+    const int attn_heads_val       = std::max(1, cfg.attn_heads);
+    const int resnet_max_tok       = cfg.resnet_max_tokens;  // 0 = no gate
+    const int attn_max_tok         = cfg.attn_max_tokens;    // 0 = no gate
+
+    auto resnet_gate = [&](int h, int w) -> bool {
+        if (!use_resnet) return false;
+        if (resnet_max_tok <= 0) return true;
+        return (h * w) <= resnet_max_tok;
+    };
+    auto attn_gate = [&](int h, int w) -> bool {
+        if (!use_attn) return false;
+        if (attn_max_tok <= 0) return true;
+        return (h * w) <= attn_max_tok;
+    };
     const int vocab = std::max(1, cfg.vocab_size);
     const int seq_len = std::max(1, cfg.seq_len);
     const int d_model = std::max(1, cfg.text_d_model);
@@ -147,6 +167,92 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         return out;
     };
 
+    // ===== Bloc ResNet : conv3x3 -> SiLU -> conv3x3 + skip =====
+    auto resblock = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
+        const size_t ps = sat_mul(static_cast<size_t>(ch), sat_mul(static_cast<size_t>(ch), 9));
+        model.push(prefix + "/conv1", "Conv2d", ps);
+        if (auto* L = model.getLayerByName(prefix + "/conv1")) {
+            L->inputs = {in};        L->output = prefix + "/c1";
+            L->in_channels = ch;    L->out_channels = ch;
+            L->input_height = h;    L->input_width = w;
+            L->kernel_size = 3;     L->stride = 1;  L->padding = 1;
+            L->use_bias = false;
+        }
+        model.push(prefix + "/act1", "SiLU", 0);
+        if (auto* A = model.getLayerByName(prefix + "/act1")) {
+            A->inputs = {prefix + "/c1"};
+            A->output = prefix + "/c1a";
+        }
+        model.push(prefix + "/conv2", "Conv2d", ps);
+        if (auto* L = model.getLayerByName(prefix + "/conv2")) {
+            L->inputs = {prefix + "/c1a"};  L->output = prefix + "/c2";
+            L->in_channels = ch;            L->out_channels = ch;
+            L->input_height = h;            L->input_width = w;
+            L->kernel_size = 3;             L->stride = 1;  L->padding = 1;
+            L->use_bias = false;
+        }
+        model.push(prefix + "/add", "Add", 0);
+        if (auto* A = model.getLayerByName(prefix + "/add")) {
+            A->inputs = {prefix + "/c2", in};
+            A->output = prefix + "/out";
+        }
+        return prefix + "/out";
+    };
+
+    // ===== Normalisation encodeur (GroupNorm ou LayerNorm spatial) =====
+    auto add_enc_norm = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
+        if (enc_norm_str == "none" || enc_norm_str.empty()) return in;
+        if (enc_norm_str == "groupnorm" || enc_norm_str == "gn") {
+            int groups = enc_gn_groups_val;
+            while (groups > 1 && ch % groups != 0) --groups;
+            model.push(prefix + "/gn", "GroupNorm", static_cast<size_t>(ch) * 2);
+            if (auto* L = model.getLayerByName(prefix + "/gn")) {
+                L->inputs = {in};       L->output = prefix + "/gn_out";
+                L->in_channels = ch;    L->num_groups = groups;
+                L->input_height = h;    L->input_width = w;
+            }
+            return prefix + "/gn_out";
+        }
+        if (enc_norm_str == "layernorm" || enc_norm_str == "ln") {
+            model.push(prefix + "/ln", "LayerNorm", static_cast<size_t>(ch) * 2);
+            if (auto* L = model.getLayerByName(prefix + "/ln")) {
+                L->inputs = {in};       L->output = prefix + "/ln_out";
+                L->in_channels = ch;    L->input_height = h;  L->input_width = w;
+            }
+            return prefix + "/ln_out";
+        }
+        return in;
+    };
+
+    // ===== SelfAttention spatiale : CHW -> permute HWC -> SelfAttn -> permute CHW =====
+    auto spatial_attn = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
+        const int tokens = h * w;
+        int heads = attn_heads_val;
+        // embed_dim doit être divisible par heads
+        while (heads > 1 && ch % heads != 0) --heads;
+        const size_t attn_params = static_cast<size_t>(ch) * static_cast<size_t>(ch) * 4;
+
+        // CHW -> HWC  (seq_len=h*w, embed_dim=ch)
+        model.push(prefix + "/to_hwc", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_hwc")) {
+            P->inputs = {in};           P->output = prefix + "/hwc";
+            P->shape = {ch, h, w};      P->permute_dims = {1, 2, 0};
+        }
+        model.push(prefix + "/attn", "SelfAttention", attn_params);
+        if (auto* A = model.getLayerByName(prefix + "/attn")) {
+            A->inputs = {prefix + "/hwc"};  A->output = prefix + "/attn_out";
+            A->seq_len = tokens;            A->embed_dim = ch;
+            A->num_heads = heads;
+        }
+        // HWC -> CHW
+        model.push(prefix + "/to_chw", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_chw")) {
+            P->inputs = {prefix + "/attn_out"};  P->output = prefix + "/chw";
+            P->shape = {h, w, ch};               P->permute_dims = {2, 0, 1};
+        }
+        return prefix + "/chw";
+    };
+
     // ===== Optional text encoder (ids -> pooled embedding) =====
     // Input ids are expected under IntTensorStore key "text_ids" when text_cond=true.
     // Outputs:
@@ -232,20 +338,36 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     int ch = base;
     x = conv2d("vae_conv/enc/conv_in", x, "vae_conv/enc/c0", cur_c, ch, cur_h, cur_w, 3, 1, 1, true);
     cur_c = ch;
+    if (resnet_gate(cur_h, cur_w)) {
+        x = add_enc_norm("vae_conv/enc/n0", x, cur_c, cur_h, cur_w);
+        x = resblock("vae_conv/enc/res0", x, cur_c, cur_h, cur_w);
+    }
 
     for (int i = 0; i < downsamples; ++i) {
         const std::string b = "vae_conv/enc/down" + std::to_string(i + 1);
         x = conv2d(b + "/conv", x, b + "/y", cur_c, cur_c, cur_h, cur_w, 3, 2, 1, true);
         cur_h = std::max(1, (cur_h + 2 * 1 - 3) / 2 + 1);
         cur_w = std::max(1, (cur_w + 2 * 1 - 3) / 2 + 1);
+        if (resnet_gate(cur_h, cur_w)) {
+            x = add_enc_norm(b + "/n", x, cur_c, cur_h, cur_w);
+            x = resblock(b + "/res", x, cur_c, cur_h, cur_w);
+        }
     }
 
     // Project to mu/logvar at latent resolution
     x = conv2d("vae_conv/enc/proj", x, "vae_conv/enc/h", cur_c, cur_c, cur_h, cur_w, 3, 1, 1, true);
+    // Bottleneck: ResNet + SelfAttention optionnels
+    if (resnet_gate(cur_h, cur_w)) {
+        x = add_enc_norm("vae_conv/enc/bot_n", x, cur_c, cur_h, cur_w);
+        x = resblock("vae_conv/enc/bot_res", x, cur_c, cur_h, cur_w);
+    }
+    if (attn_gate(cur_h, cur_w)) {
+        x = spatial_attn("vae_conv/enc/bot_attn", x, cur_c, cur_h, cur_w);
+    }
     model.push("vae_conv/enc/mu", "Conv2d",
                sat_mul(static_cast<size_t>(LC), sat_mul(static_cast<size_t>(cur_c), sat_mul(static_cast<size_t>(1), static_cast<size_t>(1)))));
     if (auto* L = model.getLayerByName("vae_conv/enc/mu")) {
-        L->inputs = {"vae_conv/enc/h_act"};
+        L->inputs = {x};
         L->output = "vae_conv/mu";
         L->in_channels = cur_c;
         L->out_channels = LC;
@@ -260,7 +382,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.push("vae_conv/enc/logvar", "Conv2d",
                sat_mul(static_cast<size_t>(LC), sat_mul(static_cast<size_t>(cur_c), sat_mul(static_cast<size_t>(1), static_cast<size_t>(1)))));
     if (auto* L = model.getLayerByName("vae_conv/enc/logvar")) {
-        L->inputs = {"vae_conv/enc/h_act"};
+        L->inputs = {x};
         L->output = "vae_conv/logvar";
         L->in_channels = cur_c;
         L->out_channels = LC;
@@ -313,6 +435,14 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     y = conv2d("vae_conv/dec/conv_in", y, "vae_conv/dec/c0", dy_c, base, dy_h, dy_w, 3, 1, 1, true);
     dy_c = base;
 
+    // Bottleneck décodeur : SelfAttention + ResNet optionnels (mêmes gates que l'encodeur)
+    if (attn_gate(dy_h, dy_w)) {
+        y = spatial_attn("vae_conv/dec/bot_attn", y, dy_c, dy_h, dy_w);
+    }
+    if (resnet_gate(dy_h, dy_w)) {
+        y = resblock("vae_conv/dec/bot_res", y, dy_c, dy_h, dy_w);
+    }
+
     for (int i = downsamples - 1; i >= 0; --i) {
         const std::string b = "vae_conv/dec/up" + std::to_string(i + 1);
         const int in_h = dy_h;
@@ -321,6 +451,9 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         dy_h = in_h * 2;
         dy_w = in_w * 2;
         y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c, dy_h, dy_w, 3, 1, 1, true);
+        if (resnet_gate(dy_h, dy_w)) {
+            y = resblock(b + "/res", y, dy_c, dy_h, dy_w);
+        }
     }
 
     // Final to RGB
@@ -463,6 +596,75 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         return out;
     };
 
+    // Options blocs optionnels (mêmes gates que buildInto)
+    const bool use_resnet_dec  = cfg.use_attention;
+    const bool use_attn_dec    = cfg.use_attn;
+    const int attn_heads_dec   = std::max(1, cfg.attn_heads);
+    const int resnet_max_dec   = cfg.resnet_max_tokens;
+    const int attn_max_dec     = cfg.attn_max_tokens;
+
+    auto resnet_gate_dec = [&](int h, int w) -> bool {
+        if (!use_resnet_dec) return false;
+        return resnet_max_dec <= 0 || (h * w) <= resnet_max_dec;
+    };
+    auto attn_gate_dec = [&](int h, int w) -> bool {
+        if (!use_attn_dec) return false;
+        return attn_max_dec <= 0 || (h * w) <= attn_max_dec;
+    };
+
+    auto resblock_dec = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
+        const size_t ps = sat_mul(static_cast<size_t>(ch), sat_mul(static_cast<size_t>(ch), 9));
+        model.push(prefix + "/conv1", "Conv2d", ps);
+        if (auto* L = model.getLayerByName(prefix + "/conv1")) {
+            L->inputs = {in};        L->output = prefix + "/c1";
+            L->in_channels = ch;    L->out_channels = ch;
+            L->input_height = h;    L->input_width = w;
+            L->kernel_size = 3;     L->stride = 1;  L->padding = 1;
+            L->use_bias = false;
+        }
+        model.push(prefix + "/act1", "SiLU", 0);
+        if (auto* A = model.getLayerByName(prefix + "/act1")) {
+            A->inputs = {prefix + "/c1"};  A->output = prefix + "/c1a";
+        }
+        model.push(prefix + "/conv2", "Conv2d", ps);
+        if (auto* L = model.getLayerByName(prefix + "/conv2")) {
+            L->inputs = {prefix + "/c1a"};  L->output = prefix + "/c2";
+            L->in_channels = ch;            L->out_channels = ch;
+            L->input_height = h;            L->input_width = w;
+            L->kernel_size = 3;             L->stride = 1;  L->padding = 1;
+            L->use_bias = false;
+        }
+        model.push(prefix + "/add", "Add", 0);
+        if (auto* A = model.getLayerByName(prefix + "/add")) {
+            A->inputs = {prefix + "/c2", in};  A->output = prefix + "/out";
+        }
+        return prefix + "/out";
+    };
+
+    auto spatial_attn_dec = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
+        const int tokens = h * w;
+        int heads = attn_heads_dec;
+        while (heads > 1 && ch % heads != 0) --heads;
+        const size_t attn_params = static_cast<size_t>(ch) * static_cast<size_t>(ch) * 4;
+        model.push(prefix + "/to_hwc", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_hwc")) {
+            P->inputs = {in};  P->output = prefix + "/hwc";
+            P->shape = {ch, h, w};  P->permute_dims = {1, 2, 0};
+        }
+        model.push(prefix + "/attn", "SelfAttention", attn_params);
+        if (auto* A = model.getLayerByName(prefix + "/attn")) {
+            A->inputs = {prefix + "/hwc"};  A->output = prefix + "/attn_out";
+            A->seq_len = tokens;            A->embed_dim = ch;
+            A->num_heads = heads;
+        }
+        model.push(prefix + "/to_chw", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_chw")) {
+            P->inputs = {prefix + "/attn_out"};  P->output = prefix + "/chw";
+            P->shape = {h, w, ch};               P->permute_dims = {2, 0, 1};
+        }
+        return prefix + "/chw";
+    };
+
     // Input latent vector -> vae_conv/z
     model.push("vae_conv/raw_z", "Identity", 0);
     if (auto* L = model.getLayerByName("vae_conv/raw_z")) {
@@ -478,6 +680,14 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     y = conv2d("vae_conv/dec/conv_in", y, "vae_conv/dec/c0", dy_c, base, dy_h, dy_w, 3, 1, 1, true);
     dy_c = base;
 
+    // Bottleneck décodeur
+    if (attn_gate_dec(dy_h, dy_w)) {
+        y = spatial_attn_dec("vae_conv/dec/bot_attn", y, dy_c, dy_h, dy_w);
+    }
+    if (resnet_gate_dec(dy_h, dy_w)) {
+        y = resblock_dec("vae_conv/dec/bot_res", y, dy_c, dy_h, dy_w);
+    }
+
     for (int i = downsamples - 1; i >= 0; --i) {
         const std::string b = "vae_conv/dec/up" + std::to_string(i + 1);
         const int in_h = dy_h;
@@ -486,6 +696,9 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         dy_h = in_h * 2;
         dy_w = in_w * 2;
         y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c, dy_h, dy_w, 3, 1, 1, true);
+        if (resnet_gate_dec(dy_h, dy_w)) {
+            y = resblock_dec(b + "/res", y, dy_c, dy_h, dy_w);
+        }
     }
 
     y = conv2d("vae_conv/dec/out", y, "vae_conv/dec/out_pre", dy_c, C, dy_h, dy_w, 3, 1, 1, false);
