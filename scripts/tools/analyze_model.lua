@@ -1,0 +1,1669 @@
+-- Analyseur de modèles/checkpoints Mimir (RawFolder / SafeTensors)
+--
+-- Usage:
+--   ./bin/mimir --lua scripts/tools/analyze_model.lua --in model.safetensors
+--   ./bin/mimir --lua scripts/tools/analyze_model.lua --in checkpoint_dir/
+--
+-- Objectif:
+--   Afficher en console (tableaux) les infos utiles: nom, date de création,
+--   versions, couches, paramètres, et un résumé des tensors.
+
+---@diagnostic disable: undefined-field, need-check-nil
+
+local Args = dofile("scripts/modules/args.lua")
+
+-- ---------------------------------------------------------------------------
+-- Utils
+-- ---------------------------------------------------------------------------
+
+local function log(...)
+    local out = {}
+    for i = 1, select("#", ...) do
+        out[#out + 1] = tostring(select(i, ...))
+    end
+    io.stdout:write(table.concat(out, " ") .. "\n")
+end
+
+local function die(msg)
+    io.stderr:write("[analyze] " .. tostring(msg) .. "\n")
+    os.exit(1)
+end
+
+local function file_exists(path)
+    local f = io.open(path, "rb")
+    if f then f:close(); return true end
+    return false
+end
+
+local function read_all(path)
+    local f = io.open(path, "rb")
+    if not f then return nil, "cannot open" end
+    local s = f:read("*a")
+    f:close()
+    return s
+end
+
+local function read_exact(f, n)
+    local s = f:read(n)
+    if not s or #s ~= n then
+        return nil, "short read"
+    end
+    return s
+end
+
+local function u64_le(bytes)
+    local b = { bytes:byte(1, 8) }
+    local n = 0
+    local mul = 1
+    for i = 1, 8 do
+        n = n + (b[i] or 0) * mul
+        mul = mul * 256
+    end
+    return n
+end
+
+local function clamp(n, lo, hi)
+    if n < lo then return lo end
+    if n > hi then return hi end
+    return n
+end
+
+local function format_int(n)
+    n = tonumber(n)
+    if not n then return "?" end
+    local s = tostring(math.floor(n))
+    local neg = false
+    if s:sub(1, 1) == "-" then neg = true; s = s:sub(2) end
+    local r = s:reverse():gsub("(%d%d%d)", "%1_")
+    r = r:reverse():gsub("^_", "")
+    if neg then r = "-" .. r end
+    return r
+end
+
+local function format_bytes(bytes)
+    bytes = tonumber(bytes)
+    if not bytes then return "?" end
+    if bytes < 1024 then return string.format("%d B", bytes) end
+    local units = { "KB", "MB", "GB", "TB" }
+    local v = bytes
+    local u = 0
+    while v >= 1024 and u < #units do
+        v = v / 1024
+        u = u + 1
+    end
+    return string.format("%.3g %s", v, units[u])
+end
+
+local function format_epoch(epoch)
+    epoch = tonumber(epoch)
+    if not epoch or epoch <= 0 then return "?" end
+    epoch = math.floor(epoch)
+    -- Format local time; suffisant pour l'analyse.
+    return os.date("%Y-%m-%d %H:%M:%S", epoch)
+end
+
+local function prod_shape(shape)
+    if type(shape) ~= "table" then return nil end
+    local p = 1
+    for i = 1, #shape do
+        local v = tonumber(shape[i])
+        if not v then return nil end
+        p = p * v
+    end
+    return p
+end
+
+local function dtype_bytes(dtype)
+    dtype = tostring(dtype or "")
+    if dtype == "F32" or dtype == "float32" then return 4 end
+    if dtype == "F16" or dtype == "float16" then return 2 end
+    if dtype == "I32" or dtype == "int32" then return 4 end
+    if dtype == "I16" or dtype == "int16" then return 2 end
+    if dtype == "U16" or dtype == "uint16" then return 2 end
+    if dtype == "U8" or dtype == "uint8" then return 1 end
+    return nil
+end
+
+-- ---------------------------------------------------------------------------
+-- UTF-8 helpers (pour alignement console)
+-- ---------------------------------------------------------------------------
+
+local function utf8_len_safe(s)
+    s = tostring(s or "")
+    if type(_G.utf8) == "table" and type(_G.utf8.len) == "function" then
+        local ok, n = pcall(_G.utf8.len, s)
+        if ok and type(n) == "number" then
+            return n
+        end
+    end
+
+    -- Fallback: compter les points de code UTF-8 (approx largeur monospace)
+    local i = 1
+    local n = 0
+    local bytes = #s
+    while i <= bytes do
+        local c = s:byte(i)
+        if not c then break end
+        if c < 0x80 then
+            i = i + 1
+        elseif c < 0xE0 then
+            i = i + 2
+        elseif c < 0xF0 then
+            i = i + 3
+        else
+            i = i + 4
+        end
+        n = n + 1
+    end
+    return n
+end
+
+local function utf8_sub_chars(s, n_chars)
+    s = tostring(s or "")
+    n_chars = tonumber(n_chars) or 0
+    n_chars = math.floor(n_chars)
+    if n_chars <= 0 then return "" end
+
+    if type(_G.utf8) == "table" and type(_G.utf8.offset) == "function" then
+        local ok, off = pcall(_G.utf8.offset, s, n_chars + 1)
+        if ok and type(off) == "number" then
+            return s:sub(1, off - 1)
+        end
+        -- Si offset échoue, on tombe sur fallback ci-dessous.
+    end
+
+    -- Fallback: itération basique UTF-8
+    local i = 1
+    local bytes = #s
+    local count = 0
+    while i <= bytes and count < n_chars do
+        local c = s:byte(i)
+        if not c then break end
+        if c < 0x80 then
+            i = i + 1
+        elseif c < 0xE0 then
+            i = i + 2
+        elseif c < 0xF0 then
+            i = i + 3
+        else
+            i = i + 4
+        end
+        count = count + 1
+    end
+    return s:sub(1, i - 1)
+end
+
+local function trunc(s, max_len)
+    s = tostring(s or "")
+    max_len = tonumber(max_len) or 80
+    max_len = math.floor(max_len)
+    if utf8_len_safe(s) <= max_len then return s end
+    if max_len < 6 then return utf8_sub_chars(s, max_len) end
+    return utf8_sub_chars(s, max_len - 3) .. "..."
+end
+
+local function pad_right(s, w)
+    s = tostring(s or "")
+    w = tonumber(w) or utf8_len_safe(s)
+    w = math.floor(w)
+    local len = utf8_len_safe(s)
+    if len >= w then return s end
+    return s .. string.rep(" ", w - len)
+end
+
+local function pad_left(s, w)
+    s = tostring(s or "")
+    w = tonumber(w) or utf8_len_safe(s)
+    w = math.floor(w)
+    local len = utf8_len_safe(s)
+    if len >= w then return s end
+    return string.rep(" ", w - len) .. s
+end
+
+local function make_table(columns, rows)
+    -- columns: { {key="name", title="Name", align="left|right", max=...}, ... }
+    local widths = {}
+    for ci = 1, #columns do
+        local col = columns[ci]
+        local title = tostring(col.title or col.key or ("col" .. ci))
+        widths[ci] = utf8_len_safe(title)
+    end
+
+    for ri = 1, #rows do
+        local row = rows[ri]
+        for ci = 1, #columns do
+            local col = columns[ci]
+            local v = row[col.key]
+            local s = trunc(v, col.max or 120)
+            local w = utf8_len_safe(s)
+            if w > widths[ci] then widths[ci] = w end
+        end
+    end
+
+    local function sep(ch)
+        local parts = { "+" }
+        for ci = 1, #columns do
+            parts[#parts + 1] = string.rep(ch, widths[ci] + 2)
+            parts[#parts + 1] = "+"
+        end
+        return table.concat(parts)
+    end
+
+    local out = {}
+    out[#out + 1] = sep("-")
+
+    do
+        local parts = { "|" }
+        for ci = 1, #columns do
+            local col = columns[ci]
+            local title = tostring(col.title or col.key or "")
+            parts[#parts + 1] = " " .. pad_right(title, widths[ci]) .. " "
+            parts[#parts + 1] = "|"
+        end
+        out[#out + 1] = table.concat(parts)
+    end
+
+    out[#out + 1] = sep("=")
+
+    for ri = 1, #rows do
+        local row = rows[ri]
+        local parts = { "|" }
+        for ci = 1, #columns do
+            local col = columns[ci]
+            local s = trunc(row[col.key], col.max or 120)
+            local cell
+            if (col.align or "left") == "right" then
+                cell = pad_left(s, widths[ci])
+            else
+                cell = pad_right(s, widths[ci])
+            end
+            parts[#parts + 1] = " " .. cell .. " "
+            parts[#parts + 1] = "|"
+        end
+        out[#out + 1] = table.concat(parts)
+    end
+
+    out[#out + 1] = sep("-")
+    return table.concat(out, "\n")
+end
+
+-- ---------------------------------------------------------------------------
+-- JSON utils (fallback)
+-- ---------------------------------------------------------------------------
+
+local function json_decode_fallback(s)
+    local i = 1
+
+    local function skip()
+        while true do
+            local c = s:sub(i, i)
+            if c == "" then return end
+            if c ~= " " and c ~= "\t" and c ~= "\n" and c ~= "\r" then return end
+            i = i + 1
+        end
+    end
+
+    local function parse_string()
+        if s:sub(i, i) ~= '"' then return nil, "expected string" end
+        i = i + 1
+        local out = {}
+        while true do
+            local c = s:sub(i, i)
+            if c == "" then return nil, "unterminated string" end
+            if c == '"' then i = i + 1; return table.concat(out) end
+            if c == "\\" then
+                local n = s:sub(i + 1, i + 1)
+                if n == "" then return nil, "unterminated escape" end
+                if n == '"' or n == "\\" or n == "/" then
+                    out[#out + 1] = n
+                    i = i + 2
+                elseif n == "b" then out[#out + 1] = "\b"; i = i + 2
+                elseif n == "f" then out[#out + 1] = "\f"; i = i + 2
+                elseif n == "n" then out[#out + 1] = "\n"; i = i + 2
+                elseif n == "r" then out[#out + 1] = "\r"; i = i + 2
+                elseif n == "t" then out[#out + 1] = "\t"; i = i + 2
+                elseif n == "u" then
+                    local hex = s:sub(i + 2, i + 5)
+                    if #hex < 4 then return nil, "bad unicode escape" end
+                    local code = tonumber(hex, 16)
+                    if not code then return nil, "bad unicode escape" end
+                    if code < 0x80 then
+                        out[#out + 1] = string.char(code)
+                    elseif code < 0x800 then
+                        out[#out + 1] = string.char(0xC0 + math.floor(code / 0x40), 0x80 + (code % 0x40))
+                    else
+                        out[#out + 1] = string.char(0xE0 + math.floor(code / 0x1000), 0x80 + (math.floor(code / 0x40) % 0x40), 0x80 + (code % 0x40))
+                    end
+                    i = i + 6
+                else
+                    return nil, "unsupported escape"
+                end
+            else
+                out[#out + 1] = c
+                i = i + 1
+            end
+        end
+    end
+
+    local function parse_number()
+        local start = i
+        local c = s:sub(i, i)
+        if c == "-" then i = i + 1 end
+        while s:sub(i, i):match("%d") do i = i + 1 end
+        if s:sub(i, i) == "." then
+            i = i + 1
+            while s:sub(i, i):match("%d") do i = i + 1 end
+        end
+        local e = s:sub(i, i)
+        if e == "e" or e == "E" then
+            i = i + 1
+            local sgn = s:sub(i, i)
+            if sgn == "+" or sgn == "-" then i = i + 1 end
+            while s:sub(i, i):match("%d") do i = i + 1 end
+        end
+        local num = tonumber(s:sub(start, i - 1))
+        if num == nil then return nil, "bad number" end
+        return num
+    end
+
+    local parse_value
+
+    local function parse_array()
+        if s:sub(i, i) ~= "[" then return nil, "expected [" end
+        i = i + 1
+        skip()
+        local arr = {}
+        if s:sub(i, i) == "]" then i = i + 1; return arr end
+        while true do
+            skip()
+            local v, err = parse_value()
+            if err then return nil, err end
+            arr[#arr + 1] = v
+            skip()
+            local c = s:sub(i, i)
+            if c == "," then i = i + 1
+            elseif c == "]" then i = i + 1; return arr
+            else return nil, "expected , or ]" end
+        end
+    end
+
+    local function parse_object()
+        if s:sub(i, i) ~= "{" then return nil, "expected {" end
+        i = i + 1
+        skip()
+        local obj = {}
+        if s:sub(i, i) == "}" then i = i + 1; return obj end
+        while true do
+            skip()
+            local k, errk = parse_string()
+            if errk then return nil, errk end
+            skip()
+            if s:sub(i, i) ~= ":" then return nil, "expected :" end
+            i = i + 1
+            skip()
+            local v, errv = parse_value()
+            if errv then return nil, errv end
+            obj[k] = v
+            skip()
+            local c = s:sub(i, i)
+            if c == "," then i = i + 1
+            elseif c == "}" then i = i + 1; return obj
+            else return nil, "expected , or }" end
+        end
+    end
+
+    function parse_value()
+        skip()
+        local c = s:sub(i, i)
+        if c == '"' then return parse_string() end
+        if c == "{" then return parse_object() end
+        if c == "[" then return parse_array() end
+        if c == "-" or c:match("%d") then return parse_number() end
+        if s:sub(i, i + 3) == "true" then i = i + 4; return true end
+        if s:sub(i, i + 4) == "false" then i = i + 5; return false end
+        if s:sub(i, i + 3) == "null" then i = i + 4; return nil end
+        return nil, "unexpected token" .. tostring(c)
+    end
+
+    local v, err = parse_value()
+    if err then return nil, err end
+    skip()
+    if i <= #s then return nil, "trailing data" end
+    return v
+end
+
+local function safe_json_decode(s)
+    if type(_G.json) == "table" and type(_G.json.decode) == "function" then
+        local ok, v = pcall(_G.json.decode, s)
+        if ok then return v end
+    end
+    if type(_G.cjson) == "table" and type(_G.cjson.decode) == "function" then
+        local ok, v = pcall(_G.cjson.decode, s)
+        if ok then return v end
+    end
+    return json_decode_fallback(s)
+end
+
+local function safe_read_json(path)
+    local s, err = read_all(path)
+    if not s then return nil, err end
+    local t, jerr = safe_json_decode(s)
+    if type(t) ~= "table" then return nil, jerr end
+    return t
+end
+
+local function read_prefix(path, n)
+    n = tonumber(n) or 65536
+    local f = io.open(path, "rb")
+    if not f then return nil, "cannot open" end
+    local s = f:read(n)
+    f:close()
+    return s or ""
+end
+
+-- ---------------------------------------------------------------------------
+-- SafeTensors reader (header + extraction)
+-- ---------------------------------------------------------------------------
+
+local function read_safetensors_header(path)
+    local f = io.open(path, "rb")
+    if not f then return nil, "cannot open" end
+
+    local len_bytes, err = read_exact(f, 8)
+    if not len_bytes then f:close(); return nil, err end
+
+    local header_len = u64_le(len_bytes)
+    if header_len <= 0 or header_len > 64 * 1024 * 1024 then
+        f:close()
+        return nil, "invalid header_len=" .. tostring(header_len)
+    end
+
+    local header_str, err2 = read_exact(f, header_len)
+    if not header_str then f:close(); return nil, err2 end
+
+    local header, errj = safe_json_decode(header_str)
+    if type(header) ~= "table" then
+        f:close()
+        return nil, "header JSON decode failed: " .. tostring(errj or "unknown")
+    end
+
+    return { f = f, header_len = header_len, header = header }, nil
+end
+
+local function extract_tensor_bytes(ctx, tensor_name, max_bytes)
+    max_bytes = tonumber(max_bytes) or (32 * 1024 * 1024)
+
+    local entry = ctx.header[tensor_name]
+    if type(entry) ~= "table" then
+        return nil, "tensor not found: " .. tostring(tensor_name)
+    end
+
+    local offsets = entry.data_offsets
+    if type(offsets) ~= "table" or #offsets < 2 then
+        return nil, "missing data_offsets"
+    end
+
+    local begin = tonumber(offsets[1])
+    local end_ = tonumber(offsets[2])
+    if not begin or not end_ or end_ < begin then
+        return nil, "invalid data_offsets"
+    end
+
+    local size = end_ - begin
+    if size <= 0 then return nil, "invalid tensor size" end
+    if size > max_bytes then
+        return nil, "tensor trop gros pour extraction (" .. format_bytes(size) .. ")"
+    end
+
+    local data_base = 8 + ctx.header_len
+    ctx.f:seek("set", data_base + begin)
+
+    local bytes, err = read_exact(ctx.f, size)
+    if not bytes then
+        return nil, "read tensor bytes failed: " .. tostring(err)
+    end
+
+    return bytes, nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Layer formatting
+-- ---------------------------------------------------------------------------
+
+local function layer_dims(layer)
+    if type(layer) ~= "table" then return "" end
+
+    -- DebugJson v1.1.0 met souvent les infos de dimensions sous `layer.config`.
+    local cfg = (type(layer.config) == "table") and layer.config or layer
+
+    local function n(x)
+        x = tonumber(x)
+        if not x or x <= 0 then return nil end
+        return math.floor(x)
+    end
+
+    local in_f = n(cfg.in_features)
+    local out_f = n(cfg.out_features)
+    if in_f and out_f then
+        return string.format("%d→%d", in_f, out_f)
+    end
+
+    local in_c = n(cfg.in_channels)
+    local out_c = n(cfg.out_channels)
+    if in_c and out_c then
+        local extra = {}
+
+        -- Convs (v1.1.0): kernel_h/kernel_w, stride_h/stride_w, pad_h/pad_w
+        local kh = n(cfg.kernel_h)
+        local kw = n(cfg.kernel_w)
+        if kh and kw then extra[#extra + 1] = string.format("k=%dx%d", kh, kw)
+        else
+            local k = n(cfg.kernel_size)
+            if k then extra[#extra + 1] = "k=" .. k end
+        end
+
+        local sh = n(cfg.stride_h)
+        local sw = n(cfg.stride_w)
+        if sh and sw then extra[#extra + 1] = string.format("s=%dx%d", sh, sw)
+        else
+            local s = n(cfg.stride)
+            if s then extra[#extra + 1] = "s=" .. s end
+        end
+
+        local ph = n(cfg.pad_h)
+        local pw = n(cfg.pad_w)
+        if ph and pw then extra[#extra + 1] = string.format("p=%dx%d", ph, pw)
+        else
+            local p = n(cfg.padding)
+            if p then extra[#extra + 1] = "p=" .. p end
+        end
+
+        -- (extra est déjà rempli ci-dessus)
+        local tail = (#extra > 0) and (" (" .. table.concat(extra, " ") .. ")") or ""
+        return string.format("%d→%d%s", in_c, out_c, tail)
+    end
+
+    -- GroupNorm / normes spatiales (in_channels sans out_channels distincts)
+    local num_groups = n(cfg.num_groups)
+    if in_c and num_groups then
+        return string.format("%d ch g=%d", in_c, num_groups)
+    end
+    if in_c and not out_c then
+        return string.format("%d ch", in_c)
+    end
+
+    local embed = n(cfg.embed_dim)
+    local heads = n(cfg.num_heads)
+    if embed and heads then
+        local seq = n(cfg.seq_len)
+        if seq then
+            return string.format("embed=%d heads=%d seq=%d", embed, heads, seq)
+        end
+        return string.format("embed=%d heads=%d", embed, heads)
+    end
+
+    return ""
+end
+
+-- ---------------------------------------------------------------------------
+-- Model analyzers
+-- ---------------------------------------------------------------------------
+
+-- Infer dominant float dtype from a tensors list (by total bytes)
+local function infer_float_dtype(tensors)
+    local acc = {}
+    for _, t in ipairs(tensors) do
+        local d = t.dtype
+        if d == "F32" or d == "F16" or d == "BF16" or d == "F64"
+                or d == "float32" or d == "float16" or d == "bfloat16" or d == "float64" then
+            acc[d] = (acc[d] or 0) + (t.bytes_raw or 0)
+        end
+    end
+    local best, best_b = nil, 0
+    for d, b in pairs(acc) do
+        if b > best_b then best_b = b; best = d end
+    end
+    return best
+end
+
+local function analyze_safetensors(path, opts)
+    local ctx, err = read_safetensors_header(path)
+    if not ctx then return nil, err end
+
+    local header = ctx.header
+    local meta = (type(header["__metadata__"]) == "table") and header["__metadata__"] or {}
+
+    local tensors = {}
+    local total_bytes = 0
+    local total_elems = 0
+
+    local has_tokenizer = false
+    local has_encoder = false
+    local has_optimizer = false
+
+    for name, entry in pairs(header) do
+        if name ~= "__metadata__" and type(entry) == "table" then
+            local dtype = entry.dtype
+            local shape = entry.shape
+            local elems = prod_shape(shape)
+            local offsets = entry.data_offsets
+            local byte_size
+            if type(offsets) == "table" and #offsets >= 2 then
+                local b = tonumber(offsets[1])
+                local e = tonumber(offsets[2])
+                if b and e and e >= b then byte_size = e - b end
+            end
+
+            local row = {
+                name = name,
+                dtype = tostring(dtype or ""),
+                shape = (type(shape) == "table") and ("[" .. table.concat(shape, "x") .. "]") or "",
+                elems = elems and format_int(elems) or "?",
+                bytes = byte_size and format_bytes(byte_size) or "?",
+                bytes_raw = byte_size or 0,
+            }
+            tensors[#tensors + 1] = row
+
+            if byte_size then total_bytes = total_bytes + byte_size end
+            if elems then total_elems = total_elems + elems end
+
+            if name:match("^tokenizer/") then has_tokenizer = true end
+            if name:match("^encoder/") then has_encoder = true end
+            if name:match("^optimizer/") then has_optimizer = true end
+        end
+    end
+
+    -- Try extract model/architecture_json
+    local arch
+    do
+        local bytes, errb = extract_tensor_bytes(ctx, "model/architecture_json", 32 * 1024 * 1024)
+        if bytes then
+            local a, ajerr = safe_json_decode(bytes)
+            if type(a) == "table" then arch = a end
+        else
+            -- OK if missing
+            if opts.debug then
+                log("[analyze][debug] architecture_json: " .. tostring(errb))
+            end
+        end
+    end
+
+    ctx.f:close()
+
+    return {
+        format = "safetensors",
+        path = path,
+        metadata = meta,
+        arch = arch,
+        tensors = tensors,
+        inferred_float_dtype = infer_float_dtype(tensors),
+        totals = {
+            tensors = #tensors,
+            bytes = total_bytes,
+            elems = total_elems,
+        },
+        components = {
+            tokenizer = has_tokenizer,
+            encoder = has_encoder,
+            optimizer = has_optimizer,
+        },
+    }, nil
+end
+
+local function analyze_raw_folder(path, opts)
+    local manifest_path = path:gsub("/*$", "") .. "/manifest.json"
+    if not file_exists(manifest_path) then
+        return nil, "manifest.json introuvable: " .. manifest_path
+    end
+
+    local manifest, err = safe_read_json(manifest_path)
+    if not manifest then return nil, "manifest.json invalide: " .. tostring(err) end
+
+    local arch_path = path:gsub("/*$", "") .. "/model/architecture.json"
+    if not file_exists(arch_path) then
+        arch_path = path:gsub("/*$", "") .. "/architecture.json" -- compat
+    end
+
+    local arch
+    if file_exists(arch_path) then
+        arch = select(1, safe_read_json(arch_path))
+    end
+
+    local tensor_index = (type(manifest.tensor_index) == "table") and manifest.tensor_index or {}
+
+    -- Collect top tensors by file size (without parsing all JSON)
+    local tensors = {}
+    local total_bytes = 0
+    for i = 1, #tensor_index do
+        local entry = tensor_index[i]
+        if type(entry) == "table" and type(entry.bin_file) == "string" and type(entry.name) == "string" then
+            local bin_path = path:gsub("/*$", "") .. "/" .. entry.bin_file
+            local f = io.open(bin_path, "rb")
+            local size = 0
+            if f then
+                local cur = f:seek()
+                size = f:seek("end") or 0
+                if cur then f:seek("set", cur) end
+                f:close()
+            end
+            total_bytes = total_bytes + (size or 0)
+            tensors[#tensors + 1] = {
+                name = entry.name,
+                bin_file = entry.bin_file,
+                json_file = entry.json_file,
+                bytes_raw = size or 0,
+                bytes = format_bytes(size or 0),
+            }
+        end
+    end
+
+    table.sort(tensors, function(a, b) return (a.bytes_raw or 0) > (b.bytes_raw or 0) end)
+
+    -- Enrich top-N with dtype/shape from JSON sidecar
+    local enrich_n = tonumber(opts.enrich_tensors) or 25
+    enrich_n = clamp(enrich_n, 0, 200)
+
+    for i = 1, math.min(enrich_n, #tensors) do
+        local t = tensors[i]
+        if t and type(t.json_file) == "string" then
+            local jp = path:gsub("/*$", "") .. "/" .. t.json_file
+            if file_exists(jp) then
+                local tj = select(1, safe_read_json(jp))
+                if type(tj) == "table" then
+                    t.dtype = tostring(tj.dtype or "")
+                    t.shape = (type(tj.shape) == "table") and ("[" .. table.concat(tj.shape, "x") .. "]") or ""
+                    local elems = prod_shape(tj.shape)
+                    t.elems = elems and format_int(elems) or ""
+                end
+            end
+        end
+    end
+
+    return {
+        format = "raw_folder",
+        path = path,
+        manifest = manifest,
+        arch = arch,
+        tensors = tensors,
+        inferred_float_dtype = infer_float_dtype(tensors),
+        totals = {
+            tensors = #tensors,
+            bytes = total_bytes,
+        },
+    }, nil
+end
+
+local function analyze_debug_json(path, opts)
+    local root, err = safe_read_json(path)
+    if not root then return nil, "debug_json invalide: " .. tostring(err) end
+
+    -- Détection de version/forme
+    local format = root.format
+    local format_version = root.format_version
+
+    local created_at = root.created_at or root.timestamp
+    local mimir_version = root.mimir_version
+    local git_commit = root.git_commit
+
+    local model_name
+    local model_type
+    local total_params
+    local num_layers
+
+    if type(root.model) == "table" then
+        model_name = root.model.name
+        total_params = root.model.total_params
+        num_layers = root.model.num_layers
+    end
+
+    if model_name == nil then model_name = root.model_name end
+    model_type = root.model_type or root.model_type_name or root.model_kind
+    if total_params == nil then total_params = root.total_params end
+    if num_layers == nil then num_layers = root.num_layers end
+
+    local layers = {}
+    if type(root.layers) == "table" then
+        -- v1.0: {name,type,params_count}
+        -- v1.1: {index,name,type,params_count,config,tensors}
+        for i = 1, #root.layers do
+            local l = root.layers[i]
+            if type(l) == "table" then
+                -- Poids par couche: somme des elems/bytes des tensors de la couche.
+                local weights_elems = 0
+                local weights_bytes = 0
+                if type(l.tensors) == "table" then
+                    for j = 1, #l.tensors do
+                        local t = l.tensors[j]
+                        if type(t) == "table" then
+                            local elems = tonumber(t.total_elements) or prod_shape(t.shape)
+                            local bpe = dtype_bytes(t.dtype)
+                            if elems and bpe then
+                                weights_elems = weights_elems + elems
+                                weights_bytes = weights_bytes + (elems * bpe)
+                            end
+                        end
+                    end
+                end
+
+                layers[#layers + 1] = {
+                    name = l.name,
+                    type = l.type,
+                    params_count = l.params_count,
+                    config = (type(l.config) == "table") and l.config or nil,
+                    weights_size = (weights_elems > 0) and weights_elems or nil,
+                    weights_bytes = (weights_bytes > 0) and weights_bytes or nil,
+                    -- pas d'inputs/output dans DebugJson; le graphe Mermaid aura un fallback linéaire
+                }
+            end
+        end
+    end
+
+    local tensors = {}
+    local total_bytes = 0
+    local total_elems = 0
+
+    -- v1.0: root.tensors[]
+    if type(root.tensors) == "table" then
+        for i = 1, #root.tensors do
+            local t = root.tensors[i]
+            if type(t) == "table" then
+                local dtype = tostring(t.dtype or "")
+                local shape = t.shape
+                local elems = tonumber(t.total_elements) or prod_shape(shape)
+                local bpe = dtype_bytes(dtype)
+                local bytes_raw = (elems and bpe) and (elems * bpe) or 0
+
+                tensors[#tensors + 1] = {
+                    name = tostring(t.name or ""),
+                    dtype = dtype,
+                    shape = (type(shape) == "table") and ("[" .. table.concat(shape, "x") .. "]") or "",
+                    elems = elems and format_int(elems) or "?",
+                    bytes = (bytes_raw > 0) and format_bytes(bytes_raw) or "?",
+                    bytes_raw = bytes_raw,
+                }
+                if elems then total_elems = total_elems + elems end
+                if bytes_raw then total_bytes = total_bytes + bytes_raw end
+            end
+        end
+    end
+
+    -- v1.1: root.layers[].tensors[] (agrégation)
+    if #tensors == 0 and type(root.layers) == "table" then
+        for i = 1, #root.layers do
+            local l = root.layers[i]
+            if type(l) == "table" and type(l.tensors) == "table" then
+                for j = 1, #l.tensors do
+                    local t = l.tensors[j]
+                    if type(t) == "table" then
+                        local dtype = tostring(t.dtype or "")
+                        local shape = t.shape
+                        local elems = tonumber(t.total_elements) or prod_shape(shape)
+                        local bpe = dtype_bytes(dtype)
+                        local bytes_raw = (elems and bpe) and (elems * bpe) or 0
+
+                        tensors[#tensors + 1] = {
+                            name = tostring(t.name or ""),
+                            dtype = dtype,
+                            shape = (type(shape) == "table") and ("[" .. table.concat(shape, "x") .. "]") or "",
+                            elems = elems and format_int(elems) or "?",
+                            bytes = (bytes_raw > 0) and format_bytes(bytes_raw) or "?",
+                            bytes_raw = bytes_raw,
+                        }
+                        if elems then total_elems = total_elems + elems end
+                        if bytes_raw then total_bytes = total_bytes + bytes_raw end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Heuristique simple: si pas de couche mais num_layers donné, laisser vide (pas de crash)
+    local arch = {
+        model_name = (type(model_name) == "string") and model_name or "?",
+        model_type = (type(model_type) == "string") and model_type or nil,
+        total_params = total_params,
+        num_layers = num_layers or ((type(layers) == "table") and #layers or nil),
+        layers = layers,
+    }
+
+    local meta = {
+        created_at = created_at,
+        mimir_version = mimir_version,
+        format_version = format_version,
+        git_commit = git_commit,
+        format = format,
+        warning = root.warning,
+        debug_only = root.debug_only,
+    }
+
+    return {
+        format = "debug_json",
+        path = path,
+        metadata = meta,
+        arch = arch,
+        tensors = tensors,
+        totals = {
+            tensors = #tensors,
+            bytes = total_bytes,
+            elems = total_elems,
+        },
+    }, nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Rendering
+-- ---------------------------------------------------------------------------
+
+local function render_summary(info)
+    local meta = info.metadata or info.manifest or {}
+    local arch = info.arch or {}
+
+    local model_name = (type(arch.model_name) == "string" and arch.model_name ~= "") and arch.model_name or "?"
+    local created_at = meta.created_at
+
+    local mimir_version = meta.mimir_version
+    local format_version = meta.format_version
+    local git_commit = meta.git_commit
+
+    local total_params = arch.total_params
+    local num_layers = arch.num_layers
+    if (not num_layers) and type(arch.layers) == "table" then num_layers = #arch.layers end
+
+    local rows = {
+        { k = "Chemin", v = info.path or "" },
+        { k = "Format", v = info.format or "" },
+        { k = "Modèle", v = model_name },
+        { k = "Type modèle", v = (type(arch.model_type) == "string" and arch.model_type ~= "") and arch.model_type or "" },
+        { k = "Créé le", v = format_epoch(created_at) },
+        { k = "Mímir version", v = mimir_version or "?" },
+        { k = "Format version", v = format_version or "?" },
+        { k = "Git commit", v = git_commit or "?" },
+        { k = "Nb couches", v = num_layers and format_int(num_layers) or "?" },
+        { k = "Params (arch)", v = total_params and format_int(total_params) or "?" },
+        { k = "Nb tensors", v = (info.totals and info.totals.tensors) and format_int(info.totals.tensors) or "?" },
+        { k = "Taille tensors", v = (info.totals and info.totals.bytes) and format_bytes(info.totals.bytes) or "?" },
+    }
+
+    if meta.debug_only ~= nil then
+        rows[#rows + 1] = { k = "Debug only", v = tostring(meta.debug_only) }
+    end
+
+    if type(meta.warning) == "string" and meta.warning ~= "" then
+        rows[#rows + 1] = { k = "Alerte", v = meta.warning }
+    end
+
+    if info.format == "safetensors" and type(info.components) == "table" then
+        rows[#rows + 1] = { k = "Composants", v = string.format("tokenizer=%s encoder=%s optimizer=%s", tostring(info.components.tokenizer), tostring(info.components.encoder), tostring(info.components.optimizer)) }
+    end
+
+    if info.format == "raw_folder" and type(meta.components) == "table" then
+        local c = meta.components
+        rows[#rows + 1] = { k = "Composants", v = string.format("tokenizer=%s encoder=%s optimizer=%s", tostring(c.tokenizer), tostring(c.encoder), tostring(c.optimizer)) }
+    end
+
+    -- Ligne DType (depuis model_config.dtype ou inféré depuis les tensors)
+    do
+        local float_dtype = nil
+        local mc0 = arch.model_config
+        if type(mc0) == "table" and type(mc0.dtype) == "string" and mc0.dtype ~= "" then
+            float_dtype = mc0.dtype
+        elseif type(info.inferred_float_dtype) == "string" and info.inferred_float_dtype ~= "" then
+            float_dtype = info.inferred_float_dtype .. " (inféré)"
+        end
+        if float_dtype then
+            rows[#rows + 1] = { k = "DType", v = float_dtype }
+        end
+    end
+
+    -- Afficher les champs clés de model_config si disponibles
+    local mc = arch.model_config
+    if type(mc) == "table" then
+        local interesting = {
+            "task", "image_w", "image_h", "image_c",
+            "latent_h", "latent_w", "latent_c", "base_channels", "downsamples",
+            "use_attention", "use_attn", "enc_norm", "enc_gn_groups",
+            "attn_heads", "resnet_max_tokens", "attn_max_tokens",
+            "stochastic_latent", "text_cond",
+            "d_model", "num_heads", "num_layers", "mlp_hidden",
+            "latent_dim", "hidden_dim",
+        }
+        local parts = {}
+        for _, k in ipairs(interesting) do
+            local v = mc[k]
+            if v ~= nil and tostring(v) ~= "" then
+                parts[#parts + 1] = k .. "=" .. tostring(v)
+            end
+        end
+        if #parts > 0 then
+            rows[#rows + 1] = { k = "model_config", v = table.concat(parts, "  ") }
+        end
+    end
+
+    local columns = {
+        { key = "k", title = "Clé", align = "left", max = 28 },
+        { key = "v", title = "Valeur", align = "left", max = 140 },
+    }
+
+    return make_table(columns, rows)
+end
+
+local function render_layers(info, opts)
+    local arch = info.arch
+    if type(arch) ~= "table" or type(arch.layers) ~= "table" then
+        return nil
+    end
+
+    local max_layers = tonumber(opts.max_layers)
+    if max_layers == nil then max_layers = #arch.layers end
+    max_layers = clamp(max_layers, 0, #arch.layers)
+
+    local rows = {}
+    for i = 1, max_layers do
+        local l = arch.layers[i]
+        if type(l) == "table" then
+            rows[#rows + 1] = {
+                idx = tostring(i),
+                name = tostring(l.name or ""),
+                type = tostring(l.type or ""),
+                params = (l.params_count ~= nil) and format_int(l.params_count) or "",
+                weights = (l.weights_size ~= nil) and format_int(l.weights_size) or "",
+                dims = layer_dims(l),
+            }
+        end
+    end
+
+    local columns = {
+        { key = "idx", title = "#", align = "right", max = 6 },
+        { key = "name", title = "Layer", align = "left", max = 72 },
+        { key = "type", title = "Type", align = "left", max = 20 },
+        { key = "params", title = "Params", align = "right", max = 14 },
+        { key = "weights", title = "Weights", align = "right", max = 14 },
+        { key = "dims", title = "Dims", align = "left", max = 46 },
+    }
+
+    local table_str = make_table(columns, rows)
+
+    if max_layers < #arch.layers then
+        table_str = table_str .. "\n" .. string.format("(affiche %d/%d couches; utilisez --max-layers pour ajuster)", max_layers, #arch.layers)
+    end
+
+    return table_str
+end
+
+local function render_graph(info, opts)
+    local arch = info.arch
+    if type(arch) ~= "table" or type(arch.layers) ~= "table" then
+        return nil
+    end
+
+    local function norm_inputs(v, i)
+        if type(v) == "table" and #v > 0 then
+            local out = {}
+            for k = 1, #v do
+                if v[k] ~= nil and tostring(v[k]) ~= "" then out[#out + 1] = tostring(v[k]) end
+            end
+            if #out > 0 then return out end
+        elseif type(v) == "string" and v ~= "" then
+            return { v }
+        end
+
+        -- DebugJson n'a pas forcément d'IO: fallback linéaire
+        if i and i > 1 then
+            return { "t" .. tostring(i - 1) }
+        end
+        return { "x" }
+    end
+
+    local function norm_output(v, i)
+        if type(v) == "string" and v ~= "" then return v end
+        -- DebugJson n'a pas forcément d'IO: fallback linéaire
+        if i then return "t" .. tostring(i) end
+        return "x"
+    end
+
+    local max_layers = tonumber(opts.max_layers)
+    if max_layers == nil then max_layers = #arch.layers end
+    max_layers = clamp(max_layers, 0, #arch.layers)
+
+    local produced = {}
+    local consumed = {}
+    local edges = 0
+    local named_tensors = {}
+
+    local rows = {}
+    for i = 1, max_layers do
+        local l = arch.layers[i]
+        if type(l) == "table" then
+            local inputs = norm_inputs(l.inputs, i)
+            local out = norm_output(l.output, i)
+            produced[out] = true
+            named_tensors[out] = true
+            for _, inp in ipairs(inputs) do
+                consumed[inp] = true
+                named_tensors[inp] = true
+                edges = edges + 1
+            end
+
+            rows[#rows + 1] = {
+                idx = tostring(i),
+                name = tostring(l.name or ""),
+                type = tostring(l.type or ""),
+                ins = table.concat(inputs, ","),
+                out = out,
+            }
+        end
+    end
+
+    local sources = {}
+    for tname, _ in pairs(consumed) do
+        if not produced[tname] then sources[#sources + 1] = tname end
+    end
+    table.sort(sources)
+
+    local sinks = {}
+    for tname, _ in pairs(produced) do
+        if not consumed[tname] then sinks[#sinks + 1] = tname end
+    end
+    table.sort(sinks)
+
+    local named_count = 0
+    for _, _ in pairs(named_tensors) do named_count = named_count + 1 end
+
+    local header_lines = {
+        string.format("Noeuds: %s | Arêtes: %s | Tensors nommés: %s", format_int(max_layers), format_int(edges), format_int(named_count)),
+        string.format("Entrées (sources): %s", (#sources > 0) and table.concat(sources, ", ") or "?"),
+        string.format("Sorties (sinks): %s", (#sinks > 0) and table.concat(sinks, ", ") or "?"),
+    }
+
+    local columns = {
+        { key = "idx", title = "#", align = "right", max = 6 },
+        { key = "name", title = "Layer", align = "left", max = 72 },
+        { key = "type", title = "Type", align = "left", max = 20 },
+        { key = "ins", title = "Inputs", align = "left", max = 46 },
+        { key = "out", title = "Output", align = "left", max = 18 },
+    }
+
+    local table_str = make_table(columns, rows)
+    if max_layers < #arch.layers then
+        table_str = table_str .. "\n" .. string.format("(graphe limité à %d/%d couches; utilisez --max-layers)", max_layers, #arch.layers)
+    end
+
+    return table.concat(header_lines, "\n") .. "\n\n" .. table_str
+end
+
+local function render_graph_blocks(info, opts)
+    local arch = info.arch
+    if type(arch) ~= "table" or type(arch.layers) ~= "table" then
+        return nil
+    end
+
+    local function norm_inputs(v, i)
+        if type(v) == "table" and #v > 0 then
+            local out = {}
+            for k = 1, #v do
+                if v[k] ~= nil and tostring(v[k]) ~= "" then out[#out + 1] = tostring(v[k]) end
+            end
+            if #out > 0 then return out end
+        elseif type(v) == "string" and v ~= "" then
+            return { v }
+        end
+
+        -- DebugJson n'a pas forcément d'IO: fallback linéaire
+        if i and i > 1 then
+            return { "t" .. tostring(i - 1) }
+        end
+        return { "x" }
+    end
+
+    local function norm_output(v, i)
+        if type(v) == "string" and v ~= "" then return v end
+        -- DebugJson n'a pas forcément d'IO: fallback linéaire
+        if i then return "t" .. tostring(i) end
+        return "x"
+    end
+
+    local max_layers = tonumber(opts.max_layers)
+    if max_layers == nil then max_layers = #arch.layers end
+    max_layers = clamp(max_layers, 0, #arch.layers)
+
+    -- Largeurs max des blocs (inner), avec caps (évite des lignes énormes)
+    local cap_in = tonumber(opts.graph_in_width) or 28
+    local cap_layer = tonumber(opts.graph_layer_width) or 48
+    local cap_out = tonumber(opts.graph_out_width) or 18
+    cap_in = clamp(math.floor(cap_in), 8, 120)
+    cap_layer = clamp(math.floor(cap_layer), 12, 160)
+    cap_out = clamp(math.floor(cap_out), 6, 60)
+
+    local produced = {}
+    local consumed = {}
+    local edges = 0
+    local named_tensors = {}
+
+    local rows = {}
+    local in_w, layer_w, out_w = 0, 0, 0
+    local idx_w = utf8_len_safe(tostring(max_layers))
+
+    for i = 1, max_layers do
+        local l = arch.layers[i]
+        if type(l) == "table" then
+            local inputs = norm_inputs(l.inputs, i)
+            local out = norm_output(l.output, i)
+            produced[out] = true
+            named_tensors[out] = true
+            for _, inp in ipairs(inputs) do
+                consumed[inp] = true
+                named_tensors[inp] = true
+                edges = edges + 1
+            end
+
+            local ins = table.concat(inputs, ",")
+            local layer = tostring(l.name or "")
+            local ltype = tostring(l.type or "")
+            if ltype ~= "" then layer = layer .. " | " .. ltype end
+
+            local ins_t = trunc(ins, cap_in)
+            local layer_t = trunc(layer, cap_layer)
+            local out_t = trunc(out, cap_out)
+
+            local iw = utf8_len_safe(ins_t)
+            local lw = utf8_len_safe(layer_t)
+            local ow = utf8_len_safe(out_t)
+            if iw > in_w then in_w = iw end
+            if lw > layer_w then layer_w = lw end
+            if ow > out_w then out_w = ow end
+
+            rows[#rows + 1] = {
+                idx = tostring(i),
+                ins = ins_t,
+                layer = layer_t,
+                out = out_t,
+            }
+        end
+    end
+
+    local sources = {}
+    for tname, _ in pairs(consumed) do
+        if not produced[tname] then sources[#sources + 1] = tname end
+    end
+    table.sort(sources)
+
+    local sinks = {}
+    for tname, _ in pairs(produced) do
+        if not consumed[tname] then sinks[#sinks + 1] = tname end
+    end
+    table.sort(sinks)
+
+    local named_count = 0
+    for _, _ in pairs(named_tensors) do named_count = named_count + 1 end
+
+    local header_lines = {
+        string.format("Noeuds: %s | Arêtes: %s | Tensors nommés: %s", format_int(max_layers), format_int(edges), format_int(named_count)),
+        string.format("Entrées (sources): %s", (#sources > 0) and table.concat(sources, ", ") or "?"),
+        string.format("Sorties (sinks): %s", (#sinks > 0) and table.concat(sinks, ", ") or "?"),
+        "",
+        string.format("%s  [%s] -> [%s] -> [%s]", pad_left("#", idx_w), pad_right("inputs", in_w), pad_right("layer | type", layer_w), pad_right("out", out_w)),
+    }
+
+    local lines = {}
+    for i = 1, #rows do
+        local r = rows[i]
+        local line = string.format(
+            "%s  [%s] -> [%s] -> [%s]",
+            pad_left(r.idx, idx_w),
+            pad_right(r.ins, in_w),
+            pad_right(r.layer, layer_w),
+            pad_right(r.out, out_w)
+        )
+        lines[#lines + 1] = line
+    end
+
+    local out = table.concat(header_lines, "\n") .. "\n" .. table.concat(lines, "\n")
+    if max_layers < #arch.layers then
+        out = out .. "\n" .. string.format("(graphe limité à %d/%d couches; utilisez --max-layers)", max_layers, #arch.layers)
+    end
+    return out
+end
+
+local function render_graph_mermaid_markdown(info, opts)
+    local arch = info.arch
+    if type(arch) ~= "table" or type(arch.layers) ~= "table" then
+        return nil
+    end
+
+    local max_layers = tonumber(opts.max_layers)
+    if max_layers == nil then max_layers = #arch.layers end
+    max_layers = clamp(max_layers, 0, #arch.layers)
+
+    local function esc_label(s)
+        s = tostring(s or "")
+        s = s:gsub("\\r", " "):gsub("\\n", " ")
+        -- mermaid labels in ["..."] => éviter les guillemets
+        s = s:gsub('"', "'")
+        return s
+    end
+
+    local function norm_inputs(v, i)
+        if type(v) == "table" and #v > 0 then
+            local out = {}
+            for k = 1, #v do
+                if v[k] ~= nil and tostring(v[k]) ~= "" then out[#out + 1] = tostring(v[k]) end
+            end
+            if #out > 0 then return out end
+        elseif type(v) == "string" and v ~= "" then
+            return { v }
+        end
+
+        -- DebugJson n'a pas d'IO: fallback linéaire
+        if i and i > 1 then
+            return { "t" .. tostring(i - 1) }
+        end
+        return { "x" }
+    end
+
+    local function norm_output(v, i)
+        if type(v) == "string" and v ~= "" then return v end
+        -- DebugJson n'a pas d'IO: fallback linéaire
+        if i then return "t" .. tostring(i) end
+        return "x"
+    end
+
+    local producers = {}  -- tensor -> layer idx
+    local consumers = {}  -- tensor -> true
+    local edges = {}
+    local source_nodes = {} -- tensor -> nodeId
+
+    local function layer_id(i)
+        return "L" .. tostring(i)
+    end
+
+    local function source_id(tensor)
+        if source_nodes[tensor] then return source_nodes[tensor] end
+        -- id mermaid: alnum/_ uniquement
+        local clean = tostring(tensor):gsub("[^%w_]", "_")
+        clean = clean:gsub("_+", "_")
+        if clean == "" then clean = "x" end
+        local id = "S_" .. clean
+        -- collision possible => stabiliser via suffix
+        local base = id
+        local n = 1
+        while source_nodes[id] do
+            n = n + 1
+            id = base .. "_" .. tostring(n)
+        end
+        source_nodes[tensor] = id
+        return id
+    end
+
+    -- Pass 1: compute producers
+    for i = 1, max_layers do
+        local l = arch.layers[i]
+        if type(l) == "table" then
+            local out = norm_output(l.output, i)
+            producers[out] = i
+        end
+    end
+
+    -- Pass 2: create edges between producing layers and consuming layers
+    for i = 1, max_layers do
+        local l = arch.layers[i]
+        if type(l) == "table" then
+            local inputs = norm_inputs(l.inputs, i)
+            for _, inp in ipairs(inputs) do
+                consumers[inp] = true
+                local p = producers[inp]
+                if p and p ~= i then
+                    edges[#edges + 1] = { from = layer_id(p), to = layer_id(i), label = esc_label(inp) }
+                else
+                    local sid = source_id(inp)
+                    edges[#edges + 1] = { from = sid, to = layer_id(i), label = esc_label(inp) }
+                end
+            end
+        end
+    end
+
+    -- Build Mermaid
+    local lines = {}
+    lines[#lines + 1] = "```mermaid"
+    lines[#lines + 1] = "flowchart LR"
+
+    -- Layer nodes
+    for i = 1, max_layers do
+        local l = arch.layers[i]
+        if type(l) == "table" then
+            local name = esc_label(l.name or "")
+            local typ = esc_label(l.type or "")
+            local label = tostring(i)
+            if name ~= "" then label = label .. ": " .. name end
+            if typ ~= "" then label = label .. " | " .. typ end
+            lines[#lines + 1] = string.format("  %s[\"%s\"]", layer_id(i), label)
+        end
+    end
+
+    -- Source nodes
+    for tensor, sid in pairs(source_nodes) do
+        lines[#lines + 1] = string.format("  %s((\"%s\"))", sid, esc_label(tensor))
+    end
+
+    -- Edges
+    for i = 1, #edges do
+        local e = edges[i]
+        if e.label and e.label ~= "" then
+            lines[#lines + 1] = string.format("  %s -->|%s| %s", e.from, e.label, e.to)
+        else
+            lines[#lines + 1] = string.format("  %s --> %s", e.from, e.to)
+        end
+    end
+
+    lines[#lines + 1] = "```"
+
+    if max_layers < #arch.layers then
+        lines[#lines + 1] = string.format("(graphe limité à %d/%d couches; utilisez --max-layers)", max_layers, #arch.layers)
+    end
+
+    return table.concat(lines, "\n")
+end
+
+local function render_top_tensors(info, opts)
+    local tensors = info.tensors
+    if type(tensors) ~= "table" then return nil end
+
+    local top = tonumber(opts.top_tensors) or 20
+    top = clamp(top, 0, 200)
+
+    -- Sort by bytes
+    local list = {}
+    for i = 1, #tensors do list[i] = tensors[i] end
+
+    table.sort(list, function(a, b)
+        return (a.bytes_raw or 0) > (b.bytes_raw or 0)
+    end)
+
+    local rows = {}
+    for i = 1, math.min(top, #list) do
+        local t = list[i]
+        rows[#rows + 1] = {
+            idx = tostring(i),
+            name = t.name or "",
+            dtype = t.dtype or "",
+            shape = t.shape or "",
+            elems = t.elems or "",
+            bytes = t.bytes or format_bytes(t.bytes_raw or 0),
+        }
+    end
+
+    local columns = {
+        { key = "idx", title = "#", align = "right", max = 6 },
+        { key = "name", title = "Tensor", align = "left", max = 78 },
+        { key = "dtype", title = "DType", align = "left", max = 8 },
+        { key = "shape", title = "Shape", align = "left", max = 36 },
+        { key = "elems", title = "Elems", align = "right", max = 16 },
+        { key = "bytes", title = "Taille", align = "right", max = 12 },
+    }
+
+    return make_table(columns, rows)
+end
+
+local function render_help()
+    local lines = {
+        "Analyseur de modèles/checkpoints Mimir (SafeTensors / RawFolder / DebugJson)",
+        "",
+        "Usage:",
+        "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in model.safetensors",
+        "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in checkpoint_dir/",
+        "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in debug.json",
+        "",
+        "Formats supportés:",
+        "  - SafeTensors: *.safetensors (ou *.st)",
+        "  - RawFolder  : dossier contenant manifest.json",
+        "  - DebugJson  : dump JSON (format=mimir_debug_dump ou JSON enhanced v1.1)",
+        "",
+        "Options:",
+        "  --in <path>                         Chemin du modèle (requis)",
+        "  --max-layers <n>                    Limite l'affichage des couches / graphe",
+        "  --top-tensors <n>                   Nb de tensors listés (par taille)",
+        "  --enrich-tensors <n>                [RawFolder] enrichit les N plus gros tensors (dtype/shape)",
+        "  --graph-format <table|blocks|mermaid>  Format de graphe (défaut: table)",
+        "                                     Alias accepté: mermaind -> mermaid",
+        "  --graph-blocks <bool>               Affiche le graphe 'blocks' en plus du graphe principal (défaut: false)",
+        "  --graph-in-width <n>                Largeur inputs (mode blocks)",
+        "  --graph-layer-width <n>             Largeur layer (mode blocks)",
+        "  --graph-out-width <n>               Largeur output (mode blocks)",
+        "  --debug <bool>                      Logs de debug (défaut: false)",
+        "  --script-help <bool>                Affiche cette aide (alias: --help-script, --h)",
+        "",
+        "Notes:",
+        "  - Le graphe Mermaid est émis en Markdown via un bloc ```mermaid```.",
+        "  - Les dumps DebugJson n'embarquent pas forcément inputs/output; dans ce cas le graphe Mermaid",
+        "    utilise un fallback linéaire (layer1 -> layer2 -> ...).",
+    }
+    return table.concat(lines, "\n")
+end
+
+-- ---------------------------------------------------------------------------
+-- Main
+-- ---------------------------------------------------------------------------
+
+local opts = Args.parse(arg) or {}
+
+local IN = Args.get_str(opts, "in", Args.get_str(opts, "path", Args.get_str(opts, "checkpoint", "")))
+
+-- Small optional knobs (reste simple)
+opts.max_layers = Args.get_num(opts, "max-layers", Args.get_num(opts, "max_layers", nil))
+opts.top_tensors = Args.get_num(opts, "top-tensors", Args.get_num(opts, "top_tensors", 20))
+opts.enrich_tensors = Args.get_num(opts, "enrich-tensors", Args.get_num(opts, "enrich_tensors", 25))
+opts.graph_blocks = Args.get_bool(opts, "graph-blocks", Args.get_bool(opts, "graph_blocks", false))
+opts.graph_in_width = Args.get_num(opts, "graph-in-width", Args.get_num(opts, "graph_in_width", nil))
+opts.graph_layer_width = Args.get_num(opts, "graph-layer-width", Args.get_num(opts, "graph_layer_width", nil))
+opts.graph_out_width = Args.get_num(opts, "graph-out-width", Args.get_num(opts, "graph_out_width", nil))
+opts.graph_format = Args.get_str(opts, "graph-format", Args.get_str(opts, "graph_format", "table"))
+opts.debug = Args.get_bool(opts, "debug", false)
+
+opts.script_help = Args.get_bool(opts, "script-help", Args.get_bool(opts, "script_help",
+    Args.get_bool(opts, "help-script", Args.get_bool(opts, "help_script",
+        Args.get_bool(opts, "h", false)
+    ))
+))
+
+if IN == "" or opts.script_help then
+    log(render_help())
+    if IN == "" and not opts.script_help then
+        os.exit(1)
+    else
+        os.exit(0)
+    end
+end
+
+local is_safetensors = IN:match("%.safetensors$") or IN:match("%.st$")
+local is_raw = file_exists(IN:gsub("/*$", "") .. "/manifest.json")
+
+local is_debug_json = false
+if (not is_raw) and file_exists(IN) and IN:match("%.json$") then
+    -- heuristique rapide (évite de parser des JSON non-model)
+    local pfx = read_prefix(IN, 256 * 1024) or ""
+    if pfx:find('"mimir_debug_dump"', 1, true) or pfx:find('"model_name"', 1, true) or pfx:find('"layers"', 1, true) then
+        local t = select(1, safe_read_json(IN))
+        if type(t) == "table" then
+            if t.format == "mimir_debug_dump" then
+                is_debug_json = true
+            elseif t.model_name ~= nil and t.layers ~= nil and t.format_version ~= nil then
+                is_debug_json = true
+            elseif type(t.model) == "table" and t.layers ~= nil and t.format_version ~= nil then
+                is_debug_json = true
+            end
+        end
+    end
+end
+
+local info, err
+if is_raw then
+    info, err = analyze_raw_folder(IN, opts)
+elseif is_debug_json then
+    info, err = analyze_debug_json(IN, opts)
+elseif is_safetensors or file_exists(IN) then
+    info, err = analyze_safetensors(IN, opts)
+else
+    die("chemin introuvable ou format non reconnu: " .. tostring(IN))
+end
+
+if not info then
+    die(err or "analyse échouée")
+end
+
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("  Analyse modèle")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("")
+
+log(render_summary(info))
+
+do
+    local gf = tostring(opts.graph_format or "table"):lower()
+    if gf == "mermaid" or gf == "mermaind" then
+        local md = render_graph_mermaid_markdown(info, opts)
+        if md then
+            log("")
+            log("Graphe (Mermaid/Markdown)")
+            log(md)
+        end
+    elseif gf == "blocks" then
+        local blocks = render_graph_blocks(info, opts)
+        if blocks then
+            log("")
+            log("Graphe (blocks)")
+            log(blocks)
+        end
+    else
+        local graph = render_graph(info, opts)
+        if graph then
+            log("")
+            log("Résumé (graphe)")
+            log(graph)
+        end
+
+        if opts.graph_blocks then
+            local blocks = render_graph_blocks(info, opts)
+            if blocks then
+                log("")
+                log("Graphe (blocks)")
+                log(blocks)
+            end
+        end
+    end
+end
+
+local layers = render_layers(info, opts)
+if layers then
+    log("")
+    log("Couches")
+    log(layers)
+end
+
+local top_t = render_top_tensors(info, opts)
+if top_t then
+    log("")
+    log("Top tensors (par taille)")
+    log(top_t)
+end
+
+log("")
+log("✓ Analyse terminée")

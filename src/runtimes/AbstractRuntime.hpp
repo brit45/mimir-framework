@@ -18,8 +18,17 @@ struct RuntimeConfig {
     bool verbose = false;
 
     // Fast-paths (opt-in)
-    bool linear_enabled = false;
-    int linear_min_ops = 1 << 20;
+    bool linear_enabled   = false;
+    int  linear_min_ops   = 1 << 20;
+
+    bool conv_enabled     = false;
+    int  conv_min_ops     = 1 << 18;  // ~256K MACs
+
+    bool norm_enabled         = false;
+    int  norm_min_elements    = 1 << 12; // 4096 éléments
+
+    bool attention_enabled  = false;
+    int  attention_min_ops  = 1 << 18;  // ~256K MACs
 
     // Optionnel: sélection de device (ex: MIMIR_CUDA_DEVICE=0)
     int device_index = 0;
