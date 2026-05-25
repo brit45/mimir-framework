@@ -138,3 +138,52 @@ local out, ferr = Mimir.Model.forward({ __input__ = ids }, false)
 assert(out, ferr)
 print("out_len=", #out)
 ```
+
+---
+
+## Calibration par feedback de validation
+
+Mécanisme permettant au résultat de validation (loss, MSE, etc.) d'influencer automatiquement le learning rate des epochs suivantes. Implémenté dans `src/LuaScripting.cpp` dans la boucle `lua_trainModel`.
+
+### Paramètres dans `modelConfig`
+
+| Paramètre | Type | Défaut | Description |
+| --- | --- | --- | --- |
+| `val_feedback_enabled` | bool | `false` | Active le mécanisme (doit être explicitement `true`) |
+| `val_reward_factor` | float | `1.05` | Multiplicateur LR si la métrique s'améliore |
+| `val_penalty_factor` | float | `0.70` | Multiplicateur LR si la métrique se dégrade |
+| `val_lr_scale_min` | float | `0.10` | Borne inférieure du multiplicateur cumulé |
+| `val_lr_scale_max` | float | `1.50` | Borne supérieure du multiplicateur cumulé |
+| `val_improve_thresh` | float | `0.001` | Seuil minimal d'amélioration relative pour déclencher la récompense |
+| `val_feedback_min_steps` | int | `0` | Nombre minimal de steps d'entraînement avant d'activer le feedback |
+
+### Comportement
+
+- `val_lr_scale` est un multiplicateur persistant appliqué à chaque appel de `step_learning_rate()`.
+- Si `validation_metric_now < best_metric * (1 - val_improve_thresh)` → **récompense** (`val_lr_scale *= val_reward_factor`).
+- Sinon → **pénalité** (`val_lr_scale *= val_penalty_factor`).
+- Le multiplicateur est clampé dans `[val_lr_scale_min, val_lr_scale_max]` à chaque mise à jour.
+- La pénalité est aussi appliquée quand la validation échoue complètement (loss invalide, NaN).
+
+### Exemple de configuration
+
+```lua
+local cfg = {
+  val_feedback_enabled    = true,
+  val_reward_factor       = 1.08,  -- +8% LR si amélioration
+  val_penalty_factor      = 0.75,  -- -25% LR si dégradation
+  val_lr_scale_min        = 0.05,
+  val_lr_scale_max        = 2.00,
+  val_improve_thresh      = 0.005, -- amélioration >= 0.5% requise
+  val_feedback_min_steps  = 100,   -- attend 100 steps avant activation
+}
+```
+
+### Intégration dans la boucle d'entraînement
+
+```lua
+-- Après chaque validation, mimir appelle apply_val_feedback(metric, step)
+-- et ajuste automatiquement val_lr_scale pour les appels suivants de step_learning_rate()
+```
+
+Voir aussi : [docs/02-User-Guide/04-Training.md](../02-User-Guide/04-Training.md) (section "Calibration par feedback de validation").

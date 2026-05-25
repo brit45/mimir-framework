@@ -1171,6 +1171,32 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             baseline_pony_kl_warmup_steps = std::max(0, pcfg.kl_warmup_steps);
         }
 
+        // ─────────────────────────────────────────────────────────────────────
+        // Calibration par feedback de validation (récompense / punition sur LR)
+        // Clés modelConfig: val_feedback_enabled, val_reward_factor,
+        //   val_penalty_factor, val_lr_scale_min, val_lr_scale_max,
+        //   val_improve_thresh, val_feedback_min_steps
+        // La métrique utilisée est "inférieure = meilleure" (recon_loss, eps_mse, bce_loss…)
+        // ─────────────────────────────────────────────────────────────────────
+        bool  val_feedback_enabled   = true;
+        float val_reward_factor      = 1.05f;   // boost LR si val s'améliore
+        float val_penalty_factor     = 0.70f;   // réduction LR si val se dégrade
+        float val_lr_scale_min       = 0.10f;   // plancher du facteur LR
+        float val_lr_scale_max       = 1.50f;   // plafond du facteur LR
+        float val_improve_thresh     = 0.001f;  // amélior. rel. min pour déclencher reward
+        int   val_feedback_min_steps = 0;       // activer seulement après N steps
+        float val_lr_scale           = 1.0f;    // facteur courant (multiplicateur step_lr)
+        float val_best_metric        = std::numeric_limits<float>::max();
+        try {
+            if (ctx.modelConfig.contains("val_feedback_enabled"))   val_feedback_enabled   = ctx.modelConfig["val_feedback_enabled"].get<bool>();
+            if (ctx.modelConfig.contains("val_reward_factor"))      val_reward_factor      = ctx.modelConfig["val_reward_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_penalty_factor"))     val_penalty_factor     = ctx.modelConfig["val_penalty_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_lr_scale_min"))       val_lr_scale_min       = ctx.modelConfig["val_lr_scale_min"].get<float>();
+            if (ctx.modelConfig.contains("val_lr_scale_max"))       val_lr_scale_max       = ctx.modelConfig["val_lr_scale_max"].get<float>();
+            if (ctx.modelConfig.contains("val_improve_thresh"))     val_improve_thresh     = ctx.modelConfig["val_improve_thresh"].get<float>();
+            if (ctx.modelConfig.contains("val_feedback_min_steps")) val_feedback_min_steps = ctx.modelConfig["val_feedback_min_steps"].get<int>();
+        } catch (...) {}
+
         auto poll_viz_live_params = [&]() {
             if (!ctx.asyncMonitor) return;
             auto viz = ctx.asyncMonitor->getViz();
@@ -1230,7 +1256,51 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
         auto step_learning_rate = [&]() -> float {
             // Avant toute interaction UI, conserver le comportement historique (arg `lr`).
-            return live_override_active ? opt.getCurrentLR() : static_cast<float>(lr);
+            const float base = live_override_active ? opt.getCurrentLR() : static_cast<float>(lr);
+            return base * val_lr_scale;
+        };
+
+        // Feedback de validation: récompense ou punit le modèle en ajustant val_lr_scale.
+        // metric : valeur scalaire (inférieure = meilleure).
+        auto apply_val_feedback = [&](float metric, int step) {
+            if (!val_feedback_enabled) return;
+            if (step < val_feedback_min_steps) return;
+            if (!std::isfinite(metric) || metric < 0.0f) return;
+
+            const float prev = val_best_metric;
+            const bool is_first = (prev == std::numeric_limits<float>::max());
+
+            if (is_first) {
+                val_best_metric = metric;
+                ctx.addLog("[val_feedback] premier point metric=" + std::to_string(metric) +
+                           " lr_scale=" + std::to_string(val_lr_scale));
+                return;
+            }
+
+            const float denom = std::max(1e-12f, std::abs(prev));
+            const float rel   = (prev - metric) / denom; // positif = amélioration
+
+            if (rel > val_improve_thresh) {
+                // Récompense: la validation s'améliore
+                val_lr_scale    = std::min(val_lr_scale_max, val_lr_scale * val_reward_factor);
+                val_best_metric = metric;
+                ctx.addLog("[val_feedback] ✓ reward: prev=" + std::to_string(prev) +
+                           " cur=" + std::to_string(metric) +
+                           " rel_improve=" + std::to_string(rel) +
+                           " -> lr_scale=" + std::to_string(val_lr_scale));
+            } else if (rel < -val_improve_thresh) {
+                // Punition: la validation se dégrade
+                val_lr_scale = std::max(val_lr_scale_min, val_lr_scale * val_penalty_factor);
+                ctx.addLog("[val_feedback] ✗ penalty: prev=" + std::to_string(prev) +
+                           " cur=" + std::to_string(metric) +
+                           " rel_degrade=" + std::to_string(-rel) +
+                           " -> lr_scale=" + std::to_string(val_lr_scale));
+            } else {
+                // Plateau / variation trop faible: neutre
+                ctx.addLog("[val_feedback] ~ plateau: prev=" + std::to_string(prev) +
+                           " cur=" + std::to_string(metric) +
+                           " lr_scale=" + std::to_string(val_lr_scale));
+            }
         };
 
         // Perf stats pour la viz: time/mem/bps (best-effort).
@@ -1664,6 +1734,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         const float final_recon = (done > 0) ? (float)(acc_recon / (double)done) : 0.0f;
                         const float final_kl = (done > 0) ? (float)(acc_kl / (double)done) : 0.0f;
                         if (ctx.asyncMonitor) ctx.asyncMonitor->updateValidation(false, global_step, done, total, true, val_ok, final_recon, final_kl, 0.0f);
+
+                        // Calibration: récompense / punition selon l'évolution de la loss de reconstruction VAE.
+                        if (val_ok && done > 0) apply_val_feedback(final_recon, global_step);
 
                         // Backbone readiness: heuristique basée sur validation.
                         if (backbone_ready_enabled && val_ok && done > 0 && !backbone_ready_written) {
@@ -2694,7 +2767,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     global_step += 1;
 
                     if (validation_enabled && validate_every_steps > 0 && (global_step % validate_every_steps) == 0) {
-                        (void)run_validation(global_step, (epoch + 1));
+                        const auto vs = run_validation(global_step, (epoch + 1));
+                        if (vs.items > 0) apply_val_feedback(static_cast<float>(vs.loss), global_step);
                     }
 
                     if (viz_taps_every_steps > 0 && (global_step % viz_taps_every_steps) == 0) {
@@ -2759,7 +2833,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 if (validation_enabled && validate_every_epochs > 0) {
                     const int epoch_1based = epoch + 1;
                     if ((epoch_1based % validate_every_epochs) == 0) {
-                        (void)run_validation(global_step, epoch_1based);
+                        const auto vse = run_validation(global_step, epoch_1based);
+                        if (vse.items > 0) apply_val_feedback(static_cast<float>(vse.loss), global_step);
                     }
                 }
 
@@ -3217,6 +3292,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         const float final_eps = (done > 0) ? (float)(acc_eps / (double)done) : 0.0f;
                         const float final_margin = (done > 0) ? (float)(acc_margin / (double)done) : 0.0f;
                         if (ctx.asyncMonitor) ctx.asyncMonitor->updateValidation(false, global_step, done, total, true, val_ok, final_img, final_eps, final_margin);
+
+                        // Calibration: récompense / punition selon l'évolution de eps_mse (DDPM).
+                        if (val_ok && done > 0) apply_val_feedback(final_eps, global_step);
 
                         if (stop_requested) {
                             break;
