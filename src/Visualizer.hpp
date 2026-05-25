@@ -154,6 +154,7 @@ private:
     std::atomic<bool> live_kl_enabled_{false};
 
     // État UI live (thread UI uniquement, non atomique).
+    bool live_ui_inited_ = false;
     float live_ui_lr_ = 0.0f;
     int live_ui_lr_warmup_steps_ = 0;
     float live_ui_kl_beta_ = 0.0f;

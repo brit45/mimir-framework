@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(Mimir VERSION 3.0.0 LANGUAGES CXX)
+project(Mimir VERSION 3.0.1 LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet

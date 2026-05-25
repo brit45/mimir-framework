@@ -5,6 +5,12 @@ Toutes les modifications notables du Mímir Framework sont documentées ici.
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [3.0.1] - 2026-05-25
+
+### 🐛 Correctifs
+
+- **`Visualizer`** : ajout du membre manquant `live_ui_inited_` dans `Visualizer.hpp` — corrige une erreur de compilation avec `ENABLE_SFML=ON`.
+
 ## [3.0.0] - 2026-05-25
 
 ### 🚀 Montée de version majeure — API enrichie, nouveaux templates et robustesse
