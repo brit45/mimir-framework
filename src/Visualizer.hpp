@@ -46,6 +46,19 @@ public:
     void requestStopTraining();
     bool consumeStopTrainingRequested();
 
+    // Paramètres d'entraînement modifiables en direct depuis l'UI (thread-safe).
+    struct LiveTrainParams {
+        bool overrides_enabled = false;
+        float lr = 0.0f;
+        int lr_warmup_steps = 0;
+        float kl_beta = 0.0f;
+        int kl_warmup_steps = 0;
+        bool kl_enabled = false;
+        uint64_t version = 0;
+    };
+    uint64_t liveTrainParamsVersion() const;
+    LiveTrainParams liveTrainParamsSnapshot() const;
+
     // Mettre à jour l'affichage
     void update();
 
@@ -130,6 +143,38 @@ private:
 
     // Flag thread-safe: mis à true quand l'utilisateur demande d'arrêter l'entraînement.
     std::atomic<bool> stop_training_requested_{false};
+
+    // Paramètres live (écrits par le thread UI, lus par le thread d'entraînement).
+    std::atomic<uint64_t> live_params_version_{0};
+    std::atomic<bool> live_overrides_enabled_{false};
+    std::atomic<float> live_lr_{0.0f};
+    std::atomic<int> live_lr_warmup_steps_{0};
+    std::atomic<float> live_kl_beta_{0.0f};
+    std::atomic<int> live_kl_warmup_steps_{0};
+    std::atomic<bool> live_kl_enabled_{false};
+
+    // État UI live (thread UI uniquement, non atomique).
+    float live_ui_lr_ = 0.0f;
+    int live_ui_lr_warmup_steps_ = 0;
+    float live_ui_kl_beta_ = 0.0f;
+    int live_ui_kl_warmup_steps_ = 0;
+    bool live_ui_kl_enabled_ = false;
+
+    // Drag des sliders live.
+    enum class LiveDragTarget { None, LR, LRWarmup, KLBeta, KLWarmup };
+    LiveDragTarget live_dragging_ = LiveDragTarget::None;
+
+    // Rects des contrôles live (reset à chaque frame).
+    std::optional<sf::FloatRect> last_live_overrides_box_;
+    std::optional<sf::FloatRect> last_live_kl_enable_box_;
+    std::optional<sf::FloatRect> last_live_lr_track_;
+    std::optional<sf::FloatRect> last_live_lr_thumb_;
+    std::optional<sf::FloatRect> last_live_lrwu_track_;
+    std::optional<sf::FloatRect> last_live_lrwu_thumb_;
+    std::optional<sf::FloatRect> last_live_klb_track_;
+    std::optional<sf::FloatRect> last_live_klb_thumb_;
+    std::optional<sf::FloatRect> last_live_klwu_track_;
+    std::optional<sf::FloatRect> last_live_klwu_thumb_;
 
     // Label parsing / architecture hints
     bool hide_activation_blocks = false;
@@ -433,6 +478,18 @@ public:
 
     void requestStopTraining() {}
     bool consumeStopTrainingRequested() { return false; }
+
+    struct LiveTrainParams {
+        bool overrides_enabled = false;
+        float lr = 0.0f;
+        int lr_warmup_steps = 0;
+        float kl_beta = 0.0f;
+        int kl_warmup_steps = 0;
+        bool kl_enabled = false;
+        uint64_t version = 0;
+    };
+    uint64_t liveTrainParamsVersion() const { return 0; }
+    LiveTrainParams liveTrainParamsSnapshot() const { return {}; }
 
     void addGeneratedImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
 

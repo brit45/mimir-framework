@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 
 // PonyXLDDPMModel (PonyXL SDXL-like):
 // - Entraînement diffusion en espace latent: image -> VAE(mu) = x0, puis
@@ -123,6 +125,53 @@ public:
         int viz_ddpm_every_steps = 0;
         // Nombre de timesteps affichés (linéairement espacés de 0 à T-1).
         int viz_ddpm_num_steps = 5;
+
+        // === Conditionnement temporel (mode string) ===
+        // "log_snr" (défaut), "t_norm", "t_norm_centered"
+        std::string timestep_cond = "";
+
+        // === Pondération de la loss ===
+        // "none" (défaut) ou "min_snr"
+        std::string loss_weighting = "none";
+        float min_snr_gamma = 5.0f;
+
+        // === Activation de sortie de l'UNet ===
+        // "linear" (défaut) ou "tanh"
+        std::string output_activation = "linear";
+
+        // === KL régularisation (espace latent) ===
+        float kl_beta = 0.0f;
+        int kl_warmup_steps = 0;
+
+        // === Clipping logvar (VAE) ===
+        float logvar_clip_min = -10.0f;
+        float logvar_clip_max = 10.0f;
+
+        // === Tokens de contexte global (appris, injectés dans la séquence texte) ===
+        int global_ctx_tokens = 0;
+
+        // === Cross-attention caption KV (injecte les embeddings caption via KV séparé) ===
+        bool caption_kv_enable = false;
+
+        // === Boost de fréquence de termes (term frequency boosting) ===
+        bool term_freq_boost_enable = false;
+        bool term_freq_boost_use_tokens = false;
+        bool term_freq_boost_use_keywords = false;
+        int term_freq_boost_start_step = 0;
+        int term_freq_boost_update_every_steps = 1;
+        int term_freq_boost_top_k = 0;
+        int term_freq_boost_repeat = 0;
+
+        // === Loss auxiliaire sur image reconstruite ===
+        float img_loss_weight = 0.0f;
+        int img_loss_every_steps = 0;
+
+        // === Architecture UNet avancée ===
+        int unet_blocks_per_level = 1;
+        int unet_bottleneck_blocks = 1;
+
+        // === Encodeur texte CLIP-like (attention causale) ===
+        bool text_clip_like = false;
     };
 
     struct StepStats {
@@ -139,6 +188,7 @@ public:
         float moment_mismatch = 0.0f;
         float spatial_coherence = 0.0f;
         float temporal_consistency = 0.0f;
+        float kl_beta_effective = 0.0f;
     };
 
     PonyXLDDPMModel();
@@ -148,6 +198,9 @@ public:
 
     // Permet de modifier l'échelle VAE après création du modèle (ex: calibration auto).
     void setVaeScale(float s) { cfg_.vae_scale = s; }
+
+    // Modifie le beta KL et les étapes de warmup à chaud (ex: depuis Lua).
+    void setLiveKL(float kl_beta, int kl_warmup_steps);
 
     // Accumule les moments (sum, sumsq, n) sur le vecteur mu du VAE pour une image.
     // mu est extrait du packed output [image || mu || logvar] du VAE.
@@ -227,4 +280,10 @@ private:
 
     // VAE decoder (pour visualizer reconstructions en espace image, lazy-load)
     std::shared_ptr<Model> vae_decode_;
+
+    // Term frequency boosting: comptages par token ID et top-K cache.
+    std::unordered_map<int, int> term_freq_counts_;
+    std::vector<int> term_freq_top_ids_;
+    std::unordered_set<int> term_freq_top_set_;
+    int term_freq_last_rebuild_step_ = -1;
 };

@@ -228,7 +228,7 @@ void printUsage(const char *prog)
 int main(int argc, char **argv)
 {
     {
-        const std::string ver = get_mimir_version();
+        const std::string ver = Mimir::Serialization::get_mimir_version();
         // Largeur interne de la boîte = 40 chars affichage.
         // Préfixe "       Mímir Framework v" = 24 chars affichage (ASCII sauf "í" qui occupe 2 octets
         // mais 1 char affichage — on calcule le padding sur la taille d'affichage).
