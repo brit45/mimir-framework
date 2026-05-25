@@ -145,7 +145,7 @@ public:
         bool enable_prediction = true;
         bool enable_statistics = true;
         bool enable_disk_spill = true;                 // Eviction non-destructive (sur disque)
-        std::string spill_dir = ".mimir_spill";        // Dossier spill
+        std::string spill_dir = ".mimir-spill";        // Dossier spill
         size_t preload_queue_size = 128; // Nombre d'items à précharger
         size_t worker_threads = 4;
     };
@@ -336,6 +336,65 @@ public:
             }
             allocations_.erase(it);
         }
+    }
+
+    // Forcer l'écriture sur disque d'une allocation (si disk spill activé)
+    // Permet de réellement "décharger" le contenu quand la pression mémoire est forte.
+    bool forceSpillToDisk(const std::string& key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = allocations_.find(key);
+        if (it == allocations_.end()) return false;
+        return spillToDisk(key, it->second);
+    }
+
+    // Écrire directement un bloc mémoire sur disque (sans buffer intermédiaire en RAM).
+    // Utile quand on est déjà proche de la limite et qu'une copie supplémentaire pourrait échouer.
+    bool storeRawOnDisk(const std::string& key, const void* data, size_t bytes) {
+        if (!config_.enable_disk_spill) return false;
+        if (!data || bytes == 0) return false;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        AllocationInfo info;
+        auto it = allocations_.find(key);
+        if (it != allocations_.end()) {
+            info = std::move(it->second);
+            allocations_.erase(it);
+        }
+
+        if (info.disk_path.empty()) {
+            info.disk_path = makeSpillPath(key);
+        }
+
+        // Écrire le fichier de spill depuis le pointeur.
+        if (!writeSpillFileRaw(info.disk_path, reinterpret_cast<const uint8_t*>(data), bytes)) {
+            // Restaurer l'ancienne entrée si on avait quelque chose
+            allocations_[key] = std::move(info);
+            return false;
+        }
+
+        // Ajuster comptages RAM/Disk selon l'ancien état
+        if (!info.data.empty()) {
+            if (current_ram_bytes_ >= info.data.size()) current_ram_bytes_ -= info.data.size();
+            else current_ram_bytes_ = 0;
+            info.data.clear();
+            info.data.shrink_to_fit();
+        }
+        if (info.on_disk) {
+            if (current_disk_bytes_ >= info.stored_bytes) current_disk_bytes_ -= info.stored_bytes;
+            else current_disk_bytes_ = 0;
+        }
+
+        info.original_size = bytes;
+        info.is_compressed = false;
+        info.on_disk = true;
+        info.stored_bytes = bytes;
+        info.last_access = getCurrentTimestamp();
+        info.access_count = 0;
+
+        current_disk_bytes_ += bytes;
+        allocations_[key] = std::move(info);
+        return true;
     }
     
     // Préchargement asynchrone
@@ -569,12 +628,49 @@ private:
     static inline bool writeSpillFile(const std::string& path, const std::vector<uint8_t>& data) {
         try {
             const std::filesystem::path p(path);
+            {
+                std::error_code ec;
+                if (p.has_parent_path()) {
+                    std::filesystem::create_directories(p.parent_path(), ec);
+                }
+            }
             const std::filesystem::path tmp = p.string() + ".tmp";
             {
                 std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
                 if (!f) return false;
                 if (!data.empty()) {
                     f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+                }
+                f.flush();
+                if (!f) return false;
+            }
+            std::error_code ec;
+            std::filesystem::rename(tmp, p, ec);
+            if (ec) {
+                std::filesystem::remove(tmp, ec);
+                return false;
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    static inline bool writeSpillFileRaw(const std::string& path, const uint8_t* data, size_t size) {
+        try {
+            const std::filesystem::path p(path);
+            {
+                std::error_code ec;
+                if (p.has_parent_path()) {
+                    std::filesystem::create_directories(p.parent_path(), ec);
+                }
+            }
+            const std::filesystem::path tmp = p.string() + ".tmp";
+            {
+                std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+                if (!f) return false;
+                if (size > 0) {
+                    f.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
                 }
                 f.flush();
                 if (!f) return false;

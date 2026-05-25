@@ -65,6 +65,7 @@ private:
     static int lua_inferModel(lua_State* L);
     static int lua_saveModel(lua_State* L);
     static int lua_loadModel(lua_State* L);
+    static int lua_modelDType(lua_State* L);
     
     // === New Serialization API ===
     static int lua_saveCheckpoint(lua_State* L);    // Serialization API v2.3
@@ -81,6 +82,7 @@ private:
     static int lua_ponyxlDdpmTrainStep(lua_State* L);
     static int lua_ponyxlDdpmValidateStep(lua_State* L);
     static int lua_ponyxlDdpmVizReconstructStep(lua_State* L);
+    static int lua_ponyxlDdpmText2Img(lua_State* L);
     static int lua_ponyxlDdpmSetVaeScale(lua_State* L);
     static int lua_ponyxlDdpmGetVaeScale(lua_State* L);
     static int lua_ponyxlDdpmVaeMuMoments(lua_State* L);
@@ -254,9 +256,52 @@ public:
     bool suppress_stdout_logs = false;
     void addLog(const std::string& msg) {
         logs.push_back(msg);
-        if (!suppress_stdout_logs) {
-            std::cout << msg << std::endl;
+        if (suppress_stdout_logs) return;
+
+        auto is_error_like = [](const std::string& s) -> bool {
+            if (s.empty()) return false;
+            auto lower = s;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            // Heuristique simple (logs existants): "Erreur", "échec", "failed", etc.
+            return (lower.find("erreur") != std::string::npos) ||
+                   (lower.find("error") != std::string::npos) ||
+                   (lower.find("failed") != std::string::npos) ||
+                   (lower.find("échec") != std::string::npos) ||
+                   (lower.find("echec") != std::string::npos) ||
+                   (lower.find("❌") != std::string::npos) ||
+                   (lower.find("⛔") != std::string::npos);
+        };
+
+        const bool has_cfg = (modelConfig.is_object() && !modelConfig.empty()) ||
+                             (currentConfig.is_object() && !currentConfig.empty());
+        const bool is_err = is_error_like(msg);
+
+        // Couleurs ANSI (stdout uniquement)
+        const char* ANSI_RESET = "\033[0m";
+        const char* ANSI_GREEN_BOLD = "\033[1;4;32m";
+        const char* ANSI_RED = "\033[1;4;31m";
+        const char* ANSI_BLUE = "\033[1;4;36m";
+
+        const char* color = ANSI_GREEN_BOLD;
+        if (is_err) color = ANSI_RED;
+        else if (has_cfg) color = ANSI_BLUE;
+
+        std::string out = msg;
+        if (!modelType.empty()) {
+            const std::string plain_prefix = "[" + modelType + "]";
+            const std::string colored_prefix = std::string("[") + color + modelType + ANSI_RESET + "]";
+
+            if (out.rfind(plain_prefix, 0) == 0) {
+                // Remplace le prefix existant [model] par une version colorée.
+                out = colored_prefix + out.substr(plain_prefix.size());
+            } else {
+                // Préfixe [model] coloré avant le message.
+                out = colored_prefix + " " + out;
+            }
         }
+
+        std::cout << out << std::endl;
     }
     
 private:

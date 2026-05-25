@@ -388,6 +388,24 @@ public:
     std::shared_ptr<Visualizer> getViz() { return viz_; }
     bool isRunning() const { return running_; }
 
+    // Définir le chemin du CSV de loss côté Visualizer (thread-safe).
+    // Appliqué dans le thread Viz (SFML) au prochain tick.
+    void setLossLogFile(const std::string& filepath) {
+        if (!viz_) return;
+        if (filepath.empty()) return;
+        std::lock_guard<std::mutex> lock(viz_mutex_);
+        pending_loss_log_file_ = filepath;
+    }
+
+    // Bloquer jusqu'à fermeture de la fenêtre Viz (best-effort).
+    // Utile en mode --lua pour éviter que le process se termine dès que le script finit.
+    void waitForVizClose() {
+        if (!viz_) return;
+        while (viz_ && viz_->isOpen()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+
     // UI -> training thread: arrêt propre demandé via bouton Viz.
     bool consumeStopTrainingRequested() {
         if (!viz_) return false;
@@ -593,6 +611,12 @@ private:
             // Ajouter images en attente
             {
                 std::lock_guard<std::mutex> lock(viz_mutex_);
+
+                if (pending_loss_log_file_.has_value()) {
+                    viz_->setLossLogFile(pending_loss_log_file_.value());
+                    pending_loss_log_file_.reset();
+                }
+
                 for (const auto& img : pending_images_) {
                     viz_->addGeneratedImage(img.pixels, img.w, img.h, img.channels, img.prompt);
                 }
@@ -710,6 +734,9 @@ private:
     std::optional<PendingFrame> pending_understanding_image_;
 
     std::optional<std::vector<Visualizer::BlockFrame>> pending_layer_blocks_;
+
+    // Pending Viz-side settings
+    std::optional<std::string> pending_loss_log_file_;
 };
 
 #endif // __ASYNC_MONITOR_HPP__

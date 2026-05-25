@@ -52,6 +52,12 @@ private:
         const void* data_ptr;
         size_t byte_size;
     };
+
+    // Owned FP16 payloads (aligned) for float tensors when saving as Float16.
+    std::vector<std::vector<uint16_t>> owned_u16_buffers_;
+
+    // Owned FP64 payloads for float tensors when saving as Float64.
+    std::vector<std::vector<double>> owned_f64_buffers_;
     
     /**
      * Create checkpoint directory structure.

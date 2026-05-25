@@ -43,6 +43,17 @@ local function must(ok, err, ctx)
   end
 end
 
+local function apply_dtype(cfg)
+  local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+  if dtype == nil then return true end
+  if type(Mimir) ~= "table" or type(Mimir.model) ~= "table" or type(Mimir.model.dtype) ~= "function" then
+    return true
+  end
+  local ok, dt_or_err = Mimir.model.dtype(dtype)
+  must(ok, dt_or_err, "Mimir.model.dtype(" .. tostring(dtype) .. ")")
+  return true
+end
+
 local function is_finite(x)
   return x == x and x ~= math.huge and x ~= -math.huge
 end
@@ -168,6 +179,7 @@ local function run_level(L)
 
   -- Registry-based creation
   must(model.create("basic_mlp", L.cfg), nil, "model.create(basic_mlp)")
+  apply_dtype(L.cfg)
 
   local t_alloc0 = os.clock()
   must(model.allocate_params(), nil, "allocate_params")
@@ -274,6 +286,7 @@ local stress_cfg = { input_dim=256, hidden_dim=256, output_dim=256, hidden_layer
 local tS0 = os.clock()
 for i=1,stress_n do
   model.create("basic_mlp", stress_cfg)
+  apply_dtype(stress_cfg)
   model.allocate_params()
   model.init_weights("xavier", i)
   local x = make_input({ height = 1, width = (stress_cfg.input_dim or 0), in_channels = 1 })

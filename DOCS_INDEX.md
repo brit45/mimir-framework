@@ -1,6 +1,6 @@
 # Index documentation (réécrit)
 
-Révision documentation : **2026-03-15**  
+Révision documentation : **2026-05-25**  
 Snapshot de l’ancienne doc : [docs_archive/2026-02-14/](docs_archive/2026-02-14/)
 
 ## Point d’entrée

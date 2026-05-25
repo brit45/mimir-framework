@@ -113,6 +113,8 @@ std::string dtype_to_string(DType dtype) {
     switch (dtype) {
         case DType::Float32: return "F32";
         case DType::Float16: return "F16";
+        case DType::BFloat16: return "BF16";
+        case DType::Float64: return "F64";
         case DType::Int32: return "I32";
         case DType::Int16: return "I16";
         case DType::Uint16: return "U16";
@@ -124,6 +126,8 @@ std::string dtype_to_string(DType dtype) {
 DType string_to_dtype(const std::string& str) {
     if (str == "F32" || str == "float32") return DType::Float32;
     if (str == "F16" || str == "float16") return DType::Float16;
+    if (str == "BF16" || str == "bfloat16" || str == "bf16") return DType::BFloat16;
+    if (str == "F64" || str == "float64" || str == "f64" || str == "double") return DType::Float64;
     if (str == "I32" || str == "int32") return DType::Int32;
     if (str == "I16" || str == "int16") return DType::Int16;
     if (str == "U16" || str == "uint16") return DType::Uint16;
@@ -135,6 +139,8 @@ size_t dtype_size(DType dtype) {
     switch (dtype) {
         case DType::Float32: return 4;
         case DType::Float16: return 2;
+        case DType::BFloat16: return 2;
+        case DType::Float64: return 8;
         case DType::Int32: return 4;
         case DType::Int16: return 2;
         case DType::Uint16: return 2;
@@ -175,7 +181,7 @@ std::string get_mimir_version() {
             return version;
         }
     }
-    return "2.4.0";  // Default version
+    return "3.0.0";  // Default version
 }
 
 std::string get_git_commit() {

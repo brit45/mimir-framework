@@ -91,6 +91,17 @@ local function assert_ok(ok, err, context)
   end
 end
 
+local function apply_dtype(cfg)
+  local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+  if dtype == nil then return true end
+  if type(Mimir) ~= "table" or type(Mimir.model) ~= "table" or type(Mimir.model.dtype) ~= "function" then
+    return true
+  end
+  local ok, dt_or_err = Mimir.model.dtype(dtype)
+  assert_ok(ok, dt_or_err, "Mimir.model.dtype(" .. tostring(dtype) .. ")")
+  return true
+end
+
 local function gen_floats(n, scale)
   scale = scale or 1.0
   local t = {}
@@ -238,6 +249,7 @@ local function bench_model_build_alloc_init(model_type, cfg, init_method, seed)
   local t0 = now_ms()
   local ok, err = Mimir.Model.create(model_type, cfg)
   assert_ok(ok, err, "Mimir.Model.create(" .. tostring(model_type) .. ")")
+  apply_dtype(cfg)
 
   local params = nil
   params = (Mimir.Model.total_params and Mimir.Model.total_params()) or nil
@@ -315,6 +327,7 @@ for _, c in ipairs(build_cases) do
   local t0 = now_ms()
   local ok, err = Mimir.Model.create(c.model_type, c.cfg)
   assert_ok(ok, err, "create " .. c.name)
+  apply_dtype(c.cfg)
 
   local build_ms = 0
   if Mimir.Model.build then
@@ -360,6 +373,7 @@ do
   local cfg = CFG.unet[1].cfg
   log("▶ UNet forward ("..CFG.image.h.."x"..CFG.image.w.."x"..CFG.image.c..")")
   assert_ok(Mimir.Model.create("unet", cfg))
+  apply_dtype(cfg)
   Mimir.Model.allocate_params()
   Mimir.Model.init_weights("he", CFG.seed)
   bench_forward("unet", img, false)
@@ -372,6 +386,7 @@ do
   log("▶ ResNet forward ("..CFG.image.h.."x"..CFG.image.w.."x"..CFG.image.c..")")
   local ok, err = pcall(function()
     assert_ok(Mimir.Model.create("resnet", cfg))
+    apply_dtype(cfg)
     Mimir.Model.allocate_params()
     Mimir.Model.init_weights("he", CFG.seed)
     bench_forward("resnet", img, false)
@@ -387,6 +402,7 @@ do
   local cfg = CFG.vit[1].cfg
   log("▶ ViT forward (num_tokens="..tostring(cfg.num_tokens)..", d_model="..tostring(cfg.d_model)..")")
   assert_ok(Mimir.Model.create("vit", cfg))
+  apply_dtype(cfg)
   Mimir.Model.allocate_params()
   Mimir.Model.init_weights("xavier", CFG.seed)
   local vit_in = gen_floats((cfg.num_tokens or 0) * (cfg.d_model or 0), 1.0)
@@ -399,6 +415,7 @@ do
   local cfg = CFG.transformer[2].cfg
   log("▶ Transformer forward (seq_len="..tostring(cfg.seq_len)..")")
   assert_ok(Mimir.Model.create("transformer", cfg))
+  apply_dtype(cfg)
   Mimir.Model.allocate_params()
   Mimir.Model.init_weights("xavier", CFG.seed)
   local tok = gen_int_tokens(cfg.seq_len or CFG.seq_len, cfg.vocab_size or 30000)
@@ -418,6 +435,7 @@ else
   log("▶ Add routing stress (basic_mlp + extra Identity/Add)")
   local cfg = { input_dim=256, hidden_dim=256, output_dim=256, hidden_layers=0, dropout=0.0 }
   assert_ok(Mimir.Model.create("basic_mlp", cfg))
+  apply_dtype(cfg)
   Mimir.Model.allocate_params()
   Mimir.Model.init_weights("xavier", CFG.seed)
 
@@ -443,6 +461,7 @@ hr("4) Serialization (Save/Load)")
 do
   local cfg = CFG.transformer[1].cfg
   assert_ok(Mimir.Model.create("transformer", cfg))
+  apply_dtype(cfg)
   Mimir.Model.allocate_params()
   Mimir.Model.init_weights("xavier", CFG.seed)
 
@@ -478,6 +497,7 @@ hr("5) Leak Check (repeat forward)")
 do
   local cfg = CFG.unet[1].cfg
   assert_ok(Mimir.Model.create("unet", cfg))
+  apply_dtype(cfg)
   Mimir.Model.allocate_params()
   Mimir.Model.init_weights("he", CFG.seed)
 

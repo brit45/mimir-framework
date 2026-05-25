@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(Mimir VERSION 2.4.0 LANGUAGES CXX)
+project(Mimir VERSION 3.0.0 LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet
@@ -15,6 +15,8 @@ option(ENABLE_SIMD "Enable SIMD optimizations (AVX2, FMA, F16C, BMI2)" ON)
 option(ENABLE_OPENMP "Enable OpenMP parallel processing" ON)
 option(ENABLE_VULKAN "Enable Vulkan Compute acceleration" ON)
 option(ENABLE_OPENCL "Enable OpenCL GPU compute" ON)
+option(ENABLE_CUDA "Enable CUDA GPU compute (cuBLAS)" OFF)
+option(ENABLE_ROCM "Enable ROCm GPU compute (rocBLAS/HIP)" OFF)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
 option(ENABLE_SFML "Enable SFML visualization" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
@@ -209,6 +211,72 @@ if(ENABLE_OPENCL)
     endif()
 endif()
 
+# CUDA / ROCm roots (hints)
+# Permet de configurer la détection quand les toolkits sont installés dans un chemin non standard.
+set(MIMIR_CUDA_ROOT "" CACHE PATH "CUDA Toolkit root (e.g. /usr/local/cuda)")
+set(MIMIR_ROCM_ROOT "" CACHE PATH "ROCm root (e.g. /opt/rocm)")
+
+# CUDA (optionnel)
+if(ENABLE_CUDA)
+    # Aider find_package(CUDAToolkit) si CUDAToolkit_ROOT n'est pas fourni.
+    if(NOT DEFINED CUDAToolkit_ROOT OR "${CUDAToolkit_ROOT}" STREQUAL "")
+        if(NOT "${MIMIR_CUDA_ROOT}" STREQUAL "")
+            set(CUDAToolkit_ROOT "${MIMIR_CUDA_ROOT}" CACHE PATH "" FORCE)
+        elseif(DEFINED ENV{CUDA_HOME} AND NOT "$ENV{CUDA_HOME}" STREQUAL "")
+            set(CUDAToolkit_ROOT "$ENV{CUDA_HOME}" CACHE PATH "" FORCE)
+        elseif(DEFINED ENV{CUDA_PATH} AND NOT "$ENV{CUDA_PATH}" STREQUAL "")
+            set(CUDAToolkit_ROOT "$ENV{CUDA_PATH}" CACHE PATH "" FORCE)
+        endif()
+    endif()
+
+    find_package(CUDAToolkit)
+    if(CUDAToolkit_FOUND)
+        message(STATUS "CUDAToolkit found: ${CUDAToolkit_VERSION}")
+    else()
+        message(WARNING "CUDAToolkit not found - CUDA compute disabled")
+        set(ENABLE_CUDA OFF)
+    endif()
+endif()
+
+# ROCm/HIP (optionnel)
+if(ENABLE_ROCM)
+    set(MIMIR_HIP_PLATFORM "AMD" CACHE STRING "HIP platform (AMD or NVIDIA). Default: AMD")
+    set_property(CACHE MIMIR_HIP_PLATFORM PROPERTY STRINGS AMD NVIDIA)
+
+    set(_MIMIR_ROCM_HINTS "")
+    if(NOT "${MIMIR_ROCM_ROOT}" STREQUAL "")
+        list(APPEND _MIMIR_ROCM_HINTS "${MIMIR_ROCM_ROOT}")
+    endif()
+    if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
+        list(APPEND _MIMIR_ROCM_HINTS "$ENV{ROCM_PATH}")
+    endif()
+    if(DEFINED ENV{ROCM_HOME} AND NOT "$ENV{ROCM_HOME}" STREQUAL "")
+        list(APPEND _MIMIR_ROCM_HINTS "$ENV{ROCM_HOME}")
+    endif()
+    # Chemin standard sur Linux
+    list(APPEND _MIMIR_ROCM_HINTS "/opt/rocm")
+
+    find_path(HIP_INCLUDE_DIR hip/hip_runtime.h
+        HINTS ${_MIMIR_ROCM_HINTS}
+        PATH_SUFFIXES include)
+    find_library(HIP_LIBRARY NAMES amdhip64 hip
+        HINTS ${_MIMIR_ROCM_HINTS}
+        PATH_SUFFIXES lib lib64)
+    find_path(ROCBLAS_INCLUDE_DIR rocblas/rocblas.h
+        HINTS ${_MIMIR_ROCM_HINTS}
+        PATH_SUFFIXES include)
+    find_library(ROCBLAS_LIBRARY NAMES rocblas
+        HINTS ${_MIMIR_ROCM_HINTS}
+        PATH_SUFFIXES lib lib64)
+
+    if(HIP_INCLUDE_DIR AND HIP_LIBRARY AND ROCBLAS_INCLUDE_DIR AND ROCBLAS_LIBRARY)
+        message(STATUS "ROCm found: HIP=${HIP_LIBRARY} rocblas=${ROCBLAS_LIBRARY}")
+    else()
+        message(WARNING "ROCm/HIP not found - ROCm compute disabled")
+        set(ENABLE_ROCM OFF)
+    endif()
+endif()
+
 # ============================================================================
 # Fichiers sources
 # ============================================================================
@@ -224,6 +292,8 @@ set(MIMIR_SOURCES
     src/ConfigOverrides.cpp
     src/Helpers.cpp
     src/stb_image_impl.cpp
+    src/runtimes/AbstractRuntime.cpp
+    src/runtimes/cpu/CpuRuntime.cpp
     src/Models/Registry/ModelArchitectures.cpp
     src/Models/MLP/BasicMLPModel.cpp
     src/Models/NLP/TransformerModel.cpp
@@ -262,16 +332,22 @@ set(MIMIR_HEADERS
     src/Helpers.hpp
     src/Layers.hpp
     src/Autograd.hpp
-    src/SIMD_Ops.hpp
-    src/HardwareOpt.hpp
+    src/runtimes/cpu/SIMD_Ops.hpp
+    src/runtimes/cpu/HardwareOpt.hpp
     src/VulkanCompute.hpp
-    src/DynamicTensorAllocator.hpp
+    src/OpenCLCompute.hpp
+    src/runtimes/AbstractRuntime.hpp
+    src/runtimes/cpu/CpuRuntime.hpp
+    src/runtimes/cuda/CudaRuntime.hpp
+    src/runtimes/rocm/RocmRuntime.hpp
+    src/runtimes/cpu/DynamicTensorAllocator.hpp
     src/AdvancedRAMManager.hpp
     src/MemoryGuard.hpp
     src/AsyncMonitor.hpp
     src/HtopDisplay.hpp
-    src/RuntimeAllocator.hpp
-    src/LayerOpsExt.hpp
+    src/runtimes/cpu/RuntimeAllocator.hpp
+    src/runtimes/cpu/LayerOpsExt.hpp
+    src/runtimes/cpu/RuntimeLayerDispatch.hpp
     src/Models/Registry/ModelArchitectures.hpp
     src/Models/MLP/BasicMLPModel.hpp
     src/Models/NLP/TransformerModel.hpp
@@ -299,6 +375,14 @@ set(MIMIR_HEADERS
     src/stb_image.h
 )
 
+if(ENABLE_CUDA AND CUDAToolkit_FOUND)
+    list(APPEND MIMIR_SOURCES src/runtimes/cuda/CudaRuntime.cpp)
+endif()
+
+if(ENABLE_ROCM AND HIP_LIBRARY AND ROCBLAS_LIBRARY)
+    list(APPEND MIMIR_SOURCES src/runtimes/rocm/RocmRuntime.cpp)
+endif()
+
 # Variante de sources sans SFML (utile pour builds headless / statiques)
 set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})
 list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML src/Visualizer.cpp)
@@ -311,6 +395,7 @@ if(ENABLE_SFML AND SFML_FOUND)
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES}
         ${MIMIR_HEADERS}
+        src/runtimes/cpu/DynamicTensorAllocator.hpp
     )
     target_compile_definitions(mimir_core PUBLIC ENABLE_SFML)
 else()
@@ -322,6 +407,7 @@ endif()
 
 target_include_directories(mimir_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/runtimes/cpu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/include
 )
 
@@ -353,6 +439,27 @@ if(ENABLE_OPENCL AND OPENCL_LIBRARY)
     target_link_libraries(mimir_core PUBLIC ${OPENCL_LIBRARY})
 endif()
 
+if(ENABLE_CUDA AND CUDAToolkit_FOUND)
+    target_compile_definitions(mimir_core PUBLIC ENABLE_CUDA)
+    if(TARGET CUDA::cudart)
+        target_link_libraries(mimir_core PUBLIC CUDA::cudart)
+    endif()
+    if(TARGET CUDA::cublas)
+        target_link_libraries(mimir_core PUBLIC CUDA::cublas)
+    endif()
+endif()
+
+if(ENABLE_ROCM AND HIP_LIBRARY AND ROCBLAS_LIBRARY)
+    target_compile_definitions(mimir_core PUBLIC ENABLE_ROCM)
+    if(MIMIR_HIP_PLATFORM STREQUAL "NVIDIA")
+        target_compile_definitions(mimir_core PUBLIC __HIP_PLATFORM_NVIDIA__)
+    else()
+        target_compile_definitions(mimir_core PUBLIC __HIP_PLATFORM_AMD__)
+    endif()
+    target_include_directories(mimir_core PUBLIC ${HIP_INCLUDE_DIR} ${ROCBLAS_INCLUDE_DIR})
+    target_link_libraries(mimir_core PUBLIC ${HIP_LIBRARY} ${ROCBLAS_LIBRARY})
+endif()
+
 if(ENABLE_LZ4 AND LZ4_LIBRARY)
     target_compile_definitions(mimir_core PUBLIC ENABLE_LZ4)
     target_link_libraries(mimir_core PUBLIC ${LZ4_LIBRARY})
@@ -370,7 +477,8 @@ endif()
 # Exécutable principal
 # ============================================================================
 
-add_executable(mimir src/main.cpp)
+add_executable(mimir src/main.cpp
+    src/runtimes/cpu/HardwareOpt.hpp)
 target_link_libraries(mimir PRIVATE mimir_core)
 
 # Copier les shaders compilés à côté du binaire (best-effort)
@@ -416,6 +524,7 @@ if(BUILD_MIMIR_STATIC)
 
     target_include_directories(mimir_core_static PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/runtimes/cpu
         ${CMAKE_CURRENT_SOURCE_DIR}/src/include
     )
 
@@ -530,6 +639,9 @@ message(STATUS "Features:")
 message(STATUS "  SIMD (AVX2/FMA):   ${ENABLE_SIMD}")
 message(STATUS "  OpenMP:            ${ENABLE_OPENMP}")
 message(STATUS "  Vulkan Compute:    ${ENABLE_VULKAN}")
+message(STATUS "  OpenCL Compute:    ${ENABLE_OPENCL}")
+message(STATUS "  CUDA Compute:      ${ENABLE_CUDA}")
+message(STATUS "  ROCm Compute:      ${ENABLE_ROCM}")
 message(STATUS "  LZ4 Compression:   ${ENABLE_LZ4}")
 message(STATUS "")
 message(STATUS "Build options:")

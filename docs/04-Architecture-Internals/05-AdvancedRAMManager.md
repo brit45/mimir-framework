@@ -42,7 +42,7 @@ Champs importants:
 - `enable_prediction`: heuristiques de prédiction d’usage.
 - `enable_statistics`: collecte des stats d’accès.
 - `enable_disk_spill`: autorise l’éviction non destructive (sur disque).
-- `spill_dir`: dossier de spill (par défaut `.mimir_spill`).
+- `spill_dir`: dossier de spill (par défaut `.mimir-spill`).
 - `worker_threads`: nombre de threads.
 
 `configure(cfg)`:

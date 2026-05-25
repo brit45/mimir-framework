@@ -2,6 +2,7 @@
 #include "../Model.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
+#include "HardwareOpt.hpp"
 #include "../Sha256.hpp"
 #include <fstream>
 #include <iomanip>
@@ -112,6 +113,58 @@ std::vector<RawCheckpointWriter::TensorData> RawCheckpointWriter::collect_tensor
     const SaveOptions& options
 ) {
     std::vector<TensorData> tensors;
+
+    owned_u16_buffers_.clear();
+    owned_f64_buffers_.clear();
+
+    DType float_storage = DType::Float32;
+    try {
+        float_storage = string_to_dtype(model.getDefaultDType());
+    } catch (...) {
+        float_storage = DType::Float32;
+    }
+    if (float_storage != DType::Float16 && float_storage != DType::BFloat16 &&
+        float_storage != DType::Float32 && float_storage != DType::Float64) {
+        float_storage = DType::Float32;
+    }
+
+    auto push_float_tensor = [&](const std::string& name,
+                                 const std::vector<size_t>& shape,
+                                 const float* data_ptr,
+                                 size_t count) {
+        if (!data_ptr || count == 0) return;
+
+        TensorData td;
+        td.name = name;
+        td.shape = shape;
+
+        if (float_storage == DType::Float16) {
+            owned_u16_buffers_.emplace_back(count);
+            HardwareOpt::fp32_to_fp16_f16c(owned_u16_buffers_.back().data(), data_ptr, count);
+            td.dtype = DType::Float16;
+            td.byte_size = count * sizeof(uint16_t);
+            td.data_ptr = owned_u16_buffers_.back().data();
+        } else if (float_storage == DType::BFloat16) {
+            owned_u16_buffers_.emplace_back(count);
+            HardwareOpt::fp32_to_bf16(owned_u16_buffers_.back().data(), data_ptr, count);
+            td.dtype = DType::BFloat16;
+            td.byte_size = count * sizeof(uint16_t);
+            td.data_ptr = owned_u16_buffers_.back().data();
+        } else if (float_storage == DType::Float64) {
+            owned_f64_buffers_.emplace_back(count);
+            auto& buf = owned_f64_buffers_.back();
+            for (size_t i = 0; i < count; ++i) buf[i] = static_cast<double>(data_ptr[i]);
+            td.dtype = DType::Float64;
+            td.byte_size = count * sizeof(double);
+            td.data_ptr = buf.data();
+        } else {
+            td.dtype = DType::Float32;
+            td.byte_size = count * sizeof(float);
+            td.data_ptr = data_ptr;
+        }
+
+        tensors.push_back(std::move(td));
+    };
     
     const auto& layers = model.getLayers();
     
@@ -130,27 +183,18 @@ std::vector<RawCheckpointWriter::TensorData> RawCheckpointWriter::collect_tensor
             continue;  // Skip empty
         }
         
-        TensorData td;
-        td.name = layer.name + "_weights";
-        td.dtype = DType::Float32;
-        td.shape = {size};  // 1D tensor
-        td.byte_size = size * sizeof(float);
-        td.data_ptr = data_ptr;
-        
-        tensors.push_back(td);
+        push_float_tensor(layer.name + "_weights", {size}, data_ptr, size);
     }
     
     // Add encoder embeddings
     if (options.save_encoder && model.getHasEncoder()) {
         const auto& enc = model.getEncoder();
         if (!enc.token_embeddings.empty()) {
-            TensorData td;
-            td.name = "encoder_token_embeddings";
-            td.dtype = DType::Float32;
-            td.shape = {static_cast<size_t>(enc.vocab_size), static_cast<size_t>(enc.dim)};
-            td.byte_size = enc.token_embeddings.size() * sizeof(float);
-            td.data_ptr = enc.token_embeddings.data();
-            tensors.push_back(td);
+            push_float_tensor(
+                "encoder_token_embeddings",
+                {static_cast<size_t>(enc.vocab_size), static_cast<size_t>(enc.dim)},
+                enc.token_embeddings.data(),
+                enc.token_embeddings.size());
         }
     }
 
@@ -158,22 +202,10 @@ std::vector<RawCheckpointWriter::TensorData> RawCheckpointWriter::collect_tensor
     if (options.save_optimizer) {
         if (const Optimizer* opt = model.getSerializedOptimizer()) {
             if (!opt->m.empty()) {
-                TensorData td;
-                td.name = "optimizer/m";
-                td.dtype = DType::Float32;
-                td.shape = {opt->m.size()};
-                td.byte_size = opt->m.size() * sizeof(float);
-                td.data_ptr = opt->m.data();
-                tensors.push_back(td);
+                push_float_tensor("optimizer/m", {opt->m.size()}, opt->m.data(), opt->m.size());
             }
             if (!opt->v.empty()) {
-                TensorData td;
-                td.name = "optimizer/v";
-                td.dtype = DType::Float32;
-                td.shape = {opt->v.size()};
-                td.byte_size = opt->v.size() * sizeof(float);
-                td.data_ptr = opt->v.data();
-                tensors.push_back(td);
+                push_float_tensor("optimizer/v", {opt->v.size()}, opt->v.data(), opt->v.size());
             }
         }
     }
@@ -183,13 +215,7 @@ std::vector<RawCheckpointWriter::TensorData> RawCheckpointWriter::collect_tensor
         // Generic: layer grad_weights snapshots
         for (const auto& layer : layers) {
             if (layer.grad_weights.empty()) continue;
-            TensorData td;
-            td.name = "grads/" + layer.name + "/weights";
-            td.dtype = DType::Float32;
-            td.shape = {layer.grad_weights.size()};
-            td.byte_size = layer.grad_weights.size() * sizeof(float);
-            td.data_ptr = layer.grad_weights.data();
-            tensors.push_back(td);
+            push_float_tensor("grads/" + layer.name + "/weights", {layer.grad_weights.size()}, layer.grad_weights.data(), layer.grad_weights.size());
         }
     }
     

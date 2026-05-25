@@ -8,7 +8,10 @@
 #include <memory>
 #include <unordered_map>
 #include <mutex>
+#include <algorithm>
+#include <iostream>
 #include <cstring>
+#include <iomanip>
 
 /**
  * DynamicTensorAllocator - Allocation RAM dynamique pour tenseurs
@@ -38,8 +41,9 @@ public:
     };
     
     // Configuration
-    void configure(size_t max_ram_gb, bool enable_compression = true, bool lazy_mode = true) {
-        max_ram_bytes_ = max_ram_gb * 1024ULL * 1024ULL * 1024ULL;
+    void configure(double max_ram_gb, bool enable_compression = true, bool lazy_mode = true) {
+        if (max_ram_gb < 0.0) max_ram_gb = 0.0;
+        max_ram_bytes_ = static_cast<size_t>(max_ram_gb * 1024.0 * 1024.0 * 1024.0);
         compression_enabled_ = enable_compression;
         lazy_mode_ = lazy_mode;
         
@@ -54,13 +58,15 @@ public:
         ram_config.enable_async_loading = false;  // Synchrone pour contrôle strict
         ram_config.enable_prediction = false;
         ram_config.enable_statistics = true;
+        ram_config.enable_disk_spill = true;
+        ram_config.spill_dir = ".mimir-spill";
         ram_config.worker_threads = 2;
         
         auto& ram_mgr = AdvancedRAMManager::instance();
         ram_mgr.configure(ram_config);
         
         std::cout << "🚀 DynamicTensorAllocator configuré:" << std::endl;
-        std::cout << "   - Limite RAM: " << max_ram_gb << " GB" << std::endl;
+        std::cout << "   - Limite RAM: " << std::fixed << std::setprecision(2) << max_ram_gb << " GB" << std::endl;
         std::cout << "   - Compression: " << (enable_compression ? "activée" : "désactivée") << std::endl;
         std::cout << "   - Lazy mode: " << (lazy_mode_ ? "activé" : "désactivé") << std::endl;
     }
@@ -84,9 +90,13 @@ public:
         // Mode non-lazy: réserver tout de suite (comptabilisation immédiate)
         if (!lazy_mode_) {
             auto& guard = MemoryGuard::instance();
+
+            // Éviction proactive dès 90% de la limite (évite le refus dur).
+            ensureBelowPressureLocked(0.90f, bytes_needed);
+
             if (!guard.requestAllocation(bytes_needed, tag)) {
                 std::cout << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
-                evictLRU(bytes_needed);
+                evictLRULocked(bytes_needed);
                 if (!guard.requestAllocation(bytes_needed, tag)) {
                     std::cerr << "❌ Impossible d'allouer tenseur même après éviction!" << std::endl;
                     return nullptr;
@@ -121,9 +131,13 @@ public:
         if (lazy_mode_ && !handle->reserved) {
             const size_t bytes_needed = handle->size * sizeof(float);
             auto& guard = MemoryGuard::instance();
+
+            // Éviction proactive dès 90% de la limite (évite le refus dur).
+            ensureBelowPressureLocked(0.90f, bytes_needed);
+
             if (!guard.requestAllocation(bytes_needed, handle->cache_key)) {
                 std::cout << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
-                evictLRU(bytes_needed);
+                evictLRULocked(bytes_needed);
                 if (!guard.requestAllocation(bytes_needed, handle->cache_key)) {
                     std::cerr << "❌ Impossible d'allouer tenseur même après éviction!" << std::endl;
                     return nullptr;
@@ -170,34 +184,9 @@ public:
     
     // Compresser un tenseur (libère RAM active, stocke compressé)
     void compressTensor(TensorHandle* handle) {
-        if (!handle || !handle->is_loaded || !handle->data_ptr) return;
-        
+        if (!handle) return;
         std::lock_guard<std::mutex> lock(mutex_);
-        
-        if (!compression_enabled_) return;
-        
-        auto& ram_mgr = AdvancedRAMManager::instance();
-        
-        // Copier vers vector pour RAMManager
-        std::vector<uint8_t> data(handle->size * sizeof(float));
-        memcpy(data.data(), handle->data_ptr, handle->size * sizeof(float));
-        
-        // Stocker compressé
-        if (ram_mgr.allocate(handle->cache_key, data, true)) {
-            // Libérer mémoire active
-            free(handle->data_ptr);
-            handle->data_ptr = nullptr;
-            handle->is_loaded = false;
-            handle->is_compressed = true;
-            
-            // Mettre à jour MemoryGuard
-            if (handle->reserved) {
-                auto& guard = MemoryGuard::instance();
-                guard.releaseAllocation(handle->reserved_bytes);
-                handle->reserved = false;
-                handle->reserved_bytes = 0;
-            }
-        }
+        (void)compressTensorLocked(handle);
     }
     
     // Libérer complètement un tenseur
@@ -271,32 +260,97 @@ public:
         }
         return count;
     }
-    
+
 private:
     DynamicTensorAllocator() = default;
-    
-    void evictLRU(size_t bytes_needed) {
+
+    // Éviction proactive pour rester sous un ratio de la limite MemoryGuard.
+    // Suppose mutex_ déjà tenu.
+    void ensureBelowPressureLocked(float target_ratio, size_t upcoming_bytes) {
+        auto& guard = MemoryGuard::instance();
+        const size_t limit = guard.getLimit();
+        if (limit == 0) return;
+
+        const size_t target = static_cast<size_t>(static_cast<double>(limit) * static_cast<double>(target_ratio));
+        const size_t current = guard.getCurrentBytes();
+        if (current + upcoming_bytes <= target) return;
+
+        const size_t need_free = (current + upcoming_bytes) - target;
+        evictLRULocked(need_free);
+    }
+
+    // Compresser/spiller un tenseur (sans reprendre mutex_)
+    // Retourne true si on a réellement libéré la réservation MemoryGuard.
+    bool compressTensorLocked(TensorHandle* handle) {
+        if (!handle || !handle->is_loaded || !handle->data_ptr) return false;
+
+        auto& ram_mgr = AdvancedRAMManager::instance();
+
+        // Spill direct sur disque (bloquant) pour libérer réellement la RAM.
+        // Évite d'allouer un gros buffer intermédiaire en RAM.
+        const size_t bytes = handle->size * sizeof(float);
+        if (!ram_mgr.storeRawOnDisk(handle->cache_key, handle->data_ptr, bytes)) {
+            // Fallback: tenter cache RAMManager (avec ou sans compression), puis spill.
+            std::vector<uint8_t> data(bytes);
+            memcpy(data.data(), handle->data_ptr, bytes);
+            const bool do_compress = compression_enabled_;
+            if (!ram_mgr.allocate(handle->cache_key, data, do_compress)) {
+                return false;
+            }
+            (void)ram_mgr.forceSpillToDisk(handle->cache_key);
+        }
+
+        // Libérer mémoire active
+        free(handle->data_ptr);
+        handle->data_ptr = nullptr;
+        handle->is_loaded = false;
+        handle->is_compressed = true;
+
+        // Mettre à jour MemoryGuard
+        if (handle->reserved) {
+            auto& guard = MemoryGuard::instance();
+            guard.releaseAllocation(handle->reserved_bytes);
+            handle->reserved = false;
+            handle->reserved_bytes = 0;
+            return true;
+        }
+        return false;
+    }
+
+    // Éviction LRU (suppose mutex_ déjà tenu).
+    void evictLRULocked(size_t bytes_needed) {
         // Trier par ordre d'accès (LRU)
         std::vector<std::pair<std::string, uint64_t>> items;
+        items.reserve(access_order_.size());
         for (const auto& [key, timestamp] : access_order_) {
             items.push_back({key, timestamp});
         }
-        
+
         std::sort(items.begin(), items.end(),
                  [](const auto& a, const auto& b) { return a.second < b.second; });
-        
-        size_t freed = 0;
+
+        auto& guard = MemoryGuard::instance();
+        const size_t before_bytes = guard.getCurrentBytes();
+
+        size_t freed_estimated = 0;
         for (const auto& [key, _] : items) {
-            if (freed >= bytes_needed) break;
-            
+            if (freed_estimated >= bytes_needed) break;
+
             auto it = handles_.find(key);
             if (it != handles_.end() && it->second->is_loaded) {
-                compressTensor(it->second.get());
-                freed += it->second->size * sizeof(float);
+                const bool freed = compressTensorLocked(it->second.get());
+                if (freed) {
+                    freed_estimated += it->second->size * sizeof(float);
+                }
             }
         }
-        
-        std::cout << "⟳ Éviction LRU: " << (freed / 1024 / 1024) << " MB libérés" << std::endl;
+
+        const size_t after_bytes = guard.getCurrentBytes();
+        const size_t freed_actual = (before_bytes >= after_bytes) ? (before_bytes - after_bytes) : 0;
+
+        std::cout << "⟳ Éviction LRU: ~" << (freed_estimated / 1024 / 1024)
+                  << " MB candidats, " << (freed_actual / 1024 / 1024)
+                  << " MB libérés (MemoryGuard)" << std::endl;
     }
     
     std::mutex mutex_;

@@ -1,28 +1,35 @@
 ---@meta
----@version 2.4.0
+---@version 3.0.0
 ---@author <bri45> for "Mímir Framework"
----@date 15 mars 2026 (dernière sync)
+---@date 25 mai 2026 (dernière sync)
 ---@diagnostic disable: missing-return, unused-local, unused-vararg, duplicate-doc-field, redundant-parameter
 
 --=============================================================================
--- Mímir Framework v2.4 — IDE Stub (EmmyLua)
+-- Mímir Framework v3.0 — IDE Stub (EmmyLua)
 --=============================================================================
 -- Ce fichier est un "stub" destiné aux IDE (LuaLS / EmmyLua / IntelliJ, etc.).
 -- Il documente l'API globale exposée par le binaire `mimir` (bindings C/C++).
 --
 -- ⚠️  IMPORTANT: Ce fichier est synchronisé avec src/LuaScripting.cpp
 --    Toute modification de l'API C++ doit être reflétée ici.
---    Dernière synchronisation: 28 février 2026 - 14 modules, 120+ fonctions
+--    Dernière synchronisation: 25 mai 2026 - 15 modules, 130+ fonctions
 --
 -- Objectifs :
 --  • Autocomplétion IDE, signatures, types, docstrings
 --  • Stable : les scripts Lua sont l'API publique
 --  • Documentation de référence pour les utilisateurs
 --
--- 🆕 Nouveautés v2.4.0 (15 mars 2026) :
---  • Synchronisation doc/scripts/stub/template
---  • Ajout du fichier VERSION pour exposer la version runtime
---  • Ajustements packaging (gitignore) pour éviter les artefacts dans les commits
+-- 🆕 Nouveautés v3.0.0 (25 mai 2026) :
+--  • Nouveau module `Mimir.IO` (read_image_rgb_u8 / readImageRGBU8)
+--  • `Mimir.Model.create_from_config(full_cfg)` — création depuis config complète (mode --conf)
+--  • `Mimir.Model.dtype()` / `Mimir.Model.dtype("float16")` — préférence dtype côté modèle
+--  • Alias `Mimir.model` (lowercase) + stub explicite `Mimir.model.dtype`
+--  • Helpers PonyXL-DDPM : train_step, validate_step, viz_reconstruct_step, text2img,
+--    set_vae_scale, get_vae_scale, vae_mu_moments
+--  • Module `pipeline_api.lua` : dtype robuste (supporte Mimir.model et Mimir.Model)
+--  • Nouveaux templates : template_pipeline_only.lua, template_pipeline_args.lua
+--  • template_new_model.lua : archi par défaut valide (vae_conv), fallback auto, tokenizer
+--    conditionnel selon archi, Allocator.get_stats() non bloquant
 --
 -- Nouveautés v2.3.0 (28 décembre 2025) :
 --  • Multi-Input / Branch Support - TensorStore system
@@ -69,11 +76,13 @@ Mimir = {}
 
 ---@class Mimir
 ---@field Model MimirModelAPI
+---@field model MimirModelAPI @Alias de `Mimir.Model`
 ---@field Architectures MimirArchitecturesAPI
 ---@field Layers MimirLayersAPI
 ---@field Checkpoint MimirCheckpointAPI
 ---@field Tokenizer MimirTokenizerAPI
 ---@field Dataset MimirDatasetAPI
+---@field IO MimirIOAPI
 ---@field Memory MimirMemoryAPI
 ---@field Guard MimirGuardAPI
 ---@field MemoryGuard MimirMemoryGuardAPI
@@ -173,12 +182,28 @@ function write_file(path, content) end
 
 ---@alias KeywordList string[]
 
+---@alias DTypeName
+---| "float32"|"f32"|"float"
+---| "float64"|"f64"|"double"
+---| "float16"|"f16"|"fp16"
+---| "bfloat16"|"bf16"
+---| "int8"|"i8"
+---| "uint8"|"u8"
+---| "int16"|"i16"
+---| "uint16"|"u16"
+---| "int32"|"i32"
+---| "uint32"|"u32"
+---| "int64"|"i64"
+---| "uint64"|"u64"
+---| "bool"|"b1"
+
 --=============================================================================
 -- Configs de modèles
 --=============================================================================
 
 ---@class ModelConfig
 ---@field type? ModelType @Injecté côté C++ lors de `Model.create()` (metadata)
+---@field dtype? DTypeName @Préférence dtype du modèle (si supporté par la runtime)
 ---@field dropout? float @Dropout générique (si supporté par l'architecture)
 ---@field optimizer? string @"sgd"|"adam"|"adamw" (utilisé par `Model.train()`)
 ---@field beta1? float
@@ -501,6 +526,13 @@ Mimir.Model = {}
 ---@return string? err
 function Mimir.Model.create(model_type, config) end
 
+---Créer un modèle à partir d'une config "complète" (injection de conf externe).
+---Retourne (ok, arch_or_err).
+---@param cfg table
+---@return boolean ok
+---@return string? arch_or_err
+function Mimir.Model.create_from_config(cfg) end
+
 ---[COMPAT] Reconstruit le modèle courant via le registre.
 ---Préférez `Mimir.Model.create(type, cfg)`.
 ---Retour: ok + nombre de paramètres (scalars).
@@ -522,6 +554,61 @@ function Mimir.Model.train(epochs, learning_rate) end
 ---@param input string|TokenIds
 ---@return string|nil output
 function Mimir.Model.infer(input) end
+
+---[Alias] `Mimir.model` (lowercase) pointe vers `Mimir.Model`.
+---Beaucoup de scripts utilisent `Mimir.model.dtype(...)`.
+---@type MimirModelAPI
+Mimir.model = Mimir.Model
+
+---[Alias] Stub explicite pour l'EmmyLua: `Mimir.model.dtype`.
+---Voir `Mimir.Model.dtype` pour la doc complète.
+---@overload fun(): DTypeName
+---@overload fun(dtype: DTypeName|string): (boolean, string)
+function Mimir.model.dtype(dtype) end
+
+-- --------------------------------------------------------------------------
+-- Helpers spécifiques: PonyXL-DDPM (diffusion)
+-- --------------------------------------------------------------------------
+
+---Effectue un train step PonyXL-DDPM (API spécialisée côté C++).
+---@param cfg table @config/état (voir scripts/training/ponyxl_ddpm_train.lua)
+---@return boolean ok
+---@return string? err
+function Mimir.Model.ponyxl_ddpm_train_step(cfg) end
+
+---Validation step PonyXL-DDPM.
+---@param cfg table
+---@return boolean ok
+---@return string? err
+function Mimir.Model.ponyxl_ddpm_validate_step(cfg) end
+
+---Step utilitaire pour reconstruire/visualiser (viz) pendant training.
+---@param cfg table
+---@return boolean ok
+---@return string? err
+function Mimir.Model.ponyxl_ddpm_viz_reconstruct_step(cfg) end
+
+---Génération texte→image PonyXL-DDPM.
+---@param cfg table
+---@return boolean ok
+---@return string? err
+function Mimir.Model.ponyxl_ddpm_text2img(cfg) end
+
+---Définir un facteur d'échelle VAE utilisé par PonyXL-DDPM.
+---@param scale number
+---@return boolean ok
+---@return string? err
+function Mimir.Model.ponyxl_ddpm_set_vae_scale(scale) end
+
+---Récupérer le facteur d'échelle VAE actuel.
+---@return number scale
+function Mimir.Model.ponyxl_ddpm_get_vae_scale() end
+
+---Retourne des moments (mu) du VAE (API PonyXL-DDPM).
+---@param cfg table
+---@return boolean ok
+---@return table|string? moments_or_err
+function Mimir.Model.ponyxl_ddpm_vae_mu_moments(cfg) end
 
 ---[DÉPRÉCIÉ] Sauvegarder le modèle (ancienne API).
 ---⚠️  Utilisez Mimir.Serialization.save() pour la nouvelle API v2.4
@@ -682,6 +769,14 @@ function Mimir.Model.set_hardware(enable) end
 ---Retourne les capacités détectées (AVX2/FMA/F16C/BMI2).
 ---@return HardwareCaps caps
 function Mimir.Model.hardware_caps() end
+
+---Lire ou définir le dtype par défaut du modèle courant.
+---Getter: `Mimir.Model.dtype()` -> string
+---Setter: `Mimir.Model.dtype("float16")` -> (ok, dtype|err)
+---Note: cette valeur est une préférence (la runtime reste majoritairement float32-first).
+---@overload fun(): DTypeName
+---@overload fun(dtype: DTypeName|string): (boolean, string)
+function Mimir.Model.dtype(dtype) end
 
 --=============================================================================
 -- Module: Mimir.Architectures
@@ -1386,8 +1481,11 @@ function Mimir.Viz.set_enabled(enabled) end
 function Mimir.Viz.save_loss_history(path) end
 
 --=============================================================================
--- Fonctions utilitaires globales (Image IO)
+-- Module: Mimir.IO
 --=============================================================================
+
+---@class MimirIOAPI
+Mimir.IO = {}
 
 ---Charger une image depuis le disque et retourner des pixels RGB u8 redimensionnés.
 ---Supporte les formats `png/jpg/jpeg/bmp/tiff/webp` via stb_image.
@@ -1400,6 +1498,20 @@ function Mimir.Viz.save_loss_history(path) end
 ---@return integer|string w_or_err
 ---@return integer? h
 ---@return integer? c
+function Mimir.IO.read_image_rgb_u8(path, target_w, target_h) end
+
+---Alias camelCase de `read_image_rgb_u8`.
+---@param path string
+---@param target_w integer
+---@param target_h integer
+---@return number[]|nil pixels
+---@return integer|string w_or_err
+---@return integer? h
+---@return integer? c
+function Mimir.IO.readImageRGBU8(path, target_w, target_h) end
+
+---[COMPAT] Ancien helper global (préférez `Mimir.IO.read_image_rgb_u8`).
+---@deprecated
 function read_image_rgb_u8(path, target_w, target_h) end
 
 -- Alias FR (même API): Mimir.visualiser
@@ -1675,6 +1787,11 @@ function Pipeline.resume(dir) end
 --=============================================================================
 ---@type MimirModelAPI
 Mimir.Model = Mimir.Model
+---@type MimirModelAPI
+Mimir.model = Mimir.Model
+
+---@type MimirModelAPI
+model = Mimir.Model
 ---@type MimirArchitecturesAPI
 Mimir.Architectures = Mimir.Architectures
 ---@type MimirLayersAPI

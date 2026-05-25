@@ -3,6 +3,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <omp.h>
 #include "Layers.hpp"
@@ -217,6 +218,7 @@ inline std::vector<std::vector<float>> chunk_forward(
     int chunks,
     int axis = 0
 ) {
+    (void)axis;
     if (chunks <= 0) {
         throw std::runtime_error("Chunk: chunks must be > 0");
     }
@@ -246,6 +248,7 @@ inline std::vector<float> stack_forward(
     const std::vector<std::vector<float>>& inputs,
     int axis = 0
 ) {
+    (void)axis;
     if (inputs.empty()) {
         throw std::runtime_error("Stack: no inputs provided");
     }
@@ -347,8 +350,9 @@ inline std::vector<float> rms_norm_forward(
     const Layer& layer
 ) {
     const float eps = layer.eps;
-const int normalized_size = layer.target_shape.empty() ?
+    const int normalized_size = layer.target_shape.empty() ?
                                  input.size() : layer.target_shape[0];
+    (void)normalized_size;
     
     std::vector<float> output(input.size());
     
@@ -404,6 +408,7 @@ inline std::vector<float> conv1d_forward(
     const int weights_size = static_cast<int>(layer.getWeightsSize());
     const float* bias = layer.use_bias ? 
                         (weights + out_channels * in_channels * kernel_size) : nullptr;
+    (void)weights_size;
     
     const long long conv1d_work = static_cast<long long>(out_channels) * out_length * in_channels * kernel_size;
     #pragma omp parallel for if(conv1d_work >= 262144) schedule(static)
@@ -420,7 +425,7 @@ inline std::vector<float> conv1d_forward(
                         int w_idx = ((oc * in_channels + ic) * kernel_size) + k;
                         
                         if (in_idx < static_cast<int>(input.size()) &&
-                            w_idx < weights_size) {
+                            w_idx < static_cast<int>(layer.getWeightsSize())) {
                             sum += input[in_idx] * weights[w_idx];
                         }
                     }
@@ -458,6 +463,7 @@ inline std::vector<float> depthwise_conv2d_forward(
     const float* weights = layer.getWeights();
     const int weights_size = static_cast<int>(layer.getWeightsSize());
     const float* bias = layer.use_bias ? (weights + channels * kernel_size * kernel_size) : nullptr;
+    (void)weights_size;
     
     // Each channel processed independently
     const long long dwconv_work = static_cast<long long>(channels) * out_height * out_width * kernel_size * kernel_size;
@@ -477,7 +483,7 @@ inline std::vector<float> depthwise_conv2d_forward(
                             int w_idx = c * (kernel_size * kernel_size) + kh * kernel_size + kw;
                             
                             if (in_idx < static_cast<int>(input.size()) &&
-                                w_idx < weights_size) {
+                                w_idx < static_cast<int>(layer.getWeightsSize())) {
                                 sum += input[in_idx] * weights[w_idx];
                             }
                         }

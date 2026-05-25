@@ -99,8 +99,17 @@ tensor::~tensor() {
 float* tensor::getData() {
     if (use_dynamic_alloc && dynamic_handle) {
         auto& allocator = DynamicTensorAllocator::instance();
-        return allocator.getTensorData(
+        float* ptr = allocator.getTensorData(
             static_cast<DynamicTensorAllocator::TensorHandle*>(dynamic_handle));
+        if (!ptr) {
+            std::cerr << "\n❌❌❌ PANIC: OUT OF MEMORY (lazy load) ❌❌❌" << std::endl;
+            std::cerr << "⛔ getTensorData() a échoué - MemoryGuard limite atteinte" << std::endl;
+            auto& guard = MemoryGuard::instance();
+            guard.printStats();
+            std::cerr << "\n⚠️  Arrêt contrôlé pour éviter un crash OS..." << std::endl;
+            std::exit(1);
+        }
+        return ptr;
     }
     return data.data();
 }
@@ -108,9 +117,18 @@ float* tensor::getData() {
 const float* tensor::getData() const {
     if (use_dynamic_alloc && dynamic_handle) {
         auto& allocator = DynamicTensorAllocator::instance();
-        return allocator.getTensorData(
+        float* ptr = allocator.getTensorData(
             static_cast<DynamicTensorAllocator::TensorHandle*>(
                 const_cast<void*>(dynamic_handle)));
+        if (!ptr) {
+            std::cerr << "\n❌❌❌ PANIC: OUT OF MEMORY (lazy load const) ❌❌❌" << std::endl;
+            std::cerr << "⛔ getTensorData() a échoué - MemoryGuard limite atteinte" << std::endl;
+            auto& guard = MemoryGuard::instance();
+            guard.printStats();
+            std::cerr << "\n⚠️  Arrêt contrôlé pour éviter un crash OS..." << std::endl;
+            std::exit(1);
+        }
+        return ptr;
     }
     return data.data();
 }

@@ -1,6 +1,7 @@
 #include "SafeTensorsReader.hpp"
 #include "../Model.hpp"
 #include "../Encoder.hpp"
+#include "HardwareOpt.hpp"
 #include <fstream>
 #include <algorithm>
 #include <cstring>
@@ -255,6 +256,21 @@ bool SafeTensorsReader::apply_tensors_to_model(
                         }
                         if (options.apply_model_config && arch.contains("model_config")) {
                             model.modelConfig = arch["model_config"];
+
+                            // Keep runtime default dtype consistent with the loaded config.
+                            // This ensures subsequent saves use the same float storage policy.
+                            try {
+                                if (model.modelConfig.contains("dtype") && model.modelConfig["dtype"].is_string()) {
+                                    model.setDefaultDType(model.modelConfig["dtype"].get<std::string>());
+                                }
+                            } catch (...) {
+                                if (options.strict_mode) {
+                                    if (error) {
+                                        *error = "Invalid dtype in model_config";
+                                    }
+                                    return false;
+                                }
+                            }
                         }
                     } catch (...) {
                         if (options.strict_mode) {
@@ -313,13 +329,50 @@ bool SafeTensorsReader::apply_tensors_to_model(
                     }
                     return false;
                 }
-                
-                // Load data
-                if (!load_tensor_data(
-                    path, data_offset, *tensor,
-                    data_ptr, actual_size * sizeof(float),
-                    error
-                )) {
+
+                // Load data (support F16/BF16/F64 -> convert to f32)
+                if (tensor->dtype == DType::Float32) {
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        data_ptr, actual_size * sizeof(float),
+                        error
+                    )) {
+                        return false;
+                    }
+                } else if (tensor->dtype == DType::Float16) {
+                    std::vector<uint16_t> tmp(actual_size);
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        tmp.data(), tmp.size() * sizeof(uint16_t),
+                        error
+                    )) {
+                        return false;
+                    }
+                    HardwareOpt::fp16_to_fp32_f16c(data_ptr, tmp.data(), actual_size);
+                } else if (tensor->dtype == DType::BFloat16) {
+                    std::vector<uint16_t> tmp(actual_size);
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        tmp.data(), tmp.size() * sizeof(uint16_t),
+                        error
+                    )) {
+                        return false;
+                    }
+                    HardwareOpt::bf16_to_fp32(data_ptr, tmp.data(), actual_size);
+                } else if (tensor->dtype == DType::Float64) {
+                    std::vector<double> tmp(actual_size);
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        tmp.data(), tmp.size() * sizeof(double),
+                        error
+                    )) {
+                        return false;
+                    }
+                    for (size_t i = 0; i < actual_size; ++i) data_ptr[i] = static_cast<float>(tmp[i]);
+                } else if (options.strict_mode) {
+                    if (error) {
+                        *error = "Unsupported dtype for tensor: " + tensor_name;
+                    }
                     return false;
                 }
             } else if (options.strict_mode) {
@@ -404,13 +457,50 @@ bool SafeTensorsReader::apply_tensors_to_model(
                 if (enc.token_embeddings.size() < expected_size) {
                     enc.token_embeddings.resize(expected_size);
                 }
-                
-                if (!load_tensor_data(
-                    path, data_offset, *tensor,
-                    enc.token_embeddings.data(),
-                    enc.token_embeddings.size() * sizeof(float),
-                    error
-                )) {
+
+                if (tensor->dtype == DType::Float32) {
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        enc.token_embeddings.data(),
+                        enc.token_embeddings.size() * sizeof(float),
+                        error
+                    )) {
+                        return false;
+                    }
+                } else if (tensor->dtype == DType::Float16) {
+                    std::vector<uint16_t> tmp(expected_size);
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        tmp.data(), tmp.size() * sizeof(uint16_t),
+                        error
+                    )) {
+                        return false;
+                    }
+                    HardwareOpt::fp16_to_fp32_f16c(enc.token_embeddings.data(), tmp.data(), expected_size);
+                } else if (tensor->dtype == DType::BFloat16) {
+                    std::vector<uint16_t> tmp(expected_size);
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        tmp.data(), tmp.size() * sizeof(uint16_t),
+                        error
+                    )) {
+                        return false;
+                    }
+                    HardwareOpt::bf16_to_fp32(enc.token_embeddings.data(), tmp.data(), expected_size);
+                } else if (tensor->dtype == DType::Float64) {
+                    std::vector<double> tmp(expected_size);
+                    if (!load_tensor_data(
+                        path, data_offset, *tensor,
+                        tmp.data(), tmp.size() * sizeof(double),
+                        error
+                    )) {
+                        return false;
+                    }
+                    for (size_t i = 0; i < expected_size; ++i) enc.token_embeddings[i] = static_cast<float>(tmp[i]);
+                } else if (options.strict_mode) {
+                    if (error) {
+                        *error = "Unsupported dtype for encoder/token_embeddings";
+                    }
                     return false;
                 }
 
@@ -473,7 +563,44 @@ bool SafeTensorsReader::apply_tensors_to_model(
                 size_t expected = 1;
                 for (size_t dim : t->shape) expected *= dim;
                 dst.resize(expected);
-                return load_tensor_data(path, data_offset, *t, dst.data(), dst.size() * sizeof(float), error);
+
+                if (t->dtype == DType::Float32) {
+                    return load_tensor_data(path, data_offset, *t, dst.data(), dst.size() * sizeof(float), error);
+                }
+                if (t->dtype == DType::Float16) {
+                    std::vector<uint16_t> tmp(expected);
+                    if (!load_tensor_data(path, data_offset, *t, tmp.data(), tmp.size() * sizeof(uint16_t), error)) {
+                        return false;
+                    }
+                    HardwareOpt::fp16_to_fp32_f16c(dst.data(), tmp.data(), expected);
+                    return true;
+                }
+
+                if (t->dtype == DType::BFloat16) {
+                    std::vector<uint16_t> tmp(expected);
+                    if (!load_tensor_data(path, data_offset, *t, tmp.data(), tmp.size() * sizeof(uint16_t), error)) {
+                        return false;
+                    }
+                    HardwareOpt::bf16_to_fp32(dst.data(), tmp.data(), expected);
+                    return true;
+                }
+
+                if (t->dtype == DType::Float64) {
+                    std::vector<double> tmp(expected);
+                    if (!load_tensor_data(path, data_offset, *t, tmp.data(), tmp.size() * sizeof(double), error)) {
+                        return false;
+                    }
+                    for (size_t i = 0; i < expected; ++i) dst[i] = static_cast<float>(tmp[i]);
+                    return true;
+                }
+
+                if (options.strict_mode) {
+                    if (error) {
+                        *error = "Unsupported dtype for optimizer tensor: " + name;
+                    }
+                    return false;
+                }
+                return true;
             };
 
             Optimizer* optp = model.getMutableSerializedOptimizer();

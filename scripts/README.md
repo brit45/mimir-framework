@@ -1,4 +1,4 @@
-# Scripts Mímir v2.4.0
+# Scripts Mímir v3.0.0
 
 Organisation des scripts Lua pour le framework Mímir.
 
@@ -55,6 +55,8 @@ Scripts d'entraînement:
 Templates pour développement:
 
 - `template_new_model.lua` - Template pour nouveau modèle
+- `template_pipeline_only.lua` - Template minimal (pipeline API uniquement)
+- `template_pipeline_args.lua` - Template (args + overrides + pipeline API)
 
 ## Utilisation
 
@@ -63,6 +65,8 @@ Templates pour développement:
 ```bash
 # Template
 ./bin/mimir --lua scripts/templates/template_new_model.lua
+./bin/mimir --lua scripts/templates/template_pipeline_only.lua
+./bin/mimir --lua scripts/templates/template_pipeline_args.lua -- --no-train
 
 # Tests
 ./bin/mimir --lua scripts/tests/test_list_archi_conf.lua
@@ -94,4 +98,4 @@ Templates pour développement:
 
 ---
 
-**Version**: 2.4.0 | **Date**: 15 mars 2026
+**Version**: 3.0.0 | **Date**: 25 mai 2026

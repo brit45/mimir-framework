@@ -16,6 +16,7 @@
 #include "HardwareOpt.hpp" // Optimisations hardware avancées
 #include "Layers.hpp"      // Pour la structure Layer
 #include "MemoryGuard.hpp" // Pour le strict mode
+#include "DType.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -140,6 +141,12 @@ public:
 
     void setDensity(double d);
     double getDensity() const;
+
+    // Default dtype preference for the model. Note: the current runtime is
+    // still float32-first; this setting is used for planning/serialization
+    // and for raw tensor allocations.
+    void setDefaultDType(const std::string& dtype);
+    const std::string& getDefaultDType() const { return default_dtype_; }
 
     void build();
     void autoBuildFromDataset(const std::string &dataset_dir);
@@ -336,11 +343,21 @@ public:
     bool saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch);
     bool packToSafetensor(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors) const;
     bool tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, Encoder &outEnc, std::vector<MagicToken> &outMagic);
-                            bool hasOpenCLCompute() const;
+    bool hasOpenCLCompute() const;
+    bool initializeOpenCLComputeEngine();
+    void shutdownOpenCLComputeEngine();
 
-                            bool initializeOpenCLComputeEngine();
-    // ============================= 
-                            void shutdownOpenCLComputeEngine();
+    bool hasCudaCompute() const;
+    bool initializeCudaComputeEngine();
+    void shutdownCudaComputeEngine();
+
+    bool hasRocmCompute() const;
+    bool initializeRocmComputeEngine();
+    void shutdownRocmComputeEngine();
+
+    bool hasCpuCompute() const;
+    bool initializeCpuComputeEngine();
+    void shutdownCpuComputeEngine();
     //           Helpers
     // =============================
 
@@ -461,6 +478,9 @@ public:
 
     // Configuration du modèle (pour dimensionnement dynamique des layers)
     json modelConfig;
+
+    // Preferred dtype for future storage/allocations (string for config interop).
+    std::string default_dtype_ = "float32";
 
     // Dernier gradient d'entrée (debug/usage avancé)
     std::vector<float> last_input_gradient_;
@@ -676,4 +696,15 @@ protected:
 
     // When true, blocks any op that would mutate weights/grad buffers.
     bool params_frozen_ = false;
+
+    // =============================
+    // Planner / Fusion (framework)
+    // =============================
+    struct StaticPlanCache {
+        bool built = false;
+        bool dumped = false;
+        // Per-layer flags (uint8_t for cache friendliness).
+        std::vector<uint8_t> fuse_conv2d_relu;
+    };
+    StaticPlanCache static_plan_;
 };

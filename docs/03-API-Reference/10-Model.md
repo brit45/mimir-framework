@@ -77,7 +77,27 @@ Applique l’étape d’optimizer (selon l’état/config).
 - Implémente des chemins spécifiques à certains modèles.
 - Peut faire des checkpoints d’interruption Ctrl+C si `cfg.checkpoint_dir` est défini.
 
-## Divers
+## DType (v3.0)
+
+### `Mimir.Model.dtype(dtype?: string) -> string | (bool, dtype|err)`
+
+Rôle : lire ou fixer le **dtype par défaut** du modèle (utilisé notamment par la sérialisation).
+
+- Sans argument : retourne un string (`"float32"`, `"float16"`, ...).
+- Avec argument : valide et applique le dtype au modèle (et synchronise `model_config.dtype`).
+
+Accessible aussi via l'alias **`Mimir.model.dtype`** (lowercase) :
+
+```lua
+-- Écriture (fixer le dtype)
+Mimir.model.dtype("float16")
+
+-- Lecture
+local dt = Mimir.model.dtype()
+log("dtype courant:", dt or "non défini")
+```
+
+Note : le framework propage aussi automatiquement `cfg.dtype` lors de `Mimir.Model.create(type, cfg)` (donc dans la plupart des scripts, tu peux juste définir `cfg.dtype`).
 
 ### `Mimir.Model.encode_prompt(prompt?: string) -> table<float> | (nil, err)`
 

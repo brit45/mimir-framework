@@ -13,6 +13,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read project version
+        id: version
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Print version
+        run: echo "Building Mímir Framework v${{ steps.version.outputs.VERSION }}"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -45,7 +52,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs
+          name: ctest-logs-v${{ steps.version.outputs.VERSION }}
           path: |
             build/Testing/Temporary/LastTest.log
             build/Testing/Temporary/LastTestsFailed.log

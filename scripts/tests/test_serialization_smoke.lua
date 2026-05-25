@@ -16,6 +16,17 @@ local function ok_or_die(ok, err, ctx)
   die((ctx or "operation") .. ": " .. tostring(err or "unknown"))
 end
 
+local function apply_dtype(cfg)
+  local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+  if dtype == nil then return true end
+  if type(Mimir) ~= "table" or type(Mimir.model) ~= "table" or type(Mimir.model.dtype) ~= "function" then
+    return true
+  end
+  local ok, dt_or_err = Mimir.model.dtype(dtype)
+  ok_or_die(ok, dt_or_err, "Mimir.model.dtype(" .. tostring(dtype) .. ")")
+  return true
+end
+
 -- ---------------------------------------------------------------------------
 -- 1) Sécurité mémoire (recommandé)
 -- ---------------------------------------------------------------------------
@@ -46,6 +57,7 @@ local cfg = {
 
 local ok_create, err_create = Mimir.Model.create(model_type, cfg)
 ok_or_die(ok_create, err_create, "Model.create")
+apply_dtype(cfg)
 
 local ok_build, err_build = Mimir.Model.build()
 ok_or_die(ok_build, err_build, "Model.build")
@@ -75,6 +87,7 @@ ok_or_die(ok_save, err_save, "Serialization.save")
 -- Re-créer le modèle pour valider que load ne dépend pas uniquement de l'état précédent.
 local ok_create2, err_create2 = Mimir.Model.create(model_type, cfg)
 ok_or_die(ok_create2, err_create2, "Model.create (reload)")
+apply_dtype(cfg)
 
 ok_or_die(Mimir.Model.build(), nil, "Model.build (reload)")
 ok_or_die(Mimir.Model.allocate_params(), nil, "Model.allocate_params (reload)")

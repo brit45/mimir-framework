@@ -726,7 +726,17 @@ std::shared_ptr<Model> Registry::create(const std::string& name, const json& con
     if (!model) {
         throw std::runtime_error("ModelArchitectures::create: factory returned null for: " + name);
     }
+
+    // Attach standardized config to the model (used by planner/serialization/runtime knobs).
     model->modelConfig = cfg;
+
+    // Propagate dtype from config -> runtime default dtype.
+    // This must be done here (framework-level) so callers don't need to manually call Model.dtype().
+    auto it_dtype = cfg.find("dtype");
+    if (it_dtype != cfg.end() && it_dtype->is_string()) {
+        // setDefaultDType validates the value and throws on unknown dtype.
+        model->setDefaultDType(it_dtype->get<std::string>());
+    }
     return model;
 }
 

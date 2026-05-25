@@ -12,9 +12,18 @@
 #ifdef ENABLE_OPENCL
 #include "OpenCLCompute.hpp"
 #endif
+#include "runtimes/AbstractRuntime.hpp"
+#ifdef ENABLE_CUDA
+#include "runtimes/cuda/CudaRuntime.hpp"
+#endif
+#ifdef ENABLE_ROCM
+#include "runtimes/rocm/RocmRuntime.hpp"
+#endif
 #include "RngContext.hpp"
 #include "RuntimeAllocator.hpp"
 #include "LayerOpsExt.hpp"
+#include "runtimes/cpu/CpuRuntime.hpp"
+#include "Planning/Planner.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Serialization/Serialization.hpp"
 #include <fstream>
@@ -27,6 +36,11 @@
 
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 
 namespace {
@@ -697,6 +711,22 @@ static std::unique_ptr<OpenCLCompute::ComputeEngine> g_opencl_engine = nullptr;
 #endif
 static bool g_opencl_available = false;
 
+// CUDA compute engine (initialized on demand)
+#ifdef ENABLE_CUDA
+static std::unique_ptr<CudaRuntime> g_cuda_engine = nullptr;
+#endif
+static bool g_cuda_available = false;
+
+// ROCm compute engine (initialized on demand)
+#ifdef ENABLE_ROCM
+static std::unique_ptr<RocmRuntime> g_rocm_engine = nullptr;
+#endif
+static bool g_rocm_available = false;
+
+// CPU runtime (always available unless explicitly disabled)
+static std::unique_ptr<CpuRuntime> g_cpu_engine = nullptr;
+static bool g_cpu_available = false;
+
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -731,13 +761,32 @@ Model::Model()
     // Encoder toujours présent + embeddings spéciaux (SEQ/MOD/MAG) disponibles.
     encoder.ensureSpecialEmbeddings();
     // Tenter d'initialiser le compute engine
+    initializeCpuComputeEngine();
     initializeComputeEngine();
     initializeOpenCLComputeEngine();
+    initializeCudaComputeEngine();
+    initializeRocmComputeEngine();
 }
 
 Model::~Model() {
     shutdownComputeEngine();
     shutdownOpenCLComputeEngine();
+    shutdownCudaComputeEngine();
+    shutdownRocmComputeEngine();
+    shutdownCpuComputeEngine();
+}
+
+void Model::setDefaultDType(const std::string& dtype) {
+    const auto dt = Mimir::parse_dtype(dtype);
+    if (dt == Mimir::DType::UNKNOWN) {
+        throw std::runtime_error("Model.setDefaultDType: dtype non supporté: '" + dtype + "'");
+    }
+    default_dtype_ = dtype;
+    // Keep a canonical copy in config for serialization/planner/Lua.
+    try {
+        modelConfig["dtype"] = dtype;
+    } catch (...) {
+    }
 }
 
 // ===== Hardware Acceleration =====
@@ -748,6 +797,67 @@ bool Model::hasVulkanCompute() const {
 
 bool Model::hasOpenCLCompute() const {
     return g_opencl_available;
+}
+
+bool Model::hasCudaCompute() const {
+    return g_cuda_available;
+}
+
+bool Model::hasRocmCompute() const {
+    return g_rocm_available;
+}
+
+bool Model::hasCpuCompute() const {
+    return g_cpu_available;
+}
+
+bool Model::initializeCpuComputeEngine() {
+    // Pattern init_once thread-safe avec atomic
+    static std::atomic<bool> initialized{false};
+    static std::mutex init_mutex;
+
+    if (initialized.load(std::memory_order_acquire)) {
+        return g_cpu_available;
+    }
+
+    std::lock_guard<std::mutex> lock(init_mutex);
+    if (initialized.load(std::memory_order_relaxed)) {
+        return g_cpu_available;
+    }
+
+    const RuntimeConfig cfg_from_env = RuntimeConfig::fromEnv("CPU");
+    if (cfg_from_env.disabled) {
+        g_cpu_available = false;
+        g_cpu_engine.reset();
+        initialized.store(true, std::memory_order_release);
+        if (cfg_from_env.verbose) {
+            std::cout << "⚠ CPU runtime disabled via MIMIR_DISABLE_CPU" << std::endl;
+        }
+        return false;
+    }
+
+    // CPU est le fallback de base; on active Linear par défaut.
+    RuntimeConfig cfg = cfg_from_env;
+    cfg.linear_enabled = env_flag_true("MIMIR_CPU_LINEAR", true);
+    cfg.linear_min_ops = env_int("MIMIR_CPU_LINEAR_MIN_OPS", 0);
+
+    try {
+        g_cpu_engine = std::make_unique<CpuRuntime>();
+        g_cpu_available = g_cpu_engine->initialize(cfg);
+        if (g_cpu_available && cfg.verbose) {
+            std::cout << "✓ CPU Runtime initialized" << std::endl;
+        }
+        if (!g_cpu_available) {
+            g_cpu_engine.reset();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "⚠ CPU Runtime unavailable: " << e.what() << std::endl;
+        g_cpu_available = false;
+        g_cpu_engine.reset();
+    }
+
+    initialized.store(true, std::memory_order_release);
+    return g_cpu_available;
 }
 
 bool Model::initializeComputeEngine() {
@@ -853,6 +963,104 @@ bool Model::initializeOpenCLComputeEngine() {
 #endif
 }
 
+bool Model::initializeCudaComputeEngine() {
+#ifndef ENABLE_CUDA
+    g_cuda_available = false;
+    return false;
+#else
+    static std::atomic<bool> initialized{false};
+    static std::mutex init_mutex;
+
+    const RuntimeConfig cfg = RuntimeConfig::fromEnv("CUDA");
+    if (cfg.disabled || !cfg.linear_enabled) {
+        g_cuda_available = false;
+        g_cuda_engine.reset();
+        initialized.store(true, std::memory_order_release);
+        if (cfg.verbose && cfg.disabled) {
+            std::cout << "⚠ CUDA Compute disabled via MIMIR_DISABLE_CUDA" << std::endl;
+        }
+        return false;
+    }
+
+    if (initialized.load(std::memory_order_acquire)) {
+        return g_cuda_available;
+    }
+
+    std::lock_guard<std::mutex> lock(init_mutex);
+    if (initialized.load(std::memory_order_relaxed)) {
+        return g_cuda_available;
+    }
+
+    try {
+        g_cuda_engine = std::make_unique<CudaRuntime>();
+        g_cuda_available = g_cuda_engine->initialize(cfg);
+        if (g_cuda_available) {
+            if (cfg.verbose) {
+                std::cout << "✓ CUDA Compute initialized" << std::endl;
+            }
+        } else {
+            g_cuda_engine.reset();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "⚠ CUDA Compute unavailable: " << e.what() << std::endl;
+        g_cuda_available = false;
+        g_cuda_engine.reset();
+    }
+
+    initialized.store(true, std::memory_order_release);
+    return g_cuda_available;
+#endif
+}
+
+bool Model::initializeRocmComputeEngine() {
+#ifndef ENABLE_ROCM
+    g_rocm_available = false;
+    return false;
+#else
+    static std::atomic<bool> initialized{false};
+    static std::mutex init_mutex;
+
+    const RuntimeConfig cfg = RuntimeConfig::fromEnv("ROCM");
+    if (cfg.disabled || !cfg.linear_enabled) {
+        g_rocm_available = false;
+        g_rocm_engine.reset();
+        initialized.store(true, std::memory_order_release);
+        if (cfg.verbose && cfg.disabled) {
+            std::cout << "⚠ ROCm Compute disabled via MIMIR_DISABLE_ROCM" << std::endl;
+        }
+        return false;
+    }
+
+    if (initialized.load(std::memory_order_acquire)) {
+        return g_rocm_available;
+    }
+
+    std::lock_guard<std::mutex> lock(init_mutex);
+    if (initialized.load(std::memory_order_relaxed)) {
+        return g_rocm_available;
+    }
+
+    try {
+        g_rocm_engine = std::make_unique<RocmRuntime>();
+        g_rocm_available = g_rocm_engine->initialize(cfg);
+        if (g_rocm_available) {
+            if (cfg.verbose) {
+                std::cout << "✓ ROCm Compute initialized" << std::endl;
+            }
+        } else {
+            g_rocm_engine.reset();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "⚠ ROCm Compute unavailable: " << e.what() << std::endl;
+        g_rocm_available = false;
+        g_rocm_engine.reset();
+    }
+
+    initialized.store(true, std::memory_order_release);
+    return g_rocm_available;
+#endif
+}
+
 void Model::shutdownComputeEngine() {
 #ifdef ENABLE_VULKAN
     if (g_compute_engine) {
@@ -875,6 +1083,40 @@ void Model::shutdownOpenCLComputeEngine() {
 #else
     g_opencl_available = false;
 #endif
+}
+
+void Model::shutdownCudaComputeEngine() {
+#ifdef ENABLE_CUDA
+    if (g_cuda_engine) {
+        g_cuda_engine->shutdown();
+        g_cuda_engine.reset();
+        g_cuda_available = false;
+    }
+#else
+    g_cuda_available = false;
+#endif
+}
+
+void Model::shutdownRocmComputeEngine() {
+#ifdef ENABLE_ROCM
+    if (g_rocm_engine) {
+        g_rocm_engine->shutdown();
+        g_rocm_engine.reset();
+        g_rocm_available = false;
+    }
+#else
+    g_rocm_available = false;
+#endif
+}
+
+void Model::shutdownCpuComputeEngine() {
+    if (g_cpu_engine) {
+        g_cpu_engine->shutdown();
+        g_cpu_engine.reset();
+        g_cpu_available = false;
+    } else {
+        g_cpu_available = false;
+    }
 }
 
 void Model::zeroGradients() {
@@ -1240,6 +1482,10 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
                 // Réutiliser le switch-case existant en appelant une petite lambda locale
                 // en se basant sur le même dispatch que forwardPass(float).
                 switch (layer.type_enum) {
+                    case LayerType::Identity: {
+                        layer_output = x;
+                        break;
+                    }
                     case LayerType::Linear: {
                         layer_output = LayerOps::linear_forward(x, layer, training);
                         break;
@@ -1364,9 +1610,28 @@ void Model::addVizTapFrame(VizFrame vf) {
     if (vf.w <= 0 || vf.h <= 0 || vf.channels <= 0) return;
     if (vf.pixels.empty()) return;
 
-    // Dedup by label (keep last)
+    auto trim_local = [](const std::string& s) -> std::string {
+        size_t b = 0;
+        while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r')) ++b;
+        if (b >= s.size()) return std::string();
+        size_t e = s.size();
+        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r')) --e;
+        return s.substr(b, e - b);
+    };
+
+    auto base_label = [&](const std::string& label) -> std::string {
+        const size_t bar = label.find('|');
+        if (bar == std::string::npos) return trim_local(label);
+        return trim_local(label.substr(0, bar));
+    };
+
+    const std::string base = base_label(vf.label);
+    if (base.empty()) return;
+
+    // Dedup by *base label* (keep last): the part after "|" is metadata that may change
+    // every step (e.g. stats, filenames). We want the UI tile to update in-place.
     auto it = std::find_if(viz_taps_.begin(), viz_taps_.end(), [&](const VizFrame& existing) {
-        return existing.label == vf.label;
+        return base_label(existing.label) == base;
     });
     if (it != viz_taps_.end()) {
         *it = std::move(vf);
@@ -1595,7 +1860,8 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
     if (modelConfig.contains("ssim_weight")) ssim_weight = std::max(0.0f, modelConfig["ssim_weight"].get<float>());
     if (modelConfig.contains("spectral_weight")) spectral_weight = std::max(0.0f, modelConfig["spectral_weight"].get<float>());
     if (modelConfig.contains("perceptual_weight")) perceptual_weight = std::max(0.0f, modelConfig["perceptual_weight"].get<float>());
-    if (modelConfig.contains("adv_weight")) adv_weight = std::max(0.0f, modelConfig["adv_weight"].get<float>());
+    // Adversarial (discriminateur) retiré pour VAEConv. On ignore adv_weight si présent.
+    (void)adv_weight;
 
     // Image shape for image-specific losses
     int img_w = 0, img_h = 0, img_c = 0;
@@ -1843,10 +2109,24 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
             pcfg["image_h"] = img_h;
             pcfg["image_c"] = img_c;
             if (modelConfig.contains("perceptual_base_channels")) {
-                pcfg["base_channels"] = std::max(1, modelConfig["perceptual_base_channels"].get<int>());
+                int bc = std::max(1, modelConfig["perceptual_base_channels"].get<int>());
+                // Compat: vgg16_feat force base_channels>=4.
+                if (p_arch == "vgg16_feat") bc = std::max(4, bc);
+                pcfg["base_channels"] = bc;
             }
             aux_perceptual_ = ModelArchitectures::create(p_arch, pcfg);
             aux_perceptual_->allocateParams();
+
+            // IMPORTANT: si aucun checkpoint n'est fourni, il faut au minimum
+            // initialiser les poids; sinon le réseau peut produire des features
+            // dégénérées (ex: zéros) et la loss perceptuelle n'apporte aucun
+            // signal => pas de "punition"/"récompense".
+            // On utilise un seed fixe pour garder un comportement déterministe.
+            try {
+                aux_perceptual_->initializeWeights("xavier", 1337u);
+            } catch (...) {
+                // Best-effort: si l'init échoue, on continue (checkpoint peut encore charger).
+            }
 
             std::string ckpt;
             if (modelConfig.contains("perceptual_checkpoint")) {
@@ -1862,11 +2142,63 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
                 opts.validate_checksums = false;
                 std::string err;
                 if (!Mimir::Serialization::load_checkpoint(*aux_perceptual_, ckpt, opts, &err)) {
-                    std::cerr << "⚠️  Perceptual checkpoint load failed: " << ckpt << " | " << err << std::endl;
-                }
-            }
+                    // Helpful fallback: for raw_folder checkpoints, infer the base_channels from
+                    // the checkpoint architecture (e.g. base=4 vs base=8 mismatch) and retry.
+                    bool retried = false;
+                    if (opts.format == Mimir::Serialization::CheckpointFormat::RawFolder) {
+                        try {
+                            namespace fs = std::filesystem;
+                            const fs::path arch_path = fs::path(ckpt) / "model" / "architecture.json";
+                            if (fs::exists(arch_path)) {
+                                std::ifstream f(arch_path);
+                                json arch;
+                                f >> arch;
 
-            aux_perceptual_->freezeParameters(true);
+                                int inferred_base = 0;
+                                if (arch.is_object() && arch.contains("layers") && arch["layers"].is_array()) {
+                                    for (const auto& L : arch["layers"]) {
+                                        if (!L.is_object()) continue;
+                                        const std::string name = L.value("name", std::string());
+                                        if (name == "vgg16_feat/b1/c1") {
+                                            inferred_base = L.value("out_channels", 0);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                const int cfg_base = pcfg.contains("base_channels") ? (int)pcfg["base_channels"].get<int>() : 0;
+                                if (inferred_base > 0 && inferred_base != cfg_base) {
+                                    std::cerr << "⚠️  Perceptual checkpoint base_channels mismatch (cfg=" << cfg_base
+                                              << ", ckpt=" << inferred_base << "). Rebuilding aux model and retrying load..." << std::endl;
+
+                                    json pcfg2 = pcfg;
+                                    pcfg2["base_channels"] = std::max(1, inferred_base);
+
+                                    aux_perceptual_.reset();
+                                    aux_perceptual_ = ModelArchitectures::create(p_arch, pcfg2);
+                                    aux_perceptual_->allocateParams();
+                                    try { aux_perceptual_->initializeWeights("xavier", 1337u); } catch (...) {}
+
+                                    std::string err2;
+                                    if (Mimir::Serialization::load_checkpoint(*aux_perceptual_, ckpt, opts, &err2)) {
+                                        retried = true;
+                                    } else {
+                                        err = err2;
+                                    }
+                                }
+                            }
+                        } catch (...) {
+                            // best-effort: keep original err
+                        }
+                    }
+
+                    if (!retried) {
+                        std::cerr << "⚠️  Perceptual checkpoint load failed: " << ckpt << " | " << err << std::endl;
+                    }
+                }
+            } else {
+                std::cerr << "⚠️  Perceptual loss active but perceptual_checkpoint is empty: using fixed random Xavier init (seed=1337)." << std::endl;
+            }
         }
 
         const std::vector<float> pred_recon(pred.begin(), pred.begin() + recon_n);
@@ -1904,102 +2236,7 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
         }
     }
 
-    // Adversarial (PatchGAN-like). Updates discriminator internally and injects dL/dx into recon gradient.
-    if (adv_weight > 0.0f && recon_is_hwc) {
-        std::string d_arch = "patch_discriminator";
-        if (modelConfig.contains("adv_disc_arch")) {
-            try { d_arch = modelConfig["adv_disc_arch"].get<std::string>(); } catch (...) {}
-        }
-        float d_lr = learning_rate;
-        if (modelConfig.contains("adv_disc_lr")) d_lr = std::max(0.0f, modelConfig["adv_disc_lr"].get<float>());
-        if (d_lr <= 0.0f) d_lr = learning_rate;
-
-        if (!aux_discriminator_) {
-            json dcfg = ModelArchitectures::defaultConfig(d_arch);
-            dcfg["image_w"] = img_w;
-            dcfg["image_h"] = img_h;
-            dcfg["image_c"] = img_c;
-            if (modelConfig.contains("adv_disc_base_channels")) {
-                dcfg["base_channels"] = std::max(4, modelConfig["adv_disc_base_channels"].get<int>());
-            }
-            aux_discriminator_ = ModelArchitectures::create(d_arch, dcfg);
-            aux_discriminator_->allocateParams();
-            aux_discriminator_opt_inited_ = false;
-        }
-
-        // Init discriminator optimizer hyperparams from main config if provided
-        if (!aux_discriminator_opt_inited_) {
-            aux_discriminator_opt_.type = opt.type;
-            aux_discriminator_opt_.beta1 = opt.beta1;
-            aux_discriminator_opt_.beta2 = opt.beta2;
-            aux_discriminator_opt_.eps = opt.eps;
-            aux_discriminator_opt_.weight_decay = 0.0f;
-            aux_discriminator_opt_.decay_strategy = LRDecayStrategy::NONE;
-            aux_discriminator_opt_.initial_lr = d_lr;
-            aux_discriminator_opt_.min_lr = d_lr;
-            aux_discriminator_opt_.warmup_steps = 0;
-            aux_discriminator_opt_inited_ = true;
-        }
-
-        const std::vector<float> pred_recon(pred.begin(), pred.begin() + recon_n);
-        const std::vector<float> tgt_recon(x.begin(), x.begin() + recon_n);
-
-        // ---- Discriminator update ----
-        aux_discriminator_->zeroGradients();
-        const std::vector<float>& d_real_view = aux_discriminator_->forwardPassView(tgt_recon, true);
-        std::vector<float> d_real(d_real_view.begin(), d_real_view.end());
-        // Backward on real immediately to avoid clobbering activations
-
-        auto bce_logits_grad = [](const std::vector<float>& logits, float target, std::vector<float>& grad, double& loss_out) {
-            const size_t n = logits.size();
-            grad.assign(n, 0.0f);
-            if (n == 0) { loss_out = 0.0; return; }
-            const double inv_n = 1.0 / static_cast<double>(n);
-            double loss_sum = 0.0;
-            for (size_t i = 0; i < n; ++i) {
-                const float p = sigmoid_scalar_f(logits[i]);
-                const float t = target;
-                // BCE(p,t)
-                loss_sum += -(static_cast<double>(t) * std::log(std::max(1e-7f, p)) + static_cast<double>(1.0f - t) * std::log(std::max(1e-7f, 1.0f - p)));
-                grad[i] = (p - t) * static_cast<float>(inv_n);
-            }
-            loss_out = loss_sum * inv_n;
-        };
-
-        std::vector<float> g_real;
-        double l_real = 0.0;
-        bce_logits_grad(d_real, 1.0f, g_real, l_real);
-        aux_discriminator_->backwardPass(g_real);
-
-        // Forward fake (new activations) + backward
-        const std::vector<float>& d_fake_view = aux_discriminator_->forwardPassView(pred_recon, true);
-        std::vector<float> d_fake(d_fake_view.begin(), d_fake_view.end());
-        std::vector<float> g_fake;
-        double l_fake = 0.0;
-        bce_logits_grad(d_fake, 0.0f, g_fake, l_fake);
-        aux_discriminator_->backwardPass(g_fake);
-        aux_discriminator_opt_.step = opt.step; // keep roughly in sync
-        aux_discriminator_->optimizerStep(aux_discriminator_opt_, d_lr);
-
-        // ---- Generator adversarial gradient via D(input grad) ----
-        aux_discriminator_->zeroGradients();
-        const std::vector<float>& d_fake2_view = aux_discriminator_->forwardPassView(pred_recon, true);
-        std::vector<float> d_fake2(d_fake2_view.begin(), d_fake2_view.end());
-        std::vector<float> g_adv;
-        double l_adv = 0.0;
-        bce_logits_grad(d_fake2, 1.0f, g_adv, l_adv);
-        aux_discriminator_->backwardPass(g_adv);
-        if (aux_discriminator_->hasLastInputGradient()) {
-            const auto& gin = aux_discriminator_->getLastInputGradient();
-            if (gin.size() >= static_cast<size_t>(recon_n)) {
-                // Add scaled generator adv gradient
-                for (int i = 0; i < recon_n; ++i) {
-                    grad_recon[static_cast<size_t>(i)] += adv_weight * gin[static_cast<size_t>(i)];
-                }
-            }
-        }
-        recon += static_cast<double>(adv_weight) * l_adv;
-    }
+    // Adversarial (discriminateur) retiré.
     const int mu_off = image_dim;
     const int lv_off = image_dim + latent_dim;
     double kl = 0.0;
@@ -3196,6 +3433,22 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
     std::mt19937 gen(seed == 0 ? std::random_device{}() : seed);
     
     std::cout << "🎲 Initializing weights using " << method << " method (bloc par layer)..." << std::endl;
+#ifdef _OPENMP
+    std::cout << "🧵 OpenMP: initialisation des poids jusqu'à " << omp_get_max_threads() << " threads" << std::endl;
+#endif
+
+    auto mix_seed = [](unsigned int base_seed, size_t layer_idx, unsigned int stream) -> unsigned int {
+        // SplitMix64-like mixing to derive independent deterministic seeds.
+        uint64_t x = (static_cast<uint64_t>(base_seed) << 1) ^ 0x9E3779B97F4A7C15ull;
+        x ^= (static_cast<uint64_t>(layer_idx) + 0xD1B54A32D192ED03ull) * 0xBF58476D1CE4E5B9ull;
+        x ^= (static_cast<uint64_t>(stream) + 0x94D049BB133111EBull) * 0x94D049BB133111EBull;
+        x ^= (x >> 30);
+        x *= 0xBF58476D1CE4E5B9ull;
+        x ^= (x >> 27);
+        x *= 0x94D049BB133111EBull;
+        x ^= (x >> 31);
+        return static_cast<unsigned int>(x & 0xFFFFFFFFu);
+    };
     
     auto frozen_prefixes = [&]() -> std::vector<std::string> {
         std::vector<std::string> out;
@@ -3254,8 +3507,6 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
             std_dev = 0.05f;
         }
         
-        std::normal_distribution<float> dist(0.0f, std_dev);
-        
         // Déterminer précisément la zone bias quand possible
         const size_t num_weights = layer.params_count;
         size_t num_pure_weights = num_weights;
@@ -3279,18 +3530,37 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
             num_pure_weights = num_weights - estimated_bias;
         }
         
-        // NOUVEAU: Initialiser directement le weight_block du layer
+        // Initialiser directement le weight_block du layer
         float* weights_data = layer.weight_block->getData();
-        
+        if (!weights_data) continue;
+
+#ifdef _OPENMP
+        // Paralléliser uniquement quand c'est suffisamment gros pour amortir l'overhead.
+        const bool use_parallel = (num_pure_weights >= 1u << 16);
+        if (use_parallel) {
+            const unsigned int base_seed = (seed == 0 ? 0xC0FFEEu : seed);
+            #pragma omp parallel
+            {
+                const unsigned int tid = static_cast<unsigned int>(omp_get_thread_num());
+                std::mt19937 gen_local(mix_seed(base_seed, layer_idx, tid));
+                std::normal_distribution<float> dist_local(0.0f, std_dev);
+
+                #pragma omp for schedule(static)
+                for (size_t i = 0; i < num_weights; ++i) {
+                    float value = (i >= num_pure_weights) ? 0.0f : dist_local(gen_local);
+                    value = std::clamp(value, -3.0f, 3.0f);
+                    weights_data[i] = value;
+                }
+            }
+            continue;
+        }
+#endif
+
+        // Fallback séquentiel (préserve la séquence actuelle basée sur `gen`).
+        std::normal_distribution<float> dist(0.0f, std_dev);
         for (size_t i = 0; i < num_weights; ++i) {
-            float value;
-            
-            // Bias initialisé à 0, weights ~ N(0,std²)
-            value = (i >= num_pure_weights) ? 0.0f : dist(gen);
-            
-            // Clip direct sans tanh (préserve magnitude)
+            float value = (i >= num_pure_weights) ? 0.0f : dist(gen);
             value = std::clamp(value, -3.0f, 3.0f);  // ±3σ capture 99.7%
-            
             weights_data[i] = value;
         }
     }
@@ -4719,6 +4989,37 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         validated = true;
         std::cerr << "✓ All " << layers.size() << " layers validated" << std::endl;
     }
+
+    // ========================================================================
+    // STATIC SCHEDULING + PLANNERS (framework)
+    // ========================================================================
+    const bool planner_enabled = env_flag_true("MIMIR_ENABLE_PLANNER", true);
+    const bool fusion_enabled = env_flag_true("MIMIR_ENABLE_FUSION", true);
+    if (planner_enabled) {
+        if (!static_plan_.built || static_plan_.fuse_conv2d_relu.size() != layers.size()) {
+            static_plan_.fuse_conv2d_relu.assign(layers.size(), 0);
+            for (size_t i = 0; i < layers.size(); ++i) {
+                const Layer& l = layers[i];
+                // Build-time capability; runtime may still disable in training.
+                if (l.type_enum == LayerType::Conv2d && l.activation == ActivationType::RELU) {
+                    static_plan_.fuse_conv2d_relu[i] = 1;
+                }
+            }
+            static_plan_.built = true;
+        }
+
+        if (!static_plan_.dumped && env_flag_true("MIMIR_PLANNER_DUMP", false)) {
+            static_plan_.dumped = true;
+            const auto lifetimes = Mimir::Planning::analyze_tensor_lifetimes(layers);
+            const auto scratch = Mimir::Planning::plan_conv2d_fastpath_scratch(layers);
+            std::cerr << "[planner] tensors=" << lifetimes.size()
+                      << " conv2d_scratch_bytes={wT=" << scratch.wT_bytes
+                      << ", xcol=" << scratch.xcol_bytes
+                      << ", c=" << scratch.c_bytes
+                      << "}"
+                      << std::endl;
+        }
+    }
     
     // État du forward
     if (training) {
@@ -4896,6 +5197,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::Conv2d:
     case LayerType::ConvTranspose2d: {
+        static bool accel_logged_conv2d = false;
         RUNTIME_CHECK(
             layer.in_channels > 0 && layer.out_channels > 0,
             "Conv2d: in_channels and out_channels must be set"
@@ -4962,11 +5264,39 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         
         const float* layer_weights = layer.getWeights();
 
+        // Fusion: Conv2d + ReLU (inference only)
+        const bool fuse_relu = fusion_enabled && !training &&
+                       static_plan_.built &&
+                       layer_idx < static_plan_.fuse_conv2d_relu.size() &&
+                       static_plan_.fuse_conv2d_relu[layer_idx] != 0 &&
+                       layer.activation == ActivationType::RELU;
+
         // Fast path: im2col + GEMM (tuilé) via HardwareOpt::matmul_fma_saturated
         // NOTE: Pour ConvTranspose2d, on garde le chemin naïf (à optimiser ensuite).
         const bool can_fast = (layer.type_enum == LayerType::Conv2d) && global_use_hardware && hasAVX2() && hasFMA();
         const int out_spatial = out_height * out_width;
         const int K = in_channels * kernel_size * kernel_size;
+
+        if (!accel_logged_conv2d && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
+            accel_logged_conv2d = true;
+            #if defined(__AVX2__)
+                std::cerr << "Conv2d: compiled_with_avx2=1";
+            #else
+                std::cerr << "Conv2d: compiled_with_avx2=0";
+            #endif
+
+            #if defined(__FMA__)
+                std::cerr << " compiled_with_fma=1";
+            #else
+                std::cerr << " compiled_with_fma=0";
+            #endif
+
+            std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
+                      << " runtime_fma=" << (hasFMA() ? 1 : 0)
+                      << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
+                      << " will_use_fast_path=" << (can_fast ? 1 : 0)
+                      << std::endl;
+        }
 
         if (can_fast && out_spatial > 0 && K > 0 && out_channels > 0) {
             // Transpose des poids: [out_c x K] -> [K x out_c]
@@ -4975,6 +5305,10 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 throw std::runtime_error("Conv2d: weights invalid");
             }
 
+            const bool dense_input = (x.size() == static_cast<size_t>(in_channels) * static_cast<size_t>(height) * static_cast<size_t>(width));
+            const float* __restrict__ xptr = dense_input ? x.data() : nullptr;
+            const int HW = height * width;
+
             // Choix d'une tuile M pour limiter la mémoire (X_col et C_tile).
             // Cible ~32MB pour X_col.
             const size_t target_bytes = 32ULL * 1024ULL * 1024ULL;
@@ -4982,10 +5316,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             int tile_m = static_cast<int>(std::max<size_t>(256, std::min<size_t>(8192, floats_budget / static_cast<size_t>(K))));
             if (tile_m > out_spatial) tile_m = out_spatial;
 
-            auto wT_buf = allocator.get_scratchpad(w_need * sizeof(float), layer.name + "/conv_wT");
+            auto wT_buf = allocator.get_scratchpad(w_need * sizeof(float), "conv_wT");
             float* wT = wT_buf.data();
+            #pragma omp parallel for if(static_cast<long long>(out_channels) * static_cast<long long>(K) > 262144) schedule(static)
             for (int oc = 0; oc < out_channels; ++oc) {
-                const float* w_oc = layer_weights + static_cast<size_t>(oc) * static_cast<size_t>(K);
+                const float* __restrict__ w_oc = layer_weights + static_cast<size_t>(oc) * static_cast<size_t>(K);
                 for (int k = 0; k < K; ++k) {
                     wT[static_cast<size_t>(k) * static_cast<size_t>(out_channels) + static_cast<size_t>(oc)] = w_oc[static_cast<size_t>(k)];
                 }
@@ -4993,8 +5328,10 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             const size_t xcol_max = static_cast<size_t>(tile_m) * static_cast<size_t>(K);
             const size_t c_max = static_cast<size_t>(tile_m) * static_cast<size_t>(out_channels);
-            auto xcol_buf = allocator.get_scratchpad(xcol_max * sizeof(float), layer.name + "/im2col");
-            auto c_buf = allocator.get_scratchpad(c_max * sizeof(float), layer.name + "/conv_gemm_out");
+
+            // Memory planner: shared tags pour réutiliser les mêmes buffers entre layers.
+            auto xcol_buf = allocator.get_scratchpad(xcol_max * sizeof(float), "im2col");
+            auto c_buf = allocator.get_scratchpad(c_max * sizeof(float), "conv_gemm_out");
             float* Xcol = xcol_buf.data();
             float* Ctmp = c_buf.data();
 
@@ -5003,26 +5340,47 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 const int tm = m1 - m0;
 
                 // im2col: Xcol[tm x K]
+                #pragma omp parallel for if(static_cast<long long>(tm) * static_cast<long long>(K) > 262144) schedule(static)
                 for (int r = 0; r < tm; ++r) {
                     const int m = m0 + r;
                     const int oh = m / out_width;
                     const int ow = m - oh * out_width;
-                    float* row = Xcol + static_cast<size_t>(r) * static_cast<size_t>(K);
+                    float* __restrict__ row = Xcol + static_cast<size_t>(r) * static_cast<size_t>(K);
+
                     int col = 0;
-                    for (int ic = 0; ic < in_channels; ++ic) {
-                        const int in_base_c = ic * (height * width);
-                        for (int kh = 0; kh < kernel_size; ++kh) {
-                            const int ih = oh * stride + kh - padding;
-                            for (int kw = 0; kw < kernel_size; ++kw) {
-                                const int iw = ow * stride + kw - padding;
-                                float v = 0.0f;
-                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                    const int in_idx = in_base_c + ih * width + iw;
-                                    if (in_idx >= 0 && static_cast<size_t>(in_idx) < x.size()) {
-                                        v = x[static_cast<size_t>(in_idx)];
+                    if (dense_input) {
+                        // Chemin rapide: pas de check sur in_idx (bornes garanties par ih/iw).
+                        for (int ic = 0; ic < in_channels; ++ic) {
+                            const int in_base_c = ic * HW;
+                            for (int kh = 0; kh < kernel_size; ++kh) {
+                                const int ih = oh * stride + kh - padding;
+                                for (int kw = 0; kw < kernel_size; ++kw) {
+                                    const int iw = ow * stride + kw - padding;
+                                    float v = 0.0f;
+                                    if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                        v = xptr[in_base_c + ih * width + iw];
                                     }
+                                    row[col++] = v;
                                 }
-                                row[col++] = v;
+                            }
+                        }
+                    } else {
+                        // Chemin robuste (config H/W pouvant être inconsistente).
+                        for (int ic = 0; ic < in_channels; ++ic) {
+                            const int in_base_c = ic * HW;
+                            for (int kh = 0; kh < kernel_size; ++kh) {
+                                const int ih = oh * stride + kh - padding;
+                                for (int kw = 0; kw < kernel_size; ++kw) {
+                                    const int iw = ow * stride + kw - padding;
+                                    float v = 0.0f;
+                                    if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                        const int in_idx = in_base_c + ih * width + iw;
+                                        if (in_idx >= 0 && static_cast<size_t>(in_idx) < x.size()) {
+                                            v = x[static_cast<size_t>(in_idx)];
+                                        }
+                                    }
+                                    row[col++] = v;
+                                }
                             }
                         }
                     }
@@ -5032,11 +5390,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 HardwareOpt::matmul_fma_saturated(Ctmp, Xcol, wT, static_cast<size_t>(tm), static_cast<size_t>(out_channels), static_cast<size_t>(K));
 
                 // Scatter vers layout output [out_c, out_h, out_w]
+                #pragma omp parallel for if(static_cast<long long>(tm) * static_cast<long long>(out_channels) > 262144) schedule(static)
                 for (int r = 0; r < tm; ++r) {
                     const int m = m0 + r;
                     const size_t base_c = static_cast<size_t>(r) * static_cast<size_t>(out_channels);
                     for (int oc = 0; oc < out_channels; ++oc) {
-                        layer_output[static_cast<size_t>(oc) * static_cast<size_t>(out_spatial) + static_cast<size_t>(m)] = Ctmp[base_c + static_cast<size_t>(oc)];
+                        float v = Ctmp[base_c + static_cast<size_t>(oc)];
+                        if (fuse_relu && v < 0.0f) v = 0.0f;
+                        layer_output[static_cast<size_t>(oc) * static_cast<size_t>(out_spatial) + static_cast<size_t>(m)] = v;
                     }
                 }
             }
@@ -5072,17 +5433,16 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         }
                         
                         int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
+                        if (fuse_relu && sum < 0.0f) sum = 0.0f;
                         layer_output[out_idx] = sum;
                     }
                 }
             }
         }
         
-        // ReLU activation if specified
-        if (layer.activation != ActivationType::NONE) {
-            for (auto &val : layer_output) {
-                val = std::max(0.0f, val);
-            }
+        // Activation (non-fusée)
+        if (layer.activation != ActivationType::NONE && !(fuse_relu && layer.activation == ActivationType::RELU)) {
+            Activation::apply_inplace(layer_output, layer.activation, layer.activation_param);
         }
         
         break;
@@ -5105,11 +5465,103 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     case LayerType::Linear: {
         bool did_vulkan = false;
         bool did_opencl = false;
+        bool did_cuda = false;
+        bool did_rocm = false;
+        bool did_cpu = false;
+
+#ifdef ENABLE_CUDA
+        if (!training && g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
+            const RuntimeConfig& cuda_cfg = g_cuda_engine->config();
+            const bool cuda_linear = cuda_cfg.linear_enabled;
+            const int cuda_min_ops = cuda_cfg.linear_min_ops;
+            const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
+            const int out_f = layer.out_features;
+            int batch = 1;
+            if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
+                batch = layer.seq_len;
+            }
+
+            const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
+            const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
+            const size_t expected_b = static_cast<size_t>(out_f);
+            const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
+
+            const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
+            if (out_f > 0 && in_f > 0 && ops >= cuda_min_ops && x.size() == expected_in) {
+                const float* weights = layer.getWeights();
+                const float* bias = nullptr;
+                const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
+                if (weights && weights_n >= expected_total_w) {
+                    if (layer.use_bias) {
+                        bias = weights + expected_w;
+                    }
+                    layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
+                    did_cuda = g_cuda_engine->linearForward(
+                        x.data(),
+                        weights,
+                        bias,
+                        layer_output.data(),
+                        batch,
+                        in_f,
+                        out_f
+                    );
+                    if (did_cuda && cuda_cfg.verbose) {
+                        std::cout << "[accel] Linear via CUDA (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
+                    }
+                }
+            }
+        }
+#endif
+
+#ifdef ENABLE_ROCM
+        if (!did_cuda && !training && g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
+            const RuntimeConfig& rocm_cfg = g_rocm_engine->config();
+            const bool rocm_linear = rocm_cfg.linear_enabled;
+            const int rocm_min_ops = rocm_cfg.linear_min_ops;
+            const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
+            const int out_f = layer.out_features;
+            int batch = 1;
+            if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
+                batch = layer.seq_len;
+            }
+
+            const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
+            const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
+            const size_t expected_b = static_cast<size_t>(out_f);
+            const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
+
+            const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
+            if (out_f > 0 && in_f > 0 && ops >= rocm_min_ops && x.size() == expected_in) {
+                const float* weights = layer.getWeights();
+                const float* bias = nullptr;
+                const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
+                if (weights && weights_n >= expected_total_w) {
+                    if (layer.use_bias) {
+                        bias = weights + expected_w;
+                    }
+                    layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
+                    did_rocm = g_rocm_engine->linearForward(
+                        x.data(),
+                        weights,
+                        bias,
+                        layer_output.data(),
+                        batch,
+                        in_f,
+                        out_f
+                    );
+                    if (did_rocm && rocm_cfg.verbose) {
+                        std::cout << "[accel] Linear via ROCm (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
+                    }
+                }
+            }
+        }
+#endif
+
 #ifdef ENABLE_VULKAN
         // Politique: par défaut off. Activer avec MIMIR_VULKAN_LINEAR=1.
         const bool vulkan_linear = env_flag_true("MIMIR_VULKAN_LINEAR", false);
         const int vk_min_ops = env_int("MIMIR_VULKAN_LINEAR_MIN_OPS", 1 << 20);
-        if (!training && vulkan_linear && g_compute_available && g_compute_engine) {
+        if (!did_cuda && !did_rocm && !training && vulkan_linear && g_compute_available && g_compute_engine) {
             const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
             const int out_f = layer.out_features;
             int batch = 1;
@@ -5158,7 +5610,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Permet d'utiliser OpenCL et Vulkan simultanément (backends indépendants).
         const bool opencl_linear = env_flag_true("MIMIR_OPENCL_LINEAR", false);
         const int min_ops = env_int("MIMIR_OPENCL_LINEAR_MIN_OPS", 1 << 20);
-        if (!did_vulkan && !training && opencl_linear && g_opencl_available && g_opencl_engine) {
+    if (!did_cuda && !did_rocm && !did_vulkan && !training && opencl_linear && g_opencl_available && g_opencl_engine) {
             const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
             const int out_f = layer.out_features;
             int batch = 1;
@@ -5194,8 +5646,78 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             }
         }
 #endif
-        if (!did_vulkan && !did_opencl) {
-            layer_output = LayerOps::linear_forward(x, layer, training);
+        if (!did_cuda && !did_rocm && !did_vulkan && !did_opencl) {
+            static bool accel_logged_linear_cpu = false;
+            if (!accel_logged_linear_cpu && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
+                accel_logged_linear_cpu = true;
+                #if defined(__AVX2__)
+                    std::cerr << "Linear(CPU): compiled_with_avx2=1";
+                #else
+                    std::cerr << "Linear(CPU): compiled_with_avx2=0";
+                #endif
+
+                #if defined(__FMA__)
+                    std::cerr << " compiled_with_fma=1";
+                #else
+                    std::cerr << " compiled_with_fma=0";
+                #endif
+
+                std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
+                          << " runtime_fma=" << (hasFMA() ? 1 : 0)
+                          << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
+                              << " cuda_linear=" << (env_flag_true("MIMIR_CUDA_LINEAR", false) ? 1 : 0)
+                              << " rocm_linear=" << (env_flag_true("MIMIR_ROCM_LINEAR", false) ? 1 : 0)
+                          << " vulkan_linear=" << (env_flag_true("MIMIR_VULKAN_LINEAR", false) ? 1 : 0)
+                          << " opencl_linear=" << (env_flag_true("MIMIR_OPENCL_LINEAR", false) ? 1 : 0)
+                          << std::endl;
+            }
+            // Fallback CPU via runtime (unifie le chemin Linear)
+            if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized()) {
+                const RuntimeConfig& cpu_cfg = g_cpu_engine->config();
+                if (cpu_cfg.linear_enabled) {
+                    const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
+                    const int out_f = layer.out_features;
+                    int batch = 1;
+                    if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
+                        batch = layer.seq_len;
+                    }
+
+                    const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
+                    const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
+                    const size_t expected_b = static_cast<size_t>(out_f);
+                    const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
+
+                    const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
+                    const int min_ops = std::max(0, cpu_cfg.linear_min_ops);
+                    if (out_f > 0 && in_f > 0 && ops >= min_ops && x.size() == expected_in) {
+                        const float* weights = layer.getWeights();
+                        const float* bias = nullptr;
+                        const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
+                        if (weights && weights_n >= expected_total_w) {
+                            if (layer.use_bias) {
+                                bias = weights + expected_w;
+                            }
+                            layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
+                            did_cpu = g_cpu_engine->linearForward(
+                                x.data(),
+                                weights,
+                                bias,
+                                layer_output.data(),
+                                batch,
+                                in_f,
+                                out_f
+                            );
+                            if (did_cpu && cpu_cfg.verbose) {
+                                std::cout << "[accel] Linear via CPU runtime (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!did_cpu) {
+                layer_output = LayerOps::linear_forward(x, layer, training);
+            }
         }
         break;
     }
@@ -5903,6 +6425,27 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::SelfAttention:
     case LayerType::MultiHeadAttention: {
+        static bool accel_logged_attention = false;
+        if (!accel_logged_attention && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
+            accel_logged_attention = true;
+            #if defined(__AVX2__)
+                std::cerr << "Attention: compiled_with_avx2=1";
+            #else
+                std::cerr << "Attention: compiled_with_avx2=0";
+            #endif
+
+            #if defined(__FMA__)
+                std::cerr << " compiled_with_fma=1";
+            #else
+                std::cerr << " compiled_with_fma=0";
+            #endif
+
+            std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
+                      << " runtime_fma=" << (hasFMA() ? 1 : 0)
+                      << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
+                      << std::endl;
+        }
+
         RUNTIME_CHECK(
             layer.getWeights() != nullptr,
             "Attention: weights not initialized. Call allocateParams() first."
@@ -5933,6 +6476,27 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::CrossAttention: {
+        static bool accel_logged_cross_attention = false;
+        if (!accel_logged_cross_attention && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
+            accel_logged_cross_attention = true;
+            #if defined(__AVX2__)
+                std::cerr << "CrossAttention: compiled_with_avx2=1";
+            #else
+                std::cerr << "CrossAttention: compiled_with_avx2=0";
+            #endif
+
+            #if defined(__FMA__)
+                std::cerr << " compiled_with_fma=1";
+            #else
+                std::cerr << " compiled_with_fma=0";
+            #endif
+
+            std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
+                      << " runtime_fma=" << (hasFMA() ? 1 : 0)
+                      << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
+                      << std::endl;
+        }
+
         RUNTIME_CHECK(
             inputs.size() >= 2,
             "CrossAttention requires 2 inputs (query, key_value), got " +
@@ -6346,6 +6910,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     case LayerType::Multiply:
                     case LayerType::Divide:
 
+                    // Attention (affichage best-effort; utile pour diagnostiquer la mémoire K/V)
+                    case LayerType::SelfAttention:
+                    case LayerType::MultiHeadAttention:
+                    case LayerType::CrossAttention:
+
                     // Activations (souvent omettent output_w/output_h dans les builders)
                     case LayerType::ReLU:
                     case LayerType::LeakyReLU:
@@ -6754,11 +7323,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             return vf;
         };
 
-        // MU: tensor spatial CHW (best-effort via layer config)
-        if (hasTensor("vae_conv/mu")) {
-            const auto& mu = getTensor("vae_conv/mu");
+        auto add_mu_frame = [&](const char* prefix) {
+            const std::string mu_name = std::string(prefix) + "/mu";
+            const std::string mu_layer = std::string(prefix) + "/enc/mu";
+            if (!hasTensor(mu_name)) return;
+            const auto& mu = getTensor(mu_name);
             int muW = 0, muH = 0, muC = 0;
-            if (Layer* L = getLayerByName("vae_conv/enc/mu")) {
+            if (Layer* L = getLayerByName(mu_layer)) {
                 muC = std::max(0, L->out_channels);
                 muH = std::max(0, L->input_height);
                 muW = std::max(0, L->input_width);
@@ -6774,50 +7345,59 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             if (muW > 0 && muH > 0 && muC > 0 && mu.size() == static_cast<size_t>(muW) * static_cast<size_t>(muH) * static_cast<size_t>(muC)) {
                 VizFrame vf = downsample_mean_chw_to_gray(mu, muW, muH, muC, std::max(1, viz_taps_max_side_), /*take_abs*/false, /*symmetric*/true);
                 if (!vf.pixels.empty()) {
-                    vf.label = "vae_conv/latent/mu";
+                    vf.label = std::string(prefix) + "/latent/mu";
                     addVizTapFrame(std::move(vf));
                 }
             }
-        }
+        };
 
-        // resdiff: |recon - input| en image-space (HWC)
-        if (hasTensor("vae_conv/recon") && hasTensor("vae_conv/in_hwc")) {
-            const auto& recon = getTensor("vae_conv/recon");
-            const auto& in_hwc = getTensor("vae_conv/in_hwc");
-            if (recon.size() == in_hwc.size() && !recon.empty()) {
-                int W = 0, H = 0, C = 0;
-                if (Layer* P = getLayerByName("vae_conv/recon_to_hwc")) {
-                    if (P->shape.size() == 3) {
-                        C = std::max(0, P->shape[0]);
-                        H = std::max(0, P->shape[1]);
-                        W = std::max(0, P->shape[2]);
-                    }
-                }
-                if ((W <= 0 || H <= 0 || C <= 0) && recon.size() % 3 == 0) {
-                    // Fallback: supposer RGB carré
-                    C = 3;
-                    const size_t hw = recon.size() / 3ULL;
-                    const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
-                    if (s > 0 && s * s == hw) {
-                        H = static_cast<int>(s);
-                        W = static_cast<int>(s);
-                    }
-                }
-                if (W > 0 && H > 0 && C > 0 && recon.size() == static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C)) {
-                    std::vector<float> diff;
-                    diff.resize(recon.size());
-                    #pragma omp simd
-                    for (size_t i = 0; i < diff.size(); ++i) {
-                        diff[i] = std::fabs(recon[i] - in_hwc[i]);
-                    }
-                    VizFrame vf = downsample_mean_chw_to_gray(diff, W, H, C, std::max(1, viz_taps_max_side_), /*take_abs*/false, /*symmetric*/false);
-                    if (!vf.pixels.empty()) {
-                        vf.label = "vae_conv/err/resdiff_abs";
-                        addVizTapFrame(std::move(vf));
-                    }
+        // MU: tensor spatial CHW (best-effort via layer config)
+        add_mu_frame("vae_conv");
+
+        auto add_resdiff_frame = [&](const char* prefix) {
+            const std::string recon_name = std::string(prefix) + "/recon";
+            const std::string in_name = std::string(prefix) + "/in_hwc";
+            const std::string recon_to_hwc = std::string(prefix) + "/recon_to_hwc";
+            if (!hasTensor(recon_name) || !hasTensor(in_name)) return;
+            const auto& recon = getTensor(recon_name);
+            const auto& in_hwc = getTensor(in_name);
+            if (recon.size() != in_hwc.size() || recon.empty()) return;
+
+            int W = 0, H = 0, C = 0;
+            if (Layer* P = getLayerByName(recon_to_hwc)) {
+                if (P->shape.size() == 3) {
+                    C = std::max(0, P->shape[0]);
+                    H = std::max(0, P->shape[1]);
+                    W = std::max(0, P->shape[2]);
                 }
             }
-        }
+            if ((W <= 0 || H <= 0 || C <= 0) && recon.size() % 3 == 0) {
+                C = 3;
+                const size_t hw = recon.size() / 3ULL;
+                const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                if (s > 0 && s * s == hw) {
+                    H = static_cast<int>(s);
+                    W = static_cast<int>(s);
+                }
+            }
+            if (W <= 0 || H <= 0 || C <= 0) return;
+            if (recon.size() != static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C)) return;
+
+            std::vector<float> diff;
+            diff.resize(recon.size());
+            #pragma omp simd
+            for (size_t i = 0; i < diff.size(); ++i) {
+                diff[i] = std::fabs(recon[i] - in_hwc[i]);
+            }
+            VizFrame vf = downsample_mean_chw_to_gray(diff, W, H, C, std::max(1, viz_taps_max_side_), /*take_abs*/false, /*symmetric*/false);
+            if (!vf.pixels.empty()) {
+                vf.label = std::string(prefix) + "/err/resdiff_abs";
+                addVizTapFrame(std::move(vf));
+            }
+        };
+
+        // resdiff: |recon - input| en image-space (HWC)
+        add_resdiff_frame("vae_conv");
     }
 
     return getTensor("x");
@@ -9072,6 +9652,71 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
 
             accumulate_grad(grad_store[input_names[0]], grad_input);
+        } else if (layer.type == "GlobalAvgPool2d" || layer.type == "AdaptiveAvgPool2d") {
+            if (inputs.empty()) {
+                continue;
+            }
+
+            const int in_channels = (layer.in_channels > 0) ? layer.in_channels : static_cast<int>(grad_out.size());
+            int height = (layer.input_height > 0) ? layer.input_height : 0;
+            int width = (layer.input_width > 0) ? layer.input_width : 0;
+
+            if (in_channels <= 0) {
+                std::cerr << "⚠️  GlobalAvgPool2d backward: missing channels (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            if (grad_out.size() != static_cast<size_t>(in_channels)) {
+                std::cerr << "⚠️  GlobalAvgPool2d backward shape mismatch (" << layer.name << ")"
+                          << " grad=" << grad_out.size() << " expected=" << in_channels
+                          << std::endl;
+                continue;
+            }
+
+            // Use real input size as hint to infer H/W if needed.
+            size_t store_in_size = 0ULL;
+            bool have_store_in = false;
+            try {
+                store_in_size = getTensor(input_names[0]).size();
+                have_store_in = true;
+            } catch (...) {
+                have_store_in = false;
+            }
+            const size_t in_size_hint = have_store_in ? store_in_size : input0_size;
+
+            // Infer H/W if missing or inconsistent.
+            if (height <= 0 || width <= 0) {
+                const size_t c = static_cast<size_t>(in_channels);
+                if (c > 0 && in_size_hint > 0ULL && (in_size_hint % c) == 0ULL) {
+                    const size_t hw = in_size_hint / c;
+                    const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                    if (s > 0 && s * s == hw) {
+                        height = static_cast<int>(s);
+                        width = static_cast<int>(s);
+                    }
+                }
+            }
+
+            if (height <= 0 || width <= 0) {
+                std::cerr << "⚠️  GlobalAvgPool2d backward: missing H/W (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            const size_t spatial = static_cast<size_t>(height) * static_cast<size_t>(width);
+            const size_t expected_in = static_cast<size_t>(in_channels) * spatial;
+            if (in_size_hint != 0ULL && in_size_hint != expected_in) {
+                std::cerr << "⚠️  GlobalAvgPool2d backward input mismatch (" << layer.name << ")"
+                          << " in=" << in_size_hint << " expected=" << expected_in
+                          << " (C=" << in_channels << " H=" << height << " W=" << width << ")"
+                          << std::endl;
+                continue;
+            }
+
+            std::vector<float> grad_in = LayerOps::global_avgpool2d_backward(grad_out, layer, expected_in);
+            if (grad_in.empty()) {
+                std::cerr << "⚠️  GlobalAvgPool2d backward failed (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
         } else if (layer.type == "UpsampleNearest") {
             // Backward UpsampleNearest: accumulation vers le pixel source (nearest)
             if (layer.out_h <= 0 || layer.out_w <= 0 || layer.in_channels <= 0) {

@@ -5,6 +5,74 @@ Toutes les modifications notables du Mímir Framework sont documentées ici.
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [3.0.0] - 2026-05-25
+
+### 🚀 Montée de version majeure — API enrichie, nouveaux templates et robustesse
+
+Cette version consolide les apports des sessions de développement de mai 2026 :
+nouveau module I/O, helpers PonyXL-DDPM, robustesse dtype, nouveaux templates Lua
+et mise à jour complète du stub EmmyLua.
+
+#### Ajouté
+
+- **`Mimir.IO` — Nouveau module** (I/O images)
+  - `Mimir.IO.read_image_rgb_u8(path)` : charge une image et retourne ses pixels RGB u8 sous forme de table Lua `{R, G, B, …}`
+  - Alias global `readImageRGBU8(path)` pour les scripts compacts
+  - Documentation dédiée : `docs/03-API-Reference/21-IO.md`
+
+- **`Mimir.Model.create_from_config(full_cfg)`**
+  - Crée un modèle depuis une config complète (ex. : table `CONF` injectée par le mode CLI `--conf`)
+  - Résout l'architecture depuis `full_cfg.architecture` (fallback `type`, puis `model.architecture|model.type`)
+  - Retourne `(true, arch)` ou `(false, err)`
+
+- **`Mimir.Model.dtype()` / `Mimir.Model.dtype(name)`**
+  - Getter/setter de la préférence dtype du modèle (`"float32"`, `"float16"`, …)
+  - Alias `Mimir.model` (lowercase) exposé globalement → `Mimir.model.dtype(...)` fonctionne
+
+- **Helpers PonyXL-DDPM**
+  - `ponyxl_ddpm_train_step(batch, lr, opts?)` — step d'entraînement complet
+  - `ponyxl_ddpm_validate_step(batch)` — step de validation
+  - `ponyxl_ddpm_viz_reconstruct_step(batch)` — forward pour visualisation
+  - `ponyxl_ddpm_text2img(prompt, steps?, seed?)` — génération image depuis texte
+  - `ponyxl_ddpm_set_vae_scale(scale)` / `ponyxl_ddpm_get_vae_scale()` — facteur d'échelle VAE
+  - `ponyxl_ddpm_vae_mu_moments(input)` — moments μ du VAE encoder
+
+- **Nouveaux templates Lua**
+  - `scripts/templates/template_pipeline_only.lua` : démarrage minimal via `pipeline_api.lua`, sans args
+  - `scripts/templates/template_pipeline_args.lua` : `args.lua` + `pipeline_api.lua` (CLI-driven)
+
+- **Détection hardware au démarrage** (`bin/mimir --help`)
+  - Affichage des optimisations CPU disponibles : AVX2, FMA, F16C, BMI2
+  - Détection runtime CUDA / ROCm (compilé + disponible)
+
+#### Modifié
+
+- **`scripts/modules/pipeline_api.lua`** — `apply_model_dtype()` robuste
+  - Supporte `Mimir.model.dtype` (v3.0+) **et** `Mimir.Model.dtype` (rétrocompat)
+  - Gestion silencieuse si ni l'un ni l'autre n'est disponible
+
+- **`scripts/templates/template_new_model.lua`** — mise à jour
+  - Architecture par défaut : `vae_conv` (nom canonique du registre)
+  - Fallback auto sur `Mimir.Architectures.available()[1]` si l'archi n'est pas trouvée
+  - `apply_dtype()` robuste (supporte les deux chemins)
+  - `vocab_size` / `max_vocab` harmonisés
+  - Tokenizer conditionnel (NLP uniquement, non initialisé pour les archis image)
+  - `Mimir.Allocator.get_stats()` à la place de `print_stats()` (non bloquant)
+
+- **`mimir-api.lua`** — stub EmmyLua complet (130+ fonctions, 15 modules)
+  - Ajout de toutes les nouvelles fonctions ci-dessus
+  - Bump version header : 2.4.0 → **3.0.0**
+  - Date de synchronisation : 25 mai 2026
+
+- **Documentation `docs/`** — mise à jour complète
+  - `docs/00-INDEX.md` : version 3.0.0, section "Nouveautés v3.0", nouveaux templates
+  - `docs/03-API-Reference/00-API-Overview.md` : ajout `Mimir.IO`, `create_from_config`, `dtype`
+  - `docs/03-API-Reference/19-Globals.md` : ajout alias `Mimir.model`
+  - `docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md` : nouvelles entrées Model + section IO + PonyXL-DDPM
+  - `docs/03-API-Reference/21-IO.md` : nouvelle page Mimir.IO
+
+- **`scripts/README.md`** : version 3.0.0, date 25 mai 2026, référence aux 2 nouveaux templates
+
 ## [2.4.0] - 2026-03-15
 
 ### 🧹 Release de maintenance

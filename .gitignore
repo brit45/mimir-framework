@@ -159,6 +159,7 @@ config_local.json
 secrets/
 
 # Mimir spill
+.mimir-spill/
 .mimir_spill/
 
 # API client export (Insomnia)
