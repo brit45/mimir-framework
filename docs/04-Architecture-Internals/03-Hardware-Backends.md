@@ -1,26 +1,37 @@
 # Backends hardware : CPU / CUDA / ROCm / Vulkan / OpenCL
 
-Mímir est **CPU-first** : le CPU reste le chemin de référence (justesse + compatibilité maximale). Des backends d'accélération optionnels activent des fast-paths pour les opérations lourdes.
+Ce document décrit l'architecture interne du système de runtimes de Mímir : comment les layers sont dispatchés vers les différents backends matériels, comment `RuntimeConfig` est configuré, et comment chaque fast-path est implémenté en C++.
 
-Sources de vérité :
+> **Public visé :** développeurs qui souhaitent comprendre ou modifier les runtimes. Si vous cherchez simplement à activer l'accélération GPU, lisez [le guide utilisateur GPU](../05-Advanced/05-GPU-Acceleration.md) à la place.
 
-- `src/runtimes/AbstractRuntime.hpp` — interface commune + `RuntimeConfig`
-- `src/runtimes/cpu/CpuRuntime.cpp` — implémentation CPU
-- `src/runtimes/cuda/CudaRuntime.cpp` — fast-paths cuBLAS (CUDA)
-- `src/runtimes/rocm/RocmRuntime.cpp` — fast-paths rocBLAS (ROCm/HIP)
-- `src/VulkanCompute.hpp` — compute Vulkan (legacy, Linear uniquement)
-- `src/OpenCLCompute.hpp` — compute OpenCL (legacy)
-- `CMakeLists.txt` — flags : `ENABLE_CUDA`, `ENABLE_ROCM`, `ENABLE_VULKAN`
+**Fichiers sources de référence :**
+
+| Fichier | Rôle |
+|---|---|
+| `src/runtimes/AbstractRuntime.hpp` | Interface commune + struct `RuntimeConfig` |
+| `src/runtimes/cpu/CpuRuntime.cpp` | Implémentation CPU (fallback universel) |
+| `src/runtimes/cuda/CudaRuntime.cpp` | Fast-paths cuBLAS (CUDA) |
+| `src/runtimes/rocm/RocmRuntime.cpp` | Fast-paths rocBLAS (ROCm/HIP) |
+| `src/VulkanCompute.hpp` | Compute Vulkan (legacy, Linear uniquement) |
+| `src/OpenCLCompute.hpp` | Compute OpenCL (legacy) |
+| `CMakeLists.txt` | Flags de compilation : `ENABLE_CUDA`, `ENABLE_ROCM`, `ENABLE_VULKAN` |
 
 ---
 
-## 0) Architecture générale des runtimes
+## Architecture générale
 
-Chaque runtime implémente `AbstractRuntime` :
+### L'interface `AbstractRuntime`
+
+Tous les backends implémentent la même interface C++ :
 
 ```cpp
 class AbstractRuntime {
+public:
+    // Initialise le backend à partir de sa configuration (détectée via env vars)
     virtual bool initialize(const RuntimeConfig& cfg) = 0;
+
+    // Tente d'exécuter un layer. Retourne false si ce layer n'est pas supporté
+    // ou si les seuils ne sont pas atteints → Model.cpp retombe sur le runtime suivant.
     virtual bool forwardLayer(
         const std::vector<const std::vector<float>*>& inputs,
         std::vector<std::vector<float>>& outputs,
@@ -29,265 +40,229 @@ class AbstractRuntime {
 };
 ```
 
-Le dispatch dans `Model.cpp` cherche le backend dans l'ordre :
-1. CUDA (si `ENABLE_CUDA` et initialisé)
-2. ROCm (si `ENABLE_ROCM` et initialisé)
-3. CPU (toujours disponible, fallback universel)
+`forwardLayer()` retourne `false` pour signaler "je ne peux pas gérer ce layer" — ce n'est pas une erreur, c'est le mécanisme de fallback. Le runtime suivant dans la pile sera alors consulté.
 
-Tout fast-path GPU échoue silencieusement vers CPU via un bloc `do { ... } while(false)` avec `break`.
+### Ordre de dispatch
+
+`Model.cpp` interroge les runtimes dans cet ordre de priorité :
+
+```
+1. CUDA Runtime   — si compilé (ENABLE_CUDA) et MIMIR_CUDA ≠ 0
+2. ROCm  Runtime  — si compilé (ENABLE_ROCM) et MIMIR_ROCM ≠ 0
+3. CPU   Runtime  — toujours disponible, jamais désactivable
+```
+
+### Le pattern "do-while-false" pour les fast-paths
+
+Chaque fast-path GPU est encapsulé dans un bloc `do { ... } while(false)`. En cas d'échec (buffer device insuffisant, opération non supportée, etc.), le code fait `break` pour sortir proprement du bloc, puis retourne `false` pour déclencher le fallback CPU :
+
+```cpp
+// Exemple simplifié du fast-path Linear
+bool CudaRuntime::forwardLayer(...) {
+    if (layer.type == LayerType::Linear) {
+        do {
+            if (!config_.linear_enabled) break;
+            if (compute_ops < config_.linear_min_ops) break;
+
+            DeviceBuf d_input, d_weight, d_output;
+            if (!d_input.alloc(...)) break;
+            // ... appels cuBLAS ...
+            cudaDeviceSynchronize();
+            d_output.copyToHost(...);
+            return true;  // succès
+        } while (false);
+        return false;  // fallback → CPU
+    }
+    return false;
+}
+```
+
+> **Note :** ce pattern garantit qu'un échec partiel (ex: allocation device échouée) ne laisse jamais le modèle dans un état incohérent. Si le GPU n'a plus de VRAM, le layer est silencieusement traité par le CPU.
 
 ---
 
-## 0.1) `RuntimeConfig` — configuration commune
+## `RuntimeConfig` — configuration commune
+
+`RuntimeConfig` est la structure partagée par tous les runtimes GPU. Elle est peuplée une seule fois au démarrage via `RuntimeConfig::fromEnv(backend_upper)`, qui lit les variables d'environnement correspondant au backend.
 
 ```cpp
 struct RuntimeConfig {
-    bool disabled           = false;
-    bool verbose            = false;
+    bool disabled        = false;
+    bool verbose         = false;
+    int  device_index    = 0;
 
-    bool linear_enabled     = false;
-    int  linear_min_ops     = 1 << 20;   // ~1M MACs
+    bool linear_enabled  = false;
+    int  linear_min_ops  = 1 << 20;   // 1 048 576 MACs (~1 M)
 
-    bool conv_enabled       = false;
-    int  conv_min_ops       = 1 << 18;   // ~256K MACs
+    bool conv_enabled    = false;
+    int  conv_min_ops    = 1 << 18;   // 262 144 MACs (~256 K)
 
-    bool norm_enabled         = false;
-    int  norm_min_elements    = 1 << 12; // 4096 éléments
+    bool norm_enabled       = false;
+    int  norm_min_elements  = 1 << 12; // 4 096 éléments
 
-    bool attention_enabled  = false;
-    int  attention_min_ops  = 1 << 18;  // ~256K MACs
-
-    int device_index = 0;
+    bool attention_enabled = false;
+    int  attention_min_ops = 1 << 18;  // 262 144 MACs (~256 K)
 
     static RuntimeConfig fromEnv(const char* backend_upper);
+    // Exemple : fromEnv("CUDA") lit MIMIR_CUDA_*, fromEnv("ROCM") lit MIMIR_ROCM_*
 };
 ```
 
-### Variables d'environnement
+### Variables d'environnement (CUDA — remplacer `CUDA` par `ROCM` pour AMD)
 
-Pour CUDA (remplacer `CUDA` par `ROCM` pour le backend ROCm) :
-
-| Variable | Effet |
-|---|---|
-| `MIMIR_CUDA=0` | Désactive le runtime CUDA |
-| `MIMIR_CUDA_VERBOSE=1` | Active le mode verbeux |
-| `MIMIR_CUDA_DEVICE=N` | Choisit le device (défaut 0) |
-| `MIMIR_CUDA_LINEAR=1` | Active fast-path Linear |
-| `MIMIR_CUDA_LINEAR_MIN_OPS=N` | Seuil min MACs pour Linear |
-| `MIMIR_CUDA_CONV=1` | Active fast-path Conv2d |
-| `MIMIR_CUDA_CONV_MIN_OPS=N` | Seuil min MACs pour Conv |
-| `MIMIR_CUDA_NORM=1` | Active fast-path LayerNorm/RMSNorm |
-| `MIMIR_CUDA_NORM_MIN_ELEMS=N` | Seuil min éléments pour Norm |
-| `MIMIR_CUDA_ATTENTION=1` | Active fast-path Attention |
-| `MIMIR_CUDA_ATTENTION_MIN_OPS=N` | Seuil min MACs pour Attention |
-
-Activation complète CUDA :
-
-```bash
-export MIMIR_CUDA=1
-export MIMIR_CUDA_LINEAR=1
-export MIMIR_CUDA_CONV=1
-export MIMIR_CUDA_NORM=1
-export MIMIR_CUDA_ATTENTION=1
-./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua
-```
+| Variable | Valeur | Effet |
+|---|---|---|
+| `MIMIR_CUDA` | `0` | Désactive complètement le runtime CUDA |
+| `MIMIR_CUDA_VERBOSE` | `1` | Log chaque décision de dispatch (utile pour le diagnostic) |
+| `MIMIR_CUDA_DEVICE` | entier | Index du GPU à utiliser (défaut : `0`) |
+| `MIMIR_CUDA_LINEAR` | `1` | Active le fast-path `Linear` |
+| `MIMIR_CUDA_LINEAR_MIN_OPS` | entier | Seuil MACs pour `Linear` (défaut : `1048576`) |
+| `MIMIR_CUDA_CONV` | `1` | Active le fast-path `Conv2d` |
+| `MIMIR_CUDA_CONV_MIN_OPS` | entier | Seuil MACs pour `Conv2d` (défaut : `262144`) |
+| `MIMIR_CUDA_NORM` | `1` | Active le fast-path `LayerNorm` / `RMSNorm` |
+| `MIMIR_CUDA_NORM_MIN_ELEMS` | entier | Seuil éléments pour les norms (défaut : `4096`) |
+| `MIMIR_CUDA_ATTENTION` | `1` | Active le fast-path `Attention` |
+| `MIMIR_CUDA_ATTENTION_MIN_OPS` | entier | Seuil MACs pour Attention (défaut : `262144`) |
 
 ---
 
-## 1) CUDA Runtime (cuBLAS)
+## Backend CUDA (cuBLAS)
 
-Build flag : `-DENABLE_CUDA=ON`.
-Dépendances : `CUDA::cudart`, `CUDA::cublas`.
+**Prérequis build :** `-DENABLE_CUDA=ON`. Dépendances CMake : `CUDA::cudart`, `CUDA::cublas`.
 
-### Fast-paths implémentés
+### Fast-path Linear (SGEMM)
 
-Tous les fast-paths suivent le même patron :
-1. Vérifier les seuils d'activation (`config_.xxx_enabled`, seuil d'ops)
-2. Allouer des buffers device (`Impl::DeviceBuf`)
-3. Appeler les primitives cuBLAS
-4. `cudaDeviceSynchronize()` + copie host
-5. En cas d'échec → `break` → fallback CPU
+Calcule `output[M,N] = input[M,K] × W[K,N]` via `cublasSgemm`, puis ajoute le biais via `cublasSaxpy`.
 
-#### 1.1 Linear (SGEMM)
+**Seuil de déclenchement :** `M × N × K ≥ linear_min_ops` (défaut ~1 M MACs).
 
-`output[M,N] = input[M,K] × W[K,N]` via `cublasSgemm`. Biais via `cublasSaxpy`.
+### Fast-path Conv2d (im2col + SGEMM)
 
-Seuil par défaut : `1 << 20` MACs. Réglable via `MIMIR_CUDA_LINEAR_MIN_OPS`.
+Les convolutions ne sont pas directement supportées par cuBLAS, mais peuvent être réduites à une multiplication matricielle via la transformation **im2col** :
 
-#### 1.2 Conv2d (im2col + SGEMM)
+1. **im2col sur CPU** — le tenseur d'entrée `[C, H, W]` est réorganisé en matrice `col[C·kH·kW, H_out·W_out]` qui "aplatit" chaque fenêtre de convolution en une colonne.
+2. **Transfert vers GPU** — `col` et les filtres `W` sont copiés en VRAM.
+3. **SGEMM sur GPU** — `output = W_flat × col` via `cublasSgemm`.
+4. **Biais via `cublasSger`** — outer product pour broadcaster le biais sur toutes les positions spatiales.
 
-1. **im2col sur host** — `input[C,H,W]` → `col[C·kH·kW, H_out·W_out]`
-2. **SGEMM sur device** — `output = W × col`
-3. **Biais via `cublasSger`** — outer product
+Supporte : `stride`, `padding`, `dilation`.
 
-Supporte : `stride`, `padding`, `dilation`. Désactivé en mode `training=true`.
+> **Important :** ce fast-path est **désactivé en mode `training=true`**. Le backward de la convolution (gradients des filtres et de l'entrée) n'est pas encore implémenté en GPU. En training, Conv2d retombe toujours sur le CPU.
 
-#### 1.3 LayerNorm / RMSNorm (hybride CPU+GPU)
+### Fast-path LayerNorm / RMSNorm (hybride CPU+GPU)
 
-1. **Normalisation sur host** — `x_hat = (x - mean) / sqrt(var + eps)` ou RMS
-2. **Affine sur GPU** — `y = gamma ⊙ x_hat + beta` via `cublasSdgmm` + `cublasSaxpy`
+La normalisation elle-même est conservée sur CPU (calcul de la moyenne et variance, opération de normalisation), mais l'étape **affine** (mise à l'échelle `gamma` + décalage `beta`) est accélérée sur GPU via :
+- `cublasSdgmm` — multiplication terme à terme par `gamma`
+- `cublasSaxpy` — ajout de `beta`
 
-GroupNorm/BatchNorm restent sur CPU (layout incompatible).
-Seuil par défaut : `1 << 12` éléments.
+Ce découpage hybride donne un bon rapport perf/complexité sans avoir à porter le calcul de variance sur CUDA.
 
-#### 1.4 SelfAttention / MultiHeadAttention
+`GroupNorm` et `BatchNorm2d` restent entièrement sur CPU (layout de mémoire incompatible avec cette stratégie).
 
-1. QKV projection sur GPU (SGEMM)
-2. Split Q/K/V sur host
-3. Par tête : scores (SGEMM OP_T), masque causal optionnel, softmax, contexte (SGEMM)
-4. Projection de sortie sur GPU
+### Fast-path Attention (multi-SGEMM)
 
-#### 1.5 CrossAttention
+Pour `SelfAttention`, `MultiHeadAttention` et `CrossAttention` :
 
-Même principe avec `Q` et `KV` depuis deux sources différentes (`qlen` ≠ `kvlen` possible).
+1. **Projection QKV sur GPU** — `Q`, `K`, `V` sont calculés via trois SGEMM.
+2. **Split Q/K/V sur CPU** — division des têtes.
+3. **Par tête en boucle :**
+   - Scores : `S = Q × Kᵀ` via `cublasSgemm` avec `CUBLAS_OP_T`
+   - Masque causal optionnel (appliqué sur CPU)
+   - Softmax (appliqué sur CPU, ligne par ligne)
+   - Contexte : `ctx = S × V` via `cublasSgemm`
+4. **Projection de sortie sur GPU** — SGEMM final.
 
-### DeviceBuf helper
+Pour `CrossAttention`, `Q` et `KV` proviennent de deux sources différentes (`qlen ≠ kvlen` est supporté).
+
+### `DeviceBuf` — helper de buffer device
+
+`DeviceBuf` est une RAII-wrapper autour d'un buffer CUDA. Il garantit que `cudaFree` est toujours appelé, même en cas d'exception :
 
 ```cpp
 struct Impl::DeviceBuf {
-    bool alloc(size_t bytes);
-    bool copyFromHost(const void* src, size_t bytes);
-    bool copyToHost(void* dst, size_t bytes);
-    ~DeviceBuf(); // cudaFree automatique
+    void*  ptr  = nullptr;
+    size_t size = 0;
+
+    bool alloc(size_t bytes);           // cudaMalloc
+    bool copyFromHost(const void* src, size_t bytes);  // cudaMemcpy H→D
+    bool copyToHost(void* dst, size_t bytes);           // cudaMemcpy D→H
+    ~DeviceBuf();                       // cudaFree automatique
 };
 ```
 
----
-
-## 2) ROCm Runtime (rocBLAS)
-
-Build flag : `-DENABLE_ROCM=ON`.
-Dépendances : `hip::host`, `roc::rocblas`.
-
-Interface **identique** au runtime CUDA. API rocBLAS calquée :
-- `hipMalloc/hipFree/hipMemcpy/hipDeviceSynchronize` → `cudaMalloc/…`
-- `rocblas_sgemm`, `rocblas_sger`, `rocblas_sdgmm`, `rocblas_saxpy`
-- Bloc conditionnel : `#ifdef ENABLE_ROCM` / `#endif`
-
-Variables d'environnement : `MIMIR_ROCM_*` (mêmes suffixes que CUDA).
+Chaque fast-path alloue ses `DeviceBuf` localement dans le bloc `do { ... } while(false)`. Si l'allocation échoue (VRAM insuffisante), le `break` libère les buffers déjà alloués via leur destructeur.
 
 ---
 
-## 3) CPU Runtime
+## Backend ROCm (rocBLAS)
 
-Toujours actif. Fallback universel via `RuntimeLayerDispatch::cpu_forward_layer` qui délègue aux fonctions `LayerOps.hpp` et `LayerOpsExt.hpp`.
+**Prérequis build :** `-DENABLE_ROCM=ON`. Dépendances CMake : `hip::host`, `roc::rocblas`.
 
-Détection CPU SIMD :
+L'implémentation est **fonctionnellement identique** au backend CUDA. Les correspondances API sont directes :
+
+| CUDA | ROCm/HIP |
+|---|---|
+| `cudaMalloc` / `cudaFree` | `hipMalloc` / `hipFree` |
+| `cudaMemcpy` | `hipMemcpy` |
+| `cudaDeviceSynchronize` | `hipDeviceSynchronize` |
+| `cublasSgemm` | `rocblas_sgemm` |
+| `cublasSger` | `rocblas_sger` |
+| `cublasSdgmm` | `rocblas_sdgmm` |
+| `cublasSaxpy` | `rocblas_saxpy` |
+
+Le code est conditionnel via `#ifdef ENABLE_ROCM` / `#endif`. Les variables d'environnement utilisent le préfixe `MIMIR_ROCM_*`.
+
+---
+
+## Backend CPU
+
+Le backend CPU est toujours actif. Il n'a pas de seuils ni de configuration : il traite tous les layers que les runtimes GPU ont refusés.
+
+Implémenté via `RuntimeLayerDispatch::cpu_forward_layer`, qui délègue aux fonctions dans `src/LayerOps.hpp` et `src/LayerOpsExt.hpp`.
+
+**Optimisations CPU disponibles :**
+
 ```cpp
-bool Model::hasAVX2();  // AVX2
-bool Model::hasFMA();   // FMA
-bool Model::hasF16C();  // float16 conversion native
-bool Model::hasBMI2();  // bit manipulation
+bool Model::hasAVX2();  // Extensions vectorielles 256-bit
+bool Model::hasFMA();   // Fusion multiply-add matérielle
+bool Model::hasF16C();  // Conversion float16 native
+bool Model::hasBMI2();  // Manipulation de bits avancée
 ```
 
-OpenMP activé au build pour les boucles parallèles dans LayerOps.
+Les boucles dans `LayerOps` sont parallélisées via **OpenMP** si activé au build.
 
 ---
 
-## 4) Tableau de synthèse
+## Backends legacy (Vulkan / OpenCL)
+
+Ces backends précèdent l'architecture à base de runtimes et ne supportent que les layers `Linear` en **inférence** uniquement. Ils sont conservés pour la rétrocompatibilité mais ne reçoivent plus de développement actif.
+
+| Backend | Build flag | Scope | Variables |
+|---|---|---|---|
+| Vulkan | `ENABLE_VULKAN` | Linear (inférence) | `MIMIR_VULKAN_LINEAR_SPV` |
+| OpenCL | `ENABLE_OPENCL` | Linear (inférence) | `MIMIR_OPENCL_LINEAR=1` |
+
+---
+
+## Tableau de synthèse
 
 | Layer | CPU | CUDA | ROCm | Vulkan |
 |---|---|---|---|---|
-| Linear | ✓ ref | ✓ cuBLAS | ✓ rocBLAS | ✓ shader |
-| Conv2d | ✓ ref | ✓ im2col+SGEMM | ✓ im2col+SGEMM | ✗ |
-| LayerNorm | ✓ ref | ✓ hybride | ✓ hybride | ✗ |
-| RMSNorm | ✓ ref | ✓ hybride | ✓ hybride | ✗ |
-| GroupNorm | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
-| BatchNorm2d | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
-| SelfAttention | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
-| MultiHeadAttention | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
-| CrossAttention | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
-| Autres | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
-
-**Règle** : tout fast-path GPU absent ou dont les conditions ne sont pas remplies retombe silencieusement sur le CPU.
+| `Linear` | ✓ ref | ✓ cuBLAS | ✓ rocBLAS | ✓ shader |
+| `Conv2d` | ✓ ref | ✓ im2col+SGEMM (inférence) | ✓ im2col+SGEMM (inférence) | ✗ |
+| `LayerNorm` | ✓ ref | ✓ hybride | ✓ hybride | ✗ |
+| `RMSNorm` | ✓ ref | ✓ hybride | ✓ hybride | ✗ |
+| `GroupNorm` | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
+| `BatchNorm2d` | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
+| `SelfAttention` | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
+| `MultiHeadAttention` | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
+| `CrossAttention` | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
+| Tous les autres | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
 
 ---
 
-## 5) Vulkan Compute (legacy)
+## Voir aussi
 
-### Build (Vulkan)
-
-- flag CMake : `ENABLE_VULKAN`
-- dépendance : `find_package(Vulkan)`
-
-### Compute engine (Vulkan)
-
-Le backend Vulkan est implémenté dans `src/VulkanCompute.hpp` via `VulkanCompute::ComputeEngine`.
-
-Init (simplifié) :
-
-- crée `VkInstance`
-- choisit le premier device avec `VK_QUEUE_COMPUTE_BIT`
-- crée `VkDevice` + récupère la queue compute
-- crée un `VkCommandPool`
-
-### Kernel ciblé (Vulkan) : `linearForward`
-
-- `ensureLinearKernel()` prépare pipeline/descriptor sets
-- `linearForward(input, weights, bias, output, batch, in_f, out_f)`
-  - alloue des buffers temporaires
-  - upload input/weights/bias
-  - dispatch compute
-  - readback output
-
-Note : allocation par appel (pas de pooling).
-
-### Shaders SPIR-V
-
-Le shader attendu : `linear_forward.comp.spv`.
-
-Compilation (CMake, best-effort) :
-- source : `shaders/linear_forward.comp`
-- output : `${CMAKE_BINARY_DIR}/shaders/linear_forward.comp.spv`
-
-Lookup runtime :
-- variable d'environnement : `MIMIR_VULKAN_LINEAR_SPV` (chemin direct)
-- sinon candidats relatifs au cwd
-
-Si le SPIR-V n'est pas trouvé, le runtime log et retombe sur CPU.
-
----
-
-## 6) OpenCL Compute (legacy)
-
-### Build (OpenCL)
-
-- flag CMake : `ENABLE_OPENCL`
-- dépendance : librairie `OpenCL`
-
-### Compute engine (OpenCL)
-
-`src/OpenCLCompute.hpp` via `OpenCLCompute::ComputeEngine`.
-
-Init :
-- détecte les plateformes
-- choisit un device : GPU d'abord, sinon CPU
-- crée `cl_context` + `cl_command_queue`
-- compile le programme OpenCL embarqué (source string dans le header)
-
-### Kernel ciblé (OpenCL) : `linearForward`
-
-- `linearForward(input, weights, bias_or_null, output, batch, in_f, out_f)`
-- alloue des `cl_mem` par appel
-- `clEnqueueNDRangeKernel` sur une grille 2D `(batch, out_f)`
-- readback output
-
----
-
-## 7) Notes et pièges
-
-- La justesse doit être validée sur CPU d'abord : GPU est un accélérateur, pas le chemin de référence.
-- Les fast-paths GPU sont **désactivés par défaut** : activer via les variables d'environnement.
-- La perf GPU peut être limitée par :
-  - allocations temporaires par appel (DeviceBuf non poolé)
-  - transferts host↔device
-  - seuils d'opérations non atteints (réduire `*_MIN_OPS` si nécessaire)
-  - disponibilité/compilation des shaders (Vulkan)
-- Le mode `training=true` désactive certains fast-paths (Conv2d) car le backward GPU n'est pas implémenté.
-
-## 8) API Lua
-
-- `Mimir.Model.hardware_caps()` — capacités CPU détectées
-- `Mimir.Model.set_hardware(true/false)` — activer/désactiver les chemins hardware
-
-Détails dans `src/LuaScripting.cpp`.
+- [Guide utilisateur GPU](../05-Advanced/05-GPU-Acceleration.md) — activer et configurer l'accélération
+- [GPU Runtimes — internals](./21-GPU-Runtimes.md) — guide pour étendre les runtimes
+- [Planning](./22-Planning.md) — analyse statique du graphe, fusions et scratchpads

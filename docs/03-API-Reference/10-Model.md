@@ -1,189 +1,396 @@
 # API : `Mimir.Model`
 
-Source : `src/LuaScripting.cpp`.
+`Mimir.Model` est le point d'entrée principal du framework. Il regroupe toutes les opérations sur le modèle courant : création, construction du graphe de layers, allocation des poids, exécution du forward/backward, et entraînement haut-niveau.
 
-Cette page documente l’API brute, mais aussi le **workflow recommandé** pour éviter les erreurs courantes.
+> **Note :** Mímir ne gère qu'un seul modèle actif à la fois par contexte. Toutes les fonctions de ce module opèrent sur ce modèle global.
 
-## Workflow recommandé (rappel)
+Source C++ : `src/LuaScripting.cpp` — liaisons Lua → C++.
 
-| Étape | Appel |
-| ---: | --- |
-| 1 | `Mimir.Model.create(type, cfg)` |
-| 2 | `Mimir.Model.build()` |
-| 3 | `Mimir.Model.allocate_params()` |
-| 4a | `Mimir.Model.init_weights(method, seed)` |
-| 4b | `Mimir.Serialization.load(path)` |
-| 5 | `Mimir.Model.forward(input, training)` |
+---
 
-Détails : `docs/02-User-Guide/02-Model-Lifecycle.md`.
+## Cycle de vie d'un modèle
 
-## Create / build
+Avant tout appel à `forward()` ou `train()`, le modèle doit passer par ces étapes dans l'ordre :
 
-### `Mimir.Model.create(name: string, cfg?: table) -> bool | (false, err)`
+| Étape | Appel | Rôle |
+| ---: | --- | --- |
+| 1 | `Mimir.Model.create(type, cfg)` | Enregistre le type et fusionne la config avec les défauts |
+| 2 | `Mimir.Model.build()` | Instancie le graphe de layers |
+| 3 | `Mimir.Model.allocate_params()` | Alloue les blocs de poids en mémoire |
+| 4a | `Mimir.Model.init_weights(method, seed)` | Initialise les poids (nouveau modèle) |
+| 4b | `Mimir.Serialization.load(path)` | Charge les poids depuis un checkpoint |
+| 5 | `Mimir.Model.forward(input, training)` | Exécute le forward pass |
 
-- Si `cfg` absent/vide : utilise la config par défaut du registre.
-- Crée le modèle via `ModelArchitectures::create`.
+> **Avertissement :** appeler `forward()` avant `allocate_params()` produit un comportement indéfini. Les étapes 1 à 3 sont obligatoires.
 
-### `Mimir.Model.build() -> (bool, params|err)`
+Détails du cycle de vie : [docs/02-User-Guide/02-Model-Lifecycle.md](../02-User-Guide/02-Model-Lifecycle.md).
 
-- Recrée le modèle via le registre à partir de `ctx.modelType` + `ctx.modelConfig`.
-- Ne fait **pas** `allocate_params` ni `init_weights`.
+---
 
-## Paramètres
+## Création et construction
 
-### `Mimir.Model.allocate_params() -> (bool, total_params|err)`
+### `Mimir.Model.create(name, cfg?)`
 
-Alloue les poids.
+```
+Mimir.Model.create(name: string, cfg?: table) -> true | (false, string)
+```
 
-### `Mimir.Model.init_weights(method?: string="he", seed?: int=0) -> bool | (false, err)`
+Enregistre l'architecture `name` comme modèle courant et fusionne `cfg` avec la configuration par défaut de cette architecture. Ne construit pas encore le graphe (c'est le rôle de `build()`).
 
-Initialise les poids. Méthodes usuelles : `he`, `xavier`.
+**Paramètres :**
 
-### `Mimir.Model.total_params() -> int`
+- `name` — nom canonique de l'architecture (ex: `"transformer"`, `"vae_conv"`, `"ponyxl_sdxl"`). Voir [la liste complète](./11-Architectures.md).
+- `cfg` *(optionnel)* — table Lua de surcharge de config. Les clés non spécifiées conservent leurs valeurs par défaut.
 
-## Exécution
+**Retour :** `true` en cas de succès, ou `(false, message_erreur)`.
 
-### `Mimir.Model.forward(input: table, training?: bool=true) -> table<float> | (nil, err)`
+**Exemple :**
 
-Deux formes d’inputs :
+```lua
+-- Créer un Transformer avec des dimensions réduites
+local ok, err = Mimir.Model.create("transformer", {
+    seq_len    = 128,
+    d_model    = 256,
+    num_layers = 4,
+    vocab_size = 8192,
+})
+assert(ok, err)
+```
 
-1) **liste** : `{1,2,3}` (int) ou `{0.1, 0.2}` (float)
-2) **map** : `{ __input__ = {...}, text_ids = {...} }` (entrées mixtes float/int)
+> **Note :** `create()` normalise aussi le nom via `canonicalArchName` — les anciens alias (ex: `"ponyxl_ddpm"`) sont acceptés et redirigés vers leur nom canonique.
 
-Conseil : utilise le format **map** dans tes scripts (même si tu n’as qu’une entrée). Ça rend ton code compatible avec les architectures multi-input.
+---
 
-| Forme | Exemple | À privilégier quand |
-| --- | --- | --- |
-| liste | `{0.1, 0.2, 0.3}` | quick tests mono-input |
-| map | `{ __input__ = ids }` | scripts réutilisables |
-| map multi-input | `{ text_ids = ids, __input__ = x }` | texte+image/latent |
+### `Mimir.Model.build()`
 
-Note sur `training` : certaines architectures/layers peuvent activer des comportements différents (dropout, stats, etc.). En inférence, passe `false`.
+```
+Mimir.Model.build() -> (true, nb_params: int) | (false, string)
+```
 
-### `Mimir.Model.backward(grad_out: table<float>) -> bool | (false, err)`
+Instancie le graphe de layers à partir du type et de la config enregistrés par `create()`. Cette étape détermine la topologie du modèle (quelles couches, dans quel ordre, avec quels paramètres de forme).
 
-`grad_out` est le gradient par rapport à la sortie principale.
+**Retour :** `(true, nombre_total_de_paramètres)` ou `(false, message_erreur)`.
 
-### `Mimir.Model.optimizer_step() -> bool | (false, err)`
+> **Note :** `build()` ne fait **pas** `allocate_params()`. Le modèle est construit mais les poids ne sont pas encore alloués ni initialisés.
 
-Applique l’étape d’optimizer (selon l’état/config).
+```lua
+local ok, nb = Mimir.Model.build()
+assert(ok, nb)
+print(string.format("Modèle construit : %d paramètres", nb))
+```
 
-### `Mimir.Model.zero_grads() -> bool | (false, err)`
+---
 
-## Entraînement “haut niveau”
+## Paramètres (poids)
 
-### `Mimir.Model.train(epochs: int, lr: number) -> (bool, err)`
+### `Mimir.Model.allocate_params()`
 
-- Implémente des chemins spécifiques à certains modèles.
-- Peut faire des checkpoints d’interruption Ctrl+C si `cfg.checkpoint_dir` est défini.
+```
+Mimir.Model.allocate_params() -> (true, total: int) | (false, string)
+```
 
-## DType (v3.0)
+Alloue les blocs de mémoire pour tous les poids du modèle. Après cet appel, les poids existent en mémoire mais contiennent des valeurs non initialisées.
 
-### `Mimir.Model.dtype(dtype?: string) -> string | (bool, dtype|err)`
+```lua
+local ok, total = Mimir.Model.allocate_params()
+assert(ok, total)
+-- Vient ensuite init_weights() ou Serialization.load()
+```
 
-Rôle : lire ou fixer le **dtype par défaut** du modèle (utilisé notamment par la sérialisation).
+---
 
-- Sans argument : retourne un string (`"float32"`, `"float16"`, ...).
-- Avec argument : valide et applique le dtype au modèle (et synchronise `model_config.dtype`).
+### `Mimir.Model.init_weights(method?, seed?)`
+
+```
+Mimir.Model.init_weights(method?: string = "he", seed?: int = 0) -> true | (false, string)
+```
+
+Initialise les poids selon la méthode spécifiée. À appeler uniquement pour un **nouveau** modèle — pour reprendre un entraînement, utilisez `Mimir.Serialization.load()` à la place.
+
+**Méthodes disponibles :**
+
+| Méthode | Description |
+|---|---|
+| `"he"` | He (Kaiming) — recommandé pour ReLU et variantes |
+| `"xavier"` | Xavier/Glorot — recommandé pour tanh/sigmoïd |
+
+```lua
+assert(Mimir.Model.init_weights("he", 42))  -- seed 42 pour reproductibilité
+```
+
+---
+
+### `Mimir.Model.total_params()`
+
+```
+Mimir.Model.total_params() -> int
+```
+
+Retourne le nombre total de paramètres scalaires (floats) du modèle. Utile pour estimer la mémoire nécessaire (approximativement `total_params * 4` octets en float32).
+
+---
+
+## Exécution (forward / backward)
+
+### `Mimir.Model.forward(input, training?)`
+
+```
+Mimir.Model.forward(input: table, training?: bool = true)
+    -> table<float> | (nil, string)
+```
+
+Exécute le forward pass du modèle. `input` peut prendre deux formes :
+
+**Forme liste** — pour un seul tenseur d'entrée :
+
+```lua
+local out = Mimir.Model.forward({0.1, 0.2, 0.3, ...}, false)
+```
+
+**Forme map** — pour les entrées nommées (multi-input) :
+
+```lua
+local out = Mimir.Model.forward({
+    __input__ = float_tensor,
+    text_ids  = int_ids,
+}, false)
+```
+
+> **Conseil :** privilégiez toujours la forme **map**, même pour un seul tenseur d'entrée. Elle rend vos scripts compatibles avec les architectures multi-input sans modification.
+
+**Le flag `training`** contrôle plusieurs comportements :
+- `true` — active le dropout, accumule les statistiques de normalisation, autorise le backward
+- `false` — désactive le dropout, utilise les statistiques figées (BatchNorm), et peut activer certains fast-paths GPU supplémentaires (ex: Conv2d)
+
+```lua
+-- Inférence
+local output, err = Mimir.Model.forward({ __input__ = ids }, false)
+assert(output, err)
+
+-- Training
+local output = Mimir.Model.forward({ __input__ = ids }, true)
+```
+
+---
+
+### `Mimir.Model.backward(grad_out)`
+
+```
+Mimir.Model.backward(grad_out: table<float>) -> true | (false, string)
+```
+
+Exécute la passe backward (rétropropagation). `grad_out` est le gradient de la loss par rapport à la sortie du modèle — il doit avoir la même taille que la sortie de `forward()`.
+
+> **Note :** dans les scripts haut-niveau (`Model.train()`), `backward()` est appelé automatiquement. Utilisez cette fonction uniquement si vous écrivez une boucle d'entraînement manuelle.
+
+---
+
+### `Mimir.Model.optimizer_step()`
+
+```
+Mimir.Model.optimizer_step() -> true | (false, string)
+```
+
+Applique une étape de l'optimiseur (SGD, Adam ou AdamW selon la config) pour mettre à jour les poids à partir des gradients calculés par `backward()`.
+
+---
+
+### `Mimir.Model.zero_grads()`
+
+```
+Mimir.Model.zero_grads() -> true | (false, string)
+```
+
+Remet à zéro tous les gradients accumulés. À appeler au début de chaque step d'entraînement manuel, avant `forward()`.
+
+---
+
+## Entraînement haut-niveau
+
+### `Mimir.Model.train(epochs, lr)`
+
+```
+Mimir.Model.train(epochs: int, lr: number) -> true | (false, string)
+```
+
+Lance la boucle d'entraînement complète. Le comportement exact dépend de l'architecture : certains modèles (VAE, DDPM, Tags) ont des chemins d'entraînement dédiés dans `LuaScripting.cpp` qui gèrent automatiquement le dataset, la validation, les checkpoints et le feedback de calibration.
+
+**Prérequis :** le dataset doit être chargé avant cet appel (`Mimir.Dataset.load()`).
+
+```lua
+Mimir.Dataset.load("dataset_2/")
+assert(Mimir.Model.train(50, 1e-4))
+```
+
+> **Note :** si le processus reçoit `Ctrl+C` pendant l'entraînement, Mímir effectue un checkpoint d'interruption propre avant de terminer (si `cfg.checkpoint_dir` est défini).
+
+---
+
+## DType (précision des poids)
+
+### `Mimir.Model.dtype(dtype?)`
+
+```
+Mimir.Model.dtype()             -> string
+Mimir.Model.dtype(dtype: string) -> true | (false, string)
+```
+
+Lit ou fixe le **dtype par défaut** du modèle. Ce dtype est utilisé notamment lors de la sérialisation pour déterminer le format de stockage des poids.
+
+Dtypes supportés : `"float32"`, `"float16"`, `"bfloat16"`.
 
 Accessible aussi via l'alias **`Mimir.model.dtype`** (lowercase) :
 
 ```lua
--- Écriture (fixer le dtype)
-Mimir.model.dtype("float16")
-
--- Lecture
+-- Lire le dtype courant
 local dt = Mimir.model.dtype()
-log("dtype courant:", dt or "non défini")
+print("dtype:", dt)  -- ex: "float32"
+
+-- Changer le dtype (impact sur la sérialisation)
+local ok, err = Mimir.model.dtype("float16")
+assert(ok, err)
 ```
 
-Note : le framework propage aussi automatiquement `cfg.dtype` lors de `Mimir.Model.create(type, cfg)` (donc dans la plupart des scripts, tu peux juste définir `cfg.dtype`).
+> **Note :** vous pouvez aussi définir `cfg.dtype = "float16"` lors de `Model.create()`. Dans ce cas, le dtype est propagé automatiquement sans appel explicite à cette fonction.
 
-### `Mimir.Model.encode_prompt(prompt?: string) -> table<float> | (nil, err)`
+---
 
-Encode un prompt texte en vecteur (dimension dépend de la config/modèle).
+## Encodage et forward spécialisés
 
-### `Mimir.Model.forward_prompt_image_seed(text_vec, image_vec, seed, training?: bool=false)`
+### `Mimir.Model.encode_prompt(prompt?)`
 
-Forward multi-input spécialisé.
+```
+Mimir.Model.encode_prompt(prompt?: string) -> table<float> | (nil, string)
+```
 
-### `Mimir.Model.hardware_caps() -> table`
-
-### `Mimir.Model.set_hardware(enabled: bool)`
-
-Active/désactive certains chemins d’accélération CPU.
-
-## Legacy
-
-### `Mimir.Model.infer(prompt: string) -> string | nil`
-
-Chemin d’inférence historique ; pas recommandé pour les workflows modernes.
-
-## Exemple minimal (forward)
+Encode un prompt texte en vecteur de flottants via le tokenizer et l'encodeur internes au modèle. La dimension de sortie dépend de l'architecture (typiquement `d_model` ou `latent_dim`).
 
 ```lua
-local cfg, err = Mimir.Architectures.default_config("transformer")
-assert(cfg, err)
-cfg.seq_len = 16
-cfg.vocab_size = 256
-
-assert(Mimir.Model.create("transformer", cfg))
-assert(Mimir.Model.build())
-assert(Mimir.Model.allocate_params())
-assert(Mimir.Model.init_weights("xavier", 0))
-
-local ids = {}
-for i = 1, cfg.seq_len do ids[i] = 1 end
-local out, ferr = Mimir.Model.forward({ __input__ = ids }, false)
-assert(out, ferr)
-print("out_len=", #out)
+local vec, err = Mimir.Model.encode_prompt("a landscape with mountains")
+assert(vec, err)
+-- vec est un tableau de floats prêt à être utilisé comme condition de génération
 ```
+
+---
+
+### `Mimir.Model.hardware_caps()`
+
+```
+Mimir.Model.hardware_caps() -> table
+```
+
+Retourne une table avec les capacités matérielles détectées sur le CPU courant :
+
+```lua
+local caps = Mimir.Model.hardware_caps()
+print(caps.avx2, caps.fma, caps.f16c, caps.bmi2)
+```
+
+---
+
+### `Mimir.Model.set_hardware(enabled)`
+
+```
+Mimir.Model.set_hardware(enabled: bool)
+```
+
+Active ou désactive les optimisations matérielles CPU (SIMD, etc.). Désactiver peut être utile pour déboguer des résultats numériques.
+
+---
+
+## Exemple complet (nouveau modèle)
+
+```lua
+-- 1. Configuration
+local cfg = {
+    seq_len    = 128,
+    d_model    = 256,
+    num_layers = 4,
+    num_heads  = 4,
+    vocab_size = 8192,
+    causal     = true,
+}
+
+-- 2. Cycle de vie
+assert(Mimir.Model.create("transformer", cfg))
+
+local ok, nb_params = Mimir.Model.build()
+assert(ok, nb_params)
+print(string.format("%.2f M paramètres", nb_params / 1e6))
+
+assert(Mimir.Model.allocate_params())
+assert(Mimir.Model.init_weights("he", 0))
+
+-- 3. Forward (inférence)
+local ids = {}
+for i = 1, cfg.seq_len do ids[i] = math.random(0, cfg.vocab_size - 1) end
+
+local output, err = Mimir.Model.forward({ __input__ = ids }, false)
+assert(output, err)
+print(string.format("Sortie : %d flottants", #output))
+```
+
+---
+
+## API legacy
+
+### `Mimir.Model.infer(prompt)`
+
+```
+Mimir.Model.infer(prompt: string) -> string | nil
+```
+
+Chemin d'inférence historique (texte → texte). Non recommandé pour les nouveaux scripts — utilisez `encode_prompt()` + `forward()` pour un contrôle total.
 
 ---
 
 ## Calibration par feedback de validation
 
-Mécanisme permettant au résultat de validation (loss, MSE, etc.) d'influencer automatiquement le learning rate des epochs suivantes. Implémenté dans `src/LuaScripting.cpp` dans la boucle `lua_trainModel`.
+Quand la validation est activée, Mímir peut automatiquement ajuster le learning rate effectif en fonction de l'évolution de la métrique de validation. Ce mécanisme de **récompense/punition** est décrit en détail dans [Entraînement — Calibration](../02-User-Guide/04-Training.md#calibration-par-feedback-de-validation).
 
 ### Paramètres dans `modelConfig`
 
 | Paramètre | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `val_feedback_enabled` | bool | `false` | Active le mécanisme (doit être explicitement `true`) |
-| `val_reward_factor` | float | `1.05` | Multiplicateur LR si la métrique s'améliore |
-| `val_penalty_factor` | float | `0.70` | Multiplicateur LR si la métrique se dégrade |
+| `val_feedback_enabled` | bool | `false` | Active le mécanisme |
+| `val_reward_factor` | float | `1.05` | Multiplicateur LR si amélioration |
+| `val_penalty_factor` | float | `0.70` | Multiplicateur LR si dégradation |
 | `val_lr_scale_min` | float | `0.10` | Borne inférieure du multiplicateur cumulé |
 | `val_lr_scale_max` | float | `1.50` | Borne supérieure du multiplicateur cumulé |
-| `val_improve_thresh` | float | `0.001` | Seuil minimal d'amélioration relative pour déclencher la récompense |
-| `val_feedback_min_steps` | int | `0` | Nombre minimal de steps d'entraînement avant d'activer le feedback |
+| `val_improve_thresh` | float | `0.001` | Seuil d'amélioration relative minimale pour déclencher la récompense |
+| `val_feedback_min_steps` | int | `0` | Steps d'entraînement avant activation |
 
-### Comportement
+**Comment fonctionne le multiplicateur :**
 
-- `val_lr_scale` est un multiplicateur persistant appliqué à chaque appel de `step_learning_rate()`.
-- Si `validation_metric_now < best_metric * (1 - val_improve_thresh)` → **récompense** (`val_lr_scale *= val_reward_factor`).
-- Sinon → **pénalité** (`val_lr_scale *= val_penalty_factor`).
-- Le multiplicateur est clampé dans `[val_lr_scale_min, val_lr_scale_max]` à chaque mise à jour.
-- La pénalité est aussi appliquée quand la validation échoue complètement (loss invalide, NaN).
+Un facteur `val_lr_scale` (initialement `1.0`) est appliqué en permanence au learning rate :
 
-### Exemple de configuration
+```
+lr_effectif = lr_base × val_lr_scale
+```
+
+Après chaque validation :
+- Si `métrique_actuelle < meilleure_métrique × (1 - val_improve_thresh)` → **récompense** : `val_lr_scale × val_reward_factor`
+- Sinon → **pénalité** : `val_lr_scale × val_penalty_factor`
+- Dans les deux cas, le résultat est clampé dans `[val_lr_scale_min, val_lr_scale_max]`
 
 ```lua
+-- Exemple : feedback agressif
 local cfg = {
-  val_feedback_enabled    = true,
-  val_reward_factor       = 1.08,  -- +8% LR si amélioration
-  val_penalty_factor      = 0.75,  -- -25% LR si dégradation
-  val_lr_scale_min        = 0.05,
-  val_lr_scale_max        = 2.00,
-  val_improve_thresh      = 0.005, -- amélioration >= 0.5% requise
-  val_feedback_min_steps  = 100,   -- attend 100 steps avant activation
+    val_feedback_enabled   = true,
+    val_reward_factor      = 1.10,   -- +10 % LR si amélioration
+    val_penalty_factor     = 0.65,   -- -35 % LR si dégradation
+    val_lr_scale_min       = 0.05,   -- LR ne descend jamais en dessous de 5 % du LR de base
+    val_lr_scale_max       = 2.00,
+    val_improve_thresh     = 0.005,  -- l'amélioration doit être > 0.5 %
+    val_feedback_min_steps = 200,    -- attendre 200 steps avant d'activer
 }
 ```
 
-### Intégration dans la boucle d'entraînement
+---
 
-```lua
--- Après chaque validation, mimir appelle apply_val_feedback(metric, step)
--- et ajuste automatiquement val_lr_scale pour les appels suivants de step_learning_rate()
-```
+## Voir aussi
 
-Voir aussi : [docs/02-User-Guide/04-Training.md](../02-User-Guide/04-Training.md) (section "Calibration par feedback de validation").
+- [Cycle de vie d'un modèle](../02-User-Guide/02-Model-Lifecycle.md)
+- [Entraînement](../02-User-Guide/04-Training.md)
+- [Architectures disponibles](./11-Architectures.md)
+- [Sérialisation](./12-Serialization.md)
