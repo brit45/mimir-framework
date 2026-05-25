@@ -2,6 +2,7 @@
 #include "../Model.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
+#include "HardwareOpt.hpp"
 #include "../Sha256.hpp"
 #include <fstream>
 #include <algorithm>
@@ -209,6 +210,21 @@ bool RawCheckpointReader::load_architecture(
         if (options.apply_model_config && arch.contains("model_config")) {
             try {
                 model.modelConfig = arch["model_config"];
+
+                // Keep runtime default dtype consistent with the loaded config.
+                // This ensures subsequent saves use the same float storage policy.
+                try {
+                    if (model.modelConfig.contains("dtype") && model.modelConfig["dtype"].is_string()) {
+                        model.setDefaultDType(model.modelConfig["dtype"].get<std::string>());
+                    }
+                } catch (...) {
+                    if (options.strict_mode) {
+                        if (error) {
+                            *error = "Invalid dtype in model_config";
+                        }
+                        return false;
+                    }
+                }
             } catch (...) {
                 if (error) {
                     *error = "Invalid model_config in architecture.json";
@@ -502,12 +518,114 @@ bool RawCheckpointReader::apply_tensors_to_model(
                     dst->resize(expected_size);
 
                     fs::path bin_path = root_path / "tensors" / t_metadata.data_file;
-                    if (!load_tensor_data(
-                        bin_path.string(), t_metadata,
-                        dst->data(),
-                        dst->size() * sizeof(float),
-                        error
-                    )) {
+
+                    if (t_metadata.dtype == DType::Float32) {
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
+                            dst->data(),
+                            dst->size() * sizeof(float),
+                            error
+                        )) {
+                            return false;
+                        }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                dst->data(),
+                                t_metadata.byte_size,
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+                    } else if (t_metadata.dtype == DType::Float16) {
+                        if (t_metadata.byte_size != expected_size * sizeof(uint16_t)) {
+                            if (error) *error = "Byte size mismatch for: " + tensor_name;
+                            return false;
+                        }
+                        std::vector<uint16_t> tmp(expected_size);
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
+                            tmp.data(),
+                            tmp.size() * sizeof(uint16_t),
+                            error
+                        )) {
+                            return false;
+                        }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                tmp.data(),
+                                tmp.size() * sizeof(uint16_t),
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+
+                        HardwareOpt::fp16_to_fp32_f16c(dst->data(), tmp.data(), expected_size);
+                    } else if (t_metadata.dtype == DType::BFloat16) {
+                        if (t_metadata.byte_size != expected_size * sizeof(uint16_t)) {
+                            if (error) *error = "Byte size mismatch for: " + tensor_name;
+                            return false;
+                        }
+                        std::vector<uint16_t> tmp(expected_size);
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
+                            tmp.data(),
+                            tmp.size() * sizeof(uint16_t),
+                            error
+                        )) {
+                            return false;
+                        }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                tmp.data(),
+                                tmp.size() * sizeof(uint16_t),
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+
+                        HardwareOpt::bf16_to_fp32(dst->data(), tmp.data(), expected_size);
+                    } else if (t_metadata.dtype == DType::Float64) {
+                        if (t_metadata.byte_size != expected_size * sizeof(double)) {
+                            if (error) *error = "Byte size mismatch for: " + tensor_name;
+                            return false;
+                        }
+                        std::vector<double> tmp(expected_size);
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
+                            tmp.data(),
+                            tmp.size() * sizeof(double),
+                            error
+                        )) {
+                            return false;
+                        }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                tmp.data(),
+                                tmp.size() * sizeof(double),
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+
+                        for (size_t i = 0; i < expected_size; ++i) (*dst)[i] = static_cast<float>(tmp[i]);
+                    } else if (options.strict_mode) {
+                        if (error) *error = "Unsupported dtype for: " + tensor_name;
                         return false;
                     }
                     continue;
@@ -532,28 +650,115 @@ bool RawCheckpointReader::apply_tensors_to_model(
                     }
                     
                     fs::path bin_path = root_path / "tensors" / t_metadata.data_file;
-                    if (!load_tensor_data(
-                        bin_path.string(), t_metadata,
-                        enc.token_embeddings.data(),
-                        enc.token_embeddings.size() * sizeof(float),
-                        error
-                    )) {
-                        return false;
-                    }
-                    
-                    // Verify checksum if requested
-                    if (options.validate_checksums && !t_metadata.checksum.empty()) {
-                        if (!verify_checksum(
+
+                    if (t_metadata.dtype == DType::Float32) {
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
                             enc.token_embeddings.data(),
-                            t_metadata.byte_size,
-                            t_metadata.checksum,
-                            t_metadata.checksum_algo
+                            enc.token_embeddings.size() * sizeof(float),
+                            error
                         )) {
-                            if (error) {
-                                *error = "Checksum mismatch for: " + tensor_name;
-                            }
                             return false;
                         }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                enc.token_embeddings.data(),
+                                t_metadata.byte_size,
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+                    } else if (t_metadata.dtype == DType::Float16) {
+                        if (t_metadata.byte_size != expected_size * sizeof(uint16_t)) {
+                            if (error) *error = "Byte size mismatch for: " + tensor_name;
+                            return false;
+                        }
+                        std::vector<uint16_t> tmp(expected_size);
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
+                            tmp.data(),
+                            tmp.size() * sizeof(uint16_t),
+                            error
+                        )) {
+                            return false;
+                        }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                tmp.data(),
+                                tmp.size() * sizeof(uint16_t),
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+
+                        HardwareOpt::fp16_to_fp32_f16c(enc.token_embeddings.data(), tmp.data(), expected_size);
+                    } else if (t_metadata.dtype == DType::BFloat16) {
+                        if (t_metadata.byte_size != expected_size * sizeof(uint16_t)) {
+                            if (error) *error = "Byte size mismatch for: " + tensor_name;
+                            return false;
+                        }
+                        std::vector<uint16_t> tmp(expected_size);
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
+                            tmp.data(),
+                            tmp.size() * sizeof(uint16_t),
+                            error
+                        )) {
+                            return false;
+                        }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                tmp.data(),
+                                tmp.size() * sizeof(uint16_t),
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+
+                        HardwareOpt::bf16_to_fp32(enc.token_embeddings.data(), tmp.data(), expected_size);
+                    } else if (t_metadata.dtype == DType::Float64) {
+                        if (t_metadata.byte_size != expected_size * sizeof(double)) {
+                            if (error) *error = "Byte size mismatch for: " + tensor_name;
+                            return false;
+                        }
+                        std::vector<double> tmp(expected_size);
+                        if (!load_tensor_data(
+                            bin_path.string(), t_metadata,
+                            tmp.data(),
+                            tmp.size() * sizeof(double),
+                            error
+                        )) {
+                            return false;
+                        }
+
+                        if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                            if (!verify_checksum(
+                                tmp.data(),
+                                tmp.size() * sizeof(double),
+                                t_metadata.checksum,
+                                t_metadata.checksum_algo
+                            )) {
+                                if (error) *error = "Checksum mismatch for: " + tensor_name;
+                                return false;
+                            }
+                        }
+
+                        for (size_t i = 0; i < expected_size; ++i) enc.token_embeddings[i] = static_cast<float>(tmp[i]);
+                    } else if (options.strict_mode) {
+                        if (error) *error = "Unsupported dtype for: " + tensor_name;
+                        return false;
                     }
                     
                     continue;
@@ -605,28 +810,118 @@ bool RawCheckpointReader::apply_tensors_to_model(
             }
             
             fs::path bin_path = root_path / "tensors" / t_metadata.data_file;
-            if (!load_tensor_data(
-                bin_path.string(), t_metadata,
-                data_ptr,
-                t_metadata.byte_size,
-                error
-            )) {
-                return false;
-            }
-            
-            // Verify checksum if requested
-            if (options.validate_checksums && !t_metadata.checksum.empty()) {
-                if (!verify_checksum(
+
+            if (t_metadata.dtype == DType::Float32) {
+                if (!load_tensor_data(
+                    bin_path.string(), t_metadata,
                     data_ptr,
-                    t_metadata.byte_size,
-                    t_metadata.checksum,
-                    t_metadata.checksum_algo
+                    actual_size * sizeof(float),
+                    error
                 )) {
-                    if (error) {
-                        *error = "Checksum mismatch for: " + tensor_name;
-                    }
                     return false;
                 }
+
+                if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                    if (!verify_checksum(
+                        data_ptr,
+                        t_metadata.byte_size,
+                        t_metadata.checksum,
+                        t_metadata.checksum_algo
+                    )) {
+                        if (error) *error = "Checksum mismatch for: " + tensor_name;
+                        return false;
+                    }
+                }
+            } else if (t_metadata.dtype == DType::Float16) {
+                if (t_metadata.byte_size != actual_size * sizeof(uint16_t)) {
+                    if (error) *error = "Byte size mismatch for: " + tensor_name;
+                    return false;
+                }
+
+                std::vector<uint16_t> tmp(actual_size);
+                if (!load_tensor_data(
+                    bin_path.string(), t_metadata,
+                    tmp.data(),
+                    tmp.size() * sizeof(uint16_t),
+                    error
+                )) {
+                    return false;
+                }
+
+                if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                    if (!verify_checksum(
+                        tmp.data(),
+                        tmp.size() * sizeof(uint16_t),
+                        t_metadata.checksum,
+                        t_metadata.checksum_algo
+                    )) {
+                        if (error) *error = "Checksum mismatch for: " + tensor_name;
+                        return false;
+                    }
+                }
+
+                HardwareOpt::fp16_to_fp32_f16c(data_ptr, tmp.data(), actual_size);
+            } else if (t_metadata.dtype == DType::BFloat16) {
+                if (t_metadata.byte_size != actual_size * sizeof(uint16_t)) {
+                    if (error) *error = "Byte size mismatch for: " + tensor_name;
+                    return false;
+                }
+
+                std::vector<uint16_t> tmp(actual_size);
+                if (!load_tensor_data(
+                    bin_path.string(), t_metadata,
+                    tmp.data(),
+                    tmp.size() * sizeof(uint16_t),
+                    error
+                )) {
+                    return false;
+                }
+
+                if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                    if (!verify_checksum(
+                        tmp.data(),
+                        tmp.size() * sizeof(uint16_t),
+                        t_metadata.checksum,
+                        t_metadata.checksum_algo
+                    )) {
+                        if (error) *error = "Checksum mismatch for: " + tensor_name;
+                        return false;
+                    }
+                }
+
+                HardwareOpt::bf16_to_fp32(data_ptr, tmp.data(), actual_size);
+            } else if (t_metadata.dtype == DType::Float64) {
+                if (t_metadata.byte_size != actual_size * sizeof(double)) {
+                    if (error) *error = "Byte size mismatch for: " + tensor_name;
+                    return false;
+                }
+
+                std::vector<double> tmp(actual_size);
+                if (!load_tensor_data(
+                    bin_path.string(), t_metadata,
+                    tmp.data(),
+                    tmp.size() * sizeof(double),
+                    error
+                )) {
+                    return false;
+                }
+
+                if (options.validate_checksums && !t_metadata.checksum.empty()) {
+                    if (!verify_checksum(
+                        tmp.data(),
+                        tmp.size() * sizeof(double),
+                        t_metadata.checksum,
+                        t_metadata.checksum_algo
+                    )) {
+                        if (error) *error = "Checksum mismatch for: " + tensor_name;
+                        return false;
+                    }
+                }
+
+                for (size_t i = 0; i < actual_size; ++i) data_ptr[i] = static_cast<float>(tmp[i]);
+            } else if (options.strict_mode) {
+                if (error) *error = "Unsupported dtype for: " + tensor_name;
+                return false;
             }
         }
         

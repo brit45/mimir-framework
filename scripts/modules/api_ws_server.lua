@@ -833,6 +833,12 @@ local function api_handle(method, path, headers, body)
     end
 
     local ok, err = Mimir.Model.create(model_type, config)
+    if ok and type(config) == "table" and config.dtype ~= nil and type(Mimir.model) == "table" and type(Mimir.model.dtype) == "function" then
+      local ok_dt, dt_or_err = Mimir.model.dtype(config.dtype)
+      if ok_dt == false then
+        return ok_json({ ok = false, error = tostring(dt_or_err) }, 500)
+      end
+    end
     return ok_json({ ok = ok, error = err })
   end
 

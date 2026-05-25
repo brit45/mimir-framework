@@ -352,6 +352,13 @@ local function bench_one(level)
     if ok == false then
       return false, "Mimir.Model.create failed: " .. tostring(err)
     end
+    local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+    if dtype ~= nil and type(Mimir.model) == "table" and type(Mimir.model.dtype) == "function" then
+      local ok_dt, dt_or_err = Mimir.model.dtype(dtype)
+      if ok_dt == false then
+        return false, "Mimir.model.dtype failed: " .. tostring(dt_or_err)
+      end
+    end
     params_last = (Mimir.Model.total_params and Mimir.Model.total_params()) or params_last
     times_build = times_build + (now_s() - tb)
 

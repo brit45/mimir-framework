@@ -1,7 +1,7 @@
 # Documentation Mímir (réécrite)
 
-Version framework : **2.4.0**  
-Révision documentation : **2026-03-15**
+Version framework : **3.0.0**  
+Révision documentation : **2026-05-25**
 
 Cette documentation remplace l’ancienne doc (archivée dans [docs_archive/2026-02-14/](../docs_archive/2026-02-14/)).
 
@@ -13,13 +13,54 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 
 ## Index par tâche (guide rapide)
 
-| Je veux… | Lis… | Lance… |
-| --- | --- | --- |
-| vérifier que l’environnement marche | [docs/01-Getting-Started/01-Quick-Start.md](01-Getting-Started/01-Quick-Start.md) | `./bin/mimir --lua scripts/templates/template_new_model.lua` |
-| comprendre create/build/alloc/init | [docs/02-User-Guide/02-Model-Lifecycle.md](02-User-Guide/02-Model-Lifecycle.md) | `./bin/mimir --lua scripts/templates/template_new_model.lua` |
-| apprendre à passer des arguments | [docs/02-User-Guide/06-Lua-Scripting.md](02-User-Guide/06-Lua-Scripting.md) | `./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua -- --help` |
-| éviter les OOM et stabiliser les runs | [docs/02-User-Guide/09-Memory.md](02-User-Guide/09-Memory.md) | `./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1` |
-| sauver/charger proprement | [docs/03-API-Reference/02-Serialization.md](03-API-Reference/02-Serialization.md) | `./bin/mimir --lua scripts/tests/test_serialization_smoke.lua` |
+- Vérifier que l’environnement marche
+  - Lis : [docs/01-Getting-Started/01-Quick-Start.md](01-Getting-Started/01-Quick-Start.md)
+  - Lance :
+
+```bash
+./bin/mimir --lua scripts/templates/template_new_model.lua
+```
+
+- Comprendre create/build/alloc/init
+  - Lis : [docs/02-User-Guide/02-Model-Lifecycle.md](02-User-Guide/02-Model-Lifecycle.md)
+  - Lance :
+
+```bash
+./bin/mimir --lua scripts/templates/template_new_model.lua
+```
+
+- Démarrer rapidement avec la Pipeline API (v3.0)
+  - Lis : [docs/02-User-Guide/06-Lua-Scripting.md](02-User-Guide/06-Lua-Scripting.md)
+  - Lance :
+
+```bash
+./bin/mimir --lua scripts/templates/template_pipeline_only.lua
+./bin/mimir --lua scripts/templates/template_pipeline_args.lua -- --no-train
+```
+
+- Apprendre à passer des arguments
+  - Lis : [docs/02-User-Guide/06-Lua-Scripting.md](02-User-Guide/06-Lua-Scripting.md)
+  - Lance :
+
+```bash
+./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua -- --help
+```
+
+- Éviter les OOM et stabiliser les runs
+  - Lis : [docs/02-User-Guide/09-Memory.md](02-User-Guide/09-Memory.md)
+  - Lance :
+
+```bash
+./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1
+```
+
+- Sauver/charger proprement
+  - Lis : [docs/03-API-Reference/02-Serialization.md](03-API-Reference/02-Serialization.md)
+  - Lance :
+
+```bash
+./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
+```
 
 ## Cheat sheet (conventions + champs importants)
 
@@ -31,7 +72,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 | `text_ids` | ids int | entrée texte dédiée (NLP) |
 | `x` | float | sortie principale (convention) |
 
-### Champs de config Transformer (v2.4)
+### Champs de config Transformer (v3.0)
 
 | Champ | Sens |
 | --- | --- |
@@ -68,6 +109,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - Scripting Lua (args, globals) : [docs/02-User-Guide/06-Lua-Scripting.md](02-User-Guide/06-Lua-Scripting.md)
 - Tokenizer & Encoder : [docs/02-User-Guide/07-Tokenizer-Encoder.md](02-User-Guide/07-Tokenizer-Encoder.md)
 - Checkpoints / reprise : [docs/02-User-Guide/08-Checkpoints.md](02-User-Guide/08-Checkpoints.md)
+- Analyse d’un artefact modèle sur disque (SafeTensors / RawFolder / DebugJson) : [docs/02-User-Guide/08-Checkpoints.md](02-User-Guide/08-Checkpoints.md)
 - Mémoire (Allocator, MemoryGuard) : [docs/02-User-Guide/09-Memory.md](02-User-Guide/09-Memory.md)
 - Scripts d’exemples : [docs/02-User-Guide/10-Examples.md](02-User-Guide/10-Examples.md)
 - Tutoriel VAEText : [docs/02-User-Guide/11-VAEText.md](02-User-Guide/11-VAEText.md)
@@ -88,8 +130,22 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - Sérialisation (détaillé) : [docs/03-API-Reference/16-Serialization.md](03-API-Reference/16-Serialization.md)
 - `Mimir.NeuroPulse` : [docs/03-API-Reference/17-NeuroPulse.md](03-API-Reference/17-NeuroPulse.md)
 - `Mimir.Layers` (ops) : [docs/03-API-Reference/18-Layers-Module.md](03-API-Reference/18-Layers-Module.md)
+- `Mimir.IO` (I/O images) : [docs/03-API-Reference/21-IO.md](03-API-Reference/21-IO.md)
 - Globals & aliases : [docs/03-API-Reference/19-Globals.md](03-API-Reference/19-Globals.md)
 - Mapping Lua ↔ C++ (sommaire) : [docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md](03-API-Reference/20-Lua-API-Cpp-Mapping.md)
+
+## 🆕 Nouveautés v3.0.0 (résumé)
+
+| Quoi | Où |
+| --- | --- |
+| Nouveau module `Mimir.IO` (lecture image RGB u8) | [03-API-Reference/21-IO.md](03-API-Reference/21-IO.md) |
+| `Mimir.Model.create_from_config(full_cfg)` | [03-API-Reference/10-Model.md](03-API-Reference/10-Model.md) |
+| `Mimir.Model.dtype()` / dtype setter | [03-API-Reference/10-Model.md](03-API-Reference/10-Model.md) |
+| Alias `Mimir.model` (lowercase) | [03-API-Reference/19-Globals.md](03-API-Reference/19-Globals.md) |
+| Helpers PonyXL-DDPM (train/val/viz/text2img/vae_scale) | [03-API-Reference/20-Lua-API-Cpp-Mapping.md](03-API-Reference/20-Lua-API-Cpp-Mapping.md) |
+| Nouveaux templates : `template_pipeline_only.lua` + `template_pipeline_args.lua` | [scripts/README.md](../scripts/README.md) |
+| pipeline_api.lua : dtype robuste (Mimir.model / Mimir.Model) | [scripts/README.md](../scripts/README.md) |
+| Détection hardware au démarrage (AVX2/FMA/F16C/BMI2 + CUDA/ROCm) | `bin/mimir --help` |
 
 ## 4) Internals (comment ça marche)
 
@@ -115,6 +171,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 
 - Performance & tuning CPU : [docs/05-Advanced/01-Performance.md](05-Advanced/01-Performance.md)
 - Debug & stabilité numérique : [docs/05-Advanced/02-Debugging.md](05-Advanced/02-Debugging.md)
+- Analyse modèle (outil `analyze_model.lua`, graphe Mermaid Markdown) : [docs/05-Advanced/02-Debugging.md](05-Advanced/02-Debugging.md)
 - LLM (état / manque / roadmap) : [docs/05-Advanced/03-LLM-Readiness.md](05-Advanced/03-LLM-Readiness.md)
 - Carte du code source (C/C++, fichier par fichier) : [docs/05-Advanced/04-Source-Code-Map.md](05-Advanced/04-Source-Code-Map.md)
 

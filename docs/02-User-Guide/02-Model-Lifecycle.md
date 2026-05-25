@@ -24,6 +24,7 @@ assert(cfg, err)
 
 cfg.seq_len = 128
 cfg.vocab_size = 8000
+cfg.dtype = "float16" -- optionnel: contrôle le dtype de stockage au save (runtime reste float32-first)
 ```
 
 Conseil : évite de fabriquer une config “from scratch” : tu risques d’oublier des champs attendus.
@@ -176,6 +177,8 @@ assert(Mimir.Model.init_weights("xavier", 42))
 ```lua
 local ok, err = Mimir.Serialization.load("checkpoint/my_model.safetensors")
 assert(ok ~= false, err)
+
+Note dtype : si le checkpoint embarque `model_config.dtype`, il est réappliqué automatiquement au modèle au load (utile pour garder des saves cohérents en reprise).
 ```
 
 Conseil : la config doit matcher (ex: `seq_len`, `vocab_size`, dims). Sinon tu auras un mismatch de shapes.

@@ -84,6 +84,42 @@ end
 |`Mimir.Model.reset_optimizer_state()`|Réinitialise moments/step (garde hyperparams)|`LuaScripting::lua_resetOptimizerState`|`Model::setSerializedOptimizer`||
 |`Mimir.Model.set_hardware(enable)`|Active/désactive accélération matérielle (global)|`LuaScripting::lua_setHardwareAccel`|`Model::setHardwareAcceleration`||
 |`Mimir.Model.hardware_caps()`|Retourne les capacités CPU + flags GPU compilés|`LuaScripting::lua_getHardwareCaps`|`Model::hasAVX2/hasFMA/hasF16C/hasBMI2`, `ENABLE_VULKAN/ENABLE_OPENCL`||
+|`Mimir.Model.create_from_config(full_cfg)`|Crée le modèle depuis une config complète (ex : `CONF` injecté par `--conf`)|`LuaScripting::lua_createModelFromConfig`|`ModelArchitectures::defaultConfig` + merge + `create`|Retourne `(true, arch)` ou `(false, err)`. **Nouveau v3.0.**|
+|`Mimir.Model.dtype()` / `dtype(name)`|Lit ou fixe la préférence dtype du modèle (`"float32"`, `"float16"`, …)|`LuaScripting::lua_modelDtype`|`ctx.modelConfig.dtype` ou `Model::setDtype`|`nil` = pas de préférence ; **Nouveau v3.0.**|
+
+### Helpers PonyXL-DDPM (v3.0)
+
+Ces helpers encapsulent le workflow complet d'entraînement du modèle PonyXL-DDPM (diffusion latente).
+
+> Disponibles uniquement si le modèle actif est de type `ponyxl_ddpm` ou compatible.
+
+|Appel Lua|Effet|Binding C++|Référence interne|Notes|
+|---|---|---|---|---|
+|`Mimir.Model.ponyxl_ddpm_train_step(batch, lr, opts?)`|Effectue un step d'entraînement complet (forward + noise + backward + optim)|`LuaScripting::lua_ponyxlDdpmTrainStep`|`PonyXLDDPMModel::trainStep`|Retourne `(loss_value, err?)`.|
+|`Mimir.Model.ponyxl_ddpm_validate_step(batch)`|Step de validation (forward sans grad, calcul loss)|`LuaScripting::lua_ponyxlDdpmValidateStep`|`PonyXLDDPMModel::validateStep`|Retourne `loss_value`.|
+|`Mimir.Model.ponyxl_ddpm_viz_reconstruct_step(batch)`|Forward reconstruit pour visualisation (latent → pixel)|`LuaScripting::lua_ponyxlDdpmVizReconstructStep`|`PonyXLDDPMModel::vizReconstructStep`|Retourne table pixels.|
+|`Mimir.Model.ponyxl_ddpm_text2img(prompt, steps?, seed?)`|Génère une image à partir d'un prompt texte (inférence DDPM)|`LuaScripting::lua_ponyxlDdpmText2Img`|`PonyXLDDPMModel::text2img`|Retourne table pixels ou `(nil, err)`.|
+|`Mimir.Model.ponyxl_ddpm_set_vae_scale(scale)`|Fixe le facteur d'échelle VAE (scaling latent ↔ pixel)|`LuaScripting::lua_ponyxlDdpmSetVaeScale`|`PonyXLDDPMModel::setVaeScale`||
+|`Mimir.Model.ponyxl_ddpm_get_vae_scale()`|Lit le facteur d'échelle VAE courant|`LuaScripting::lua_ponyxlDdpmGetVaeScale`|`PonyXLDDPMModel::getVaeScale`||
+|`Mimir.Model.ponyxl_ddpm_vae_mu_moments(input)`|Calcule les moments μ du VAE encoder (μ, log-var)|`LuaScripting::lua_ponyxlDdpmVaeMuMoments`|`PonyXLDDPMModel::vaeMuMoments`|Retourne `(mu_table, logvar_table)`.|
+
+---
+
+## `Mimir.IO` (v3.0)
+
+### Exemple (script) — `Mimir.IO`
+
+```lua
+local px, err = Mimir.IO.read_image_rgb_u8("./dataset_2/img0001.png")
+if not px then error(err) end
+-- normalise 0–255 → 0.0–1.0
+for i = 1, #px do px[i] = px[i] / 255.0 end
+local out = Mimir.Model.forward({ __input__ = px }, false)
+```
+
+|Appel Lua|Effet|Binding C++|Référence interne|Notes|
+|---|---|---|---|---|
+|`Mimir.IO.read_image_rgb_u8(path)`|Lit une image et retourne ses pixels RGB u8 sous forme de table int|`LuaScripting::lua_readImageRGBU8`|I/O image interne|Alias global : `readImageRGBU8(path)`. Voir [21-IO.md](21-IO.md).|
 
 ---
 

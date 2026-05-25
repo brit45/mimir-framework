@@ -136,6 +136,31 @@ local function build_config(model_type, user_cfg, allowed_keys, fallback_cfg, le
     return cfg
 end
 
+local function apply_model_dtype(cfg)
+    if type(cfg) ~= "table" then return true end
+    local dtype = cfg.dtype
+    if dtype == nil then return true end
+
+    local dtype_fn = nil
+    if type(Mimir) == "table" then
+        if type(Mimir.model) == "table" and type(Mimir.model.dtype) == "function" then
+            dtype_fn = Mimir.model.dtype
+        elseif type(Mimir.Model) == "table" and type(Mimir.Model.dtype) == "function" then
+            dtype_fn = Mimir.Model.dtype
+        end
+    end
+    if dtype_fn == nil then
+        -- Runtime ancienne: ignorer silencieusement.
+        return true
+    end
+
+    local ok, dt_or_err = dtype_fn(dtype)
+    if ok == false then
+        return false, dt_or_err
+    end
+    return true
+end
+
 -- ============================================================================
 -- Pipeline de base
 -- ============================================================================
@@ -204,6 +229,10 @@ function Pipeline.Transformer(config)
         if not ok_create then
             return false, err_create
         end
+            local ok_dt, err_dt = apply_model_dtype(self.config)
+            if ok_dt == false then
+                return false, err_dt
+            end
 
         local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
         if not ok_build then
@@ -298,6 +327,10 @@ function Pipeline.UNet(config)
         if not ok_create then
             return false, err_create
         end
+            local ok_dt, err_dt = apply_model_dtype(self.config)
+            if ok_dt == false then
+                return false, err_dt
+            end
 
         local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
         if not ok_build then
@@ -386,6 +419,10 @@ function Pipeline.VAE(config)
         if not ok_create then
             return false, err_create
         end
+            local ok_dt, err_dt = apply_model_dtype(self.config)
+            if ok_dt == false then
+                return false, err_dt
+            end
 
         local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
         if not ok_build then
@@ -472,6 +509,10 @@ function Pipeline.ViT(config)
         if not ok_create then
             return false, err_create
         end
+            local ok_dt, err_dt = apply_model_dtype(self.config)
+            if ok_dt == false then
+                return false, err_dt
+            end
 
         local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
         if not ok_build then
@@ -578,6 +619,10 @@ function Pipeline.Diffusion(config)
         if not ok_create then
             return false, err_create
         end
+            local ok_dt, err_dt = apply_model_dtype(self.config)
+            if ok_dt == false then
+                return false, err_dt
+            end
 
         local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
         if not ok_build then
@@ -650,6 +695,10 @@ function Pipeline.ResNet(config)
         if not ok_create then
             return false, err_create
         end
+            local ok_dt, err_dt = apply_model_dtype(self.config)
+            if ok_dt == false then
+                return false, err_dt
+            end
 
         local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
         if not ok_build then
@@ -712,6 +761,10 @@ function Pipeline.MobileNet(config)
         if not ok_create then
             return false, err_create
         end
+            local ok_dt, err_dt = apply_model_dtype(self.config)
+            if ok_dt == false then
+                return false, err_dt
+            end
 
         local ok_build, params_or_err = build_allocate_init(self.config.init, self.config.seed)
         if not ok_build then

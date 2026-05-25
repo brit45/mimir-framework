@@ -4,11 +4,12 @@ La source de vérité de l’API exposée est `src/LuaScripting.cpp`.
 
 ## Modules principaux
 
-- `Mimir.Model` : create/build/allocate/init/forward/backward + helpers d’entraînement
+- `Mimir.Model` : create/build/allocate/init/forward/backward + helpers d'entraînement + `dtype` + `create_from_config`
 - `Mimir.Architectures` : liste et config par défaut des architectures
 - `Mimir.Serialization` : save/load, formats, debug dumps
 - `Mimir.Tokenizer` : tokenize/detokenize, BPE
 - `Mimir.Dataset` : chargement et itération (selon scripts)
+- `Mimir.IO` : lecture d'images (RGB u8)
 
 Pages de référence associées :
 
@@ -23,6 +24,7 @@ Pages de référence associées :
 - Ops layers : `docs/03-API-Reference/18-Layers-Module.md`
 - Globals/aliases : `docs/03-API-Reference/19-Globals.md`
 - Mapping Lua ↔ C++ (sommaire) : `docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md`
+- `Mimir.IO` (I/O images) : `docs/03-API-Reference/21-IO.md`
 
 ## Convention d’arguments
 

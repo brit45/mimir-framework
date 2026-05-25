@@ -62,6 +62,12 @@ private:
 
     // Buffers owned by the writer (used for non-float tensor payloads like tokenizer/encoder JSON)
     std::vector<std::vector<uint8_t>> owned_buffers_;
+
+    // Owned FP16 payloads (aligned) for float tensors when saving as Float16.
+    std::vector<std::vector<uint16_t>> owned_u16_buffers_;
+
+    // Owned FP64 payloads for float tensors when saving as Float64.
+    std::vector<std::vector<double>> owned_f64_buffers_;
     
     /**
      * Collect all tensors from model.

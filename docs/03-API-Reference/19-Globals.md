@@ -41,6 +41,7 @@ En plus de `Mimir.*`, le runtime publie des **aliases globaux** qui pointent ver
 
 | Alias global | Pointe vers | Pourquoi ça existe | Recommandation |
 | --- | --- | --- | --- |
+| `Mimir.model` | `Mimir.Model` | alias lowercase pour scripts compacts (v3.0) | OK pour scripts jetables, préfère `Mimir.Model` en projet long |
 | `model` | `Mimir.Model` | scripts courts, legacy | OK pour scripts jetables, préfère `Mimir.Model` en projet long |
 | `architectures` | `Mimir.Architectures` | idem | idem |
 | `tokenizer` | `Mimir.Tokenizer` | idem | idem |

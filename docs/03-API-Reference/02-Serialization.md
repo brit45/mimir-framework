@@ -26,6 +26,7 @@ Les fonctions sont exposées sous `Mimir.Serialization`.
 ## Bonnes pratiques
 
 - Toujours sauvegarder la config d’architecture (type, dims, seq_len, vocab_size).
+- Fixer `cfg.dtype` si tu veux contrôler le dtype de stockage sur disque (ex: `"float16"`).
 - Valider les checksums en chargement si dispo.
 - Ne pas changer `seq_len` ou `vocab_size` après entraînement sans stratégie explicite (sinon shapes incompatibles).
 
@@ -36,6 +37,7 @@ local cfg, err = Mimir.Architectures.default_config("transformer")
 assert(cfg, err)
 cfg.seq_len = 64
 cfg.vocab_size = 2000
+cfg.dtype = "float16" -- contrôle le dtype de stockage au save (runtime reste float32-first)
 
 assert(Mimir.Model.create("transformer", cfg))
 assert(Mimir.Model.build())

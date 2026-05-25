@@ -58,6 +58,17 @@ local function assert_ok(ok, err, msg)
   end
 end
 
+local function apply_dtype(cfg)
+  local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+  if dtype == nil then return true end
+  if type(Mimir) ~= "table" or type(Mimir.model) ~= "table" or type(Mimir.model.dtype) ~= "function" then
+    return true
+  end
+  local ok, dt_or_err = Mimir.model.dtype(dtype)
+  assert_ok(ok, dt_or_err, "Mimir.model.dtype(" .. tostring(dtype) .. ") failed")
+  return true
+end
+
 local MEM_GB = opt_num("mem-gb", 15)
 local ALLOC_GB = opt_num("alloc-gb", MEM_GB)
 local ENABLE_COMPRESSION = opt_bool("compression", opt_bool("compress", true))
@@ -149,6 +160,7 @@ log("✓ Dataset chargé: " .. tostring(n_or_err))
 
 -- Modèle
 assert_ok(Mimir.Model.create("vae_text", cfg), nil, "Model.create(vae_text) failed")
+apply_dtype(cfg)
 local params = Mimir.Model.total_params()
 log("✓ Model créé (registry): params=" .. tostring(params))
 

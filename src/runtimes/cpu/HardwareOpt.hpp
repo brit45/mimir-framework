@@ -88,6 +88,29 @@ inline void fp16_to_fp32_f16c(float* dst, const uint16_t* src, size_t count) {
 #endif
 }
 
+// ===== BF16 STORAGE (software, portable) =====
+
+inline void fp32_to_bf16(uint16_t* dst, const float* src, size_t count) {
+    // Rounding-to-nearest-even on truncation of lower 16 bits.
+    #pragma omp simd
+    for (size_t i = 0; i < count; ++i) {
+        union { float f; uint32_t u; } v;
+        v.f = src[i];
+        const uint32_t lsb = (v.u >> 16) & 1u;
+        const uint32_t rounding_bias = 0x7FFFu + lsb;
+        dst[i] = static_cast<uint16_t>((v.u + rounding_bias) >> 16);
+    }
+}
+
+inline void bf16_to_fp32(float* dst, const uint16_t* src, size_t count) {
+    #pragma omp simd
+    for (size_t i = 0; i < count; ++i) {
+        union { float f; uint32_t u; } v;
+        v.u = (static_cast<uint32_t>(src[i]) << 16);
+        dst[i] = v.f;
+    }
+}
+
 // ===== FMA SATURÉ (3 opérations par cycle) =====
 
 // Matmul optimisé avec FMA complètement saturé

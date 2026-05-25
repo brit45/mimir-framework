@@ -552,6 +552,17 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     root["total_params"] = model.totalParamCount();
     root["num_layers"] = model.getLayers().size();
 
+    // DType + config snapshot (kept in sync by Model::setDefaultDType)
+    root["default_dtype"] = model.getDefaultDType();
+    {
+        json cfg = model.modelConfig;
+        if (!cfg.is_object()) cfg = json::object();
+        if (!cfg.contains("dtype")) {
+            cfg["dtype"] = model.getDefaultDType();
+        }
+        root["model_config"] = cfg;
+    }
+
     // Optional captured gradients: no longer supported (VAEModel removed)
     const std::unordered_map<std::string, std::vector<float>>* captured_grads = nullptr;
     

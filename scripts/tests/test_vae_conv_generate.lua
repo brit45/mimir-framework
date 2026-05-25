@@ -24,6 +24,19 @@ local function die(msg)
   error(tostring(msg or "error"))
 end
 
+local function apply_dtype(cfg)
+  local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+  if dtype == nil then return true end
+  if type(Mimir) ~= "table" or type(Mimir.model) ~= "table" or type(Mimir.model.dtype) ~= "function" then
+    return true
+  end
+  local ok, dt_or_err = Mimir.model.dtype(dtype)
+  if ok == false then
+    die("dtype invalide: " .. tostring(dt_or_err))
+  end
+  return true
+end
+
 local function opt_str(k, d)
   local v = opts[k]
   if v == nil or v == true then return d end
@@ -490,6 +503,8 @@ local input_f32 = rgb_u8_to_f32_minus1_1(input_u8)
 
 local ok_create, err_create = Mimir.Model.create("vae_conv", cfg)
 if not ok_create then die("Model.create(vae_conv) failed: " .. tostring(err_create)) end
+
+apply_dtype(cfg)
 
 local ok_alloc, nparams_or_err = Mimir.Model.allocate_params()
 if ok_alloc == false then die("Model.allocate_params failed: " .. tostring(nparams_or_err)) end

@@ -110,6 +110,9 @@ public:
     // Sauvegarder l'historique de loss dans un fichier CSV
     void saveLossHistory(const std::string& filepath) const;
 
+    // Définir dynamiquement le chemin du CSV loss (appelé typiquement via AsyncMonitor).
+    void setLossLogFile(const std::string& filepath);
+
 private:
     std::string loss_log_file;  // Chemin du fichier de log
     // Configuration
@@ -466,6 +469,7 @@ public:
                       float = 0.0f) {}
 
     void addLossPoint(float) {}
+    void setLossLogFile(const std::string&) {}
     void clearImages() {}
     void setEnabled(bool) {}
     bool isEnabled() const { return false; }

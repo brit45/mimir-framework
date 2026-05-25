@@ -369,11 +369,11 @@
         },
         {
           "allow_drag": true,
-          "h": 598.9998779296875,
+          "h": 659.9998779296875,
           "id": 1,
           "title": "Blocks / Layers",
           "visible": true,
-          "w": 1252.0001220703125,
+          "w": 1250.0001220703125,
           "x": 6.99993896484375,
           "y": 303.0
         },
@@ -399,11 +399,11 @@
         },
         {
           "allow_drag": true,
-          "h": 817.9999389648438,
+          "h": 877.9999389648438,
           "id": 4,
           "title": "Metrics",
           "visible": true,
-          "w": 521.0,
+          "w": 524.0,
           "x": 1267.0,
           "y": 85.0
         },
@@ -423,7 +423,7 @@
       "show_prompt_text": true,
       "show_training_progress": true,
       "version": 2,
-      "window_height": 912,
+      "window_height": 976,
       "window_width": 1792
     },
     "5": {

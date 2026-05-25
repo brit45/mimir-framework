@@ -201,6 +201,17 @@ public:
                                                        int seed = 12345,
                                                        int ddpm_step = -1);
 
+    // Génération text2img (DDIM-like, eta=0) en espace latent, puis décodage via VAE.
+    // Retourne une image RGB u8 (format identique à ReconPreview).
+    // - sample_steps: nombre d'étapes d'échantillonnage (<=0 => utilise cfg.ddpm_steps)
+    // - guidance_scale: CFG sur eps_pred (1.0 = pas de guidance)
+    // - max_side: limite la taille max de sortie (<=0 => pas de downscale)
+    ReconPreview text2imgSdxlLatentDiffusion(const std::string& prompt,
+                                             int seed = 12345,
+                                             int sample_steps = 50,
+                                             float guidance_scale = 1.0f,
+                                             int max_side = 0);
+
     static void buildInto(Model& model, const Config& cfg);
 
     static std::vector<float> imageBytesToFloatRGB(const std::vector<uint8_t>& rgb, int w, int h);

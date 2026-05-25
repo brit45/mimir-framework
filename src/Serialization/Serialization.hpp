@@ -29,6 +29,8 @@ enum class CheckpointFormat {
 enum class DType {
     Float32,
     Float16,
+    BFloat16,
+    Float64,
     Int32,
     Int16,
     Uint16,

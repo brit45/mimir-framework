@@ -3,6 +3,7 @@
 
 #include <immintrin.h>  // AVX2
 #include <cstddef>
+#include <cmath>
 #include <cstring>
 #include <algorithm>
 #include "HardwareOpt.hpp"  // Optimisations hardware avancées

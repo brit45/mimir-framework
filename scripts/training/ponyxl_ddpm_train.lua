@@ -10,6 +10,8 @@
 -- Notes:
 -- - Ici, `recon_loss` désigne la loss de diffusion utilisée pour eps_pred vs eps (ex: mse/huber/charbonnier).
 -- - Le modèle gère: VAE encode (mu), sampling t/eps, schedule DDPM, etc.
+-- - NOTE: les anciennes options "peltier-*" sont désormais DÉPRÉCIÉES et ignorées
+--   (le modèle C++ utilise uniquement eps ~ N(0,I), i.e. DDPM latent standard).
 --
 -- Usage (exemple):
 --   ./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua -- \
@@ -28,13 +30,41 @@
 --   --viz --viz-title "PonyXL" --viz-width 1600 --viz-height 900 --viz-fps 60
 --   --viz-ddpm --viz-ddpm-every 200 --viz-ddpm-steps 5
 
+-- ---------------------------------------------------------------------------
+-- Logs: normalisation (évite les indentations "  ..." et homogénéise les erreurs)
+-- ---------------------------------------------------------------------------
+
+local _raw_log = _G.log or function(m)
+  io.stdout:write(tostring(m or ""), "\n")
+end
+
+local function log(msg)
+  local s = tostring(msg or "")
+  s = s:gsub("^%s+", "")
+  _raw_log(s)
+end
+
 local function die(msg)
-  log("❌ " .. tostring(msg))
+  log("ERROR: " .. tostring(msg))
   os.exit(1)
 end
 
-local function logf(fmt, ...)
-  log(string.format(fmt, ...))
+local function apply_dtype(cfg)
+  local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+  if dtype == nil then return true end
+  if type(Mimir) ~= "table" then return true end
+
+  local dtype_fn = nil
+  if type(Mimir.model) == "table" and type(Mimir.model.dtype) == "function" then
+    dtype_fn = Mimir.model.dtype
+  elseif type(Mimir.Model) == "table" and type(Mimir.Model.dtype) == "function" then
+    dtype_fn = Mimir.Model.dtype
+  end
+  if dtype_fn == nil then return true end
+
+  local ok, dt_or_err = dtype_fn(dtype)
+  if not ok then die("dtype invalide: " .. tostring(dt_or_err)) end
+  return true
 end
 
 -- ---------------------------------------------------------------------------
@@ -177,7 +207,7 @@ end
 
 local MEM_GB = opt_num("mem-gb", 15)
 local ALLOC_GB = opt_num("alloc-gb", MEM_GB)
-local ENABLE_COMPRESSION = opt_bool("compress", true)
+local ENABLE_COMPRESSION = opt_bool("compress", false)
 
 if Mimir and Mimir.Allocator and Mimir.Allocator.configure then
   Mimir.Allocator.configure({ max_ram_gb = ALLOC_GB, enable_compression = ENABLE_COMPRESSION })
@@ -186,7 +216,8 @@ if Mimir and Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
   pcall(Mimir.MemoryGuard.setLimit, MEM_GB)
 end
 if Mimir and Mimir.Model and Mimir.Model.set_hardware then
-  pcall(Mimir.Model.set_hardware, true)
+  -- Désactivé par défaut: activez via `--hw true` si souhaité.
+  pcall(Mimir.Model.set_hardware, opt_bool("hw", true))
 end
 
 -- ---------------------------------------------------------------------------
@@ -195,7 +226,7 @@ end
 
 local DATASET_DIR = Args.get_str(opts, "dataset", "dataset_2")
 local EPOCHS = Args.get_int(opts, "epochs", 5)
-local LR = Args.get_num(opts, "lr", 1e-4)
+local LR = Args.get_num(opts, "lr", 1e-5)
 
 local TRAIN_SEED = Args.get_int(opts, "seed", 4242)
 local INIT_SEED = Args.get_int(opts, "init-seed", TRAIN_SEED)
@@ -207,55 +238,76 @@ local DATASET_H = Args.get_int(opts, "dataset-h", 512)
 local DATASET_MIN_MODALITIES = Args.get_int(opts, "dataset-min-modalities", 2)
 
 local TOKENIZER_PATH = Args.get_str(opts, "tokenizer", "checkpoint/base_tokenizer/tokenizer.json")
-local DESIRED_MAX_VOCAB = Args.get_int(opts, "max-vocab", 32000)
+local DESIRED_MAX_VOCAB = Args.get_int(opts, "max-vocab", 100000)
 
-local DEFAULT_VAE_CKPT = "checkpoint/vae_conv_base_tok_latent-16-BS-320"
+local DEFAULT_VAE_CKPT = "checkpoint/vae_conv_cpu_512_latent-64-64-32_base-64-2/epoch_0011"
 local VAE_CKPT_IN = Args.get_str(opts, "vae-checkpoint", DEFAULT_VAE_CKPT)
 local VAE_CKPT = resolve_checkpoint_dir(VAE_CKPT_IN)
 
-local OUT_DIR = Args.get_str(opts, "out-dir", "checkpoint/PonyXL_SDXL_Stub")
+local OUT_DIR = Args.get_str(opts, "out-dir", "checkpoint/PonyXL_SDXL")
 
-local TRAIN_TIMESTEPS = Args.get_int(opts, "train-timesteps", Args.get_int(opts, "ddpm-steps", 100))
+local SAVE_PRETRAIN_DEBUG_JSON = opt_bool("save-pretrain-jsondebug", true)
+local PRETRAIN_DEBUG_JSON_PATH = Args.get_str(opts, "pretrain-jsondebug", OUT_DIR .. "/pretrain_debug.json")
+
+local TRAIN_TIMESTEPS = Args.get_int(opts, "train-timesteps", Args.get_int(opts, "ddpm-steps", 1000))
 local BETA_START = Args.get_num(opts, "beta-start", 1e-4)
-local BETA_END = Args.get_num(opts, "beta-end", 2e-2)
-local TARGET_AB_END = Args.get_num(opts, "ddpm-alpha-bar-end", Args.get_num(opts, "alpha-bar-end", 4e-5))
+local BETA_END = Args.get_num(opts, "beta-end", 0.02)
+local TARGET_AB_END = Args.get_num(opts, "ddpm-alpha-bar-end", Args.get_num(opts, "alpha-bar-end", 4e-6))
 local AUTO_BETA_END = opt_bool("auto-beta-end", true)
 if AUTO_BETA_END and (not opt_has("beta-end")) then
   BETA_END = solve_beta_end_for_target_ab(TRAIN_TIMESTEPS, BETA_START, TARGET_AB_END)
 end
 
-local DDPM_STEPS_PER_IMAGE = Args.get_int(opts, "ddpm-steps-per-image", 10)
+local DDPM_STEPS_PER_IMAGE = Args.get_int(opts, "ddpm-steps-per-image", 1)
 
 local function default_steps_per_image(train_items)
   if train_items and train_items > 0 and train_items < 512 then return 2 end
   return 1
 end
 
-local PELTIER_NOISE = opt_bool("peltier-noise", true)
-local PELTIER_MIX = Args.get_num(opts, "peltier-mix", 0.65)
-local PELTIER_BLUR = Args.get_int(opts, "peltier-blur", Args.get_int(opts, "peltier-blur-radius", 2))
+local DEPRECATED_PELTIER_USED = opt_has("peltier-noise") or opt_has("peltier-mix") or opt_has("peltier-blur") or opt_has("peltier-blur-radius")
+if DEPRECATED_PELTIER_USED then
+  log("  ⚠️ options 'peltier-*' dépréciées et ignorées (DDPM latent standard: eps~N(0,I))")
+end
 
-local TEXT_CTX_LEN = Args.get_int(opts, "text-ctx-len", 100)
-local TEXT_MEANPOOL = opt_bool("text-meanpool", true)
+local TEXT_CTX_LEN = Args.get_int(opts, "text-ctx-len", 75)
+local TEXT_MEANPOOL = opt_bool("text-meanpool", false)
 
-local RECON_LOSS = Args.get_str(opts, "recon-loss", "huber")
+local RECON_LOSS = Args.get_str(opts, "recon-loss", "mse")
+
+-- Diffusion conditioning / stabilization knobs (C++ config keys)
+local TIMESTEP_COND = Args.get_str(opts, "timestep-cond", "log_snr")
+local LOSS_WEIGHTING = Args.get_str(opts, "loss-weighting", "none")
+local MIN_SNR_GAMMA = Args.get_num(opts, "min-snr-gamma", 5.0)
+local OUTPUT_ACTIVATION = Args.get_str(opts, "output-activation", "linear")
+local CFG_DROPOUT = Args.get_num(opts, "cfg-dropout", 0.10)
+
+-- Optional: image-space auxiliary loss (via VAE decoder). Coûteux.
+local IMG_LOSS_WEIGHT = Args.get_num(opts, "img-loss-weight", 0.0)
+local IMG_LOSS_EVERY = Args.get_int(opts, "img-loss-every", Args.get_int(opts, "img-loss-every-steps", 0))
+
+local KL_BETA = Args.get_num(opts, "kl-beta", 0.0)
+local KL_WARMUP_STEPS = Args.get_int(opts, "kl-warmup-steps", 0)
+local LOGVAR_CLIP_MIN = Args.get_num(opts, "logvar-clip-min", -10.0)
+local LOGVAR_CLIP_MAX = Args.get_num(opts, "logvar-clip-max", 10.0)
 
 local OPTIMIZER = Args.get_str(opts, "optimizer", "adamw")
+local WARMUP_STEPS = Args.get_int(opts, "lr-warmup-steps", Args.get_int(opts, "warmup-steps", 800))
 
 local VIZ_DDPM = opt_bool("viz-ddpm", true)
-local VIZ_DDPM_EVERY = Args.get_int(opts, "viz-ddpm-every", 60)
-local VIZ_DDPM_STEPS = Args.get_int(opts, "viz-ddpm-steps", 2)
+local VIZ_DDPM_EVERY = Args.get_int(opts, "viz-ddpm-every", 200)
+local VIZ_DDPM_STEPS = Args.get_int(opts, "viz-ddpm-steps", 1)
 
-local VALIDATE_EVERY = Args.get_int(opts, "validate-every", Args.get_int(opts, "validate-every-steps", 4))
-local VALIDATE_ITEMS = math.max(1, Args.get_int(opts, "validate-items", 8))
+local VALIDATE_EVERY = Args.get_int(opts, "validate-every", Args.get_int(opts, "validate-every-steps", 100))
+local VALIDATE_ITEMS = math.max(1, Args.get_int(opts, "validate-items", 4))
 local VALIDATE_HOLDOUT = opt_bool("validate-holdout", true)
 local VALIDATE_HOLDOUT_FRAC = Args.get_num(opts, "validate-holdout-frac", 0.01)
-local VALIDATE_HOLDOUT_ITEMS = Args.get_int(opts, "validate-holdout-items", 2)
+local VALIDATE_HOLDOUT_ITEMS = Args.get_int(opts, "validate-holdout-items", 6)
 local VALIDATE_SAVE_DEBUG = opt_bool("validate-save-debug", true)
 local VALIDATE_SEED = Args.get_int(opts, "validate-seed", 4242)
-local VALIDATE_T = Args.get_int(opts, "validate-t", -1)
+local VALIDATE_T = Args.get_int(opts, "validate-t", 1000)
 
-local AUTOSAVE_EVERY = Args.get_int(opts, "autosave-every", 200)
+local AUTOSAVE_EVERY = Args.get_int(opts, "autosave-every", 800)
 local AUTOSAVE_DIR = Args.get_str(opts, "autosave-dir", OUT_DIR .. "/autosave_latest")
 
 -- Avec `Mimir.Model.train`, l'autosave est géré côté framework à la fin des epochs.
@@ -263,7 +315,7 @@ local AUTOSAVE_DIR = Args.get_str(opts, "autosave-dir", OUT_DIR .. "/autosave_la
 local AUTOSAVE_EVERY_EPOCHS = Args.get_int(opts, "autosave-every-epochs", (AUTOSAVE_EVERY > 0) and 1 or 0)
 
 local CALIBRATE_VAE = opt_bool("calibrate-vae", true)
-local CALIBRATE_ITEMS = Args.get_int(opts, "calibrate-items", 32)
+local CALIBRATE_ITEMS = Args.get_int(opts, "calibrate-items", 30)
 
 local INIT_WEIGHTS = opt_bool("init-weights", true)
 
@@ -271,30 +323,31 @@ local INIT_WEIGHTS = opt_bool("init-weights", true)
 -- Tokenizer
 -- ---------------------------------------------------------------------------
 
-log("[ponyxl_ddpm_train] init tokenizer")
+log("  init tokenizer")
 Mimir.Tokenizer.load(TOKENIZER_PATH)
 if Mimir.Tokenizer.set_max_vocab then
   pcall(Mimir.Tokenizer.set_max_vocab, DESIRED_MAX_VOCAB)
 end
-Mimir.Tokenizer.ensure_vocab_from_text("pony horse snow forest portrait TAGS CONTEXTE MENTALITE TEXTE")
+Mimir.Tokenizer.ensure_vocab_from_text("pony horse snow forest portrait")
 
 local TOKENIZER_MAX_VOCAB = (Mimir.Tokenizer.get_max_vocab and Mimir.Tokenizer.get_max_vocab()) or Mimir.Tokenizer.vocab_size()
-logf("[ponyxl_ddpm_train] tokenizer loaded: path=%s vocab_size=%d max_vocab=%d",
+log(string.format("tokenizer loaded: path=%s vocab_size=%d max_vocab=%d",
   tostring(TOKENIZER_PATH),
   tonumber(Mimir.Tokenizer.vocab_size() or 0) or 0,
-  tonumber(TOKENIZER_MAX_VOCAB or 0) or 0)
+  tonumber(TOKENIZER_MAX_VOCAB or 0) or 0))
 
 -- ---------------------------------------------------------------------------
 -- Dataset
 -- ---------------------------------------------------------------------------
 
-log("[ponyxl_ddpm_train] load dataset")
+log("load dataset")
 local ok_ds, n_or_err = Mimir.Dataset.load(DATASET_DIR, DATASET_W, DATASET_H, DATASET_MIN_MODALITIES)
 if not ok_ds then die(n_or_err or "Dataset.load a échoué") end
 local DATASET_TOTAL = math.floor(tonumber(n_or_err) or 0)
 if DATASET_TOTAL <= 0 then die("dataset vide") end
-logf("[ponyxl_ddpm_train] dataset_total=%d (dir=%s) w=%d h=%d min_modalities=%d",
+log(string.format("dataset_total=%d (dir=%s) w=%d h=%d min_modalities=%d",
   DATASET_TOTAL, tostring(DATASET_DIR), DATASET_W, DATASET_H, DATASET_MIN_MODALITIES)
+)
 
 local function load_image_text_item(i)
   local item, err_item = Mimir.Dataset.get(i)
@@ -358,7 +411,7 @@ local holdout_indices, train_indices = {}, {}
 if holdout_n > 0 then
   for k = 1, holdout_n do holdout_indices[#holdout_indices + 1] = all_indices[k] end
   for k = holdout_n + 1, #all_indices do train_indices[#train_indices + 1] = all_indices[k] end
-  logf("[ponyxl_ddpm_train] holdout split: holdout=%d train=%d", #holdout_indices, #train_indices)
+  log(string.format("holdout split: holdout=%d train=%d", #holdout_indices, #train_indices))
 else
   train_indices = all_indices
 end
@@ -376,7 +429,7 @@ end
 -- Modèle
 -- ---------------------------------------------------------------------------
 
-log("[ponyxl_ddpm_train] create model")
+log("create model")
 ---@type any
 local cfg = Mimir.Architectures.default_config("ponyxl_ddpm")
 
@@ -384,8 +437,19 @@ cfg.max_vocab = TOKENIZER_MAX_VOCAB or cfg.max_vocab
 cfg.seed = TRAIN_SEED
 cfg.recon_loss = RECON_LOSS
 
+cfg.timestep_cond = TIMESTEP_COND
+cfg.loss_weighting = LOSS_WEIGHTING
+cfg.min_snr_gamma = MIN_SNR_GAMMA
+cfg.output_activation = OUTPUT_ACTIVATION
+cfg.cfg_dropout_prob = CFG_DROPOUT
+
 cfg.text_ctx_len = TEXT_CTX_LEN
 cfg.text_bottleneck_meanpool = TEXT_MEANPOOL
+
+-- Texte: options SDXL-like
+cfg.text_clip_like = opt_bool("text-clip-like", cfg.text_clip_like ~= false)
+cfg.global_ctx_tokens = Args.get_int(opts, "global-ctx-tokens", tonumber(cfg.global_ctx_tokens or 0) or 0)
+cfg.sdxl_time_cond = opt_bool("sdxl-time-cond", cfg.sdxl_time_cond ~= false)
 
 cfg.vae_checkpoint = VAE_CKPT
 cfg.checkpoint_dir = OUT_DIR
@@ -399,19 +463,22 @@ cfg.ddpm_beta_start = BETA_START
 cfg.ddpm_beta_end = BETA_END
 cfg.ddpm_steps_per_image = DDPM_STEPS_PER_IMAGE
 
-cfg.peltier_noise = PELTIER_NOISE
-cfg.peltier_mix = PELTIER_MIX
-cfg.peltier_blur_radius = PELTIER_BLUR
-
 cfg.optimizer = OPTIMIZER
 cfg.beta1 = 0.9
 cfg.beta2 = 0.999
 cfg.weight_decay = Args.get_num(opts, "weight-decay", 0.0)
-cfg.decay_strategy = Args.get_str(opts, "decay-strategy", "cosine")
+cfg.decay_strategy = Args.get_str(opts, "decay-strategy", "linear")
+cfg.warmup_steps = Args.get_int(opts, "warmup-steps", WARMUP_STEPS)
 
 cfg.log_every = 1
 cfg.max_items = MAX_ITEMS
 cfg.autosave_every_epochs = AUTOSAVE_EVERY_EPOCHS
+
+-- KL prior regularization (optional)
+cfg.kl_beta = KL_BETA
+cfg.kl_warmup_steps = KL_WARMUP_STEPS
+cfg.logvar_clip_min = LOGVAR_CLIP_MIN
+cfg.logvar_clip_max = LOGVAR_CLIP_MAX
 
 -- Validation (gérée par `Mimir.Model.train` côté framework)
 cfg.validate_every_steps = VALIDATE_EVERY
@@ -429,33 +496,69 @@ cfg.caption_contexte_dropout_prob = opt_num("caption-contexte-dropout", tonumber
 cfg.caption_mentalite_dropout_prob = opt_num("caption-mentalite-dropout", tonumber(cfg.caption_mentalite_dropout_prob) or 0.0)
 cfg.caption_texte_dropout_prob = opt_num("caption-texte-dropout", tonumber(cfg.caption_texte_dropout_prob) or 0.0)
 
-cfg.viz_taps_max_frames = Args.get_int(opts, "viz-taps-max-frames", (VIZ_DDPM and 32) or (cfg.viz_taps_max_frames or 24))
-cfg.viz_taps_max_side = Args.get_int(opts, "viz-taps-max-side", cfg.viz_taps_max_side or 128)
+-- Captions key/value + term-frequency boost (optionnel)
+if cfg.caption_kv_enable ~= nil then
+  cfg.caption_kv_enable = opt_bool("caption-kv-enable", cfg.caption_kv_enable ~= false)
+end
+if cfg.term_freq_boost_enable ~= nil then
+  cfg.term_freq_boost_enable = opt_bool("term-freq-boost-enable", cfg.term_freq_boost_enable ~= false)
+  cfg.term_freq_boost_use_tokens = opt_bool("term-freq-boost-use-tokens", cfg.term_freq_boost_use_tokens ~= false)
+  cfg.term_freq_boost_use_keywords = opt_bool("term-freq-boost-use-keywords", cfg.term_freq_boost_use_keywords ~= false)
+  cfg.term_freq_boost_top_k = Args.get_int(opts, "term-freq-boost-top-k", tonumber(cfg.term_freq_boost_top_k or 0) or 0)
+  cfg.term_freq_boost_repeat = Args.get_int(opts, "term-freq-boost-repeat", tonumber(cfg.term_freq_boost_repeat or 0) or 0)
+  cfg.term_freq_boost_start_step = Args.get_int(opts, "term-freq-boost-start-step", tonumber(cfg.term_freq_boost_start_step or 0) or 0)
+  cfg.term_freq_boost_update_every_steps = Args.get_int(opts, "term-freq-boost-update-every-steps", tonumber(cfg.term_freq_boost_update_every_steps or 0) or 0)
+end
+
+cfg.viz_taps_max_frames = Args.get_int(opts, "viz-taps", Args.get_int(opts, "viz-taps-max-frames", 64))
+cfg.viz_taps_max_side = Args.get_int(opts, "viz-taps-size", Args.get_int(opts, "viz-taps-max-side", 720))
 if VIZ_DDPM then
   cfg.viz_ddpm_every_steps = VIZ_DDPM_EVERY
   cfg.viz_ddpm_num_steps = VIZ_DDPM_STEPS
 end
 
+-- Image-space auxiliary loss (disabled by default)
+cfg.img_loss_weight = IMG_LOSS_WEIGHT
+cfg.img_loss_every_steps = IMG_LOSS_EVERY
+
 if Args.apply_overrides and opts and opts.override ~= nil then
   local ok_ov, err_ov = pcall(Args.apply_overrides, cfg, opts)
   if not ok_ov then die(err_ov) end
-  log("[ponyxl_ddpm_train] overrides applied")
+  log("overrides applied")
 end
 
-logf("[ponyxl_ddpm_train] vae-checkpoint=%s", tostring(VAE_CKPT))
-logf("[ponyxl_ddpm_train] ddpm: T=%d beta_start=%.6g beta_end=%.6g alpha_bar_end=%.6g steps_per_image=%d",
+log(string.format("vae-checkpoint=%s", tostring(VAE_CKPT)))
+log(string.format("ddpm: T=%d beta_start=%.6g beta_end=%.6g alpha_bar_end=%.6g steps_per_image=%d",
   cfg.ddpm_steps,
   cfg.ddpm_beta_start,
   cfg.ddpm_beta_end,
   ddpm_alpha_bar_end(cfg.ddpm_steps, cfg.ddpm_beta_start, cfg.ddpm_beta_end),
-  cfg.ddpm_steps_per_image)
-logf("[ponyxl_ddpm_train] loss: recon_loss=%s", tostring(cfg.recon_loss))
-logf("[ponyxl_ddpm_train] text: ctx_len=%d meanpool=%s", cfg.text_ctx_len, tostring(cfg.text_bottleneck_meanpool))
+  cfg.ddpm_steps_per_image))
+log(string.format("loss: recon_loss=%s", tostring(cfg.recon_loss)))
+log(string.format("timestep_cond=%s loss_weighting=%s min_snr_gamma=%.6g output_activation=%s cfg_dropout_prob=%.6g",
+  tostring(cfg.timestep_cond),
+  tostring(cfg.loss_weighting),
+  tonumber(cfg.min_snr_gamma or 0.0) or 0.0,
+  tostring(cfg.output_activation),
+  tonumber(cfg.cfg_dropout_prob or 0.0) or 0.0))
+log(string.format("kl: kl_beta=%.6g kl_warmup_steps=%d logvar_clip=[%.6g,%.6g]",
+  tonumber(cfg.kl_beta or 0.0) or 0.0,
+  tonumber(cfg.kl_warmup_steps or 0) or 0,
+  tonumber(cfg.logvar_clip_min or -10.0) or -10.0,
+  tonumber(cfg.logvar_clip_max or 10.0) or 10.0))
+log(string.format("text: ctx_len=%d meanpool=%s", cfg.text_ctx_len, tostring(cfg.text_bottleneck_meanpool)))
+log(string.format("optimizer: type=%s decay_strategy=%s warmup_steps=%d",
+  tostring(cfg.optimizer), tostring(cfg.decay_strategy), tonumber(cfg.warmup_steps or 0) or 0)
+)
+log(string.format("viz_taps: max_frames=%d max_side=%d (actif seulement si mimir est lancé avec --viz)",
+  tonumber(cfg.viz_taps_max_frames or 0) or 0, tonumber(cfg.viz_taps_max_side or 0) or 0)
+)
 
 local ok_create, err_create = Mimir.Model.create("ponyxl_ddpm", cfg)
 if not ok_create then die(err_create or "Model.create a échoué") end
+apply_dtype(cfg)
 
-log("[ponyxl_ddpm_train] allocate/init")
+log("  allocate/init")
 Mimir.Model.allocate_params()
 if INIT_WEIGHTS then
   Mimir.Model.init_weights("xavier", INIT_SEED)
@@ -468,18 +571,18 @@ end
 if CALIBRATE_VAE then
   local n_items = math.max(0, math.floor(tonumber(CALIBRATE_ITEMS) or 0))
   if n_items > 0 then
-    logf("[ponyxl_ddpm_train] calibrate vae_scale: items=%d", n_items)
+    log(string.format("calibrate vae_scale: items=%d", n_items))
     local sum, sumsq, n = 0.0, 0.0, 0
     local used = 0
     for j = 1, math.min(n_items, #train_indices) do
       local idx = train_indices[j]
       local s, err_s = load_image_text_item(idx)
       if not s then
-        log("[ponyxl_ddpm_train] calibrate skip item " .. tostring(idx) .. ": " .. tostring(err_s))
+        log("  calibrate skip item " .. tostring(idx) .. ": " .. tostring(err_s))
       else
         local m, err_m = Mimir.Model.ponyxl_ddpm_vae_mu_moments(s.img, s.w, s.h)
         if not m then
-          log("[ponyxl_ddpm_train] calibrate error: " .. tostring(err_m))
+          log("  calibrate error: " .. tostring(err_m))
         else
           sum = sum + (tonumber(m.sum) or 0.0)
           sumsq = sumsq + (tonumber(m.sumsq) or 0.0)
@@ -497,15 +600,36 @@ if CALIBRATE_VAE then
       local scale = 1.0 / std
       local ok_set, err_set = Mimir.Model.ponyxl_ddpm_set_vae_scale(scale)
       if not ok_set then
-        log("[ponyxl_ddpm_train] calibrate: set_vae_scale failed: " .. tostring(err_set))
+        log("  calibrate: set_vae_scale failed: " .. tostring(err_set))
       else
         local cur = Mimir.Model.ponyxl_ddpm_get_vae_scale()
-        logf("[ponyxl_ddpm_train] calibrate done: used=%d n=%d mean=%.6g std=%.6g -> vae_scale=%.6g (cur=%.6g)",
+        log(string.format("calibrate done: used=%d n=%d mean=%.6g std=%.6g -> vae_scale=%.6g (cur=%.6g)",
           used, n, mean, std, scale, tonumber(cur) or scale)
+        )
       end
     else
-      log("[ponyxl_ddpm_train] calibrate skipped: n==0")
+      log("  calibrate skipped: n==0")
     end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Sauvegarde debug JSON (avant train)
+-- ---------------------------------------------------------------------------
+
+if SAVE_PRETRAIN_DEBUG_JSON then
+  log(string.format("save pretrain debug_json: %s", tostring(PRETRAIN_DEBUG_JSON_PATH)))
+  local ok_dbg, err_dbg = Mimir.Serialization.save(PRETRAIN_DEBUG_JSON_PATH, "debug_json", {
+    include_checksums = true,
+    include_git_info = true,
+    include_optimizer_state = true,
+    max_values_per_tensor = 16,
+    -- best-effort: si dispo dans ce run
+    save_tokenizer = true,
+    save_encoder = true,
+  })
+  if not ok_dbg then
+    log("WARN: pretrain debug_json save failed: " .. tostring(err_dbg))
   end
 end
 
@@ -513,13 +637,13 @@ end
 -- Entraînement
 -- ---------------------------------------------------------------------------
 
-log("[ponyxl_ddpm_train] start")
-logf("[ponyxl_ddpm_train] epochs=%d lr=%.6g max_items=%d autosave_every_epochs=%d", EPOCHS, LR, MAX_ITEMS, AUTOSAVE_EVERY_EPOCHS)
+log("  start ....")
+log(string.format("epochs=%d lr=%.6g max_items=%d autosave_every_epochs=%d", EPOCHS, LR, MAX_ITEMS, AUTOSAVE_EVERY_EPOCHS))
 
 local ok_train, steps_or_err = Mimir.Model.train(EPOCHS, LR)
 if not ok_train then
   if steps_or_err == "STOP_REQUESTED" then
-    log("[ponyxl_ddpm_train] ⛔ stop demandé via Viz")
+    log("  ⛔ stop demandé via Viz")
   else
     die(steps_or_err or "Model.train a échoué")
   end

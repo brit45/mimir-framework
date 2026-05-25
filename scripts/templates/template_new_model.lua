@@ -12,25 +12,69 @@ local RUN_TAG = "my_model"
 ---@type ModelType Type du modèle à construire (doit correspondre au registry C++)
 -- Astuce: vous pouvez surcharger l'archi via env:
 --   MIMIR_ARCH=ponyxl_sdxl_stub ./bin/mimir --lua scripts/templates/template_new_model.lua
-local MODEL_TYPE = os.getenv("MIMIR_ARCH") or "t2i_autoencoder"
+-- Valeur par défaut: choisir une archi connue du repo.
+local MODEL_TYPE = os.getenv("MIMIR_ARCH") or "vae_conv"
 
 -- Récupérer une config par défaut depuis le registry C++
 ---@type table|nil, string?
 local CONFIG, err_cfg = Mimir.Architectures.default_config(MODEL_TYPE)
 if not CONFIG then
     log("⚠️ default_config() indisponible: " .. (err_cfg or "unknown"))
-    CONFIG = {}
+    -- Fallback: prendre une archi disponible (si l'API le permet)
+    local ok_list, list_or_err = pcall(function()
+        if type(Mimir.Architectures) == "table" and type(Mimir.Architectures.available) == "function" then
+            return Mimir.Architectures.available()
+        end
+        return nil, "Architectures.available() indisponible"
+    end)
+
+    if ok_list and type(list_or_err) == "table" and #list_or_err > 0 then
+        MODEL_TYPE = tostring(list_or_err[1])
+        log("ℹ️  Fallback: utilisation de l'architecture disponible: " .. tostring(MODEL_TYPE))
+        CONFIG, err_cfg = Mimir.Architectures.default_config(MODEL_TYPE)
+    end
+
+    if type(CONFIG) ~= "table" then
+        CONFIG = {}
+    end
+end
+
+local function apply_dtype(dtype)
+    if dtype == nil then return true end
+    local dtype_fn = nil
+    if type(Mimir) == "table" then
+        if type(Mimir.model) == "table" and type(Mimir.model.dtype) == "function" then
+            dtype_fn = Mimir.model.dtype
+        elseif type(Mimir.Model) == "table" and type(Mimir.Model.dtype) == "function" then
+            dtype_fn = Mimir.Model.dtype
+        end
+    end
+    if dtype_fn == nil then
+        -- Runtime ancienne / non supportée: ignorer silencieusement.
+        return true
+    end
+    local ok, dt_or_err = dtype_fn(dtype)
+    if ok == false then
+        return false, dt_or_err
+    end
+    return true
 end
 
 -- Ajustez ici selon votre dataset / contraintes mémoire
 CONFIG.seq_len = CONFIG.seq_len or 64
-CONFIG.max_vocab = CONFIG.max_vocab or 50000
+-- Convention moderne: vocab_size (legacy: max_vocab)
+CONFIG.vocab_size = CONFIG.vocab_size or CONFIG.max_vocab or 50000
+CONFIG.max_vocab = CONFIG.max_vocab or CONFIG.vocab_size -- legacy (compat)
 CONFIG.image_w = CONFIG.image_w or 256
 CONFIG.image_h = CONFIG.image_h or 256
 CONFIG.image_c = CONFIG.image_c or 4
 -- Convention moderne: d_model (certaines archis legacy utilisent encore embed_dim)
 CONFIG.d_model = CONFIG.d_model or CONFIG.embed_dim or 256
 CONFIG.embed_dim = CONFIG.embed_dim or CONFIG.d_model -- legacy (compat)
+
+-- Optionnel: dtype (préférence) via env/config.
+-- Ex: MIMIR_DTYPE=float16 ./bin/mimir --lua scripts/templates/template_new_model.lua
+CONFIG.dtype = CONFIG.dtype or os.getenv("MIMIR_DTYPE")
 
 -- Training (consommés par vos scripts, pas forcément par le binding)
 CONFIG.batch_size = CONFIG.batch_size or 8
@@ -109,7 +153,7 @@ log("━━━━━━━━━━━━━━━━━━━━━━━━━
 
 log("Configuration choisie:")
 log(string.format("  • seq_len: %d", CONFIG.seq_len))
-log(string.format("  • max_vocab: %d", CONFIG.max_vocab))
+log(string.format("  • vocab_size/max_vocab: %d", CONFIG.vocab_size or CONFIG.max_vocab or 0))
 log(string.format("  • d_model/embed_dim: %d", CONFIG.d_model))
 log(string.format("  • image: %dx%dx%d", CONFIG.image_w, CONFIG.image_h, CONFIG.image_c))
 
@@ -128,6 +172,18 @@ if not ok_create then
     os.exit(1)
 end
 log("✓ Modèle créé (type='" .. MODEL_TYPE .. "')")
+
+-- Appliquer la préférence dtype (si supportée par la runtime)
+do
+    local ok_dt, dt_or_err = apply_dtype(CONFIG.dtype)
+    if ok_dt == false then
+        log("❌ ERREUR: dtype invalide: " .. tostring(dt_or_err))
+        os.exit(1)
+    end
+    if CONFIG.dtype ~= nil then
+        log("✓ dtype appliqué: " .. tostring(CONFIG.dtype))
+    end
+end
 
 -- Construire l'architecture à partir de (MODEL_TYPE + CONFIG)
 ---@type boolean, integer|string?
@@ -213,26 +269,43 @@ log("\n━━━━━━━━━━━━━━━━━━━━━━━━�
 log("  6. Tokenizer (optionnel pour NLP)")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
----@type boolean
-local ok_tok = Mimir.Tokenizer.create(CONFIG.max_vocab)
-if not ok_tok then
-    log("❌ Échec de la création du tokenizer")
-    os.exit(1)
+local wants_tokenizer = false
+do
+    local mt = tostring(MODEL_TYPE or "")
+    if mt == "transformer" or mt:find("transformer", 1, true) ~= nil or mt:find("gpt", 1, true) ~= nil or mt:find("bert", 1, true) ~= nil then
+        wants_tokenizer = true
+    end
 end
 
--- Ajouter les tokens spéciaux
-Mimir.Tokenizer.add_token("[PAD]")
-Mimir.Tokenizer.add_token("[UNK]")
-Mimir.Tokenizer.add_token("[CLS]")
-Mimir.Tokenizer.add_token("[SEP]")
-Mimir.Tokenizer.add_token("[MASK]")  -- Pour masked language modeling
+if wants_tokenizer and type(Mimir.Tokenizer) == "table" and type(Mimir.Tokenizer.create) == "function" then
+    ---@type boolean
+    local ok_tok = Mimir.Tokenizer.create(CONFIG.vocab_size or CONFIG.max_vocab)
+    if not ok_tok then
+        log("⚠️  Tokenizer.create() a échoué (skip tokenizer)")
+    else
+        -- Ajouter les tokens spéciaux (si exposés)
+        if type(Mimir.Tokenizer.add_token) == "function" then
+            Mimir.Tokenizer.add_token("[PAD]")
+            Mimir.Tokenizer.add_token("[UNK]")
+            Mimir.Tokenizer.add_token("[CLS]")
+            Mimir.Tokenizer.add_token("[SEP]")
+            Mimir.Tokenizer.add_token("[MASK]")  -- Pour masked language modeling
+        end
 
--- Configurer la longueur max des séquences
-Mimir.Tokenizer.set_max_length(CONFIG.seq_len)
+        -- Configurer la longueur max des séquences
+        if type(Mimir.Tokenizer.set_max_length) == "function" then
+            Mimir.Tokenizer.set_max_length(CONFIG.seq_len)
+        end
 
-log(string.format("✓ Tokenizer créé (max_vocab: %d)", CONFIG.max_vocab))
-log(string.format("  Tokens spéciaux: PAD=%d, UNK=%d, CLS/SEQ=%d",
-    Mimir.Tokenizer.pad_id(), Mimir.Tokenizer.unk_id(), Mimir.Tokenizer.seq_id()))
+        log(string.format("✓ Tokenizer créé (vocab_size: %d)", CONFIG.vocab_size or CONFIG.max_vocab or 0))
+        if type(Mimir.Tokenizer.pad_id) == "function" and type(Mimir.Tokenizer.unk_id) == "function" and type(Mimir.Tokenizer.seq_id) == "function" then
+            log(string.format("  Tokens spéciaux: PAD=%d, UNK=%d, CLS/SEQ=%d",
+                Mimir.Tokenizer.pad_id(), Mimir.Tokenizer.unk_id(), Mimir.Tokenizer.seq_id()))
+        end
+    end
+else
+    log("ℹ️  Tokenizer non activé pour cette arch (skip)")
+end
 
 -- Exemple d'utilisation (décommenter si besoin)
 -- local test_text = "Hello world, this is a test."
@@ -431,7 +504,35 @@ Mimir.MemoryGuard.printStats()
 
 -- Stats Allocator
 log("\n📊 Stats Allocator:")
-Mimir.Allocator.print_stats()
+if type(Mimir.Allocator) == "table" then
+    local stats_fn = nil
+    if type(Mimir.Allocator.get_stats) == "function" then
+        stats_fn = Mimir.Allocator.get_stats
+    elseif type(Mimir.Allocator.getStats) == "function" then
+        stats_fn = Mimir.Allocator.getStats
+    end
+
+    if stats_fn ~= nil then
+        local ok_stats, stats = pcall(stats_fn)
+        if ok_stats and type(stats) == "table" then
+            -- Champs documentés: tensor_count, loaded_count (d'autres peuvent exister selon la runtime)
+            log(string.format("  • tensor_count: %s", tostring(stats.tensor_count)))
+            log(string.format("  • loaded_count: %s", tostring(stats.loaded_count)))
+            -- Dump léger des clés additionnelles
+            for k, v in pairs(stats) do
+                if k ~= "tensor_count" and k ~= "loaded_count" then
+                    log(string.format("  • %s: %s", tostring(k), tostring(v)))
+                end
+            end
+        else
+            log("  ⚠️  Allocator.get_stats() a échoué")
+        end
+    else
+        log("  ℹ️  Allocator.get_stats() indisponible (utilisez Mimir.Allocator.print_stats() manuellement si besoin)")
+    end
+else
+    log("  ℹ️  Allocator indisponible")
+end
 
 log("\n💡 Prochaines étapes:")
 log("  1. Implémenter votre boucle de training (étape 8)")

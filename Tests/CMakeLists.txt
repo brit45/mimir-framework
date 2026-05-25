@@ -25,10 +25,12 @@ mimir_add_test(FrameworkTest.MemoryGuard          test_memory_guard.cpp)
 mimir_add_test(FrameworkTest.OverrideParsing      test_override_parsing.cpp)
 mimir_add_test(RegistryTest.Aliases               test_registry_aliases.cpp)
 mimir_add_test(LuaTest.ApiBasics                  test_lua_api_basics.cpp)
+mimir_add_test(LuaTest.ModelDType                 test_lua_dtype_api.cpp)
 mimir_add_test(LuaTest.CreateFromConfigErrors     test_lua_create_from_config_errors.cpp)
 
 mimir_add_test(SerializationTest.SafeTensorsModel test_serialization_safetensors_model.cpp)
 mimir_add_test(SerializationTest.RawFolderModel   test_serialization_rawfolder_model.cpp)
+mimir_add_test(SerializationTest.DebugJsonModel    test_serialization_debug_json_model.cpp)
 mimir_add_test(SerializationTest.StrictMissingAssets test_serialization_strict_missing_assets.cpp)
 
 mimir_add_test(FrameworkTest.TokenizerJsonControlChars test_tokenizer_json_control_chars.cpp)
@@ -40,3 +42,7 @@ mimir_add_test(RuntimeTest.ResidualMerge              test_runtime_residual_merg
 mimir_add_test(RuntimeTest.AllLayerTypes              test_layers_all_types.cpp)
 mimir_add_test(ModelTest.WeightBlocks                test_model_weight_blocks.cpp)
 mimir_add_test(ModelTest.TrainStepFreeze             test_model_train_step_freeze.cpp)
+
+mimir_add_test(FrameworkTest.DType                   test_dtype.cpp)
+mimir_add_test(FrameworkTest.PlannerLifetimes        test_planner_lifetimes.cpp)
+mimir_add_test(FrameworkTest.PlannerFusionAndScratch test_planner_fusion_and_scratch.cpp)

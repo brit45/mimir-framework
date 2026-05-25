@@ -128,6 +128,20 @@ local function make_transformer_cfg(d_model, num_layers, num_heads)
     }
 end
 
+-- Apply optional dtype preference if provided by cfg or env.
+local function apply_dtype(cfg)
+    local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+    if dtype == nil then return true end
+    if type(Mimir) ~= "table" or type(Mimir.model) ~= "table" or type(Mimir.model.dtype) ~= "function" then
+        return true
+    end
+    local ok, dt_or_err = Mimir.model.dtype(dtype)
+    if ok == false then
+        error("dtype invalide: " .. tostring(dt_or_err))
+    end
+    return true
+end
+
 -- ================================================================
 -- Benchmark 2: Model Creation - Small
 -- ================================================================
@@ -150,6 +164,7 @@ timer("Transformer " .. config.num_layers_small .. "L x " .. config.d_model_smal
     end
 
     Mimir.Model.create("transformer", cfg)
+    apply_dtype(cfg)
     Mimir.Model.allocate_params()
     Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
@@ -177,6 +192,7 @@ timer("Transformer " .. config.num_layers_medium .. "L x " .. config.d_model_med
     end
 
     Mimir.Model.create("transformer", cfg)
+    apply_dtype(cfg)
     Mimir.Model.allocate_params()
     Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
@@ -205,6 +221,7 @@ if mode ~= "quick" then
         end
 
         Mimir.Model.create("transformer", cfg)
+        apply_dtype(cfg)
         Mimir.Model.allocate_params()
         Mimir.Model.init_weights("xavier", 42)
         log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
@@ -223,6 +240,7 @@ timer("Transformer non-causal", function()
     local cfg = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
     cfg.causal = false
     Mimir.Model.create("transformer", cfg)
+    apply_dtype(cfg)
     Mimir.Model.allocate_params()
     Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
@@ -233,6 +251,7 @@ timer("Transformer causal", function()
     local cfg = make_transformer_cfg(config.d_model_medium, config.num_layers_medium, 8)
     cfg.causal = true
     Mimir.Model.create("transformer", cfg)
+    apply_dtype(cfg)
     Mimir.Model.allocate_params()
     Mimir.Model.init_weights("xavier", 42)
     log("   📊 Paramètres: " .. tostring(Mimir.Model.total_params()))
@@ -250,6 +269,7 @@ local checkpoint_path_st = checkpoint_path .. ".safetensors"
 
 tokenizer_create(config.vocab_size)
 Mimir.Model.create("transformer", small_config)
+apply_dtype(small_config)
 Mimir.Model.allocate_params()
 Mimir.Model.init_weights("xavier", 42)
 
@@ -269,6 +289,7 @@ end
 timer("Load checkpoint", function()
     tokenizer_create(config.vocab_size)
     Mimir.Model.create("transformer", small_config)
+    apply_dtype(small_config)
     Mimir.Model.allocate_params()
     Mimir.Serialization.load(checkpoint_path_st)
 end)

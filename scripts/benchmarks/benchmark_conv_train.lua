@@ -25,6 +25,17 @@ if Mimir.Model and Mimir.Model.set_hardware then
   if not ok then log("⚠️ set_hardware(true) failed") end
 end
 
+local function apply_dtype(cfg)
+  local dtype = (type(cfg) == "table" and cfg.dtype) or os.getenv("MIMIR_DTYPE")
+  if dtype == nil then return true end
+  if type(Mimir) ~= "table" or type(Mimir.model) ~= "table" or type(Mimir.model.dtype) ~= "function" then
+    return true
+  end
+  local ok, dt_or_err = Mimir.model.dtype(dtype)
+  assert(ok ~= false, tostring(dt_or_err or "Model.dtype failed"))
+  return true
+end
+
 -- ======================================================================
 -- 1) Build model (BasicMLP)
 -- ======================================================================
@@ -34,14 +45,18 @@ log("━━━━━━━━━━━━━━━━━━━━━━━━━
 
 local DIM = 256
 
-local ok, err = Mimir.Model.create("basic_mlp", {
+local cfg = {
   input_dim = DIM,
   hidden_dim = DIM,
   output_dim = DIM,
   hidden_layers = 2,
   dropout = 0.0
-})
+}
+
+local ok, err = Mimir.Model.create("basic_mlp", cfg)
 assert(ok ~= false, tostring(err or "Model.create(basic_mlp) failed"))
+
+apply_dtype(cfg)
 
 assert(Mimir.Model.allocate_params())
 assert(Mimir.Model.init_weights("xavier", 42))
