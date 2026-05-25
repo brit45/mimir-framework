@@ -10,6 +10,7 @@
 #include "Encoder.hpp"
 #include "ConfigOverrides.hpp"
 #include "runtimes/AbstractRuntime.hpp"
+#include "Serialization/Serialization.hpp"
 #include "include/json.hpp"
 #include <iostream>
 #include <fstream>
@@ -226,10 +227,17 @@ void printUsage(const char *prog)
 
 int main(int argc, char **argv)
 {
-    std::cout << "╔════════════════════════════════════════╗\n";
-    std::cout << "║       Mímir Framework v2.4.0           ║\n";
-    std::cout << "║     Deep Learning Architectures        ║\n";
-    std::cout << "╚════════════════════════════════════════╝\n\n";
+    {
+        const std::string ver = get_mimir_version();
+        // Largeur interne de la boîte = 40 chars affichage.
+        // Préfixe "       Mímir Framework v" = 24 chars affichage (ASCII sauf "í" qui occupe 2 octets
+        // mais 1 char affichage — on calcule le padding sur la taille d'affichage).
+        const int trailing = std::max(0, 40 - 24 - static_cast<int>(ver.size()));
+        std::cout << "╔════════════════════════════════════════╗\n";
+        std::cout << "║       Mímir Framework v" << ver << std::string(trailing, ' ') << "║\n";
+        std::cout << "║     Deep Learning Architectures        ║\n";
+        std::cout << "╚════════════════════════════════════════╝\n\n";
+    }
 
     // Préparer le spill dir + nettoyage fin de run.
     {
