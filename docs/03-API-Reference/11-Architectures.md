@@ -275,3 +275,67 @@ local img = model:text2img_sdxl_latent_diffusion(prompt, seed, steps, guidance_s
 ```json
 { "stub_only": false, "q_len": 32, "kv_len": 32, "d_model": 64, "num_heads": 4, "num_layers": 2 }
 ```
+
+### Modèles HuggingFace / SDXL (checkpoints externes)
+
+Ces architectures sont conçues pour charger/refléter des checkpoints HuggingFace/PyTorch
+(SDXL notamment). Utilisez-les avec un mapping JSON et `Mimir.Serialization.load(...)`.
+Voir les scripts d'exemple dans `scripts/inferences/`.
+
+**`external_safetensors_base`** — Base non-exécutable qui reflète exactement les clés d'un
+checkpoint safetensors externe (utile pour inspecter/mapper un fichier source).
+
+```json
+{ "source_safetensors": "", "max_tensors": 0 }
+```
+
+Champs optionnels supplémentaires : `include_prefixes` / `exclude_prefixes`
+(listes de préfixes pour filtrer les tenseurs créés).
+
+**`hf_clip_text_encoder_1`** — Encodeur texte CLIP/SDXL exécutable
+(`conditioner.embedders.0`).
+
+```json
+{
+  "vocab_size": 49408, "padding_idx": 0, "seq_len": 77, "d_model": 768,
+  "num_layers": 12, "num_heads": 12, "mlp_hidden": 3072, "causal": true
+}
+```
+
+**`hf_clip_text_encoder_2`** — Encodeur texte OpenCLIP/SDXL exécutable
+(`conditioner.embedders.1`), avec projection et logit scale optionnels.
+
+```json
+{
+  "vocab_size": 49408, "padding_idx": 0, "seq_len": 77, "d_model": 1280,
+  "num_layers": 32, "num_heads": 20, "mlp_hidden": 5120,
+  "proj_dim": 1280, "causal": true, "include_logit_scale": true
+}
+```
+
+**`hf_sdxl_transformer_block`** — Bloc transformer SDXL exécutable
+(SelfAttention + CrossAttention + FeedForward).
+
+```json
+{
+  "q_len": 64, "kv_len": 77, "d_model": 640, "context_dim": 2048,
+  "num_heads": 10, "ff_hidden": 2560,
+  "self_attn_qkv_bias": false, "self_attn_out_bias": true, "cross_attn_out_bias": true
+}
+```
+
+**`hf_vae_decoder`** — Décodeur VAE SDXL exécutable
+(`first_stage_model.decoder`).
+
+```json
+{
+  "image_w": 512, "image_h": 512, "image_c": 3,
+  "latent_w": 64, "latent_h": 64, "latent_c": 4,
+  "num_heads": 1, "norm_groups": 32
+}
+```
+
+> Les valeurs ci-dessus sont indicatives : utilisez
+> `Mimir.Architectures.default_config(name)` (ou `info(name)`) pour obtenir la config
+> exacte à jour côté runtime.
+
