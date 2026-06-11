@@ -1,7 +1,7 @@
 # Documentation Mímir (réécrite)
 
-Version framework : **3.0.0**  
-Révision documentation : **2026-05-25**
+Version framework : **3.0.1**  
+Révision documentation : **2026-06-05**
 
 Cette documentation remplace l’ancienne doc (archivée dans [docs_archive/2026-02-14/](../docs_archive/2026-02-14/)).
 
@@ -29,7 +29,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 ./bin/mimir --lua scripts/templates/template_new_model.lua
 ```
 
-- Démarrer rapidement avec la Pipeline API (v3.0)
+- Démarrer rapidement avec la Pipeline API (v3.0+)
   - Lis : [docs/02-User-Guide/06-Lua-Scripting.md](02-User-Guide/06-Lua-Scripting.md)
   - Lance :
 
@@ -72,7 +72,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 | `text_ids` | ids int | entrée texte dédiée (NLP) |
 | `x` | float | sortie principale (convention) |
 
-### Champs de config Transformer (v3.0)
+### Champs de config Transformer (v3.0+)
 
 | Champ | Sens |
 | --- | --- |
@@ -98,6 +98,12 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - CLI (binaire `mimir`) : [docs/01-Getting-Started/03-CLI.md](01-Getting-Started/03-CLI.md)
 - Organisation du repo : [docs/01-Getting-Started/04-Repo-Layout.md](01-Getting-Started/04-Repo-Layout.md)
 - Smoketest (valider l’environnement rapidement) : [docs/01-Getting-Started/05-Smoketest.md](01-Getting-Started/05-Smoketest.md)
+
+Parcours conseillé si tu reviens sur le projet après plusieurs semaines :
+
+1. valide le binaire avec le smoketest,
+2. relis le lifecycle modèle,
+3. seulement ensuite ouvre la référence API détaillée.
 
 ## 2) Utiliser le framework
 
@@ -134,7 +140,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - Globals & aliases : [docs/03-API-Reference/19-Globals.md](03-API-Reference/19-Globals.md)
 - Mapping Lua ↔ C++ (sommaire) : [docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md](03-API-Reference/20-Lua-API-Cpp-Mapping.md)
 
-## 🆕 Nouveautés v3.0.0 (résumé)
+## 🆕 Nouveautés de la série 3.0 (résumé)
 
 | Quoi | Où |
 | --- | --- |
@@ -146,6 +152,8 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 | Nouveaux templates : `template_pipeline_only.lua` + `template_pipeline_args.lua` | [scripts/README.md](../scripts/README.md) |
 | pipeline_api.lua : dtype robuste (Mimir.model / Mimir.Model) | [scripts/README.md](../scripts/README.md) |
 | Détection hardware au démarrage (AVX2/FMA/F16C/BMI2 + CUDA/ROCm) | `bin/mimir --help` |
+
+Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent encore de fonctionnalités “nouvelles en v3.0”. Lis cela comme “introduit dans la branche 3.0, toujours valable en 3.0.1”, et non comme une indication que la version courante serait restée sur la première release de cette branche.
 
 ## 4) Internals (comment ça marche)
 

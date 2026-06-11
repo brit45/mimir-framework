@@ -12,6 +12,8 @@
 --
 -- Sortie: image PPM (P6) RGB, pixels en [0,255].
 
+---@diagnostic disable: need-check-nil, inject-field
+
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
 
@@ -95,7 +97,7 @@ local function read_ppm(path)
       local c = string.char(b)
       if c == "#" then
         -- skip comment line
-        f:read("*l")
+        local _ = f:read("*l")
       elseif c:match("%s") then
         -- keep skipping whitespace
       else
@@ -338,8 +340,11 @@ local function infer_cfg_from_checkpoint(ckpt_dir)
   end
 
   local image_c = 3
-  if type(enc_conv_in) == "table" and tonumber(enc_conv_in.in_channels) then
-    image_c = math.max(1, math.floor(tonumber(enc_conv_in.in_channels)))
+  if type(enc_conv_in) == "table" then
+    local in_channels = tonumber(enc_conv_in.in_channels)
+    if in_channels then
+      image_c = math.max(1, math.floor(in_channels))
+    end
   end
 
   local base_channels = tonumber(dec_conv_in.out_channels) or 0
@@ -450,8 +455,14 @@ end
 local cfg = Mimir.Architectures.default_config("vae_conv")
 if type(cfg) ~= "table" then die("default_config(vae_conv) failed") end
 
-cfg.image_w = inferred.image_w
-cfg.image_h = inferred.image_h
+local inferred_image_w = math.tointeger(inferred.image_w)
+local inferred_image_h = math.tointeger(inferred.image_h)
+if not inferred_image_w or not inferred_image_h then
+  die("infer_cfg_from_checkpoint returned non-integer image size")
+end
+
+cfg.image_w = inferred_image_w
+cfg.image_h = inferred_image_h
 cfg.image_c = inferred.image_c
 cfg.latent_h = inferred.latent_h
 cfg.latent_w = inferred.latent_w

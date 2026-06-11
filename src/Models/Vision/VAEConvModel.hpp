@@ -5,7 +5,10 @@
 #include <string>
 
 // VAEConvModel:
-// - Convolutional VAE (downsample -> mu/logvar -> reparameterize -> upsample)
+// - VAE PUREMENT CONVOLUTIONNEL (downsample -> mu/logvar -> reparameterize -> upsample)
+// - Aucune SelfAttention ni couche dense/texte : uniquement Conv2d /
+//   ConvTranspose2d / GroupNorm|LayerNorm / SiLU / résidus Add / UpsampleNearest
+//   / Reparameterize (+ adaptateurs de disposition Reshape/Permute pour l'I/O).
 // - Output packs: [recon(image_dim), mu(latent_dim), logvar(latent_dim)]
 // - Latent is spatial: latent_dim = latent_h * latent_w * latent_c (CHW)
 
@@ -30,12 +33,13 @@ public:
         // ---- Blocs optionnels ----
 
         // Blocs ResNet (conv3x3->SiLU->conv3x3 + skip) dans l'encodeur et le décodeur.
-        // Activé via --resnet / cfg.use_attention.
+        // Entièrement convolutionnels. Activé via --resnet / cfg.use_attention.
         bool use_attention = true;
 
-        // SelfAttention spatiale au bottleneck (latent resolution).
-        // Activé via --attn / cfg.use_attn.
-        bool use_attn = true;
+        // [DÉPRÉCIÉ / IGNORÉ] Le modèle est désormais purement convolutionnel :
+        // la SelfAttention spatiale n'est plus émise dans le graphe. Conservé
+        // uniquement pour compatibilité de configuration (JSON/Lua).
+        bool use_attn = false;
 
         // Normalisation dans l'encodeur : "none" | "groupnorm" | "layernorm"
         std::string enc_norm = "groupnorm";
@@ -43,18 +47,30 @@ public:
         // Nombre maximum de groupes pour GroupNorm (sera clampé au meilleur diviseur ≤ cette valeur).
         int enc_gn_groups = 32;
 
-        // Nombre de têtes pour la SelfAttention spatiale.
+        // Normalisation dans le décodeur : "none" | "groupnorm" | "layernorm".
+        // Si vide, reprend enc_norm.
+        std::string dec_norm = "groupnorm";
+
+        // Nombre maximum de groupes pour la GroupNorm du décodeur.
+        // Si <= 0, reprend enc_gn_groups.
+        int dec_gn_groups = 32;
+
+        // Upsampling du décodeur : "conv_transpose" | "nearest_conv".
+        std::string decoder_upsample = "conv_transpose";
+
+        // [DÉPRÉCIÉ / IGNORÉ] Têtes d'attention (plus d'attention dans le graphe).
         int attn_heads = 4;
 
         // Garde-fou ResNet : bloc ResNet injecté seulement si h*w <= resnet_max_tokens.
         // 0 = pas de garde-fou (toujours injecté).
         int resnet_max_tokens = 0;
 
-        // Garde-fou SelfAttention : attn injectée seulement si h*w <= attn_max_tokens.
-        // 0 = pas de garde-fou.
+        // [DÉPRÉCIÉ / IGNORÉ] Garde-fou SelfAttention (plus d'attention dans le graphe).
         int attn_max_tokens = 0;
 
-        // Optional: texte (conditionnement + alignement). Si false, VAEConv reste image-only.
+        // [DÉPRÉCIÉ / IGNORÉ] Conditionnement texte. Un modèle purement convolutionnel
+        // ne peut pas embarquer le chemin dense texte (Embedding/Pool/Linear) ; ces
+        // champs sont conservés pour compatibilité mais n'affectent plus le graphe.
         bool text_cond = false;
         int vocab_size = 32000;
         int seq_len = 64;
@@ -69,8 +85,7 @@ public:
     static void buildInto(Model& model, const Config& cfg);
     
     // Decoder-only graph: input is z (latent CHW vector), output is recon (RGB vector).
-    // Layer names match the decoder portion of buildInto() so checkpoints can be loaded
-    // with strict_mode=false (encoder tensors will be ignored).
+    // Layer names match the decoder portion of buildInto().
     static void buildDecoderInto(Model& model, const Config& cfg);
 
 private:

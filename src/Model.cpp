@@ -30,6 +30,7 @@
 #include <iomanip>
 #include <ctime>
 #include <iostream>
+#include <array>
 #include <cmath>
 #include <sstream>
 #include <cstdlib>
@@ -1345,6 +1346,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
             case LayerType::Linear:
             case LayerType::LayerNorm:
             case LayerType::GELU:
+            case LayerType::GEGLU:
             case LayerType::MultiHeadAttention:
             case LayerType::SelfAttention:
             case LayerType::Embedding:
@@ -1392,7 +1394,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
 
         try {
             if (layer.type_enum == LayerType::Embedding) {
-                const std::vector<std::string>& input_names = layer.inputs.empty() ? kDefaultInputNameX : layer.inputs;
+                const std::vector<std::string>& input_names =
+                    (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
                 const std::vector<int>& ids = getTensorInt(input_names[0]);
 
                 // Snapshot inputs for backward (ids stockés en float)
@@ -1448,7 +1451,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
             } else {
                 // Pour les autres layers, reprendre le chemin float habituel:
                 // récupérer les inputs float depuis tensor_store.
-                const std::vector<std::string>& input_names = layer.inputs.empty() ? kDefaultInputNameX : layer.inputs;
+                const std::vector<std::string>& input_names =
+                    (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
 
                 auto& inputs = scratch_input_ptrs_;
                 inputs.clear();
@@ -1477,13 +1481,21 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
                     forward_state.layer_output_masks.emplace_back();
                 }
 
-                const std::vector<float>& x = *inputs[0];
+                static const std::vector<float> kEmptyInput;
+                const std::vector<float>& x = (!inputs.empty() && inputs[0] != nullptr) ? *inputs[0] : kEmptyInput;
 
                 // Réutiliser le switch-case existant en appelant une petite lambda locale
                 // en se basant sur le même dispatch que forwardPass(float).
                 switch (layer.type_enum) {
                     case LayerType::Identity: {
                         layer_output = x;
+                        break;
+                    }
+                    case LayerType::Constant: {
+                        RUNTIME_CHECK(layer.getWeights() != nullptr, "Constant: weights not initialized");
+                        const float* src = layer.getWeights();
+                        const size_t n = layer.getWeightsSize();
+                        layer_output.assign(src, src + n);
                         break;
                     }
                     case LayerType::Linear: {
@@ -1496,6 +1508,10 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
                     }
                     case LayerType::GELU: {
                         layer_output = LayerOps::gelu_forward(x);
+                        break;
+                    }
+                    case LayerType::GEGLU: {
+                        layer_output = LayerOps::geglu_forward(x, layer.seq_len, layer.out_features);
                         break;
                     }
                     case LayerType::ReLU: {
@@ -1533,6 +1549,25 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
                         layer_output = LayerOps::concat_forward(inputs_vec, layer.concat_axis);
                         break;
                     }
+                    case LayerType::TokenMeanPool: {
+                        const int seq_len = layer.seq_len > 0 ? layer.seq_len : 0;
+                        const int embed_dim = layer.embed_dim > 0 ? layer.embed_dim : 0;
+                        RUNTIME_CHECK(seq_len > 0 && embed_dim > 0, "TokenMeanPool: seq_len and embed_dim must be set");
+                        RUNTIME_CHECK(static_cast<int>(x.size()) == seq_len * embed_dim, "TokenMeanPool: input size mismatch");
+
+                        layer_output.assign(static_cast<size_t>(embed_dim), 0.0f);
+                        for (int t = 0; t < seq_len; ++t) {
+                            const int base = t * embed_dim;
+                            for (int d = 0; d < embed_dim; ++d) {
+                                layer_output[static_cast<size_t>(d)] += x[static_cast<size_t>(base + d)];
+                            }
+                        }
+                        const float inv = 1.0f / static_cast<float>(seq_len);
+                        for (int d = 0; d < embed_dim; ++d) {
+                            layer_output[static_cast<size_t>(d)] *= inv;
+                        }
+                        break;
+                    }
                     case LayerType::MultiHeadAttention:
                     case LayerType::SelfAttention: {
                         RUNTIME_CHECK(layer.getWeights() != nullptr, "Attention: weights not initialized");
@@ -1544,13 +1579,26 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
                         const float* weights = layer.getWeights();
                         int qkv_size = embed_dim * embed_dim * 3;
                         int out_size = embed_dim * embed_dim;
+                        int qkv_bias_size = embed_dim * 3;
+                        int out_bias_size = embed_dim;
+                        size_t expected_no_bias = static_cast<size_t>(qkv_size + out_size);
+                        size_t expected_with_bias = expected_no_bias + static_cast<size_t>(qkv_bias_size + out_bias_size);
+                        size_t actual_size = layer.getWeightsSize();
+                        bool has_bias = (actual_size >= expected_with_bias);
                         std::vector<float> qkv_weight(weights, weights + qkv_size);
                         std::vector<float> out_weight(weights + qkv_size, weights + qkv_size + out_size);
+                        std::vector<float> qkv_bias;
+                        std::vector<float> out_bias;
+                        if (has_bias) {
+                            const float* bias_ptr = weights + qkv_size + out_size;
+                            qkv_bias.assign(bias_ptr, bias_ptr + qkv_bias_size);
+                            out_bias.assign(bias_ptr + qkv_bias_size, bias_ptr + qkv_bias_size + out_bias_size);
+                        }
 
                         if (layer.type_enum == LayerType::SelfAttention) {
-                            layer_output = LayerOps::self_attention_forward(x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal);
+                            layer_output = LayerOps::self_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
                         } else {
-                            layer_output = LayerOps::multihead_attention_forward(x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal);
+                            layer_output = LayerOps::multihead_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
                         }
                         break;
                     }
@@ -1666,6 +1714,12 @@ const std::vector<float>& Model::forwardPassNamedView(
     auto iti = float_inputs.find("__input__");
     if (iti != float_inputs.end()) {
         return forwardPassView(iti->second, training);
+    }
+
+    // Compat: beaucoup de tests/unités injectent une seule entrée nommée (ex: x0)
+    // sans alias explicite vers "x". Utiliser cette unique entrée comme ancre du forward.
+    if (float_inputs.size() == 1) {
+        return forwardPassView(float_inputs.begin()->second, training);
     }
 
     static const std::vector<float> empty;
@@ -4996,23 +5050,30 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     const bool planner_enabled = env_flag_true("MIMIR_ENABLE_PLANNER", true);
     const bool fusion_enabled = env_flag_true("MIMIR_ENABLE_FUSION", true);
     if (planner_enabled) {
-        if (!static_plan_.built || static_plan_.fuse_conv2d_relu.size() != layers.size()) {
-            static_plan_.fuse_conv2d_relu.assign(layers.size(), 0);
-            for (size_t i = 0; i < layers.size(); ++i) {
-                const Layer& l = layers[i];
-                // Build-time capability; runtime may still disable in training.
-                if (l.type_enum == LayerType::Conv2d && l.activation == ActivationType::RELU) {
-                    static_plan_.fuse_conv2d_relu[i] = 1;
-                }
-            }
+        if (!static_plan_.built ||
+            static_plan_.built_for_training != training ||
+            static_plan_.execution.ops.size() != layers.size()) {
+            static_plan_.execution = Mimir::Planning::build_execution_plan_static(layers, training);
             static_plan_.built = true;
+            static_plan_.built_for_training = training;
         }
 
         if (!static_plan_.dumped && env_flag_true("MIMIR_PLANNER_DUMP", false)) {
             static_plan_.dumped = true;
             const auto lifetimes = Mimir::Planning::analyze_tensor_lifetimes(layers);
             const auto scratch = Mimir::Planning::plan_conv2d_fastpath_scratch(layers);
+            size_t generic_activation_fusions = 0;
+            size_t generic_unary_fusions = 0;
+            size_t generic_split_fusions = 0;
+            for (size_t i = 0; i < static_plan_.execution.fuse_activation_consumer.size(); ++i) {
+                if (static_plan_.execution.fuse_activation_consumer[i] >= 0) ++generic_activation_fusions;
+                if (static_plan_.execution.fuse_unary_consumer[i] >= 0) ++generic_unary_fusions;
+                if (static_plan_.execution.fuse_split_consumer[i] >= 0) ++generic_split_fusions;
+            }
             std::cerr << "[planner] tensors=" << lifetimes.size()
+                      << " generic_activation_fusions=" << generic_activation_fusions
+                      << " generic_unary_fusions=" << generic_unary_fusions
+                      << " generic_split_fusions=" << generic_split_fusions
                       << " conv2d_scratch_bytes={wT=" << scratch.wT_bytes
                       << ", xcol=" << scratch.xcol_bytes
                       << ", c=" << scratch.c_bytes
@@ -5055,7 +5116,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Par défaut: snapshot valeurs (sécurité), sauf si le backward n'utilise que des tailles.
         // Important: pour Add/Concat/Split/Subtract/TokenMeanPool/Upsample/Identity, on évite la copie.
         if (layer.type == "Add" || layer.type == "Concat" || layer.type == "Split" || layer.type == "Subtract" ||
-            layer.type == "TokenMeanPool" || layer.type == "UpsampleNearest" || layer.type == "Identity") {
+            layer.type == "TokenMeanPool" || layer.type == "UpsampleNearest" || layer.type == "Identity" || layer.type == "Constant") {
             return false;
         }
         // Dropout backward se base sur un masque (output), pas sur l'input.
@@ -5092,15 +5153,140 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // qui ne renseignent pas output_width/output_height (ex: activations).
     int viz_last_w = 0;
     int viz_last_h = 0;
+
+    auto apply_fused_standalone_activation = [&](std::vector<float>& data, const Layer& act_layer) {
+        switch (act_layer.type_enum) {
+            case LayerType::ReLU:
+                data = LayerOps::relu_forward(data);
+                break;
+            case LayerType::LeakyReLU: {
+                const float alpha = act_layer.leaky_relu_alpha > 0 ? act_layer.leaky_relu_alpha : 0.01f;
+                data = LayerOpsExt::leaky_relu_forward(data, alpha);
+                break;
+            }
+            case LayerType::GELU:
+                data = LayerOps::gelu_forward(data);
+                break;
+            case LayerType::GEGLU:
+                data = LayerOps::geglu_forward(data, act_layer.seq_len, act_layer.out_features);
+                break;
+            case LayerType::SiLU:
+                data = LayerOps::silu_forward(data);
+                break;
+            case LayerType::Tanh:
+                data = LayerOps::tanh_forward(data);
+                break;
+            case LayerType::Sigmoid:
+                data = LayerOps::sigmoid_forward(data);
+                break;
+            case LayerType::Softmax:
+            case LayerType::LogSoftmax:
+                data = LayerOps::softmax_forward(data, act_layer);
+                break;
+            case LayerType::Softplus:
+                data = LayerOpsExt::softplus_forward(data);
+                break;
+            case LayerType::Mish:
+                data = LayerOpsExt::mish_forward(data);
+                break;
+            case LayerType::HardSigmoid:
+                data = LayerOpsExt::hard_sigmoid_forward(data);
+                break;
+            case LayerType::HardSwish:
+                data = LayerOpsExt::hard_swish_forward(data);
+                break;
+            default:
+                throw std::runtime_error("Unsupported fused activation layer: " + act_layer.type);
+        }
+    };
+
+    auto apply_fused_unary_shape = [&](std::vector<float>& data, const Layer& unary_layer) {
+        switch (unary_layer.type_enum) {
+            case LayerType::Identity:
+                data = LayerOps::identity_forward(data);
+                break;
+            case LayerType::Flatten:
+                data = LayerOps::flatten_forward(data, unary_layer);
+                break;
+            case LayerType::Reshape:
+            case LayerType::View:
+                data = LayerOps::reshape_forward(data, unary_layer);
+                break;
+            case LayerType::Transpose:
+                RUNTIME_CHECK(
+                    unary_layer.in_features > 0 && unary_layer.out_features > 0,
+                    "Fused Transpose: in_features and out_features must be set"
+                );
+                data = LayerOps::transpose_forward(data, unary_layer.in_features, unary_layer.out_features);
+                break;
+            case LayerType::Permute: {
+                RUNTIME_CHECK(
+                    !unary_layer.permute_dims.empty(),
+                    "Fused Permute: permute_dims must be configured"
+                );
+                std::vector<int> shape = unary_layer.shape;
+                if (shape.empty()) {
+                    shape = {1, static_cast<int>(data.size())};
+                }
+                data = LayerOps::permute_forward(data, unary_layer.permute_dims, shape);
+                break;
+            }
+            case LayerType::Squeeze: {
+                std::vector<int> input_shape = {static_cast<int>(data.size())};
+                std::vector<int> output_shape;
+                data = LayerOpsExt::squeeze_forward(data, input_shape, output_shape, unary_layer.squeeze_dim);
+                break;
+            }
+            case LayerType::Unsqueeze: {
+                std::vector<int> input_shape = {static_cast<int>(data.size())};
+                std::vector<int> output_shape;
+                RUNTIME_CHECK(
+                    unary_layer.unsqueeze_dim >= -10 && unary_layer.unsqueeze_dim < 10,
+                    "Fused Unsqueeze: unsqueeze_dim must be set (valid range: -10 to 10)"
+                );
+                data = LayerOpsExt::unsqueeze_forward(data, input_shape, output_shape, unary_layer.unsqueeze_dim);
+                break;
+            }
+            default:
+                throw std::runtime_error("Unsupported fused unary shape layer: " + unary_layer.type);
+        }
+    };
+
+    auto apply_fused_split_or_chunk = [&](std::vector<float>& data, const Layer& split_layer) {
+        const std::string output_base = split_layer.output.empty() ? "x" : split_layer.output;
+        if (split_layer.type_enum == LayerType::Split) {
+            RUNTIME_CHECK(!split_layer.split_sizes.empty(), "Split: split_sizes must be configured");
+            auto splits = LayerOps::split_forward(data, split_layer.split_sizes, split_layer.split_axis);
+            for (size_t i = 0; i < splits.size(); ++i) {
+                storeTensor(output_base + "_" + std::to_string(i), std::move(splits[i]));
+            }
+            data = getTensor(output_base + "_0");
+            return;
+        }
+
+        RUNTIME_CHECK(split_layer.num_chunks > 0, "Chunk: num_chunks must be set");
+        auto chunks = LayerOpsExt::chunk_forward(data, split_layer.num_chunks, split_layer.split_axis);
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            storeTensor(output_base + "_" + std::to_string(i), std::move(chunks[i]));
+        }
+        data = getTensor(output_base + "_0");
+    };
     
     for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        if (planner_enabled && static_plan_.built &&
+            layer_idx < static_plan_.execution.skip_layer.size() &&
+            static_plan_.execution.skip_layer[layer_idx] != 0) {
+            continue;
+        }
+
         const auto &layer = layers[layer_idx];
         
         // ====================================================================
         // RETRIEVE INPUTS (multi-input support)
         // ====================================================================
         
-        const std::vector<std::string>& input_names = layer.inputs.empty() ? kDefaultInputNameX : layer.inputs;
+        const std::vector<std::string>& input_names =
+            (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
 
         auto& inputs = scratch_input_ptrs_;
         inputs.clear();
@@ -5179,8 +5365,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             forward_state.layer_output_masks.emplace_back();
         }
 
-        // Pour compatibilité: x est toujours inputs[0]
-        const std::vector<float>& x = *inputs[0];
+        // Pour compatibilité: x est généralement inputs[0], sauf pour des layers sans entrée comme Constant.
+        static const std::vector<float> kEmptyInput;
+        const std::vector<float>& x = (!inputs.empty() && inputs[0] != nullptr) ? *inputs[0] : kEmptyInput;
         
         std::vector<float> layer_output;
         
@@ -5267,8 +5454,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Fusion: Conv2d + ReLU (inference only)
         const bool fuse_relu = fusion_enabled && !training &&
                        static_plan_.built &&
-                       layer_idx < static_plan_.fuse_conv2d_relu.size() &&
-                       static_plan_.fuse_conv2d_relu[layer_idx] != 0 &&
+                       layer_idx < static_plan_.execution.fuse_relu_for_conv2d.size() &&
+                       static_plan_.execution.fuse_relu_for_conv2d[layer_idx] != 0 &&
                        layer.activation == ActivationType::RELU;
 
         // Fast path: im2col + GEMM (tuilé) via HardwareOpt::matmul_fma_saturated
@@ -5301,9 +5488,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         if (can_fast && out_spatial > 0 && K > 0 && out_channels > 0) {
             // Transpose des poids: [out_c x K] -> [K x out_c]
             const size_t w_need = static_cast<size_t>(out_channels) * static_cast<size_t>(K);
-            if (layer.getWeights() == nullptr || layer.getWeightsSize() < w_need) {
+            const size_t total_need = w_need + (layer.use_bias ? static_cast<size_t>(out_channels) : 0ULL);
+            if (layer.getWeights() == nullptr || layer.getWeightsSize() < total_need) {
                 throw std::runtime_error("Conv2d: weights invalid");
             }
+            const float* bias_ptr = layer.use_bias ? (layer_weights + w_need) : nullptr;
 
             const bool dense_input = (x.size() == static_cast<size_t>(in_channels) * static_cast<size_t>(height) * static_cast<size_t>(width));
             const float* __restrict__ xptr = dense_input ? x.data() : nullptr;
@@ -5396,6 +5585,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     const size_t base_c = static_cast<size_t>(r) * static_cast<size_t>(out_channels);
                     for (int oc = 0; oc < out_channels; ++oc) {
                         float v = Ctmp[base_c + static_cast<size_t>(oc)];
+                        if (bias_ptr) v += bias_ptr[oc];
                         if (fuse_relu && v < 0.0f) v = 0.0f;
                         layer_output[static_cast<size_t>(oc) * static_cast<size_t>(out_spatial) + static_cast<size_t>(m)] = v;
                     }
@@ -5407,34 +5597,91 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             allocator.return_scratchpad(std::move(wT_buf));
         } else {
             // Fallback: chemin naïf
-            #pragma omp parallel for schedule(static) collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144)
-            for (int oc = 0; oc < out_channels; ++oc) {
-                for (int oh = 0; oh < out_height; ++oh) {
-                    for (int ow = 0; ow < out_width; ++ow) {
-                        float sum = 0.0f;
-                        
-                        for (int ic = 0; ic < in_channels; ++ic) {
-                            for (int kh = 0; kh < kernel_size; ++kh) {
-                                for (int kw = 0; kw < kernel_size; ++kw) {
-                                    int ih = oh * stride + kh - padding;
-                                    int iw = ow * stride + kw - padding;
-                                    
-                                    if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                        int in_idx = ic * (height * width) + ih * width + iw;
-                                        int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
-                                        
-                                        if (in_idx < static_cast<int>(x.size()) && 
-                                            w_idx < static_cast<int>(layer.getWeightsSize())) {
-                                            sum += x[in_idx] * layer_weights[w_idx];
-                                        }
+            if (layer.type_enum == LayerType::ConvTranspose2d) {
+                std::fill(layer_output.begin(), layer_output.end(), 0.0f);
+
+                if (layer.use_bias) {
+                    for (int oc = 0; oc < out_channels; ++oc) {
+                        const size_t bias_idx = static_cast<size_t>(out_channels) * static_cast<size_t>(K) + static_cast<size_t>(oc);
+                        if (bias_idx >= layer.getWeightsSize()) continue;
+                        const float bias = layer_weights[bias_idx];
+                        const size_t base = static_cast<size_t>(oc) * static_cast<size_t>(out_height * out_width);
+                        for (int pos = 0; pos < out_height * out_width; ++pos) {
+                            layer_output[base + static_cast<size_t>(pos)] = bias;
+                        }
+                    }
+                }
+
+                #pragma omp parallel for schedule(static) collapse(2) if(static_cast<long long>(out_channels) * in_channels * height * width * kernel_size * kernel_size > 262144)
+                for (int oc = 0; oc < out_channels; ++oc) {
+                    for (int ic = 0; ic < in_channels; ++ic) {
+                        for (int ih = 0; ih < height; ++ih) {
+                            for (int iw = 0; iw < width; ++iw) {
+                                const int in_idx = ic * (height * width) + ih * width + iw;
+                                if (in_idx >= static_cast<int>(x.size())) continue;
+                                const float in_v = x[static_cast<size_t>(in_idx)];
+
+                                for (int kh = 0; kh < kernel_size; ++kh) {
+                                    for (int kw = 0; kw < kernel_size; ++kw) {
+                                        const int oh = ih * stride + kh - padding;
+                                        const int ow = iw * stride + kw - padding;
+                                        if (oh < 0 || oh >= out_height || ow < 0 || ow >= out_width) continue;
+
+                                        const int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
+                                        const int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
+                                        if (w_idx >= static_cast<int>(layer.getWeightsSize()) || out_idx >= static_cast<int>(layer_output.size())) continue;
+
+                                        #pragma omp atomic
+                                        layer_output[static_cast<size_t>(out_idx)] += in_v * layer_weights[w_idx];
                                     }
                                 }
                             }
                         }
-                        
-                        int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
-                        if (fuse_relu && sum < 0.0f) sum = 0.0f;
-                        layer_output[out_idx] = sum;
+                    }
+                }
+
+                if (fuse_relu) {
+                    for (float& v : layer_output) {
+                        if (v < 0.0f) v = 0.0f;
+                    }
+                }
+            } else {
+                #pragma omp parallel for schedule(static) collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144)
+                for (int oc = 0; oc < out_channels; ++oc) {
+                    for (int oh = 0; oh < out_height; ++oh) {
+                        for (int ow = 0; ow < out_width; ++ow) {
+                            float sum = 0.0f;
+                            
+                            for (int ic = 0; ic < in_channels; ++ic) {
+                                for (int kh = 0; kh < kernel_size; ++kh) {
+                                    for (int kw = 0; kw < kernel_size; ++kw) {
+                                        int ih = oh * stride + kh - padding;
+                                        int iw = ow * stride + kw - padding;
+                                        
+                                        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                            int in_idx = ic * (height * width) + ih * width + iw;
+                                            int w_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
+                                            
+                                            if (in_idx < static_cast<int>(x.size()) && 
+                                                w_idx < static_cast<int>(layer.getWeightsSize())) {
+                                                sum += x[in_idx] * layer_weights[w_idx];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (layer.use_bias) {
+                                const size_t bias_idx = static_cast<size_t>(out_channels) * static_cast<size_t>(K) + static_cast<size_t>(oc);
+                                if (bias_idx < layer.getWeightsSize()) {
+                                    sum += layer_weights[bias_idx];
+                                }
+                            }
+
+                            int out_idx = oc * (out_height * out_width) + oh * out_width + ow;
+                            if (fuse_relu && sum < 0.0f) sum = 0.0f;
+                            layer_output[out_idx] = sum;
+                        }
                     }
                 }
             }
@@ -5914,28 +6161,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             layer.name + "_output"
         );
         std::vector<float>& out = output_handle.data();
-        out = x;
-        
-        float mean = 0.0f;
-        for (float val : x) mean += val;
-        mean /= x.size();
-        
-        float var = 0.0f;
-        for (float val : x) {
-            float diff = val - mean;
-            var += diff * diff;
-        }
-        var /= x.size();
-        float std = std::sqrt(var + layer.eps);
-        
-        const float* layer_weights = layer.getWeights();
-        
-        for (size_t i = 0; i < out.size(); ++i) {
-            out[i] = (out[i] - mean) / std;
-            if (layer.affine && i < layer.getWeightsSize()) {
-                out[i] *= layer_weights[i];
-            }
-        }
+        out = LayerOps::batchnorm_forward(x, layer, training);
 
         layer_output = out;
         
@@ -5979,6 +6205,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::GELU: {
         layer_output = LayerOps::gelu_forward(x);
+        break;
+    }
+
+    case LayerType::GEGLU: {
+        layer_output = LayerOps::geglu_forward(x, layer.seq_len, layer.out_features);
         break;
     }
     
@@ -6029,9 +6260,23 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::MaxPool2d: {
         const int kernel_size = layer.get_kernel_h();
-        const int in_channels = layer.in_channels > 0 ? layer.in_channels : 64;
-        const int height = layer.input_height > 0 ? layer.input_height : 64;
-        const int width = layer.input_width > 0 ? layer.input_width : 64;
+        int in_channels = layer.in_channels > 0 ? layer.in_channels : 0;
+        int height = layer.input_height > 0 ? layer.input_height : 0;
+        int width = layer.input_width > 0 ? layer.input_width : 0;
+        // Dimensionnement correct obligatoire: pas de défaut silencieux (64x64).
+        // Si H/W manquent mais le nombre de canaux est connu, on infère une carte
+        // spatiale carrée a partir de la taille reelle de l'entree.
+        if (in_channels > 0 && (height <= 0 || width <= 0) && !x.empty()
+            && (x.size() % static_cast<size_t>(in_channels)) == 0) {
+            const size_t hw = x.size() / static_cast<size_t>(in_channels);
+            const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+            if (s > 0 && s * s == hw) {
+                height = static_cast<int>(s);
+                width = static_cast<int>(s);
+            }
+        }
+        RUNTIME_CHECK(in_channels > 0 && height > 0 && width > 0,
+            "MaxPool2d: in_channels/input_height/input_width must be set (or inferable from input)");
         const int stride = layer.get_stride_h();
         const int padding = layer.get_pad_h();
 
@@ -6085,6 +6330,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         break;
     }
     
+    case LayerType::MaxPool1d: {
+        layer_output = LayerOpsExt::maxpool1d_forward(x, layer);
+        break;
+    }
+
     case LayerType::AvgPool1d: {
         layer_output = LayerOpsExt::avgpool1d_forward(x, layer);
         break;
@@ -6219,6 +6469,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::Identity: {
         layer_output = LayerOps::identity_forward(x);
+        break;
+    }
+
+    case LayerType::Constant: {
+        RUNTIME_CHECK(layer.getWeights() != nullptr, "Constant: weights not initialized. Call allocateParams() first.");
+        const float* src = layer.getWeights();
+        const size_t n = layer.getWeightsSize();
+        layer_output.assign(src, src + n);
         break;
     }
     
@@ -6459,17 +6717,35 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         const float* weights = layer.getWeights();
         int qkv_size = embed_dim * embed_dim * 3;
         int out_size = embed_dim * embed_dim;
+        int qkv_bias_size = embed_dim * 3;
+        int out_bias_size = embed_dim;
+        size_t expected_no_bias = static_cast<size_t>(qkv_size + out_size);
+        size_t expected_out_bias_only = expected_no_bias + static_cast<size_t>(out_bias_size);
+        size_t expected_with_bias = expected_no_bias + static_cast<size_t>(qkv_bias_size + out_bias_size);
+        size_t actual_size = layer.getWeightsSize();
+        bool has_full_bias = (actual_size >= expected_with_bias);
+        bool has_out_bias_only = (!has_full_bias && actual_size >= expected_out_bias_only);
         
         std::vector<float> qkv_weight(weights, weights + qkv_size);
         std::vector<float> out_weight(weights + qkv_size, weights + qkv_size + out_size);
+        std::vector<float> qkv_bias;
+        std::vector<float> out_bias;
+        if (has_full_bias) {
+            const float* bias_ptr = weights + qkv_size + out_size;
+            qkv_bias.assign(bias_ptr, bias_ptr + qkv_bias_size);
+            out_bias.assign(bias_ptr + qkv_bias_size, bias_ptr + qkv_bias_size + out_bias_size);
+        } else if (has_out_bias_only) {
+            const float* bias_ptr = weights + qkv_size + out_size;
+            out_bias.assign(bias_ptr, bias_ptr + out_bias_size);
+        }
         
         if (layer.type_enum == LayerType::SelfAttention) {
             layer_output = LayerOps::self_attention_forward(
-                x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal
+                x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal
             );
         } else {
             layer_output = LayerOps::multihead_attention_forward(
-                x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal
+                x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal
             );
         }
         break;
@@ -6526,23 +6802,34 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             (q_in.size() % static_cast<size_t>(embed_dim)) == 0,
             "CrossAttention: query input size must be divisible by embed_dim"
         );
+        const int kv_embed_dim = layer.in_features > 0 ? layer.in_features : embed_dim;
         RUNTIME_CHECK(
-            (kv_in.size() % static_cast<size_t>(embed_dim)) == 0,
-            "CrossAttention: key/value input size must be divisible by embed_dim"
+            (kv_in.size() % static_cast<size_t>(kv_embed_dim)) == 0,
+            "CrossAttention: key/value input size must be divisible by kv_embed_dim"
         );
 
         const int query_len = static_cast<int>(q_in.size() / static_cast<size_t>(embed_dim));
-        const int kv_len = static_cast<int>(kv_in.size() / static_cast<size_t>(embed_dim));
+        const int kv_len = static_cast<int>(kv_in.size() / static_cast<size_t>(kv_embed_dim));
         RUNTIME_CHECK(query_len > 0 && kv_len > 0, "CrossAttention: invalid sequence lengths");
 
         const float* weights = layer.getWeights();
         const int q_size = embed_dim * embed_dim;
-        const int kv_size = embed_dim * (2 * embed_dim);
+        const int kv_size = kv_embed_dim * (2 * embed_dim);
         const int out_size = embed_dim * embed_dim;
+        const int out_bias_size = embed_dim;
+        const size_t expected_no_bias = static_cast<size_t>(q_size + kv_size + out_size);
+        const size_t expected_with_bias = expected_no_bias + static_cast<size_t>(out_bias_size);
+        const size_t actual_size = layer.getWeightsSize();
+        const bool has_out_bias = actual_size >= expected_with_bias;
 
         std::vector<float> q_weight(weights, weights + q_size);
         std::vector<float> kv_weight(weights + q_size, weights + q_size + kv_size);
         std::vector<float> out_weight(weights + q_size + kv_size, weights + q_size + kv_size + out_size);
+        std::vector<float> out_bias;
+        if (has_out_bias) {
+            const float* bias_ptr = weights + q_size + kv_size + out_size;
+            out_bias.assign(bias_ptr, bias_ptr + out_bias_size);
+        }
 
         layer_output = LayerOps::cross_attention_forward(
             q_in,
@@ -6550,9 +6837,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             q_weight,
             kv_weight,
             out_weight,
+            out_bias,
             query_len,
             kv_len,
             embed_dim,
+            kv_embed_dim,
             num_heads,
             causal
         );
@@ -6565,15 +6854,21 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::UpsampleNearest: {
         RUNTIME_CHECK(
-            layer.out_h > 0 && layer.out_w > 0 && layer.in_channels > 0,
-            "UpsampleNearest: dimensions (out_h, out_w, in_channels) must be set"
+            layer.in_channels > 0,
+            "UpsampleNearest: in_channels must be set"
         );
-        
-        int in_h = layer.out_h;
-        int in_w = layer.out_w;
-        int channels = layer.in_channels;
-        int scale_h = layer.scale_h > 0 ? layer.scale_h : 2;
-        int scale_w = layer.scale_w > 0 ? layer.scale_w : 2;
+
+        const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+        const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+        RUNTIME_CHECK(in_h > 0 && in_w > 0, "UpsampleNearest: input_height/input_width must be set");
+
+        const int channels = layer.in_channels;
+        const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : 0);
+        const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : 0);
+        const int scale_h = layer.scale_h > 0 ? static_cast<int>(std::lround(layer.scale_h))
+                                               : ((out_h > 0) ? std::max(1, out_h / in_h) : 2);
+        const int scale_w = layer.scale_w > 0 ? static_cast<int>(std::lround(layer.scale_w))
+                                               : ((out_w > 0) ? std::max(1, out_w / in_w) : 2);
         
         layer_output = LayerOps::upsample_nearest_forward(
             x, in_h, in_w, channels, scale_h, scale_w
@@ -6583,15 +6878,17 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::UpsampleBilinear: {
         RUNTIME_CHECK(
-            layer.out_h > 0 && layer.out_w > 0 && layer.in_channels > 0,
-            "UpsampleBilinear: dimensions must be set"
+            layer.in_channels > 0,
+            "UpsampleBilinear: in_channels must be set"
         );
-        
-        int in_h = layer.out_h;
-        int in_w = layer.out_w;
-        int channels = layer.in_channels;
-        int out_h = in_h * 2;
-        int out_w = in_w * 2;
+
+        const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+        const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+        RUNTIME_CHECK(in_h > 0 && in_w > 0, "UpsampleBilinear: input_height/input_width must be set");
+
+        const int channels = layer.in_channels;
+        const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_h) * std::max(0.0f, layer.scale_h)))));
+        const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_w) * std::max(0.0f, layer.scale_w)))));
         
         layer_output = LayerOps::upsample_bilinear_forward(
             x, in_h, in_w, channels, out_h, out_w
@@ -6601,15 +6898,17 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::UpsampleBicubic: {
         RUNTIME_CHECK(
-            layer.out_h > 0 && layer.out_w > 0,
+            true,
             "UpsampleBicubic: dimensions must be set"
         );
-        
-        int in_h = layer.out_h;
-        int in_w = layer.out_w;
-        int channels = layer.in_channels > 0 ? layer.in_channels : 3;
-        int out_h = in_h * 2;
-        int out_w = in_w * 2;
+
+        const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+        const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+        RUNTIME_CHECK(in_h > 0 && in_w > 0, "UpsampleBicubic: input_height/input_width must be set");
+
+        const int channels = layer.in_channels > 0 ? layer.in_channels : 3;
+        const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_h) * std::max(0.0f, layer.scale_h)))));
+        const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_w) * std::max(0.0f, layer.scale_w)))));
         
         layer_output = LayerOpsExt::upsample_bicubic_forward(
             x, in_h, in_w, channels, out_h, out_w
@@ -6919,6 +7218,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     case LayerType::ReLU:
                     case LayerType::LeakyReLU:
                     case LayerType::GELU:
+                    case LayerType::GEGLU:
                     case LayerType::SiLU:
                     case LayerType::Tanh:
                     case LayerType::Sigmoid:
@@ -6977,7 +7277,43 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             };
 
             if (is_viz_candidate_layer(layer.type_enum)) {
-                auto infer_hw = [&](const Layer& lyr, size_t out_size, int& ow, int& oh, int& c) -> bool {
+                auto viz_preview_prefers_chw = [&](const Layer& lyr) -> bool {
+                    switch (lyr.type_enum) {
+                        case LayerType::Conv2d:
+                        case LayerType::ConvTranspose2d:
+                        case LayerType::DepthwiseConv2d:
+                        case LayerType::GroupNorm:
+                        case LayerType::BatchNorm2d:
+                        case LayerType::InstanceNorm2d:
+                        case LayerType::UpsampleNearest:
+                        case LayerType::UpsampleBilinear:
+                        case LayerType::UpsampleBicubic:
+                        case LayerType::PixelShuffle:
+                            return true;
+                        case LayerType::LayerNorm:
+                            return lyr.in_channels > 0 && lyr.input_height > 0 && lyr.input_width > 0;
+                        default:
+                            break;
+                    }
+
+                    if (lyr.name.find("_chw") != std::string::npos || lyr.name.find("/chw") != std::string::npos) {
+                        return true;
+                    }
+                    if (lyr.output.find("_chw") != std::string::npos || lyr.output.find("/chw") != std::string::npos) {
+                        return true;
+                    }
+                    if (lyr.name.find("_hwc") != std::string::npos || lyr.name.find("/hwc") != std::string::npos) {
+                        return false;
+                    }
+                    if (lyr.output.find("_hwc") != std::string::npos || lyr.output.find("/hwc") != std::string::npos) {
+                        return false;
+                    }
+                    return false;
+                };
+
+                auto infer_hw = [&](const Layer& lyr, size_t out_size, int& ow, int& oh, int& c, bool& channels_first) -> bool {
+                    channels_first = viz_preview_prefers_chw(lyr);
+
                     auto ok = [&](int w, int h) -> bool {
                         if (w <= 0 || h <= 0) return false;
                         const size_t spatial = static_cast<size_t>(w) * static_cast<size_t>(h);
@@ -6990,12 +7326,57 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         return true;
                     };
 
+                    auto ok_derived_conv2d = [&]() -> bool {
+                        if (lyr.input_width <= 0 || lyr.input_height <= 0) return false;
+                        const int kw = lyr.get_kernel_w();
+                        const int kh = lyr.get_kernel_h();
+                        const int sw = lyr.get_stride_w();
+                        const int sh = lyr.get_stride_h();
+                        const int pw = lyr.get_pad_w();
+                        const int ph = lyr.get_pad_h();
+                        if (kw <= 0 || kh <= 0 || sw <= 0 || sh <= 0) return false;
+                        const int w = (lyr.input_width + 2 * pw - kw) / sw + 1;
+                        const int h = (lyr.input_height + 2 * ph - kh) / sh + 1;
+                        return ok(w, h);
+                    };
+
+                    auto ok_derived_deconv2d = [&]() -> bool {
+                        if (lyr.input_width <= 0 || lyr.input_height <= 0) return false;
+                        const int kw = lyr.get_kernel_w();
+                        const int kh = lyr.get_kernel_h();
+                        const int sw = lyr.get_stride_w();
+                        const int sh = lyr.get_stride_h();
+                        const int pw = lyr.get_pad_w();
+                        const int ph = lyr.get_pad_h();
+                        if (kw <= 0 || kh <= 0 || sw <= 0 || sh <= 0) return false;
+                        const int w = (lyr.input_width - 1) * sw - 2 * pw + kw;
+                        const int h = (lyr.input_height - 1) * sh - 2 * ph + kh;
+                        return ok(w, h);
+                    };
+
+                    auto ok_derived_upsample = [&]() -> bool {
+                        if (lyr.out_w > 0 && lyr.out_h > 0) return ok(lyr.out_w, lyr.out_h);
+                        if (lyr.input_width <= 0 || lyr.input_height <= 0) return false;
+                        const int w = std::max(1, static_cast<int>(std::lround(static_cast<double>(lyr.input_width) * std::max(0.0f, lyr.scale_w))));
+                        const int h = std::max(1, static_cast<int>(std::lround(static_cast<double>(lyr.input_height) * std::max(0.0f, lyr.scale_h))));
+                        return ok(w, h);
+                    };
+
                     // 1) Métadonnées explicites
                     if (ok(lyr.output_width, lyr.output_height)) return true;
                     if (ok(lyr.out_w, lyr.out_h)) return true;
+
+                    // 2) Dérivation à partir des paramètres spatiaux du layer.
+                    if (lyr.type_enum == LayerType::ConvTranspose2d && ok_derived_deconv2d()) return true;
+                    if (lyr.type_enum == LayerType::Conv2d && ok_derived_conv2d()) return true;
+                    if ((lyr.type_enum == LayerType::UpsampleNearest ||
+                         lyr.type_enum == LayerType::UpsampleBilinear ||
+                         lyr.type_enum == LayerType::UpsampleBicubic) && ok_derived_upsample()) return true;
+
+                    // 3) En dernier recours seulement: réutiliser les dims d'entrée.
                     if (ok(lyr.input_width, lyr.input_height)) return true;
 
-                    // 2) Shapes connues (si elles matchent exactement la taille)
+                    // 4) Shapes connues (si elles matchent exactement la taille)
                     auto try_shape = [&](const std::vector<int>& s) -> bool {
                         if (s.size() != 3) return false;
                         const int a = s[0];
@@ -7011,12 +7392,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         // Si out_channels est renseigné, on choisit celle qui match.
                         if (out_c > 0) {
                             if (out_c == d) {
+                                channels_first = false;
                                 c = d;
                                 ow = b;
                                 oh = a;
                                 return true;
                             }
                             if (out_c == a) {
+                                channels_first = true;
                                 c = a;
                                 ow = d;
                                 oh = b;
@@ -7026,28 +7409,35 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                         // Sinon, essayer de coller aux dims input si dispo.
                         if (lyr.input_height == a && lyr.input_width == b) {
+                            channels_first = false;
                             c = d;
                             ow = b;
                             oh = a;
                             return true;
                         }
                         if (lyr.input_height == b && lyr.input_width == d) {
+                            channels_first = true;
                             c = a;
                             ow = d;
                             oh = b;
                             return true;
                         }
 
-                        // Default: HWC (c'est ce que les builders Mimir utilisent le plus souvent).
-                        c = d;
-                        ow = b;
-                        oh = a;
+                        if (channels_first) {
+                            c = a;
+                            ow = d;
+                            oh = b;
+                        } else {
+                            c = d;
+                            ow = b;
+                            oh = a;
+                        }
                         return true;
                     };
                     if (try_shape(lyr.shape)) return true;
                     if (try_shape(lyr.target_shape)) return true;
 
-                    // 3) Fallback: dernier HxW connu dans ce thread (souvent valable pour activations/norm)
+                    // 5) Fallback: dernier HxW connu dans ce thread (souvent valable pour activations/norm)
                     if (ok(viz_last_w, viz_last_h)) return true;
 
                     return false;
@@ -7056,7 +7446,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 int ow = 0;
                 int oh = 0;
                 int c = 0;
-                const bool has_hw = infer_hw(layer, layer_output.size(), ow, oh, c);
+                bool channels_first = false;
+                const bool has_hw = infer_hw(layer, layer_output.size(), ow, oh, c, channels_first);
 
                 if (has_hw && ow > 0 && oh > 0) {
                     const size_t spatial = static_cast<size_t>(ow) * static_cast<size_t>(oh);
@@ -7073,9 +7464,23 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                         VizFrame vf;
 
-                        // Si le tenseur a >= 3 canaux, on affiche un aperçu RGB (3 premiers canaux)
-                        // pour mieux visualiser les "modifications" spatiales.
-                        if (c >= 3) {
+                        auto sample_value = [&](int sample_c, size_t base) -> float {
+                            if (sample_c < 0) return 0.0f;
+                            const size_t idx = channels_first
+                                ? (static_cast<size_t>(sample_c) * spatial + base)
+                                : (base * static_cast<size_t>(std::max(1, c)) + static_cast<size_t>(sample_c));
+                            return (idx < layer_output.size()) ? layer_output[idx] : 0.0f;
+                        };
+
+                        const bool image_like_preview = (c == 3 || c == 4) &&
+                            (layer.out_channels == 3 || layer.out_channels == 4 ||
+                             layer.name.find("recon") != std::string::npos ||
+                             layer.name.find("/out") != std::string::npos ||
+                             layer.name.find("output") != std::string::npos);
+
+                        const bool prefer_rgb_preview = image_like_preview || c > 4;
+
+                        if (prefer_rgb_preview) {
                             std::vector<float> map;
                             map.resize(static_cast<size_t>(vw) * static_cast<size_t>(vh) * 3, 0.0f);
 
@@ -7084,25 +7489,81 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                 for (int x = 0; x < vw; ++x) {
                                     const int xx = x * sx;
                                     const size_t base = (static_cast<size_t>(yy) * static_cast<size_t>(ow) + static_cast<size_t>(xx));
-                                    for (int cc = 0; cc < 3; ++cc) {
-                                        const size_t idx = static_cast<size_t>(cc) * spatial + base;
-                                        const float v = (idx < layer_output.size()) ? layer_output[idx] : 0.0f;
-                                        map[(static_cast<size_t>(y) * static_cast<size_t>(vw) + static_cast<size_t>(x)) * 3ULL + static_cast<size_t>(cc)] = v;
+
+                                    if (image_like_preview) {
+                                        for (int cc = 0; cc < 3; ++cc) {
+                                            const float v = sample_value(cc, base);
+                                            map[(static_cast<size_t>(y) * static_cast<size_t>(vw) + static_cast<size_t>(x)) * 3ULL + static_cast<size_t>(cc)] = v;
+                                        }
+                                    } else {
+                                        const int c_take = std::max(1, std::min(c, 32));
+                                        double sum = 0.0;
+                                        double energy = 0.0;
+                                        for (int chan = 0; chan < c_take; ++chan) {
+                                            const double v = static_cast<double>(sample_value(chan, base));
+                                            sum += v;
+                                            energy += std::fabs(v);
+                                        }
+                                        const float mean_v = static_cast<float>(sum / static_cast<double>(c_take));
+                                        const float energy_v = static_cast<float>(energy / static_cast<double>(c_take));
+
+                                        const size_t dst = (static_cast<size_t>(y) * static_cast<size_t>(vw) + static_cast<size_t>(x)) * 3ULL;
+                                        map[dst + 0] = mean_v;
+                                        map[dst + 1] = energy_v;
+                                        map[dst + 2] = -mean_v;
                                     }
                                 }
                             }
 
                             float max_abs = 0.0f;
-                            for (float v : map) max_abs = std::max(max_abs, std::fabs(v));
+                            float max_energy = 0.0f;
+                            if (image_like_preview) {
+                                for (float v : map) max_abs = std::max(max_abs, std::fabs(v));
+                            } else {
+                                for (size_t i = 0; i < map.size(); i += 3) {
+                                    max_abs = std::max(max_abs, std::max(std::fabs(map[i + 0]), std::fabs(map[i + 2])));
+                                    max_energy = std::max(max_energy, std::fabs(map[i + 1]));
+                                }
+                            }
                             const float inv = 1.0f / (max_abs + 1e-6f);
+                            const float inv_energy = 1.0f / (max_energy + 1e-6f);
 
                             std::vector<uint8_t> px;
                             px.resize(map.size());
-                            for (size_t i = 0; i < map.size(); ++i) {
-                                const float s = map[i] * inv;
-                                const float t = 0.5f + 0.5f * std::tanh(s);
-                                const int p = static_cast<int>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
-                                px[i] = static_cast<uint8_t>(std::clamp(p, 0, 255));
+                            if (image_like_preview) {
+                                for (size_t i = 0; i < map.size(); ++i) {
+                                    const float s = map[i] * inv;
+                                    const float t = 0.5f + 0.5f * std::tanh(s);
+                                    const int p = static_cast<int>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
+                                    px[i] = static_cast<uint8_t>(std::clamp(p, 0, 255));
+                                }
+                            } else {
+                                for (size_t i = 0; i < map.size(); i += 3) {
+                                    const float signed_mean = map[i + 0] * inv;
+                                    const float energy_norm = std::clamp(std::tanh(map[i + 1] * inv_energy), 0.0f, 1.0f);
+                                    const float t = std::clamp(0.5f + 0.5f * std::tanh(signed_mean), 0.0f, 1.0f);
+
+                                    const float neg_r = 70.0f,  neg_g = 125.0f, neg_b = 215.0f;
+                                    const float mid_r = 170.0f, mid_g = 170.0f, mid_b = 170.0f;
+                                    const float pos_r = 230.0f, pos_g = 170.0f, pos_b = 80.0f;
+
+                                    float r = 0.0f, g = 0.0f, b = 0.0f;
+                                    if (t < 0.5f) {
+                                        const float u = t / 0.5f;
+                                        r = neg_r + (mid_r - neg_r) * u;
+                                        g = neg_g + (mid_g - neg_g) * u;
+                                        b = neg_b + (mid_b - neg_b) * u;
+                                    } else {
+                                        const float u = (t - 0.5f) / 0.5f;
+                                        r = mid_r + (pos_r - mid_r) * u;
+                                        g = mid_g + (pos_g - mid_g) * u;
+                                        b = mid_b + (pos_b - mid_b) * u;
+                                    }
+
+                                    px[i + 0] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(r * energy_norm)), 0, 255));
+                                    px[i + 1] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(g * energy_norm)), 0, 255));
+                                    px[i + 2] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(b * energy_norm)), 0, 255));
+                                }
                             }
 
                             vf.pixels = std::move(px);
@@ -7122,8 +7583,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                     const size_t base = (static_cast<size_t>(yy) * static_cast<size_t>(ow) + static_cast<size_t>(xx));
                                     double acc = 0.0;
                                     for (int cc = 0; cc < c_take; ++cc) {
-                                        const size_t idx = static_cast<size_t>(cc) * spatial + base;
-                                        if (idx < layer_output.size()) acc += static_cast<double>(layer_output[idx]);
+                                        acc += static_cast<double>(sample_value(cc, base));
                                     }
                                     map[static_cast<size_t>(y) * static_cast<size_t>(vw) + static_cast<size_t>(x)] = static_cast<float>(acc / static_cast<double>(c_take));
                                 }
@@ -7169,15 +7629,26 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         }
                     }
                 } else {
-                    // Fallback minimal: vecteur 1D -> bande (1 x max_side) pour ne pas rater
-                    // complètement les layers dont la forme n'est pas connue.
+                    // Fallback vectoriel: projeter le tenseur 1D sur une petite heatmap 2D.
+                    // Une bande 1xN devient quasiment invisible une fois mise à l'échelle dans la VIZ,
+                    // ce qui donne l'impression d'une vignette noire.
                     const int max_side = std::max(1, viz_taps_max_side_);
-                    const int vw = std::max(1, std::min<int>(max_side, static_cast<int>(layer_output.size())));
+                    const size_t nvals = layer_output.size();
+                    const size_t max_pixels = static_cast<size_t>(max_side) * static_cast<size_t>(max_side);
+                    const size_t sample_count = std::max<size_t>(1, std::min(nvals, max_pixels));
+
+                    const int vw = std::max(1, std::min<int>(max_side, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(sample_count))))));
+                    const int vh = std::max(1, std::min<int>(max_side, static_cast<int>((sample_count + static_cast<size_t>(vw) - 1) / static_cast<size_t>(vw))));
 
                     std::vector<float> map;
-                    map.resize(static_cast<size_t>(vw), 0.0f);
-                    for (int i = 0; i < vw; ++i) {
-                        map[static_cast<size_t>(i)] = layer_output[static_cast<size_t>(i)];
+                    map.resize(static_cast<size_t>(vw) * static_cast<size_t>(vh), 0.0f);
+
+                    const size_t map_count = map.size();
+                    for (size_t i = 0; i < map_count; ++i) {
+                        const size_t src_idx = (nvals <= map_count)
+                            ? std::min(i, nvals - 1)
+                            : ((i * nvals) / map_count);
+                        map[i] = layer_output[std::min(src_idx, nvals - 1)];
                     }
 
                     float max_abs = 0.0f;
@@ -7185,15 +7656,15 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     const float inv = 1.0f / (max_abs + 1e-6f);
 
                     VizFrame vf;
-                    vf.pixels.resize(static_cast<size_t>(vw));
-                    for (int i = 0; i < vw; ++i) {
-                        const float s = map[static_cast<size_t>(i)] * inv;
+                    vf.pixels.resize(map.size());
+                    for (size_t i = 0; i < map.size(); ++i) {
+                        const float s = map[i] * inv;
                         const float t = 0.5f + 0.5f * std::tanh(s);
                         const int p = static_cast<int>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
-                        vf.pixels[static_cast<size_t>(i)] = static_cast<uint8_t>(std::clamp(p, 0, 255));
+                        vf.pixels[i] = static_cast<uint8_t>(std::clamp(p, 0, 255));
                     }
                     vf.w = vw;
-                    vf.h = 1;
+                    vf.h = vh;
                     vf.channels = 1;
 
                     const std::string block_label = block_label_for(layer);
@@ -7222,6 +7693,34 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // ====================================================================
         
         std::string output_name = layer.output.empty() ? "x" : layer.output;
+
+        if (fusion_enabled && !training && static_plan_.built) {
+            const auto& plan = static_plan_.execution;
+            if (layer_idx < plan.fuse_activation_consumer.size()) {
+                const int activation_idx = plan.fuse_activation_consumer[layer_idx];
+                if (activation_idx >= 0) {
+                    const Layer& activation_layer = layers[static_cast<size_t>(activation_idx)];
+                    apply_fused_standalone_activation(layer_output, activation_layer);
+                    output_name = activation_layer.output.empty() ? "x" : activation_layer.output;
+                }
+            }
+            if (layer_idx < plan.fuse_unary_consumer.size()) {
+                const int unary_idx = plan.fuse_unary_consumer[layer_idx];
+                if (unary_idx >= 0) {
+                    const Layer& unary_layer = layers[static_cast<size_t>(unary_idx)];
+                    apply_fused_unary_shape(layer_output, unary_layer);
+                    output_name = unary_layer.output.empty() ? "x" : unary_layer.output;
+                }
+            }
+            if (layer_idx < plan.fuse_split_consumer.size()) {
+                const int split_idx = plan.fuse_split_consumer[layer_idx];
+                if (split_idx >= 0) {
+                    const Layer& split_layer = layers[static_cast<size_t>(split_idx)];
+                    apply_fused_split_or_chunk(layer_output, split_layer);
+                    output_name = split_layer.output.empty() ? "x" : split_layer.output;
+                }
+            }
+        }
 
         // Masque (ReLU/Dropout) ou snapshot output (Reparameterize) selon besoins.
         if (training) {
@@ -7972,7 +8471,7 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
 
         auto needs_input_values_for_backward = [&](const Layer& l) -> bool {
             if (l.type == "Add" || l.type == "Concat" || l.type == "Split" || l.type == "Subtract" ||
-                l.type == "TokenMeanPool" || l.type == "UpsampleNearest" || l.type == "Identity") {
+                l.type == "TokenMeanPool" || l.type == "UpsampleNearest" || l.type == "Identity" || l.type == "Constant") {
                 return false;
             }
             if (l.type == "Dropout" || l.type == "Dropout2d" || l.type == "AlphaDropout") {
@@ -8047,6 +8546,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
             accumulate_grad(grad_store[input_names[0]], grad_out);
 
+        } else if (layer.type == "Constant") {
+            continue;
+
         } else if (layer.type == "Concat") {
             if (input_names.size() < 2) {
                 std::cerr << "⚠️  Concat backward skipped: need >=2 inputs (" << layer.name << ")" << std::endl;
@@ -8117,6 +8619,50 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
 
             accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "Chunk") {
+            // Chunk forward = découpage contigu en num_chunks morceaux base_i (axis ignoré).
+            // Backward = reconcaténation contiguë des grads des branches base_i.
+            const int n_chunks = layer.num_chunks > 0 ? layer.num_chunks : 0;
+            if (n_chunks <= 0 || input0_size == 0) {
+                std::cerr << "⚠️  Chunk backward skipped: num_chunks/input invalides (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const std::string base = layer.output.empty() ? "x" : layer.output;
+            const size_t total = input0_size;
+            const size_t chunk_size = total / static_cast<size_t>(n_chunks);
+            const size_t remainder = total % static_cast<size_t>(n_chunks);
+            std::vector<float> grad_in(total, 0.0f);
+            size_t off = 0;
+            for (int c = 0; c < n_chunks; ++c) {
+                const size_t n = chunk_size + (static_cast<size_t>(c) < remainder ? 1ULL : 0ULL);
+                const std::string out_c = base + "_" + std::to_string(c);
+                auto it = grad_store.find(out_c);
+                if (it != grad_store.end() && it->second.size() == n && n > 0) {
+                    std::copy_n(it->second.data(), n, grad_in.data() + off);
+                }
+                off += n;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "Stack") {
+            // Stack forward = concat contigu de N entrées de même taille (axis ignoré).
+            // Backward = découpage de grad_out en N tranches égales, une par entrée.
+            const size_t nin = input_names.size();
+            if (nin < 2) {
+                std::cerr << "⚠️  Stack backward skipped: need >=2 inputs (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            if (grad_out.size() % nin != 0) {
+                std::cerr << "⚠️  Stack backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const size_t slice = grad_out.size() / nin;
+            for (size_t i = 0; i < nin; ++i) {
+                std::vector<float> grad_in(slice, 0.0f);
+                std::copy_n(grad_out.data() + i * slice, slice, grad_in.data());
+                accumulate_grad(grad_store[input_names[i]], grad_in);
+            }
 
         } else if (layer.type == "Add") {
             if ((!have_input_sizes || input_sizes.size() < 2) && inputs.size() < 2) {
@@ -8400,6 +8946,131 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
 
             accumulate_grad(grad_store[input_names[0]], grad_input0);
 
+        } else if (layer.type == "GroupNorm" || layer.type == "InstanceNorm2d") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  " << layer.type << " backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            int channels = layer.in_channels > 0 ? layer.in_channels : 0;
+            int height = layer.input_height > 0 ? layer.input_height : 0;
+            int width = layer.input_width > 0 ? layer.input_width : 0;
+            if (channels > 0 && (height <= 0 || width <= 0)
+                && (xin.size() % static_cast<size_t>(channels)) == 0) {
+                const size_t hw = xin.size() / static_cast<size_t>(channels);
+                const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                if (s > 0 && s * s == hw) { height = static_cast<int>(s); width = static_cast<int>(s); }
+            }
+            if (channels <= 0 || height <= 0 || width <= 0) {
+                std::cerr << "⚠️  " << layer.type << " backward: missing dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            // InstanceNorm2d == GroupNorm avec num_groups = channels.
+            int num_groups = (layer.type == "InstanceNorm2d") ? channels
+                                                              : (layer.num_groups > 0 ? layer.num_groups : 1);
+            if (channels % num_groups != 0) num_groups = 1;
+            const int cpg = channels / num_groups;       // canaux par groupe
+            const int spatial = height * width;
+            const int G = cpg * spatial;                 // éléments réduits par groupe
+            const float eps = layer.eps > 0.0f ? layer.eps : 1e-5f;
+
+            const bool affine = layer.affine && layer.getWeights() != nullptr;
+            const bool has_beta = affine && layer.use_bias;
+            const float* w = affine ? layer.getWeights() : nullptr;
+            if (affine && layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (int g = 0; g < num_groups; ++g) {
+                const int base = g * G;
+                // mean / var sur le groupe
+                float mean = 0.0f;
+                for (int i = 0; i < G; ++i) mean += xin[static_cast<size_t>(base + i)];
+                mean /= static_cast<float>(G);
+                float var = 0.0f;
+                for (int i = 0; i < G; ++i) { const float d = xin[static_cast<size_t>(base + i)] - mean; var += d * d; }
+                var /= static_cast<float>(G);
+                const float inv_std = 1.0f / std::sqrt(var + eps);
+
+                // sommes sur le groupe (avec gamma per-canal)
+                float sum_dxhat = 0.0f, sum_dxhat_xhat = 0.0f;
+                for (int i = 0; i < G; ++i) {
+                    const int idx = base + i;
+                    const int c = (idx / spatial) % channels;
+                    const float gamma = w ? w[static_cast<size_t>(c)] : 1.0f;
+                    const float xhat = (xin[static_cast<size_t>(idx)] - mean) * inv_std;
+                    const float dxhat = grad_out[static_cast<size_t>(idx)] * gamma;
+                    sum_dxhat += dxhat;
+                    sum_dxhat_xhat += dxhat * xhat;
+                    if (affine) {
+                        layer.grad_weights[static_cast<size_t>(c)] += grad_out[static_cast<size_t>(idx)] * xhat;
+                        if (has_beta) layer.grad_weights[static_cast<size_t>(channels + c)] += grad_out[static_cast<size_t>(idx)];
+                    }
+                }
+                const float invG = 1.0f / static_cast<float>(G);
+                for (int i = 0; i < G; ++i) {
+                    const int idx = base + i;
+                    const int c = (idx / spatial) % channels;
+                    const float gamma = w ? w[static_cast<size_t>(c)] : 1.0f;
+                    const float xhat = (xin[static_cast<size_t>(idx)] - mean) * inv_std;
+                    const float dxhat = grad_out[static_cast<size_t>(idx)] * gamma;
+                    grad_in[static_cast<size_t>(idx)] = inv_std * invG * (static_cast<float>(G) * dxhat - sum_dxhat - xhat * sum_dxhat_xhat);
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "RMSNorm") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  RMSNorm backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            int F = 0;
+            if (layer.in_features > 0) F = layer.in_features;
+            else if (layer.embed_dim > 0) F = layer.embed_dim;
+            else if (!layer.shape.empty() && layer.shape.back() > 0) F = layer.shape.back();
+            else if (!layer.target_shape.empty() && layer.target_shape.back() > 0) F = layer.target_shape.back();
+            else F = static_cast<int>(xin.size());
+            if (F <= 0 || (xin.size() % static_cast<size_t>(F)) != 0) {
+                std::cerr << "⚠️  RMSNorm backward: invalid normalized_size (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const int tokens = static_cast<int>(xin.size()) / F;
+            const float eps = layer.eps > 0.0f ? layer.eps : 1e-5f;
+            const bool affine = layer.affine && layer.getWeights() != nullptr;
+            const float* w = affine ? layer.getWeights() : nullptr;
+            if (affine && layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+
+            // y_i = gamma_i * x_i * r , r = 1/sqrt(mean(x^2)+eps)
+            // dx_i = r*gamma_i*dy_i - (r^3 x_i / F) * sum_j(gamma_j*dy_j*x_j)
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (int t = 0; t < tokens; ++t) {
+                const int base = t * F;
+                float ms = 0.0f;
+                for (int i = 0; i < F; ++i) { const float v = xin[static_cast<size_t>(base + i)]; ms += v * v; }
+                ms /= static_cast<float>(F);
+                const float r = 1.0f / std::sqrt(ms + eps);
+                const float r3 = r * r * r;
+                float S = 0.0f;
+                for (int i = 0; i < F; ++i) {
+                    const float gamma = w ? w[static_cast<size_t>(i)] : 1.0f;
+                    S += gamma * grad_out[static_cast<size_t>(base + i)] * xin[static_cast<size_t>(base + i)];
+                }
+                for (int i = 0; i < F; ++i) {
+                    const float x = xin[static_cast<size_t>(base + i)];
+                    const float gamma = w ? w[static_cast<size_t>(i)] : 1.0f;
+                    const float dy = grad_out[static_cast<size_t>(base + i)];
+                    grad_in[static_cast<size_t>(base + i)] = r * gamma * dy - (r3 * x / static_cast<float>(F)) * S;
+                    if (affine) layer.grad_weights[static_cast<size_t>(i)] += dy * x * r;
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
         } else if (layer.type == "Dropout" || layer.type == "Dropout2d") {
             if (grad_out.size() != input0_size) {
                 std::cerr << "⚠️  Dropout backward shape mismatch (" << layer.name << ")" << std::endl;
@@ -8456,13 +9127,34 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
             accumulate_grad(grad_store[input_names[0]], grad_in);
 
-        } else if (layer.type == "Reshape") {
-            // Reshape: pas de changement de layout (uniquement une vue logique)
+        } else if (layer.type == "Reshape" || layer.type == "View" || layer.type == "Flatten" ||
+                   layer.type == "Squeeze" || layer.type == "Unsqueeze") {
+            // Reshape/View/Flatten/Squeeze/Unsqueeze: pas de changement de layout
+            // (vue logique uniquement) -> le gradient se route tel quel vers l'entrée.
             if (grad_out.size() != input0_size) {
-                std::cerr << "⚠️  Reshape backward shape mismatch (" << layer.name << ")" << std::endl;
+                std::cerr << "⚠️  " << layer.type << " backward shape mismatch (" << layer.name << ")" << std::endl;
                 continue;
             }
             accumulate_grad(grad_store[input_names[0]], grad_out);
+
+        } else if (layer.type == "Transpose") {
+            // y = transpose([rows=in_features, cols=out_features]).
+            // grad_input = transpose inverse de grad_out ([cols, rows] -> [rows, cols]).
+            const int rows = layer.in_features;
+            const int cols = layer.out_features;
+            if (rows <= 0 || cols <= 0 || grad_out.size() != static_cast<size_t>(rows) * static_cast<size_t>(cols)) {
+                std::cerr << "⚠️  Transpose backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            std::vector<float> grad_in(static_cast<size_t>(rows) * static_cast<size_t>(cols), 0.0f);
+            // grad_out layout [cols, rows]: grad_out[j*rows + i] correspond à input[i*cols + j]
+            for (int i = 0; i < rows; ++i) {
+                for (int j = 0; j < cols; ++j) {
+                    grad_in[static_cast<size_t>(i) * static_cast<size_t>(cols) + static_cast<size_t>(j)] =
+                        grad_out[static_cast<size_t>(j) * static_cast<size_t>(rows) + static_cast<size_t>(i)];
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
 
         } else if (layer.type == "Permute") {
             // Permute: nécessite l'inverse de la permutation
@@ -8537,6 +9229,71 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
             accumulate_grad(grad_store[input_names[0]], grad_in);
 
+        } else if (layer.type == "ReLU") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  ReLU backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (size_t i = 0; i < grad_in.size(); ++i) {
+                grad_in[i] = (xin[i] > 0.0f) ? grad_out[i] : 0.0f;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "Softmax" || layer.type == "LogSoftmax") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  " << layer.type << " backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            // Backward axis-aware identique au forward (groupes outer/axis/inner).
+            const bool is_log = (layer.type == "LogSoftmax");
+            const std::vector<int> shape = LayerOps::infer_shape_for_axis_op(xin, layer);
+            int axis = layer.axis;
+            if (axis < 0) axis += static_cast<int>(shape.size());
+            if (axis < 0 || axis >= static_cast<int>(shape.size())) axis = static_cast<int>(shape.size()) - 1;
+            size_t outer = 1;
+            for (int i = 0; i < axis; ++i) outer *= static_cast<size_t>(shape[static_cast<size_t>(i)]);
+            const size_t axis_size = static_cast<size_t>(shape[static_cast<size_t>(axis)]);
+            size_t inner = 1;
+            for (size_t i = static_cast<size_t>(axis) + 1; i < shape.size(); ++i) inner *= static_cast<size_t>(shape[i]);
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (size_t oi = 0; oi < outer; ++oi) {
+                for (size_t ii = 0; ii < inner; ++ii) {
+                    const size_t base = (oi * axis_size * inner) + ii;
+                    // p = softmax(x) sur l'axe
+                    float maxv = xin[base];
+                    for (size_t a = 1; a < axis_size; ++a) maxv = std::max(maxv, xin[base + a * inner]);
+                    float denom = 0.0f;
+                    for (size_t a = 0; a < axis_size; ++a) denom += std::exp(xin[base + a * inner] - maxv);
+                    const float invd = denom > 0.0f ? 1.0f / denom : 0.0f;
+                    if (is_log) {
+                        // dx_a = dy_a - p_a * sum_b dy_b
+                        float sum_dy = 0.0f;
+                        for (size_t a = 0; a < axis_size; ++a) sum_dy += grad_out[base + a * inner];
+                        for (size_t a = 0; a < axis_size; ++a) {
+                            const float pa = std::exp(xin[base + a * inner] - maxv) * invd;
+                            grad_in[base + a * inner] = grad_out[base + a * inner] - pa * sum_dy;
+                        }
+                    } else {
+                        // dx_a = p_a * (dy_a - sum_b dy_b p_b)
+                        float dot = 0.0f;
+                        for (size_t a = 0; a < axis_size; ++a) {
+                            const float pa = std::exp(xin[base + a * inner] - maxv) * invd;
+                            dot += grad_out[base + a * inner] * pa;
+                        }
+                        for (size_t a = 0; a < axis_size; ++a) {
+                            const float pa = std::exp(xin[base + a * inner] - maxv) * invd;
+                            grad_in[base + a * inner] = pa * (grad_out[base + a * inner] - dot);
+                        }
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
         } else if (layer.type == "Sigmoid") {
             if (inputs.empty()) {
                 continue;
@@ -8608,6 +9365,119 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 const float ds = s * (1.0f - s);
                 const float dy_dx = s + x * ds;
                 grad_in[i] = grad_out[i] * dy_dx;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "LeakyReLU") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  LeakyReLU backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const float alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (size_t i = 0; i < grad_in.size(); ++i) {
+                grad_in[i] = grad_out[i] * (xin[i] > 0.0f ? 1.0f : alpha);
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "Softplus") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  Softplus backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            // d/dx softplus = sigmoid(x)
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (size_t i = 0; i < grad_in.size(); ++i) {
+                const float s = 1.0f / (1.0f + std::exp(-xin[i]));
+                grad_in[i] = grad_out[i] * s;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "Mish") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  Mish backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            // f = x*tanh(sp), sp=softplus(x) ; df = tanh(sp) + x*(1-tanh(sp)^2)*sigmoid(x)
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (size_t i = 0; i < grad_in.size(); ++i) {
+                const float x = xin[i];
+                const float sp = x > 20.0f ? x : std::log(1.0f + std::exp(x));
+                const float th = std::tanh(sp);
+                const float sig = 1.0f / (1.0f + std::exp(-x));
+                grad_in[i] = grad_out[i] * (th + x * (1.0f - th * th) * sig);
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "HardSigmoid") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  HardSigmoid backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            // f = clip((x+3)/6,0,1) ; df = 1/6 si -3<x<3, sinon 0
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (size_t i = 0; i < grad_in.size(); ++i) {
+                const float x = xin[i];
+                grad_in[i] = (x > -3.0f && x < 3.0f) ? grad_out[i] * (1.0f / 6.0f) : 0.0f;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "HardSwish") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            if (grad_out.size() != xin.size()) {
+                std::cerr << "⚠️  HardSwish backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            // f = x*clip((x+3)/6,0,1) ; df = 0 (x<-3), 1 (x>3), (2x+3)/6 (-3<=x<=3)
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            for (size_t i = 0; i < grad_in.size(); ++i) {
+                const float x = xin[i];
+                float d;
+                if (x < -3.0f) d = 0.0f;
+                else if (x > 3.0f) d = 1.0f;
+                else d = (2.0f * x + 3.0f) / 6.0f;
+                grad_in[i] = grad_out[i] * d;
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "GEGLU") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            const int seq_len = layer.seq_len > 0 ? layer.seq_len : 1;
+            const int hidden = layer.out_features > 0 ? layer.out_features : 0;
+            if (hidden <= 0 || xin.size() != static_cast<size_t>(seq_len) * static_cast<size_t>(hidden) * 2ULL
+                || grad_out.size() != static_cast<size_t>(seq_len) * static_cast<size_t>(hidden)) {
+                std::cerr << "⚠️  GEGLU backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            // out = value * gelu(gate) ; gelu(g) = 0.5*g*(1+tanh(u)), u=k*(g+0.044715*g^3), k=sqrt(2/pi)
+            const float k = std::sqrt(2.0f / 3.14159265359f);
+            std::vector<float> grad_in(xin.size(), 0.0f);
+            const size_t token_stride = static_cast<size_t>(hidden) * 2ULL;
+            for (int t = 0; t < seq_len; ++t) {
+                const float* src = &xin[static_cast<size_t>(t) * token_stride];
+                const float* go = &grad_out[static_cast<size_t>(t) * static_cast<size_t>(hidden)];
+                float* gin = &grad_in[static_cast<size_t>(t) * token_stride];
+                for (int i = 0; i < hidden; ++i) {
+                    const float value = src[i];
+                    const float gate = src[static_cast<size_t>(hidden) + static_cast<size_t>(i)];
+                    const float u = k * (gate + 0.044715f * gate * gate * gate);
+                    const float th = std::tanh(u);
+                    const float gelu = 0.5f * gate * (1.0f + th);
+                    const float du = k * (1.0f + 3.0f * 0.044715f * gate * gate);
+                    const float dgelu = 0.5f * (1.0f + th) + 0.5f * gate * (1.0f - th * th) * du;
+                    gin[i] = go[i] * gelu;                                   // d/dvalue
+                    gin[static_cast<size_t>(hidden) + static_cast<size_t>(i)] = go[i] * value * dgelu; // d/dgate
+                }
             }
             accumulate_grad(grad_store[input_names[0]], grad_in);
 
@@ -9300,116 +10170,204 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
 
             accumulate_grad(grad_store[input_names[0]], grad_input0);
             
-        } else if (layer.type == "BatchNorm2d") {
+        } else if (layer.type == "Conv1d") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            const int in_channels = layer.in_channels > 0 ? layer.in_channels : 1;
+            const int out_channels = layer.out_channels > 0 ? layer.out_channels : 1;
+            const int kernel_size = layer.kernel_h > 0 ? layer.kernel_h : 3;
+            const int stride = layer.stride_h > 0 ? layer.stride_h : 1;
+            const int padding = layer.pad_h >= 0 ? layer.pad_h : 0;
+            const int length = static_cast<int>(xin.size()) / std::max(1, in_channels);
+            const int out_length = (length + 2 * padding - kernel_size) / stride + 1;
+            if (out_length <= 0 || grad_out.size() != static_cast<size_t>(out_channels) * out_length) {
+                std::cerr << "⚠️  Conv1d backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const float* weights = layer.getWeights();
+            const size_t w_main = static_cast<size_t>(out_channels) * in_channels * kernel_size;
+            if (!weights || layer.getWeightsSize() < w_main) { continue; }
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+            const bool has_bias = layer.use_bias && layer.grad_bias.size() == static_cast<size_t>(out_channels);
+            std::vector<float> grad_in(static_cast<size_t>(in_channels) * length, 0.0f);
+            for (int oc = 0; oc < out_channels; ++oc) {
+                for (int ol = 0; ol < out_length; ++ol) {
+                    const float g = grad_out[static_cast<size_t>(oc) * out_length + ol];
+                    if (has_bias) layer.grad_bias[static_cast<size_t>(oc)] += g;
+                    for (int ic = 0; ic < in_channels; ++ic) {
+                        for (int kk = 0; kk < kernel_size; ++kk) {
+                            const int il = ol * stride + kk - padding;
+                            if (il < 0 || il >= length) continue;
+                            const size_t in_idx = static_cast<size_t>(ic) * length + il;
+                            const size_t w_idx = (static_cast<size_t>(oc) * in_channels + ic) * kernel_size + kk;
+                            layer.grad_weights[w_idx] += g * xin[in_idx];
+                            grad_in[in_idx] += g * weights[w_idx];
+                        }
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "DepthwiseConv2d") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            const int channels = layer.in_channels > 0 ? layer.in_channels : 0;
+            int height = layer.input_height > 0 ? layer.input_height : 0;
+            int width = layer.input_width > 0 ? layer.input_width : 0;
+            const int kernel_size = layer.kernel_h > 0 ? layer.kernel_h : 3;
+            const int stride = layer.stride_h > 0 ? layer.stride_h : 1;
+            const int padding = layer.pad_h >= 0 ? layer.pad_h : 0;
+            if (channels > 0 && (height <= 0 || width <= 0) && !xin.empty()
+                && (xin.size() % static_cast<size_t>(channels)) == 0) {
+                const size_t hw = xin.size() / static_cast<size_t>(channels);
+                const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                if (s > 0 && s * s == hw) { height = static_cast<int>(s); width = static_cast<int>(s); }
+            }
+            if (channels <= 0 || height <= 0 || width <= 0) {
+                std::cerr << "⚠️  DepthwiseConv2d backward: missing dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const int out_h = (height + 2 * padding - kernel_size) / stride + 1;
+            const int out_w = (width + 2 * padding - kernel_size) / stride + 1;
+            if (out_h <= 0 || out_w <= 0 || grad_out.size() != static_cast<size_t>(channels) * out_h * out_w) {
+                std::cerr << "⚠️  DepthwiseConv2d backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const float* weights = layer.getWeights();
+            const size_t w_main = static_cast<size_t>(channels) * kernel_size * kernel_size;
+            if (!weights || layer.getWeightsSize() < w_main) { continue; }
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+            const bool has_bias = layer.use_bias && layer.grad_bias.size() == static_cast<size_t>(channels);
+            std::vector<float> grad_in(static_cast<size_t>(channels) * height * width, 0.0f);
+            for (int c = 0; c < channels; ++c) {
+                for (int oh = 0; oh < out_h; ++oh) {
+                    for (int ow = 0; ow < out_w; ++ow) {
+                        const float g = grad_out[static_cast<size_t>(c) * out_h * out_w + static_cast<size_t>(oh) * out_w + ow];
+                        if (has_bias) layer.grad_bias[static_cast<size_t>(c)] += g;
+                        for (int kh = 0; kh < kernel_size; ++kh) {
+                            for (int kw = 0; kw < kernel_size; ++kw) {
+                                const int ih = oh * stride + kh - padding;
+                                const int iw = ow * stride + kw - padding;
+                                if (ih < 0 || ih >= height || iw < 0 || iw >= width) continue;
+                                const size_t in_idx = static_cast<size_t>(c) * height * width + static_cast<size_t>(ih) * width + iw;
+                                const size_t w_idx = static_cast<size_t>(c) * kernel_size * kernel_size + static_cast<size_t>(kh) * kernel_size + kw;
+                                layer.grad_weights[w_idx] += g * xin[in_idx];
+                                grad_in[in_idx] += g * weights[w_idx];
+                            }
+                        }
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "BatchNorm2d" || layer.type == "BatchNorm1d") {
             if (inputs.empty()) {
                 continue;
             }
             const std::vector<float>& layer_input0 = *inputs[0];
-            // NOUVEAU: Récupérer les poids et gradients depuis le weight_block
-            const float* layer_weights = layer.getWeights();
-            if (layer.grad_weights.size() != layer.getWeightsSize()) {
-                layer.grad_weights.resize(layer.getWeightsSize(), 0.0f);
+            if (grad_out.size() != layer_input0.size()) {
+                std::cerr << "⚠️  BatchNorm backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
             }
-            
-            // Backward BatchNorm avec formule compacte standard (CORRIGÉ)
-            int channels = 64; // À adapter
-            int height = 64, width = 64;
-            int spatial_size = height * width;
-            const float eps = 1e-5f;
+
+            // --- Dimensions RÉELLES (plus de 64 figé) ---
+            int channels = layer.in_channels > 0 ? layer.in_channels : layer.out_channels;
+            if (channels <= 0 && !layer.running_mean.empty()) {
+                channels = static_cast<int>(layer.running_mean.size());
+            }
+            if (channels <= 0 && layer.affine && layer.getWeights()) {
+                const size_t w_sz = layer.getWeightsSize();
+                channels = static_cast<int>((layer.use_bias && (w_sz % 2ULL) == 0ULL) ? (w_sz / 2ULL) : w_sz);
+            }
+            const int total = static_cast<int>(layer_input0.size());
+            if (channels <= 0 || (total % channels) != 0) {
+                std::cerr << "⚠️  BatchNorm backward: invalid channels (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            // spatial (H*W) puis batch déduits de la taille réelle.
+            int spatial = 1;
+            if (layer.type_enum == LayerType::BatchNorm2d && layer.input_height > 0 && layer.input_width > 0) {
+                spatial = layer.input_height * layer.input_width;
+            }
+            if (spatial <= 0 || (total % (channels * spatial)) != 0) {
+                spatial = (total % channels == 0) ? (total / channels) : 1;
+            }
+            const int batch = total / (channels * spatial);
+            const int N = batch * spatial; // éléments réduits par canal
+            const float eps = layer.eps > 0.0f ? layer.eps : 1e-5f;
+
+            const float* layer_weights = layer.getWeights();
+            const bool affine = layer.affine;
+            const bool has_beta = affine && layer.use_bias;
+            if (affine && layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+
+            // Layout des poids = BLOCKED (cohérent avec batchnorm_forward):
+            //   gamma = weights[0 .. C) , beta = weights[C .. 2C)
+            auto idx_at = [&](int b, int c, int s) -> size_t {
+                return static_cast<size_t>(b) * static_cast<size_t>(channels) * static_cast<size_t>(spatial)
+                     + static_cast<size_t>(c) * static_cast<size_t>(spatial)
+                     + static_cast<size_t>(s);
+            };
 
             for (int c = 0; c < channels; ++c) {
-                // Calculer mean et variance pour ce canal (forward)
+                // mean / var sur (batch, spatial) pour ce canal
                 float mean = 0.0f;
-                for (int h = 0; h < height; ++h) {
-                    for (int w = 0; w < width; ++w) {
-                        int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(layer_input0.size())) {
-                            mean += layer_input0[static_cast<size_t>(idx)];
-                        }
-                    }
-                }
-                mean /= spatial_size;
-                
+                for (int b = 0; b < batch; ++b)
+                    for (int s = 0; s < spatial; ++s)
+                        mean += layer_input0[idx_at(b, c, s)];
+                mean /= static_cast<float>(N);
+
                 float var = 0.0f;
-                for (int h = 0; h < height; ++h) {
-                    for (int w = 0; w < width; ++w) {
-                        int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(layer_input0.size())) {
-                            float diff = layer_input0[static_cast<size_t>(idx)] - mean;
-                            var += diff * diff;
-                        }
+                for (int b = 0; b < batch; ++b)
+                    for (int s = 0; s < spatial; ++s) {
+                        const float d = layer_input0[idx_at(b, c, s)] - mean;
+                        var += d * d;
+                    }
+                var /= static_cast<float>(N);
+                const float invstd = 1.0f / std::sqrt(var + eps);
+
+                const float gamma = (affine && layer_weights && c < static_cast<int>(layer.getWeightsSize()))
+                                        ? layer_weights[static_cast<size_t>(c)] : 1.0f;
+
+                // grad_gamma = sum(dy * xhat) ; grad_beta = sum(dy)
+                // sum_dxhat = sum(dy*gamma) ; sum_dxhat_xhat = sum(dy*gamma*xhat)
+                float grad_gamma = 0.0f, grad_beta = 0.0f;
+                float sum_dxhat = 0.0f, sum_dxhat_xhat = 0.0f;
+                for (int b = 0; b < batch; ++b) {
+                    for (int s = 0; s < spatial; ++s) {
+                        const size_t i = idx_at(b, c, s);
+                        const float xhat = (layer_input0[i] - mean) * invstd;
+                        const float dy = grad_out[i];
+                        const float dxhat = dy * gamma;
+                        grad_gamma += dy * xhat;
+                        grad_beta += dy;
+                        sum_dxhat += dxhat;
+                        sum_dxhat_xhat += dxhat * xhat;
                     }
                 }
-                var /= spatial_size;
-                float invstd = 1.0f / std::sqrt(var + eps);
-                
-                // Récupérer gamma (scale parameter) depuis weight_block
-                float gamma = 1.0f;
-                if (c * 2 < static_cast<int>(layer.getWeightsSize())) {
-                    gamma = layer_weights[c * 2];
-                }
-                
-                // Gradient gamma: sum(dY * x_normalized)
-                float grad_gamma = 0.0f;
-                for (int h = 0; h < height; ++h) {
-                    for (int w = 0; w < width; ++w) {
-                        int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad_out.size()) && 
-                            idx < static_cast<int>(layer_input0.size())) {
-                            float x_normalized = (layer_input0[static_cast<size_t>(idx)] - mean) * invstd;
-                            grad_gamma += grad_out[static_cast<size_t>(idx)] * x_normalized;
-                        }
+
+                if (affine && c < static_cast<int>(layer.grad_weights.size())) {
+                    layer.grad_weights[static_cast<size_t>(c)] += grad_gamma; // gamma bloc
+                    if (has_beta && (channels + c) < static_cast<int>(layer.grad_weights.size())) {
+                        layer.grad_weights[static_cast<size_t>(channels + c)] += grad_beta; // beta bloc
                     }
                 }
-                if (c * 2 < static_cast<int>(layer.grad_weights.size())) {
-                    layer.grad_weights[c * 2] += grad_gamma;
-                }
-                
-                // Gradient beta: sum(dY)
-                float grad_beta = 0.0f;
-                for (int h = 0; h < height; ++h) {
-                    for (int w = 0; w < width; ++w) {
-                        int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad_out.size())) {
-                            grad_beta += grad_out[static_cast<size_t>(idx)];
-                        }
-                    }
-                }
-                if (c * 2 + 1 < static_cast<int>(layer.grad_weights.size())) {
-                    layer.grad_weights[c * 2 + 1] += grad_beta;
-                }
-                
-                // Calculer sum(dY) et sum(dY * (x - mean))
-                float sum_dy = grad_beta; // Déjà calculé
-                float sum_dy_xmu = 0.0f;
-                for (int h = 0; h < height; ++h) {
-                    for (int w = 0; w < width; ++w) {
-                        int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad_out.size()) && 
-                            idx < static_cast<int>(layer_input0.size())) {
-                            sum_dy_xmu += grad_out[static_cast<size_t>(idx)] * (layer_input0[static_cast<size_t>(idx)] - mean);
-                        }
-                    }
-                }
-                
-                // Gradient input avec formule compacte standard (CORRIGÉ)
-                // dx = (1/N) * gamma * invstd * (N*dY - sum(dY) - (x-mean)*invstd^2*sum(dY*(x-mean)))
-                float invstd2 = invstd * invstd;
-                float inv_N = 1.0f / spatial_size;
-                
-                for (int h = 0; h < height; ++h) {
-                    for (int w = 0; w < width; ++w) {
-                        int idx = c * spatial_size + h * width + w;
-                        if (idx < static_cast<int>(grad_input0.size()) &&
-                            idx < static_cast<int>(layer_input0.size())) {
-                            float x_mu = layer_input0[static_cast<size_t>(idx)] - mean;
-                            float dx = inv_N * gamma * invstd * (
-                                spatial_size * grad_out[static_cast<size_t>(idx)] 
-                                - sum_dy 
-                                - x_mu * invstd2 * sum_dy_xmu
-                            );
-                            grad_input0[static_cast<size_t>(idx)] = dx;
-                        }
+
+                // dx = invstd/N * (N*dxhat - sum_dxhat - xhat*sum_dxhat_xhat)
+                const float invN = 1.0f / static_cast<float>(N);
+                for (int b = 0; b < batch; ++b) {
+                    for (int s = 0; s < spatial; ++s) {
+                        const size_t i = idx_at(b, c, s);
+                        const float xhat = (layer_input0[i] - mean) * invstd;
+                        const float dxhat = grad_out[i] * gamma;
+                        grad_input0[i] = invstd * invN * (static_cast<float>(N) * dxhat - sum_dxhat - xhat * sum_dxhat_xhat);
                     }
                 }
             }
@@ -9635,23 +10593,174 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 continue;
             }
             const std::vector<float>& layer_input0 = *inputs[0];
-            // Backward MaxPool : propager le gradient au max (parallélisé)
+            // Backward MaxPool2d: routage du gradient vers l'argmax de chaque fenêtre 2D
+            // (géométrie identique au forward: C x OH x OW sur in_channels/input_height/width).
+            const int kernel_size = layer.get_kernel_h() > 0 ? layer.get_kernel_h() : 2;
+            int channels = layer.in_channels > 0 ? layer.in_channels : 0;
+            int height = layer.input_height > 0 ? layer.input_height : 0;
+            int width = layer.input_width > 0 ? layer.input_width : 0;
+            // Inférence carrée si dims absentes mais canaux connus.
+            if (channels > 0 && (height <= 0 || width <= 0)
+                && (layer_input0.size() % static_cast<size_t>(channels)) == 0) {
+                const size_t hw = layer_input0.size() / static_cast<size_t>(channels);
+                const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                if (s > 0 && s * s == hw) { height = static_cast<int>(s); width = static_cast<int>(s); }
+            }
+            const int stride = layer.get_stride_h() > 0 ? layer.get_stride_h() : kernel_size;
+            const int padding = layer.get_pad_h();
+
+            if (channels <= 0 || height <= 0 || width <= 0) {
+                std::cerr << "⚠️  MaxPool2d backward: missing dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
+            const int out_h = (height + 2 * padding - kernel_size) / stride + 1;
+            const int out_w = (width + 2 * padding - kernel_size) / stride + 1;
+            if (out_h <= 0 || out_w <= 0
+                || grad_out.size() != static_cast<size_t>(channels) * static_cast<size_t>(out_h) * static_cast<size_t>(out_w)) {
+                std::cerr << "⚠️  MaxPool2d backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+
             std::vector<float> grad_input(layer_input0.size(), 0.0f);
-            #pragma omp simd
-            for (size_t i = 0; i < grad_out.size(); ++i) {
-                size_t idx1 = i * 2;
-                size_t idx2 = i * 2 + 1;
-                
-                if (idx1 < layer_input0.size() && idx2 < layer_input0.size()) {
-                    if (layer_input0[idx1] >= layer_input0[idx2]) {
-                        grad_input[idx1] = grad_out[i];
-                    } else {
-                        grad_input[idx2] = grad_out[i];
+            for (int c = 0; c < channels; ++c) {
+                for (int oh = 0; oh < out_h; ++oh) {
+                    for (int ow = 0; ow < out_w; ++ow) {
+                        float max_val = -std::numeric_limits<float>::infinity();
+                        int arg_idx = -1;
+                        for (int kh = 0; kh < kernel_size; ++kh) {
+                            for (int kw = 0; kw < kernel_size; ++kw) {
+                                const int ih = oh * stride + kh - padding;
+                                const int iw = ow * stride + kw - padding;
+                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                    const int in_idx = c * (height * width) + ih * width + iw;
+                                    if (layer_input0[static_cast<size_t>(in_idx)] > max_val) {
+                                        max_val = layer_input0[static_cast<size_t>(in_idx)];
+                                        arg_idx = in_idx;
+                                    }
+                                }
+                            }
+                        }
+                        if (arg_idx >= 0) {
+                            const int out_idx = c * (out_h * out_w) + oh * out_w + ow;
+                            grad_input[static_cast<size_t>(arg_idx)] += grad_out[static_cast<size_t>(out_idx)];
+                        }
                     }
                 }
             }
 
             accumulate_grad(grad_store[input_names[0]], grad_input);
+        } else if (layer.type == "AvgPool2d") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            const int kh = layer.get_kernel_h() > 0 ? layer.get_kernel_h() : 2;
+            const int kw = layer.get_kernel_w() > 0 ? layer.get_kernel_w() : kh;
+            const int sh = layer.get_stride_h() > 0 ? layer.get_stride_h() : kh;
+            const int sw = layer.get_stride_w() > 0 ? layer.get_stride_w() : kw;
+            const int ph = layer.get_pad_h();
+            const int pw = layer.get_pad_w();
+            int channels = layer.in_channels > 0 ? layer.in_channels : 0;
+            int height = layer.input_height > 0 ? layer.input_height : 0;
+            int width = layer.input_width > 0 ? layer.input_width : 0;
+            if (channels > 0 && (height <= 0 || width <= 0)
+                && (xin.size() % static_cast<size_t>(channels)) == 0) {
+                const size_t hw = xin.size() / static_cast<size_t>(channels);
+                const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                if (s > 0 && s * s == hw) { height = static_cast<int>(s); width = static_cast<int>(s); }
+            }
+            if (channels <= 0 || height <= 0 || width <= 0) {
+                std::cerr << "⚠️  AvgPool2d backward: missing dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const int oh_n = (height + 2 * ph - kh) / sh + 1;
+            const int ow_n = (width + 2 * pw - kw) / sw + 1;
+            if (oh_n <= 0 || ow_n <= 0
+                || grad_out.size() != static_cast<size_t>(channels) * oh_n * ow_n) {
+                std::cerr << "⚠️  AvgPool2d backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            std::vector<float> grad_input(xin.size(), 0.0f);
+            for (int c = 0; c < channels; ++c) {
+                for (int oh = 0; oh < oh_n; ++oh) {
+                    for (int ow = 0; ow < ow_n; ++ow) {
+                        // count = positions valides (le forward divise par count)
+                        int count = 0;
+                        for (int dy = 0; dy < kh; ++dy)
+                            for (int dx = 0; dx < kw; ++dx) {
+                                const int ih = oh * sh + dy - ph;
+                                const int iw = ow * sw + dx - pw;
+                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) ++count;
+                            }
+                        if (count == 0) continue;
+                        const int out_idx = c * (oh_n * ow_n) + oh * ow_n + ow;
+                        const float g = grad_out[static_cast<size_t>(out_idx)] / static_cast<float>(count);
+                        for (int dy = 0; dy < kh; ++dy)
+                            for (int dx = 0; dx < kw; ++dx) {
+                                const int ih = oh * sh + dy - ph;
+                                const int iw = ow * sw + dx - pw;
+                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                    const int in_idx = c * (height * width) + ih * width + iw;
+                                    grad_input[static_cast<size_t>(in_idx)] += g;
+                                }
+                            }
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_input);
+
+        } else if (layer.type == "AvgPool1d" || layer.type == "MaxPool1d") {
+            if (inputs.empty()) { continue; }
+            const std::vector<float>& xin = *inputs[0];
+            const int channels = layer.in_channels > 0 ? layer.in_channels : 1;
+            if (channels <= 0 || (xin.size() % static_cast<size_t>(channels)) != 0) {
+                std::cerr << "⚠️  Pool1d backward: invalid channels (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const int length = static_cast<int>(xin.size()) / channels;
+            const int ksz = layer.kernel_h > 0 ? layer.kernel_h : 2;
+            const int stride = layer.stride_h > 0 ? layer.stride_h : ksz;
+            const int padding = layer.pad_h >= 0 ? layer.pad_h : 0;
+            const int out_length = (length + 2 * padding - ksz) / stride + 1;
+            if (out_length <= 0
+                || grad_out.size() != static_cast<size_t>(channels) * out_length) {
+                std::cerr << "⚠️  Pool1d backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const bool is_max = (layer.type == "MaxPool1d");
+            std::vector<float> grad_input(xin.size(), 0.0f);
+            for (int c = 0; c < channels; ++c) {
+                for (int ol = 0; ol < out_length; ++ol) {
+                    if (is_max) {
+                        float max_val = -std::numeric_limits<float>::infinity();
+                        int arg = -1;
+                        for (int k = 0; k < ksz; ++k) {
+                            const int il = ol * stride + k - padding;
+                            if (il >= 0 && il < length) {
+                                const int in_idx = c * length + il;
+                                if (xin[static_cast<size_t>(in_idx)] > max_val) {
+                                    max_val = xin[static_cast<size_t>(in_idx)];
+                                    arg = in_idx;
+                                }
+                            }
+                        }
+                        if (arg >= 0) grad_input[static_cast<size_t>(arg)] += grad_out[static_cast<size_t>(c * out_length + ol)];
+                    } else {
+                        int count = 0;
+                        for (int k = 0; k < ksz; ++k) {
+                            const int il = ol * stride + k - padding;
+                            if (il >= 0 && il < length) ++count;
+                        }
+                        if (count == 0) continue;
+                        const float g = grad_out[static_cast<size_t>(c * out_length + ol)] / static_cast<float>(count);
+                        for (int k = 0; k < ksz; ++k) {
+                            const int il = ol * stride + k - padding;
+                            if (il >= 0 && il < length) grad_input[static_cast<size_t>(c * length + il)] += g;
+                        }
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_input);
+
         } else if (layer.type == "GlobalAvgPool2d" || layer.type == "AdaptiveAvgPool2d") {
             if (inputs.empty()) {
                 continue;
@@ -9719,18 +10828,22 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             accumulate_grad(grad_store[input_names[0]], grad_in);
         } else if (layer.type == "UpsampleNearest") {
             // Backward UpsampleNearest: accumulation vers le pixel source (nearest)
-            if (layer.out_h <= 0 || layer.out_w <= 0 || layer.in_channels <= 0) {
+            const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+            const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+            const int channels = layer.in_channels;
+            if (in_h <= 0 || in_w <= 0 || channels <= 0) {
                 std::cerr << "⚠️  UpsampleNearest backward: missing dims (" << layer.name << ")" << std::endl;
                 continue;
             }
 
-            const int in_h = layer.out_h;
-            const int in_w = layer.out_w;
-            const int channels = layer.in_channels;
-            const int scale_h = (layer.scale_h > 0) ? layer.scale_h : 2;
-            const int scale_w = (layer.scale_w > 0) ? layer.scale_w : 2;
-            const int out_h = in_h * scale_h;
-            const int out_w = in_w * scale_w;
+            const int meta_out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : 0);
+            const int meta_out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : 0);
+            const int scale_h = (layer.scale_h > 0) ? static_cast<int>(std::lround(layer.scale_h))
+                                                     : ((meta_out_h > 0) ? std::max(1, meta_out_h / in_h) : 2);
+            const int scale_w = (layer.scale_w > 0) ? static_cast<int>(std::lround(layer.scale_w))
+                                                     : ((meta_out_w > 0) ? std::max(1, meta_out_w / in_w) : 2);
+            const int out_h = meta_out_h > 0 ? meta_out_h : (in_h * scale_h);
+            const int out_w = meta_out_w > 0 ? meta_out_w : (in_w * scale_w);
 
             const size_t expected_in = static_cast<size_t>(channels) * static_cast<size_t>(in_h) * static_cast<size_t>(in_w);
             const size_t expected_out = static_cast<size_t>(channels) * static_cast<size_t>(out_h) * static_cast<size_t>(out_w);
@@ -9770,6 +10883,184 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                         const int iw = ow / scale_w;
                         const size_t in_idx = in_plane + static_cast<size_t>(ih) * static_cast<size_t>(in_w) + static_cast<size_t>(iw);
                         const size_t out_idx = out_plane + static_cast<size_t>(oh) * static_cast<size_t>(out_w) + static_cast<size_t>(ow);
+                        grad_in[in_idx] += grad_out[out_idx];
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+        } else if (layer.type == "ZeroPad2d" || layer.type == "ReflectionPad2d" || layer.type == "ReplicationPad2d") {
+            // Backward padding: scatter-add du gradient vers la position source (gather inverse).
+            const int channels = layer.in_channels > 0 ? layer.in_channels : 0;
+            const int in_h = layer.input_height > 0 ? layer.input_height : 0;
+            const int in_w = layer.input_width > 0 ? layer.input_width : 0;
+            if (channels <= 0 || in_h <= 0 || in_w <= 0) {
+                std::cerr << "⚠️  " << layer.type << " backward: missing dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const bool is_zero = (layer.type == "ZeroPad2d");
+            const int pad_top = layer.pad_h >= 0 ? layer.pad_h : 1;
+            const int pad_left = is_zero ? (layer.pad_w >= 0 ? layer.pad_w : 1) : pad_top;
+            const int out_h = in_h + 2 * pad_top;
+            const int out_w = in_w + 2 * pad_left;
+            if (grad_out.size() != static_cast<size_t>(channels) * out_h * out_w) {
+                std::cerr << "⚠️  " << layer.type << " backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            std::vector<float> grad_in(static_cast<size_t>(channels) * in_h * in_w, 0.0f);
+            for (int c = 0; c < channels; ++c) {
+                for (int oh = 0; oh < out_h; ++oh) {
+                    for (int ow = 0; ow < out_w; ++ow) {
+                        int ih, iw;
+                        if (is_zero) {
+                            ih = oh - pad_top;
+                            iw = ow - pad_left;
+                            if (ih < 0 || ih >= in_h || iw < 0 || iw >= in_w) continue; // zone padding = pas de gradient
+                        } else if (layer.type == "ReflectionPad2d") {
+                            ih = oh - pad_top; iw = ow - pad_top;
+                            if (ih < 0) ih = -ih;
+                            if (ih >= in_h) ih = 2 * in_h - ih - 2;
+                            if (iw < 0) iw = -iw;
+                            if (iw >= in_w) iw = 2 * in_w - iw - 2;
+                            ih = std::max(0, std::min(ih, in_h - 1));
+                            iw = std::max(0, std::min(iw, in_w - 1));
+                        } else { // ReplicationPad2d
+                            ih = std::max(0, std::min(oh - pad_top, in_h - 1));
+                            iw = std::max(0, std::min(ow - pad_top, in_w - 1));
+                        }
+                        const size_t in_idx = static_cast<size_t>(c) * in_h * in_w + static_cast<size_t>(ih) * in_w + iw;
+                        const size_t out_idx = static_cast<size_t>(c) * out_h * out_w + static_cast<size_t>(oh) * out_w + ow;
+                        grad_in[in_idx] += grad_out[out_idx];
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "UpsampleBilinear") {
+            const int channels = layer.in_channels;
+            const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+            const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+            if (channels <= 0 || in_h <= 0 || in_w <= 0) {
+                std::cerr << "⚠️  UpsampleBilinear backward: missing dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_h) * std::max(0.0f, layer.scale_h)))));
+            const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_w) * std::max(0.0f, layer.scale_w)))));
+            if (grad_out.size() != static_cast<size_t>(channels) * out_h * out_w) {
+                std::cerr << "⚠️  UpsampleBilinear backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const float scale_h = static_cast<float>(in_h) / out_h;
+            const float scale_w = static_cast<float>(in_w) / out_w;
+            std::vector<float> grad_in(static_cast<size_t>(channels) * in_h * in_w, 0.0f);
+            for (int c = 0; c < channels; ++c) {
+                const size_t in_plane = static_cast<size_t>(c) * in_h * in_w;
+                for (int oh = 0; oh < out_h; ++oh) {
+                    for (int ow = 0; ow < out_w; ++ow) {
+                        const float ih_f = oh * scale_h;
+                        const float iw_f = ow * scale_w;
+                        const int ih0 = static_cast<int>(std::floor(ih_f));
+                        const int iw0 = static_cast<int>(std::floor(iw_f));
+                        const int ih1 = std::min(ih0 + 1, in_h - 1);
+                        const int iw1 = std::min(iw0 + 1, in_w - 1);
+                        const float dh = ih_f - ih0;
+                        const float dw = iw_f - iw0;
+                        const float g = grad_out[static_cast<size_t>(c) * out_h * out_w + static_cast<size_t>(oh) * out_w + ow];
+                        grad_in[in_plane + static_cast<size_t>(ih0) * in_w + iw0] += g * (1 - dh) * (1 - dw);
+                        grad_in[in_plane + static_cast<size_t>(ih0) * in_w + iw1] += g * (1 - dh) * dw;
+                        grad_in[in_plane + static_cast<size_t>(ih1) * in_w + iw0] += g * dh * (1 - dw);
+                        grad_in[in_plane + static_cast<size_t>(ih1) * in_w + iw1] += g * dh * dw;
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "UpsampleBicubic") {
+            const int channels = layer.in_channels > 0 ? layer.in_channels : 3;
+            const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+            const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+            if (channels <= 0 || in_h <= 0 || in_w <= 0) {
+                std::cerr << "⚠️  UpsampleBicubic backward: missing dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_h) * std::max(0.0f, layer.scale_h)))));
+            const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_w) * std::max(0.0f, layer.scale_w)))));
+            if (grad_out.size() != static_cast<size_t>(channels) * out_h * out_w) {
+                std::cerr << "⚠️  UpsampleBicubic backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            auto cubic_weight = [](float x) -> float {
+                constexpr float a = -0.75f;
+                x = std::abs(x);
+                if (x <= 1.0f) return ((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f;
+                if (x < 2.0f) return (((a * x - 5.0f * a) * x + 8.0f * a) * x) - 4.0f * a;
+                return 0.0f;
+            };
+            const float scale_h = static_cast<float>(in_h) / out_h;
+            const float scale_w = static_cast<float>(in_w) / out_w;
+            std::vector<float> grad_in(static_cast<size_t>(channels) * in_h * in_w, 0.0f);
+            for (int c = 0; c < channels; ++c) {
+                const size_t in_plane = static_cast<size_t>(c) * in_h * in_w;
+                for (int oh = 0; oh < out_h; ++oh) {
+                    for (int ow = 0; ow < out_w; ++ow) {
+                        const float ih_f = (oh + 0.5f) * scale_h - 0.5f;
+                        const float iw_f = (ow + 0.5f) * scale_w - 0.5f;
+                        const int ih_base = static_cast<int>(std::floor(ih_f));
+                        const int iw_base = static_cast<int>(std::floor(iw_f));
+                        // Calculer weight_sum (le forward normalise par weight_sum)
+                        float weight_sum = 0.0f;
+                        for (int mh = -1; mh <= 2; ++mh) {
+                            const float wh = cubic_weight(ih_f - static_cast<float>(ih_base + mh));
+                            for (int mw = -1; mw <= 2; ++mw) {
+                                weight_sum += wh * cubic_weight(iw_f - static_cast<float>(iw_base + mw));
+                            }
+                        }
+                        if (weight_sum == 0.0f) continue;
+                        const float g = grad_out[static_cast<size_t>(c) * out_h * out_w + static_cast<size_t>(oh) * out_w + ow] / weight_sum;
+                        for (int mh = -1; mh <= 2; ++mh) {
+                            const int ih = std::max(0, std::min(ih_base + mh, in_h - 1));
+                            const float wh = cubic_weight(ih_f - static_cast<float>(ih_base + mh));
+                            for (int mw = -1; mw <= 2; ++mw) {
+                                const int iw = std::max(0, std::min(iw_base + mw, in_w - 1));
+                                const float w = wh * cubic_weight(iw_f - static_cast<float>(iw_base + mw));
+                                grad_in[in_plane + static_cast<size_t>(ih) * in_w + iw] += g * w;
+                            }
+                        }
+                    }
+                }
+            }
+            accumulate_grad(grad_store[input_names[0]], grad_in);
+
+        } else if (layer.type == "PixelShuffle") {
+            // Réarrangement bijectif (C*r^2,H,W) -> (C,H*r,W*r): backward = mapping inverse.
+            const int r = layer.scale_h > 0 ? layer.scale_h : 2;
+            const int r2 = r * r;
+            const int in_channels = layer.in_channels > 0 ? layer.in_channels : 0;
+            const int height = layer.input_height > 0 ? layer.input_height : 0;
+            const int width = layer.input_width > 0 ? layer.input_width : 0;
+            if (in_channels <= 0 || height <= 0 || width <= 0 || in_channels % r2 != 0) {
+                std::cerr << "⚠️  PixelShuffle backward: invalid dims (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            const int out_channels = in_channels / r2;
+            const int out_height = height * r;
+            const int out_width = width * r;
+            if (grad_out.size() != static_cast<size_t>(out_channels) * out_height * out_width) {
+                std::cerr << "⚠️  PixelShuffle backward shape mismatch (" << layer.name << ")" << std::endl;
+                continue;
+            }
+            std::vector<float> grad_in(static_cast<size_t>(in_channels) * height * width, 0.0f);
+            const size_t out_hw = static_cast<size_t>(out_height) * out_width;
+            const size_t in_hw = static_cast<size_t>(height) * width;
+            for (int oc = 0; oc < out_channels; ++oc) {
+                for (int oh = 0; oh < out_height; ++oh) {
+                    for (int ow = 0; ow < out_width; ++ow) {
+                        const int ih = oh / r;
+                        const int iw = ow / r;
+                        const int sub_h = oh - ih * r;
+                        const int sub_w = ow - iw * r;
+                        const int ic = oc * r2 + sub_h * r + sub_w;
+                        const size_t in_idx = static_cast<size_t>(ic) * in_hw + static_cast<size_t>(ih) * width + iw;
+                        const size_t out_idx = static_cast<size_t>(oc) * out_hw + static_cast<size_t>(oh) * out_width + ow;
                         grad_in[in_idx] += grad_out[out_idx];
                     }
                 }

@@ -355,7 +355,7 @@ function M.opt_num(k, d)
 end
 
 function M.opt_int(k, d)
-  return math.floor(opt_num(k, d))
+  return math.floor(M.opt_num(k, d))
 end
 
 function M.opt_str(k, d)

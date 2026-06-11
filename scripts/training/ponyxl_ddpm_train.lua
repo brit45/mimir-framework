@@ -238,7 +238,7 @@ local DATASET_H = Args.get_int(opts, "dataset-h", 512)
 local DATASET_MIN_MODALITIES = Args.get_int(opts, "dataset-min-modalities", 2)
 
 local TOKENIZER_PATH = Args.get_str(opts, "tokenizer", "checkpoint/base_tokenizer/tokenizer.json")
-local DESIRED_MAX_VOCAB = Args.get_int(opts, "max-vocab", 100000)
+local DESIRED_MAX_VOCAB = Args.get_int(opts, "max-vocab", 32000)
 
 local DEFAULT_VAE_CKPT = "checkpoint/vae_conv_cpu_512_latent-64-64-32_base-64-2/epoch_0011"
 local VAE_CKPT_IN = Args.get_str(opts, "vae-checkpoint", DEFAULT_VAE_CKPT)
@@ -270,8 +270,11 @@ if DEPRECATED_PELTIER_USED then
   log("  ⚠️ options 'peltier-*' dépréciées et ignorées (DDPM latent standard: eps~N(0,I))")
 end
 
-local TEXT_CTX_LEN = Args.get_int(opts, "text-ctx-len", 75)
+local TEXT_CTX_LEN = Args.get_int(opts, "text-ctx-len", 1300)
 local TEXT_MEANPOOL = opt_bool("text-meanpool", false)
+local UNET_DEPTH = Args.get_int(opts, "unet-depth", 3)
+local UNET_BLOCKS_PER_LEVEL = Args.get_int(opts, "unet-blocks-per-level", 1)
+local UNET_BOTTLENECK_BLOCKS = Args.get_int(opts, "unet-bottleneck-blocks", 1)
 
 local RECON_LOSS = Args.get_str(opts, "recon-loss", "mse")
 
@@ -450,6 +453,9 @@ cfg.text_bottleneck_meanpool = TEXT_MEANPOOL
 cfg.text_clip_like = opt_bool("text-clip-like", cfg.text_clip_like ~= false)
 cfg.global_ctx_tokens = Args.get_int(opts, "global-ctx-tokens", tonumber(cfg.global_ctx_tokens or 0) or 0)
 cfg.sdxl_time_cond = opt_bool("sdxl-time-cond", cfg.sdxl_time_cond ~= false)
+cfg.unet_depth = UNET_DEPTH
+cfg.unet_blocks_per_level = UNET_BLOCKS_PER_LEVEL
+cfg.unet_bottleneck_blocks = UNET_BOTTLENECK_BLOCKS
 
 cfg.vae_checkpoint = VAE_CKPT
 cfg.checkpoint_dir = OUT_DIR
@@ -546,7 +552,15 @@ log(string.format("kl: kl_beta=%.6g kl_warmup_steps=%d logvar_clip=[%.6g,%.6g]",
   tonumber(cfg.kl_warmup_steps or 0) or 0,
   tonumber(cfg.logvar_clip_min or -10.0) or -10.0,
   tonumber(cfg.logvar_clip_max or 10.0) or 10.0))
-log(string.format("text: ctx_len=%d meanpool=%s", cfg.text_ctx_len, tostring(cfg.text_bottleneck_meanpool)))
+log(string.format("text: ctx_len=%d meanpool=%s clip_like=%s global_ctx_tokens=%d",
+  cfg.text_ctx_len,
+  tostring(cfg.text_bottleneck_meanpool),
+  tostring(cfg.text_clip_like),
+  tonumber(cfg.global_ctx_tokens or 0) or 0))
+log(string.format("unet: depth=%d blocks_per_level=%d bottleneck_blocks=%d",
+  tonumber(cfg.unet_depth or 0) or 0,
+  tonumber(cfg.unet_blocks_per_level or 0) or 0,
+  tonumber(cfg.unet_bottleneck_blocks or 0) or 0))
 log(string.format("optimizer: type=%s decay_strategy=%s warmup_steps=%d",
   tostring(cfg.optimizer), tostring(cfg.decay_strategy), tonumber(cfg.warmup_steps or 0) or 0)
 )
@@ -580,14 +594,20 @@ if CALIBRATE_VAE then
       if not s then
         log("  calibrate skip item " .. tostring(idx) .. ": " .. tostring(err_s))
       else
-        local m, err_m = Mimir.Model.ponyxl_ddpm_vae_mu_moments(s.img, s.w, s.h)
-        if not m then
-          log("  calibrate error: " .. tostring(err_m))
+        local image_w = math.tointeger(s.w)
+        local image_h = math.tointeger(s.h)
+        if not image_w or not image_h then
+          log("  calibrate skip item " .. tostring(idx) .. ": invalid image size")
         else
-          sum = sum + (tonumber(m.sum) or 0.0)
-          sumsq = sumsq + (tonumber(m.sumsq) or 0.0)
-          n = n + (tonumber(m.n) or 0)
-          used = used + 1
+          local m, err_m = Mimir.Model.ponyxl_ddpm_vae_mu_moments(s.img, image_w, image_h)
+          if not m then
+            log("  calibrate error: " .. tostring(err_m))
+          else
+            sum = sum + (tonumber(m.sum) or 0.0)
+            sumsq = sumsq + (tonumber(m.sumsq) or 0.0)
+            n = n + (tonumber(m.n) or 0)
+            used = used + 1
+          end
         end
       end
     end

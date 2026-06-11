@@ -70,7 +70,10 @@ void VGG16FeatModel::buildInto(Model& model, const Config& cfg) {
                             int in_w,
                             int k,
                             int s,
-                            int p) {
+                            int p,
+                            int out_h,
+                            int out_w) {
+        // --- Conv2d (sans biais: la normalisation qui suit annule tout biais) ---
         model.push(name, "Conv2d",
                    sat_mul(static_cast<size_t>(out_c), sat_mul(static_cast<size_t>(in_c), sat_mul(static_cast<size_t>(k), static_cast<size_t>(k)))));
         if (auto* L = model.getLayerByName(name)) {
@@ -85,9 +88,38 @@ void VGG16FeatModel::buildInto(Model& model, const Config& cfg) {
             L->padding = p;
             L->use_bias = false;
         }
+
+        // --- LayerNorm (normalisation de toute la carte d'activation, sans affine) ---
+        // But: borner l'échelle des activations entre chaque conv pour empêcher
+        // l'explosion de gradient (cause de la divergence d'un VGG sans normalisation).
+        //
+        // Choix techniques (contraints par le moteur):
+        //   * GroupNorm   -> pas de backward implémenté  => inutilisable.
+        //   * BatchNorm2d -> backward bugué (dims figées) => inutilisable.
+        //   * MaxPool2d   -> backward bugué (paires 1D)   => downsampling gardé en conv s2.
+        //   * LayerNorm   -> forward+backward corrects/cohérents => RETENU.
+        //
+        // On normalise sur l'ensemble C*H*W (groups=1, affine=false): cela retire
+        // seulement la composante continue + l'échelle globale, en préservant les
+        // magnitudes relatives par canal (indispensable car la sortie est un GAP
+        // par canal régressé vers des moyennes de patchs).
+        const std::string ln = name + "/ln";
+        model.push(ln, "LayerNorm", 0);
+        if (auto* N = model.getLayerByName(ln)) {
+            N->inputs = {out};
+            N->output = out + "_ln";
+            N->in_channels = out_c;
+            N->input_height = out_h;
+            N->input_width = out_w;
+            N->in_features = std::max(1, out_c * out_h * out_w); // groups = 1 (carte entière)
+            N->affine = false;
+            N->use_bias = false;
+        }
+
+        // --- ReLU ---
         model.push(name + "/act", "ReLU", 0);
         if (auto* A = model.getLayerByName(name + "/act")) {
-            A->inputs = {out};
+            A->inputs = {out + "_ln"};
             A->output = out + "_act";
         }
         return out + "_act";
@@ -119,15 +151,19 @@ void VGG16FeatModel::buildInto(Model& model, const Config& cfg) {
     auto block = [&](int bi, int convs, int out_c) {
         const std::string p = "vgg16_feat/b" + std::to_string(bi);
         for (int i = 0; i < convs; ++i) {
-            x = add_conv_act(p + "/c" + std::to_string(i + 1), x, p + "/y" + std::to_string(i + 1), cur_c, out_c, cur_h, cur_w, 3, 1, 1);
+            // Convs internes: stride 1, pad 1 -> dims spatiales inchangées.
+            x = add_conv_act(p + "/c" + std::to_string(i + 1), x, p + "/y" + std::to_string(i + 1),
+                             cur_c, out_c, cur_h, cur_w, 3, 1, 1, cur_h, cur_w);
             cur_c = out_c;
         }
-        // Downsample via stride-2 conv
-        x = add_conv_act(p + "/down", x, p + "/down_y", cur_c, cur_c, cur_h, cur_w, 3, 2, 1);
-        cur_h = conv_out(cur_h, 3, 2, 1);
-        cur_w = conv_out(cur_w, 3, 2, 1);
+        // Downsample via conv stride-2 (seul downsampling au backward correct).
+        const int dh = conv_out(cur_h, 3, 2, 1);
+        const int dw = conv_out(cur_w, 3, 2, 1);
+        x = add_conv_act(p + "/down", x, p + "/down_y", cur_c, cur_c, cur_h, cur_w, 3, 2, 1, dh, dw);
+        cur_h = dh;
+        cur_w = dw;
 
-        // Feature tap: GAP after down
+        // Feature tap: GAP après le downsample.
         feats.push_back(add_gap(p + "/gap", x, cur_c, cur_h, cur_w));
     };
 

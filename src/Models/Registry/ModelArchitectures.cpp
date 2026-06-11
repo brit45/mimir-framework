@@ -1,8 +1,12 @@
 #include "ModelArchitectures.hpp"
 
 #include "Models/MLP/BasicMLPModel.hpp"
+#include "Models/NLP/HFCLIPTextEncoder1Model.hpp"
+#include "Models/NLP/HFCLIPTextEncoder2Model.hpp"
 #include "Models/NLP/TransformerModel.hpp"
 #include "Models/NLP/VAETextModel.hpp"
+#include "Models/External/ExternalSafeTensorsModel.hpp"
+#include "Models/Vision/HFVaeDecoderModel.hpp"
 #include "Models/Vision/ViTModel.hpp"
 #include "Models/Vision/VAEModel.hpp"
 #include "Models/Vision/VAEConvModel.hpp"
@@ -15,6 +19,7 @@
 #include "Models/Vision/CNN/VGG16FeatModel.hpp"
 #include "Models/Diffusion/DiffusionModel.hpp"
 #include "Models/Diffusion/CondDiffusionModel.hpp"
+#include "Models/Diffusion/HFSDXLTransformerBlockModel.hpp"
 #include "Models/Diffusion/PonyXLDDPMModel.hpp"
 #include "Models/Diffusion/SD35Model.hpp"
 #include "Models/Vision/PatchDiscriminatorModel.hpp"
@@ -29,6 +34,7 @@ namespace {
 static inline std::string canonicalArchName(const std::string& name) {
     // Alias convivial: "SD3.5" -> "sd3_5".
     if (name == "sd3.5" || name == "SD3.5" || name == "sd3_5" || name == "SD3_5") return "sd3_5";
+    if (name == "ponyxl_safetensors_base" || name == "ponyxl_monolith_base") return "external_safetensors_base";
     return name;
 }
 } // namespace
@@ -150,6 +156,85 @@ static TransformerModel::Config transformerCfgFromJson(const json& cfg) {
     out.output_dim = jget<int>(cfg, "output_dim", out.output_dim);
     out.causal = jget<bool>(cfg, "causal", out.causal);
     return out;
+}
+
+static HFCLIPTextEncoder2Model::Config hfClipTextEncoder2CfgFromJson(const json& cfg) {
+    HFCLIPTextEncoder2Model::Config out;
+    out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
+    out.padding_idx = jget<int>(cfg, "padding_idx", out.padding_idx);
+    out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.num_layers = jget<int>(cfg, "num_layers", out.num_layers);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+    out.proj_dim = jget<int>(cfg, "proj_dim", out.proj_dim);
+    out.causal = jget<bool>(cfg, "causal", out.causal);
+    out.include_logit_scale = jget<bool>(cfg, "include_logit_scale", out.include_logit_scale);
+    return out;
+}
+
+static HFCLIPTextEncoder1Model::Config hfClipTextEncoder1CfgFromJson(const json& cfg) {
+    HFCLIPTextEncoder1Model::Config out;
+    out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
+    out.padding_idx = jget<int>(cfg, "padding_idx", out.padding_idx);
+    out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.num_layers = jget<int>(cfg, "num_layers", out.num_layers);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+    out.causal = jget<bool>(cfg, "causal", out.causal);
+    return out;
+}
+
+static json hfClipTextEncoder1DefaultConfigJson() {
+    HFCLIPTextEncoder1Model::Config d;
+    return json{{"vocab_size", d.vocab_size},
+                {"padding_idx", d.padding_idx},
+                {"seq_len", d.seq_len},
+                {"d_model", d.d_model},
+                {"num_layers", d.num_layers},
+                {"num_heads", d.num_heads},
+                {"mlp_hidden", d.mlp_hidden},
+                {"causal", d.causal}};
+}
+
+static HFVaeDecoderModel::Config hfVaeDecoderCfgFromJson(const json& cfg) {
+    HFVaeDecoderModel::Config out;
+    out.image_w = jget<int>(cfg, "image_w", out.image_w);
+    out.image_h = jget<int>(cfg, "image_h", out.image_h);
+    out.image_c = jget<int>(cfg, "image_c", out.image_c);
+    out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
+    out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
+    out.latent_c = jget<int>(cfg, "latent_c", out.latent_c);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.norm_groups = jget<int>(cfg, "norm_groups", out.norm_groups);
+    return out;
+}
+
+static json hfVaeDecoderDefaultConfigJson() {
+    HFVaeDecoderModel::Config d;
+    return json{{"image_w", d.image_w},
+                {"image_h", d.image_h},
+                {"image_c", d.image_c},
+                {"latent_w", d.latent_w},
+                {"latent_h", d.latent_h},
+                {"latent_c", d.latent_c},
+                {"num_heads", d.num_heads},
+                {"norm_groups", d.norm_groups}};
+}
+
+static json hfClipTextEncoder2DefaultConfigJson() {
+    HFCLIPTextEncoder2Model::Config d;
+    return json{{"vocab_size", d.vocab_size},
+                {"padding_idx", d.padding_idx},
+                {"seq_len", d.seq_len},
+                {"d_model", d.d_model},
+                {"num_layers", d.num_layers},
+                {"num_heads", d.num_heads},
+                {"mlp_hidden", d.mlp_hidden},
+                {"proj_dim", d.proj_dim},
+                {"causal", d.causal},
+                {"include_logit_scale", d.include_logit_scale}};
 }
 
 static json transformerDefaultConfigJson() {
@@ -304,6 +389,29 @@ static PonyXLDDPMModel::Config ponyxlDdpmCfgFromJson(const json& cfg) {
     out.viz_ddpm_every_steps = jget<int>(cfg, "viz_ddpm_every_steps", out.viz_ddpm_every_steps);
     out.viz_ddpm_num_steps = jget<int>(cfg, "viz_ddpm_num_steps", out.viz_ddpm_num_steps);
 
+    out.timestep_cond = jget<std::string>(cfg, "timestep_cond", out.timestep_cond);
+    out.loss_weighting = jget<std::string>(cfg, "loss_weighting", out.loss_weighting);
+    out.min_snr_gamma = jget<float>(cfg, "min_snr_gamma", out.min_snr_gamma);
+    out.output_activation = jget<std::string>(cfg, "output_activation", out.output_activation);
+    out.kl_beta = jget<float>(cfg, "kl_beta", out.kl_beta);
+    out.kl_warmup_steps = jget<int>(cfg, "kl_warmup_steps", out.kl_warmup_steps);
+    out.logvar_clip_min = jget<float>(cfg, "logvar_clip_min", out.logvar_clip_min);
+    out.logvar_clip_max = jget<float>(cfg, "logvar_clip_max", out.logvar_clip_max);
+    out.global_ctx_tokens = jget<int>(cfg, "global_ctx_tokens", out.global_ctx_tokens);
+    out.caption_kv_enable = jget<bool>(cfg, "caption_kv_enable", out.caption_kv_enable);
+    out.term_freq_boost_enable = jget<bool>(cfg, "term_freq_boost_enable", out.term_freq_boost_enable);
+    out.term_freq_boost_use_tokens = jget<bool>(cfg, "term_freq_boost_use_tokens", out.term_freq_boost_use_tokens);
+    out.term_freq_boost_use_keywords = jget<bool>(cfg, "term_freq_boost_use_keywords", out.term_freq_boost_use_keywords);
+    out.term_freq_boost_start_step = jget<int>(cfg, "term_freq_boost_start_step", out.term_freq_boost_start_step);
+    out.term_freq_boost_update_every_steps = jget<int>(cfg, "term_freq_boost_update_every_steps", out.term_freq_boost_update_every_steps);
+    out.term_freq_boost_top_k = jget<int>(cfg, "term_freq_boost_top_k", out.term_freq_boost_top_k);
+    out.term_freq_boost_repeat = jget<int>(cfg, "term_freq_boost_repeat", out.term_freq_boost_repeat);
+    out.img_loss_weight = jget<float>(cfg, "img_loss_weight", out.img_loss_weight);
+    out.img_loss_every_steps = jget<int>(cfg, "img_loss_every_steps", out.img_loss_every_steps);
+    out.unet_blocks_per_level = jget<int>(cfg, "unet_blocks_per_level", out.unet_blocks_per_level);
+    out.unet_bottleneck_blocks = jget<int>(cfg, "unet_bottleneck_blocks", out.unet_bottleneck_blocks);
+    out.text_clip_like = jget<bool>(cfg, "text_clip_like", out.text_clip_like);
+
     return out;
 }
 
@@ -363,6 +471,29 @@ static json ponyxlDdpmDefaultConfigJson() {
 
         {"viz_ddpm_every_steps", d.viz_ddpm_every_steps},
         {"viz_ddpm_num_steps", d.viz_ddpm_num_steps},
+
+        {"timestep_cond", d.timestep_cond},
+        {"loss_weighting", d.loss_weighting},
+        {"min_snr_gamma", d.min_snr_gamma},
+        {"output_activation", d.output_activation},
+        {"kl_beta", d.kl_beta},
+        {"kl_warmup_steps", d.kl_warmup_steps},
+        {"logvar_clip_min", d.logvar_clip_min},
+        {"logvar_clip_max", d.logvar_clip_max},
+        {"global_ctx_tokens", d.global_ctx_tokens},
+        {"caption_kv_enable", d.caption_kv_enable},
+        {"term_freq_boost_enable", d.term_freq_boost_enable},
+        {"term_freq_boost_use_tokens", d.term_freq_boost_use_tokens},
+        {"term_freq_boost_use_keywords", d.term_freq_boost_use_keywords},
+        {"term_freq_boost_start_step", d.term_freq_boost_start_step},
+        {"term_freq_boost_update_every_steps", d.term_freq_boost_update_every_steps},
+        {"term_freq_boost_top_k", d.term_freq_boost_top_k},
+        {"term_freq_boost_repeat", d.term_freq_boost_repeat},
+        {"img_loss_weight", d.img_loss_weight},
+        {"img_loss_every_steps", d.img_loss_every_steps},
+        {"unet_blocks_per_level", d.unet_blocks_per_level},
+        {"unet_bottleneck_blocks", d.unet_bottleneck_blocks},
+        {"text_clip_like", d.text_clip_like},
     };
 }
 
@@ -399,6 +530,9 @@ static VAEConvModel::Config vaeConvCfgFromJson(const json& cfg) {
     out.use_attn           = jget<bool>(cfg, "use_attn", out.use_attn);
     out.enc_norm           = jget<std::string>(cfg, "enc_norm", out.enc_norm);
     out.enc_gn_groups      = jget<int>(cfg, "enc_gn_groups", out.enc_gn_groups);
+    out.dec_norm           = jget<std::string>(cfg, "dec_norm", out.dec_norm);
+    out.dec_gn_groups      = jget<int>(cfg, "dec_gn_groups", out.dec_gn_groups);
+    out.decoder_upsample   = jget<std::string>(cfg, "decoder_upsample", out.decoder_upsample);
     out.attn_heads         = jget<int>(cfg, "attn_heads", out.attn_heads);
     out.resnet_max_tokens  = jget<int>(cfg, "resnet_max_tokens", out.resnet_max_tokens);
     out.attn_max_tokens    = jget<int>(cfg, "attn_max_tokens", out.attn_max_tokens);
@@ -426,6 +560,9 @@ static json vaeConvDefaultConfigJson() {
                 {"use_attn", d.use_attn},
                 {"enc_norm", d.enc_norm},
                 {"enc_gn_groups", d.enc_gn_groups},
+                {"dec_norm", d.dec_norm},
+                {"dec_gn_groups", d.dec_gn_groups},
+                {"decoder_upsample", d.decoder_upsample},
                 {"attn_heads", d.attn_heads},
                 {"resnet_max_tokens", d.resnet_max_tokens},
                 {"attn_max_tokens", d.attn_max_tokens},
@@ -434,6 +571,38 @@ static json vaeConvDefaultConfigJson() {
                 {"seq_len", d.seq_len},
                 {"text_d_model", d.text_d_model},
                 {"proj_dim", d.proj_dim}};
+}
+
+static ExternalSafeTensorsModel::Config externalSafeTensorsCfgFromJson(const json& cfg) {
+    ExternalSafeTensorsModel::Config out;
+    out.source_safetensors = jget<std::string>(cfg, "source_safetensors", out.source_safetensors);
+    out.max_tensors = jget<int>(cfg, "max_tensors", out.max_tensors);
+    if (cfg.is_object()) {
+        auto parse_prefixes = [&](const char* key, std::vector<std::string>& out_vec) {
+            auto it = cfg.find(key);
+            if (it == cfg.end() || it->is_null()) return;
+            if (it->is_string()) {
+                out_vec.push_back(it->get<std::string>());
+                return;
+            }
+            if (it->is_array()) {
+                for (const auto& v : *it) {
+                    if (v.is_string()) out_vec.push_back(v.get<std::string>());
+                }
+            }
+        };
+        parse_prefixes("include_prefixes", out.include_prefixes);
+        parse_prefixes("exclude_prefixes", out.exclude_prefixes);
+    }
+    return out;
+}
+
+static json externalSafeTensorsDefaultConfigJson() {
+    ExternalSafeTensorsModel::Config d;
+    return json{{"source_safetensors", d.source_safetensors},
+                {"include_prefixes", d.include_prefixes},
+                {"exclude_prefixes", d.exclude_prefixes},
+                {"max_tensors", d.max_tensors}};
 }
 
 static ResNetModel::Config resnetCfgFromJson(const json& cfg) {
@@ -645,6 +814,33 @@ static json sd35DefaultConfigJson() {
         {"mlp_hidden", d.mlp_hidden},
         {"causal", d.causal},
     };
+}
+
+static HFSDXLTransformerBlockModel::Config hfSdxlTransformerBlockCfgFromJson(const json& cfg) {
+    HFSDXLTransformerBlockModel::Config out;
+    out.q_len = jget<int>(cfg, "q_len", out.q_len);
+    out.kv_len = jget<int>(cfg, "kv_len", out.kv_len);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.context_dim = jget<int>(cfg, "context_dim", out.context_dim);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.ff_hidden = jget<int>(cfg, "ff_hidden", out.ff_hidden);
+    out.self_attn_qkv_bias = jget<bool>(cfg, "self_attn_qkv_bias", out.self_attn_qkv_bias);
+    out.self_attn_out_bias = jget<bool>(cfg, "self_attn_out_bias", out.self_attn_out_bias);
+    out.cross_attn_out_bias = jget<bool>(cfg, "cross_attn_out_bias", out.cross_attn_out_bias);
+    return out;
+}
+
+static json hfSdxlTransformerBlockDefaultConfigJson() {
+    HFSDXLTransformerBlockModel::Config d;
+    return json{{"q_len", d.q_len},
+                {"kv_len", d.kv_len},
+                {"d_model", d.d_model},
+                {"context_dim", d.context_dim},
+                {"num_heads", d.num_heads},
+                {"ff_hidden", d.ff_hidden},
+                {"self_attn_qkv_bias", d.self_attn_qkv_bias},
+                {"self_attn_out_bias", d.self_attn_out_bias},
+                {"cross_attn_out_bias", d.cross_attn_out_bias}};
 }
 
 } // namespace
@@ -949,6 +1145,76 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<VGG16FeatModel>();
                     m->buildFromConfig(vgg16FeatCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "hf_clip_text_encoder_1",
+            Entry{
+                "hf_clip_text_encoder_1",
+                "Encodeur texte CLIP/SDXL exécutable pour checkpoints HuggingFace/PyTorch (conditioner.embedders.0)",
+                hfClipTextEncoder1DefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<HFCLIPTextEncoder1Model>();
+                    m->buildFromConfig(hfClipTextEncoder1CfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "hf_clip_text_encoder_2",
+            Entry{
+                "hf_clip_text_encoder_2",
+                "Encodeur texte OpenCLIP/SDXL exécutable pour checkpoints HuggingFace/PyTorch",
+                hfClipTextEncoder2DefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<HFCLIPTextEncoder2Model>();
+                    m->buildFromConfig(hfClipTextEncoder2CfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "hf_vae_decoder",
+            Entry{
+                "hf_vae_decoder",
+                "Décodeur VAE SDXL/HuggingFace exécutable pour le composant first_stage_model.decoder",
+                hfVaeDecoderDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<HFVaeDecoderModel>();
+                    m->buildFromConfig(hfVaeDecoderCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "hf_sdxl_transformer_block",
+            Entry{
+                "hf_sdxl_transformer_block",
+                "Bloc transformer SDXL/HuggingFace exécutable avec SelfAttention, CrossAttention et GEGLU",
+                hfSdxlTransformerBlockDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<HFSDXLTransformerBlockModel>();
+                    m->buildFromConfig(hfSdxlTransformerBlockCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "external_safetensors_base",
+            Entry{
+                "external_safetensors_base",
+                "Base non-executable qui reflète exactement les clés d'un checkpoint safetensors externe",
+                externalSafeTensorsDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<ExternalSafeTensorsModel>();
+                    m->buildFromConfig(externalSafeTensorsCfgFromJson(cfg));
                     return m;
                 },
             }

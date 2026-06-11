@@ -16,6 +16,9 @@ dataset_cache.json
 build/
 dist/
 
+# Artefacts CTest (générés à la racine lors de l'exécution des tests)
+Testing/
+
 # Variantes locales de build (ex: build_sfml, build_static, build_verify...)
 build_*/
 

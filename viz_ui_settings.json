@@ -3,21 +3,21 @@
     "panels": [
       {
         "allow_drag": true,
-        "h": 290.0,
+        "h": 291.0,
         "id": 0,
         "title": "Context",
         "visible": true,
-        "w": 401.0000305175781,
+        "w": 324.0000915527344,
         "x": 4.0,
         "y": 4.0
       },
       {
         "allow_drag": true,
-        "h": 356.9999084472656,
+        "h": 659.9998779296875,
         "id": 1,
         "title": "Blocks / Layers",
         "visible": true,
-        "w": 1251.0,
+        "w": 1250.0001220703125,
         "x": 6.99993896484375,
         "y": 303.0
       },
@@ -26,7 +26,7 @@
         "h": 291.00006103515625,
         "id": 2,
         "title": "Generated",
-        "visible": true,
+        "visible": false,
         "w": 844.0,
         "x": 415.0,
         "y": 4.000091552734375
@@ -43,31 +43,31 @@
       },
       {
         "allow_drag": true,
-        "h": 574.0,
+        "h": 877.9999389648438,
         "id": 4,
         "title": "Metrics",
         "visible": true,
-        "w": 517.0,
-        "x": 1268.0,
+        "w": 524.0,
+        "x": 1264.0,
         "y": 85.0
       },
       {
         "allow_drag": true,
-        "h": 238.0,
+        "h": 291.0,
         "id": 5,
         "title": "Loss",
         "visible": true,
-        "w": 1783.9998779296875,
-        "x": 4.0,
-        "y": 668.0
+        "w": 918.9999389648438,
+        "x": 337.00006103515625,
+        "y": 4.0
       }
     ],
-    "show_generated_images": true,
+    "show_generated_images": false,
     "show_loss_graph": true,
     "show_prompt_text": true,
     "show_training_progress": true,
     "version": 2,
-    "window_height": 912,
+    "window_height": 976,
     "window_width": 1792
   },
   "slots": {

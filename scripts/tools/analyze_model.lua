@@ -453,7 +453,7 @@ local function safe_read_json(path)
 end
 
 local function read_prefix(path, n)
-    n = tonumber(n) or 65536
+    n = math.tointeger(tonumber(n) or 65536) or 65536
     local f = io.open(path, "rb")
     if not f then return nil, "cannot open" end
     local s = f:read(n)

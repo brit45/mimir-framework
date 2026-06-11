@@ -341,12 +341,14 @@ private:
 
     // Helpers
     void createImageTexture(ImageData& img_data, int w, int h, int channels, int display_size);
+    void createLayerBlockTexture(ImageData& img_data, const std::string& label);
     sf::Color getLossColor(float loss);
 
     // UI
     bool show_help_overlay_ = false;
     bool show_prompt_text_ = true;
     bool zoom_active_ = false;
+    bool smooth_layer_block_previews_ = true;
     enum class FocusTarget { Dataset, Projection, Understanding, LayerBlock, Generated };
     FocusTarget focus_target_ = FocusTarget::Dataset;
     int focus_block_index_ = 0;

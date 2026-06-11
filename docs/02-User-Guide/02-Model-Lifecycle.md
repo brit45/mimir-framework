@@ -177,8 +177,25 @@ assert(Mimir.Model.init_weights("xavier", 42))
 ```lua
 local ok, err = Mimir.Serialization.load("checkpoint/my_model.safetensors")
 assert(ok ~= false, err)
+```
 
-Note dtype : si le checkpoint embarque `model_config.dtype`, il est réappliqué automatiquement au modèle au load (utile pour garder des saves cohérents en reprise).
+Note dtype : si le checkpoint embarque `model_config.dtype`, il est réappliqué automatiquement au modèle au load. C’est utile si tu veux reprendre un run puis réécrire un checkpoint sans changer la politique de stockage des tenseurs float.
+
+Exemple de reprise minimal :
+
+```lua
+local cfg, err = Mimir.Architectures.default_config("transformer")
+assert(cfg, err)
+
+assert(Mimir.Model.create("transformer", cfg))
+assert(Mimir.Model.build())
+assert(Mimir.Model.allocate_params())
+
+local ok, load_err = Mimir.Serialization.load("checkpoint/my_model.safetensors")
+assert(ok ~= false, load_err)
+
+local out = Mimir.Model.forward({ __input__ = {1, 1, 1, 1} }, false)
+assert(out)
 ```
 
 Conseil : la config doit matcher (ex: `seq_len`, `vocab_size`, dims). Sinon tu auras un mismatch de shapes.

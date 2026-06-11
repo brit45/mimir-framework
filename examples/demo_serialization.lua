@@ -28,6 +28,8 @@ local CONFIG = {
     debug_json_path = "/tmp/mimir_demo_debug.json",
 }
 
+local checkpoint = Mimir.Serialization
+
 -- ══════════════════════════════════════════════════════════════
 -- Étape 1: Créer un modèle de test
 -- ══════════════════════════════════════════════════════════════
@@ -68,7 +70,6 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
 -- Sauvegarder
 print("📦 Sauvegarde SafeTensors...")
 local ok, err = checkpoint.save(
-    model,
     CONFIG.safetensors_path,
     "safetensors",
     {
@@ -85,10 +86,12 @@ else
     -- Afficher la taille
     local cmd = "ls -lh " .. CONFIG.safetensors_path .. " 2>/dev/null | awk '{print $5}'"
     local handle = io.popen(cmd)
-    local size = handle:read("*a"):gsub("%s+", "")
-    handle:close()
-    if size ~= "" then
-        print("  Taille: " .. size)
+    if handle then
+        local size = handle:read("*a"):gsub("%s+", "")
+        handle:close()
+        if size ~= "" then
+            print("  Taille: " .. size)
+        end
     end
 end
 
@@ -105,12 +108,9 @@ Mimir.Model.create("transformer", {
 Mimir.Model.build()
 
 local ok, err = checkpoint.load(
-    model,
     CONFIG.safetensors_path,
     "safetensors",
-    {
-        strict_mode = true
-    }
+    {}
 )
 
 if not ok then
@@ -132,7 +132,6 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
 -- Sauvegarder
 print("📦 Sauvegarde RawFolder...")
 local ok, err = checkpoint.save(
-    model,
     CONFIG.raw_folder_path,
     "raw_folder",
     {
@@ -167,13 +166,11 @@ Mimir.Model.create("transformer", {
 })
 
 local ok, err = checkpoint.load(
-    model,
     CONFIG.raw_folder_path,
     "raw_folder",
     {
         load_tokenizer = true,
-        validate_checksums = true,
-        strict_mode = false
+        verify_checksums = true
     }
 )
 
@@ -197,7 +194,6 @@ print("⚠️  Format DEBUG uniquement - Petits modèles seulement!")
 print("📦 Sauvegarde DebugJson...")
 
 local ok, err = checkpoint.save(
-    model,
     CONFIG.debug_json_path,
     "debug_json",
     {
@@ -213,10 +209,12 @@ else
     -- Afficher la taille
     local cmd = "ls -lh " .. CONFIG.debug_json_path .. " 2>/dev/null | awk '{print $5}'"
     local handle = io.popen(cmd)
-    local size = handle:read("*a"):gsub("%s+", "")
-    handle:close()
-    if size ~= "" then
-        print("  Taille: " .. size)
+    if handle then
+        local size = handle:read("*a"):gsub("%s+", "")
+        handle:close()
+        if size ~= "" then
+            print("  Taille: " .. size)
+        end
     end
     
     -- Afficher un extrait
@@ -245,7 +243,7 @@ Mimir.Model.create("transformer", {
 })
 Mimir.Model.build()
 
-local ok, err = checkpoint.load(model, CONFIG.safetensors_path)
+local ok, err = checkpoint.load(CONFIG.safetensors_path)
 if ok then
     print("✓ Auto-détecté: SafeTensors")
 else
@@ -253,7 +251,7 @@ else
 end
 
 -- RawFolder (détecté par manifest.json)
-local ok, err = checkpoint.load(model, CONFIG.raw_folder_path)
+local ok, err = checkpoint.load(CONFIG.raw_folder_path)
 if ok then
     print("✓ Auto-détecté: RawFolder")
 else

@@ -17,6 +17,7 @@
 #include "Layers.hpp"      // Pour la structure Layer
 #include "MemoryGuard.hpp" // Pour le strict mode
 #include "DType.hpp"
+#include "Planning/Planner.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -702,9 +703,9 @@ protected:
     // =============================
     struct StaticPlanCache {
         bool built = false;
+        bool built_for_training = false;
         bool dumped = false;
-        // Per-layer flags (uint8_t for cache friendliness).
-        std::vector<uint8_t> fuse_conv2d_relu;
+        Mimir::Planning::ExecutionPlan execution;
     };
     StaticPlanCache static_plan_;
 };

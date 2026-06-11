@@ -18,6 +18,132 @@
 
 namespace LayerOps {
 
+inline std::vector<int> infer_shape_for_axis_op(const std::vector<float>& input, const Layer& layer) {
+    if (!layer.shape.empty()) {
+        size_t total = 1;
+        for (int d : layer.shape) {
+            if (d <= 0) {
+                total = 0;
+                break;
+            }
+            total *= static_cast<size_t>(d);
+        }
+        if (total == input.size()) {
+            return layer.shape;
+        }
+    }
+
+    if (layer.in_features > 0 && (input.size() % static_cast<size_t>(layer.in_features)) == 0) {
+        return {
+            static_cast<int>(input.size() / static_cast<size_t>(layer.in_features)),
+            layer.in_features,
+        };
+    }
+
+    if (layer.embed_dim > 0 && (input.size() % static_cast<size_t>(layer.embed_dim)) == 0) {
+        return {
+            static_cast<int>(input.size() / static_cast<size_t>(layer.embed_dim)),
+            layer.embed_dim,
+        };
+    }
+
+    if (layer.seq_len > 0 && (input.size() % static_cast<size_t>(layer.seq_len)) == 0) {
+        return {
+            layer.seq_len,
+            static_cast<int>(input.size() / static_cast<size_t>(layer.seq_len)),
+        };
+    }
+
+    return {static_cast<int>(input.size())};
+}
+
+inline std::vector<float> batchnorm_forward(
+    const std::vector<float>& input,
+    const Layer& layer,
+    bool training = true
+) {
+    if (input.empty()) {
+        return {};
+    }
+
+    int channels = layer.in_channels > 0 ? layer.in_channels : layer.out_channels;
+    if (channels <= 0) {
+        if (!layer.running_mean.empty()) {
+            channels = static_cast<int>(layer.running_mean.size());
+        } else if (layer.affine && layer.getWeights()) {
+            const size_t w_sz = layer.getWeightsSize();
+            if (layer.use_bias && (w_sz % 2ULL) == 0ULL) {
+                channels = static_cast<int>(w_sz / 2ULL);
+            } else {
+                channels = static_cast<int>(w_sz);
+            }
+        }
+    }
+
+    if (channels <= 0) {
+        throw std::runtime_error("BatchNorm: invalid channel count");
+    }
+
+    int spatial_size = 1;
+    if (layer.type_enum == LayerType::BatchNorm2d && layer.input_height > 0 && layer.input_width > 0) {
+        spatial_size = layer.input_height * layer.input_width;
+    }
+
+    size_t sample_stride = static_cast<size_t>(channels) * static_cast<size_t>(spatial_size);
+    if (sample_stride == 0 || (input.size() % sample_stride) != 0) {
+        spatial_size = 1;
+        sample_stride = static_cast<size_t>(channels);
+    }
+    if (sample_stride == 0 || (input.size() % sample_stride) != 0) {
+        throw std::runtime_error("BatchNorm: input size incompatible with channel/spatial dimensions");
+    }
+
+    const int batch_size = static_cast<int>(input.size() / sample_stride);
+    if (batch_size <= 0) {
+        throw std::runtime_error("BatchNorm: invalid batch size");
+    }
+
+    std::vector<float> gamma(static_cast<size_t>(channels), 1.0f);
+    std::vector<float> beta(static_cast<size_t>(channels), 0.0f);
+    if (layer.affine) {
+        const float* weights = layer.getWeights();
+        const size_t w_sz = layer.getWeightsSize();
+        if (weights) {
+            const size_t gamma_n = std::min(static_cast<size_t>(channels), w_sz);
+            std::copy(weights, weights + gamma_n, gamma.begin());
+            if (layer.use_bias && w_sz >= static_cast<size_t>(channels) * 2ULL) {
+                std::copy(weights + channels, weights + channels + channels, beta.begin());
+            }
+        }
+    }
+
+    std::vector<float> running_mean(static_cast<size_t>(channels), 0.0f);
+    std::vector<float> running_var(static_cast<size_t>(channels), 1.0f);
+    const bool has_running_stats =
+        layer.track_running_stats &&
+        layer.running_mean.size() == static_cast<size_t>(channels) &&
+        layer.running_var.size() == static_cast<size_t>(channels);
+    if (has_running_stats) {
+        running_mean = layer.running_mean;
+        running_var = layer.running_var;
+    }
+
+    std::vector<float> output = input;
+    Normalization::batch_norm(
+        output,
+        gamma,
+        beta,
+        running_mean,
+        running_var,
+        batch_size,
+        channels,
+        spatial_size,
+        layer.eps,
+        training || !has_running_stats
+    );
+    return output;
+}
+
 // ============================================================================
 // LINEAR (Dense / Fully Connected)
 // ============================================================================
@@ -28,19 +154,35 @@ inline std::vector<float> linear_forward(
     bool training = true
 ) {
     (void)training;
-    const int in_f = layer.in_features > 0 ? layer.in_features : input.size();
+    const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(input.size());
     const int out_f = layer.out_features;
     
     if (out_f <= 0) {
         throw std::runtime_error("Linear: out_features not set");
     }
     
+    if (in_f <= 0) {
+        throw std::runtime_error("Linear: in_features not set");
+    }
+
     const float* weights = layer.getWeights();
+    if (!weights) {
+        throw std::runtime_error("Linear: weights not initialized");
+    }
     const float* bias = layer.use_bias ? (weights + in_f * out_f) : nullptr;
 
+    if (static_cast<int>(input.size()) < in_f) {
+        throw std::runtime_error("Linear: input size smaller than in_features");
+    }
+
+    const bool infer_batch = (layer.seq_len <= 0) &&
+                             (in_f > 0) &&
+                             (static_cast<int>(input.size()) > in_f) &&
+                             ((static_cast<int>(input.size()) % in_f) == 0);
+
     // Mode séquence: input = [seq_len, in_f] aplati, output = [seq_len, out_f] aplati
-    if (layer.seq_len > 0 && static_cast<int>(input.size()) == layer.seq_len * in_f) {
-        const int seq_len = layer.seq_len;
+    if ((layer.seq_len > 0 && static_cast<int>(input.size()) == layer.seq_len * in_f) || infer_batch) {
+        const int seq_len = infer_batch ? (static_cast<int>(input.size()) / in_f) : layer.seq_len;
         std::vector<float> output(static_cast<size_t>(seq_len) * static_cast<size_t>(out_f), 0.0f);
 
         #pragma omp parallel for schedule(static) if(static_cast<long long>(seq_len) * out_f * in_f > 262144)
@@ -77,6 +219,10 @@ inline std::vector<float> linear_forward(
         }
 
         return output;
+    }
+
+    if (static_cast<int>(input.size()) != in_f) {
+        throw std::runtime_error("Linear: input size mismatch");
     }
 
     // Fallback historique: vector -> vector
@@ -327,35 +473,53 @@ inline std::vector<float> softmax_forward(
     const std::vector<float>& input,
     const Layer& layer
 ) {
-    const int N = input.size();
-    std::vector<float> output(N);
-    
-    // Find max for numerical stability
-    float max_val = *std::max_element(input.begin(), input.end());
-    
-    // Compute exp(x - max)
-    float sum = 0.0f;
-    #pragma omp simd reduction(+:sum)
-    for (int i = 0; i < N; ++i) {
-        output[i] = std::exp(input[i] - max_val);
-        sum += output[i];
+    if (input.empty()) {
+        return {};
     }
 
-    // Normalize (or log-normalize)
-    const float inv_sum = 1.0f / sum;
-    if (layer.type_enum == LayerType::LogSoftmax) {
-        // log_softmax(x) = (x - max) - log(sum(exp(x-max)))
-        const float log_denom = std::log(sum);
-        #pragma omp simd
-        for (int i = 0; i < N; ++i) {
-            output[i] = (input[i] - max_val) - log_denom;
+    const std::vector<int> shape = infer_shape_for_axis_op(input, layer);
+    int axis = layer.axis;
+    if (axis < 0) axis += static_cast<int>(shape.size());
+    if (axis < 0 || axis >= static_cast<int>(shape.size())) {
+        axis = static_cast<int>(shape.size()) - 1;
+    }
+
+    size_t outer = 1;
+    for (int i = 0; i < axis; ++i) outer *= static_cast<size_t>(shape[static_cast<size_t>(i)]);
+    size_t axis_size = static_cast<size_t>(shape[static_cast<size_t>(axis)]);
+    size_t inner = 1;
+    for (size_t i = static_cast<size_t>(axis) + 1; i < shape.size(); ++i) inner *= static_cast<size_t>(shape[i]);
+
+    std::vector<float> output(input.size(), 0.0f);
+    const bool is_log = layer.type_enum == LayerType::LogSoftmax;
+    for (size_t outer_idx = 0; outer_idx < outer; ++outer_idx) {
+        for (size_t inner_idx = 0; inner_idx < inner; ++inner_idx) {
+            const size_t base = (outer_idx * axis_size * inner) + inner_idx;
+            float max_val = input[base];
+            for (size_t a = 1; a < axis_size; ++a) {
+                const float v = input[base + a * inner];
+                if (v > max_val) max_val = v;
+            }
+
+            float sum = 0.0f;
+            for (size_t a = 0; a < axis_size; ++a) {
+                const float e = std::exp(input[base + a * inner] - max_val);
+                output[base + a * inner] = e;
+                sum += e;
+            }
+
+            if (is_log) {
+                const float log_denom = std::log(sum);
+                for (size_t a = 0; a < axis_size; ++a) {
+                    output[base + a * inner] = (input[base + a * inner] - max_val) - log_denom;
+                }
+            } else {
+                const float inv_sum = 1.0f / sum;
+                for (size_t a = 0; a < axis_size; ++a) {
+                    output[base + a * inner] *= inv_sum;
+                }
+            }
         }
-        return output;
-    }
-
-    #pragma omp simd
-    for (int i = 0; i < N; ++i) {
-        output[i] *= inv_sum;
     }
 
     return output;
@@ -639,6 +803,35 @@ inline std::vector<float> gelu_forward(const std::vector<float>& input) {
         output[i] = x * cdf;
     }
     
+    return output;
+}
+
+inline std::vector<float> geglu_forward(const std::vector<float>& input, int seq_len, int hidden_dim) {
+    if (seq_len <= 0) {
+        throw std::runtime_error("GEGLU: seq_len must be > 0");
+    }
+    if (hidden_dim <= 0) {
+        throw std::runtime_error("GEGLU: hidden_dim must be > 0");
+    }
+
+    const size_t expected = static_cast<size_t>(seq_len) * static_cast<size_t>(hidden_dim) * 2ULL;
+    if (input.size() != expected) {
+        throw std::runtime_error("GEGLU: input size mismatch");
+    }
+
+    std::vector<float> output(static_cast<size_t>(seq_len) * static_cast<size_t>(hidden_dim), 0.0f);
+    const float sqrt_2_over_pi = std::sqrt(2.0f / 3.14159265359f);
+    const size_t token_stride = static_cast<size_t>(hidden_dim) * 2ULL;
+    for (int token = 0; token < seq_len; ++token) {
+        const float* src = &input[static_cast<size_t>(token) * token_stride];
+        float* dst = &output[static_cast<size_t>(token) * static_cast<size_t>(hidden_dim)];
+        for (int i = 0; i < hidden_dim; ++i) {
+            const float value = src[i];
+            const float gate = src[static_cast<size_t>(hidden_dim) + static_cast<size_t>(i)];
+            const float cdf = 0.5f * (1.0f + std::tanh(sqrt_2_over_pi * (gate + 0.044715f * gate * gate * gate)));
+            dst[i] = value * (gate * cdf);
+        }
+    }
     return output;
 }
 
@@ -1081,8 +1274,10 @@ inline void matmul(
 // Self-Attention (simplifié - single head)
 inline std::vector<float> self_attention_forward(
     const std::vector<float>& input,
-    const std::vector<float>& qkv_weight,  // Combined Q,K,V weights
+    const std::vector<float>& qkv_weight,  // Combined Q,K,V weights [3*embed_dim, embed_dim]
     const std::vector<float>& out_weight,
+    const std::vector<float>& qkv_bias,
+    const std::vector<float>& out_bias,
     int seq_len,
     int embed_dim,
     int num_heads = 1,
@@ -1099,10 +1294,29 @@ inline std::vector<float> self_attention_forward(
     if (input.size() != static_cast<size_t>(seq_len * embed_dim)) {
         throw std::runtime_error("SelfAttention: input size mismatch");
     }
+    if (!qkv_bias.empty() && qkv_bias.size() != static_cast<size_t>(qkv_dim)) {
+        throw std::runtime_error("SelfAttention: qkv_bias size mismatch");
+    }
+    if (!out_bias.empty() && out_bias.size() != static_cast<size_t>(embed_dim)) {
+        throw std::runtime_error("SelfAttention: out_bias size mismatch");
+    }
     
-    // 1. Linear projection to Q, K, V: [seq_len, embed_dim] @ [embed_dim, 3*embed_dim]
+    // 1. Linear projection to Q, K, V.
+    // Layout attendu pour qkv_weight: [3*embed_dim, embed_dim] (Q, K, V empilés verticalement).
     std::vector<float> qkv(seq_len * qkv_dim);
-    matmul(input, qkv_weight, qkv, seq_len, embed_dim, qkv_dim);
+    #pragma omp parallel for schedule(static) if(static_cast<long long>(seq_len) * qkv_dim * embed_dim > 262144)
+    for (int m = 0; m < seq_len; ++m) {
+        const float* xrow = &input[static_cast<size_t>(m) * static_cast<size_t>(embed_dim)];
+        float* qkv_row = &qkv[static_cast<size_t>(m) * static_cast<size_t>(qkv_dim)];
+        for (int n = 0; n < qkv_dim; ++n) {
+            const float* w_row = &qkv_weight[static_cast<size_t>(n) * static_cast<size_t>(embed_dim)];
+            float sum = qkv_bias.empty() ? 0.0f : qkv_bias[static_cast<size_t>(n)];
+            for (int k = 0; k < embed_dim; ++k) {
+                sum += xrow[k] * w_row[k];
+            }
+            qkv_row[n] = sum;
+        }
+    }
     
     // 2. Split into Q, K, V
     std::vector<float> Q(seq_len * embed_dim);
@@ -1217,6 +1431,16 @@ inline std::vector<float> self_attention_forward(
     // 6. Output projection
     std::vector<float> output(seq_len * embed_dim);
     matmul(attended, out_weight, output, seq_len, embed_dim, embed_dim);
+    if (!out_bias.empty()) {
+        #pragma omp parallel for schedule(static) if(static_cast<long long>(seq_len) * embed_dim > 262144)
+        for (int i = 0; i < seq_len; ++i) {
+            float* row = &output[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+            #pragma omp simd
+            for (int j = 0; j < embed_dim; ++j) {
+                row[j] += out_bias[static_cast<size_t>(j)];
+            }
+        }
+    }
     
     return output;
 }
@@ -1226,6 +1450,8 @@ inline std::vector<float> multihead_attention_forward(
     const std::vector<float>& input,
     const std::vector<float>& qkv_weight,
     const std::vector<float>& out_weight,
+    const std::vector<float>& qkv_bias,
+    const std::vector<float>& out_bias,
     int seq_len,
     int embed_dim,
     int num_heads,
@@ -1233,7 +1459,8 @@ inline std::vector<float> multihead_attention_forward(
 ) {
     // Pour l'instant, on simplifie en utilisant self_attention
     // Une vraie implémentation diviserait en heads parallèles
-    return self_attention_forward(input, qkv_weight, out_weight, 
+    return self_attention_forward(input, qkv_weight, out_weight,
+                                   qkv_bias, out_bias,
                                    seq_len, embed_dim, num_heads, causal);
 }
 
@@ -1244,9 +1471,11 @@ inline std::vector<float> cross_attention_forward(
     const std::vector<float>& q_weight,
     const std::vector<float>& kv_weight,
     const std::vector<float>& out_weight,
+    const std::vector<float>& out_bias,
     int query_len,
     int kv_len,
     int embed_dim,
+    int kv_embed_dim,
     int num_heads = 1,
     bool causal = false
 ) {
@@ -1261,8 +1490,20 @@ inline std::vector<float> cross_attention_forward(
     if (query_input.size() != static_cast<size_t>(query_len * embed_dim)) {
         throw std::runtime_error("CrossAttention: query_input size mismatch");
     }
-    if (kv_input.size() != static_cast<size_t>(kv_len * embed_dim)) {
+    if (kv_embed_dim <= 0) {
+        throw std::runtime_error("CrossAttention: invalid kv_embed_dim");
+    }
+    if (kv_input.size() != static_cast<size_t>(kv_len * kv_embed_dim)) {
         throw std::runtime_error("CrossAttention: kv_input size mismatch");
+    }
+    if (q_weight.size() != static_cast<size_t>(embed_dim * embed_dim)) {
+        throw std::runtime_error("CrossAttention: q_weight size mismatch");
+    }
+    if (kv_weight.size() != static_cast<size_t>(kv_embed_dim * (2 * embed_dim))) {
+        throw std::runtime_error("CrossAttention: kv_weight size mismatch");
+    }
+    if (out_weight.size() != static_cast<size_t>(embed_dim * embed_dim)) {
+        throw std::runtime_error("CrossAttention: out_weight size mismatch");
     }
 
     // 1) Projections: Q = query @ Wq, KV = kv @ Wkv (produces K||V)
@@ -1270,7 +1511,7 @@ inline std::vector<float> cross_attention_forward(
     matmul(query_input, q_weight, Q, query_len, embed_dim, embed_dim);
 
     std::vector<float> KV(kv_len * (2 * embed_dim));
-    matmul(kv_input, kv_weight, KV, kv_len, embed_dim, 2 * embed_dim);
+    matmul(kv_input, kv_weight, KV, kv_len, kv_embed_dim, 2 * embed_dim);
 
     std::vector<float> K(kv_len * embed_dim);
     std::vector<float> V(kv_len * embed_dim);
@@ -1388,6 +1629,18 @@ inline std::vector<float> cross_attention_forward(
     // 3) Output projection
     std::vector<float> output(query_len * embed_dim);
     matmul(attended, out_weight, output, query_len, embed_dim, embed_dim);
+    if (!out_bias.empty()) {
+        if (out_bias.size() != static_cast<size_t>(embed_dim)) {
+            throw std::runtime_error("CrossAttention: out_bias size mismatch");
+        }
+        for (int i = 0; i < query_len; ++i) {
+            float* row = &output[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+            #pragma omp simd
+            for (int j = 0; j < embed_dim; ++j) {
+                row[j] += out_bias[static_cast<size_t>(j)];
+            }
+        }
+    }
     return output;
 }
 
