@@ -17,9 +17,95 @@
 --  • Operations multi-input complètes (Add, Multiply, Concat, MatMul, Split)
 -- Historique v2.0.0 :
 -- Namespace Mimir
+---@class Mimir
+Mimir = {}
 
----| "hf_vae_decoder"
+---@class Mimir
+---@field Model MimirModelAPI
+---@field model MimirModelAPI @Alias de `Mimir.Model`
+---@field Architectures MimirArchitecturesAPI
+---@field Layers MimirLayersAPI
+---@field Checkpoint MimirCheckpointAPI
+---@field Tokenizer MimirTokenizerAPI
+---@field Dataset MimirDatasetAPI
+---@field IO MimirIOAPI
+---@field Memory MimirMemoryAPI
+---@field Guard MimirGuardAPI
+---@field MemoryGuard MimirMemoryGuardAPI
+---@field Allocator MimirAllocatorAPI
+---@field Htop MimirHtopAPI
+---@field Viz MimirVizAPI
+---@field Serialization MimirSerializationAPI
+---@field NeuroPulse MimirNeuroPulseAPI
+
+--=============================================================================
+-- Aliases / Types de base
+--=============================================================================
+
+---@alias int integer
+---@alias float number
+---@alias bool boolean
+---@alias bytes integer
+
+---@alias TokenId integer
+---@alias TokenIds TokenId[]
+---@alias TokenText string
+
+---@alias ModelType
+---| "t2i_autoencoder"
+---| "ponyxl_ddpm"
+---| "ponyxl_sdxl_stub"
+---| "ponyxl_sdxl_unet2d"
+---| "ponyxl_sdxl"
+---| "basic_mlp"
 ---| "transformer"
+---| "vae_text"
+---| "vae_text_decode"
+---| "vit"
+---| "vae"
+---| "vae_conv"
+---| "vae_conv_decode"
+---| "resnet"
+---| "unet"
+---| "mobilenet"
+---| "vgg16"
+---| "vgg19"
+---| "diffusion"
+---| "cond_diffusion"
+---| "sd3_5"
+---| "neuropulse"
+---| "gan_latent"
+---| "external_safetensors_base"
+---| "hf_clip_text_encoder_1"
+---| "hf_clip_text_encoder_2"
+---| "hf_vae_decoder"
+---| "hf_sdxl_transformer_block"
+
+---@alias ArchitectureName
+---| "basic_mlp"
+---| "transformer"
+---| "vae_text"
+---| "vae_text_decode"
+---| "vit"
+---| "vae"
+---| "vae_conv"
+---| "vae_conv_decode"
+---| "resnet"
+---| "unet"
+---| "mobilenet"
+---| "vgg16"
+---| "vgg19"
+---| "ponyxl_ddpm"
+---| "diffusion"
+---| "gan_latent"
+---| "cond_diffusion"
+---| "sd3_5"
+---| "external_safetensors_base"
+---| "hf_clip_text_encoder_1"
+---| "hf_clip_text_encoder_2"
+---| "hf_vae_decoder"
+---| "hf_sdxl_transformer_block"
+
 ---Lire un JSON depuis le disque.
 ---@param path string
 ---@return table|nil json
@@ -429,6 +515,8 @@ function write_file(path, content) end
 --=============================================================================
 -- Module: Mimir.Model
 --=============================================================================
+
+Mimir = {}
 
 ---@class MimirModelAPI
 Mimir.Model = {}
