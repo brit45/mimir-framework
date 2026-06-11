@@ -30,6 +30,63 @@ Comportement :
 - si l’architecture est inconnue : erreur.
 - la config retournée sert de base : on peut ensuite fournir des overrides à la création.
 
+## `info(name?: string) -> ArchitectureInfo[] | ArchitectureInfo | (nil, err)`
+
+Lit **toutes les infos** du registry pour une (ou toutes les) architecture(s).
+
+- Sans argument : renvoie la **liste complète** des entrées (`ArchitectureInfo[]`).
+- Avec un `name` : renvoie l’entrée correspondante (`ArchitectureInfo`), ou `(nil, err)` si inconnue.
+
+Chaque entrée est une table :
+
+| Champ | Type | Description |
+| --- | --- | --- |
+| `name` | `string` | Nom canonique (clé du registry) |
+| `description` | `string` | Description courte (peut être vide) |
+| `config` | `table` | Config par défaut complète (peut contenir un champ `dtype`) |
+
+Notes :
+
+- C’est le seul accesseur qui expose le champ `description` du registry C++.
+- `config` est identique à ce que renvoie `default_config(name)`.
+
+Exemple :
+
+```lua
+for _, entry in ipairs(Mimir.Architectures.info()) do
+  print(entry.name, entry.description)
+end
+```
+
+## `dtypes() -> DTypeInfo[]`
+
+Liste les **dtypes pris en charge** par le framework (source : `src/DType.hpp`).
+
+Chaque entrée est une table :
+
+| Champ | Type | Description |
+| --- | --- | --- |
+| `name` | `string` | Nom canonique (ex: `float32`, `bfloat16`) |
+| `aliases` | `string` | Alias acceptés, séparés par des virgules (ex: `f32, float32`) |
+| `bytes` | `integer` | Taille en octets d’un élément |
+| `kind` | `string` | Famille : `float` / `int` / `uint` / `bool` |
+
+Le **dtype par défaut** d’une architecture est le champ `config.dtype` s’il est présent,
+sinon `float32` (défaut global du modèle). On peut le changer via `Mimir.model.dtype(name)`
+ou via un override `dtype=...` à la création.
+
+Exemple :
+
+```lua
+for _, dt in ipairs(Mimir.Architectures.dtypes()) do
+  print(dt.name, dt.bytes, dt.kind, dt.aliases)
+end
+```
+
+> Astuce : le script `scripts/tools/inspect_architectures.lua` affiche tout cela
+> sous forme de tableaux colorés (`-a` pour archis + dtypes, `-l <arch> -p` pour
+> les paramètres d’une archi, `-d` pour les dtypes seuls).
+
 ## `create(name: string, overrides?: table) -> Model | (nil, err)`
 
 Crée un modèle depuis une architecture nommée.

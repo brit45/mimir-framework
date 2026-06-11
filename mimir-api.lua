@@ -13,143 +13,13 @@
 -- ⚠️  IMPORTANT: Ce fichier est synchronisé avec src/LuaScripting.cpp
 --    Toute modification de l'API C++ doit être reflétée ici.
 --    Dernière synchronisation: 25 mai 2026 - 15 modules, 130+ fonctions
---
--- Objectifs :
---  • Autocomplétion IDE, signatures, types, docstrings
---  • Stable : les scripts Lua sont l'API publique
---  • Documentation de référence pour les utilisateurs
---
--- 🆕 Nouveautés v3.0.0 (25 mai 2026) :
---  • Nouveau module `Mimir.IO` (read_image_rgb_u8 / readImageRGBU8)
---  • `Mimir.Model.create_from_config(full_cfg)` — création depuis config complète (mode --conf)
---  • `Mimir.Model.dtype()` / `Mimir.Model.dtype("float16")` — préférence dtype côté modèle
 --  • Alias `Mimir.model` (lowercase) + stub explicite `Mimir.model.dtype`
---  • Helpers PonyXL-DDPM : train_step, validate_step, viz_reconstruct_step, text2img,
---    set_vae_scale, get_vae_scale, vae_mu_moments
---  • Module `pipeline_api.lua` : dtype robuste (supporte Mimir.model et Mimir.Model)
---  • Nouveaux templates : template_pipeline_only.lua, template_pipeline_args.lua
---  • template_new_model.lua : archi par défaut valide (vae_conv), fallback auto, tokenizer
---    conditionnel selon archi, Allocator.get_stats() non bloquant
---
--- Nouveautés v2.3.0 (28 décembre 2025) :
---  • Multi-Input / Branch Support - TensorStore system
---  • model.set_layer_io() - Configuration des entrées/sorties des layers
 --  • Operations multi-input complètes (Add, Multiply, Concat, MatMul, Split)
---  • Support residual connections et skip connections
---  • Documentation complète (MULTI_INPUT_SUPPORT.md)
---  • Mode Strict activé (0 pass-through, RUNTIME_CHECK/RUNTIME_ERROR_STRICT)
---
--- Nouveautés v2.1.0 :
---  • Scripts réorganisés en catégories (demos, examples, tests, etc.)
---  • Documentation corrigée (33 fixes)
---  • Synchronisation API validée (114 fonctions)
---
 -- Historique v2.0.0 :
---  • MemoryGuard API (limite stricte 10 GB par défaut)
---  • Mimir.Allocator.configure() pour configuration mémoire (OBLIGATOIRE)
---  • Modes train()/eval() pour tous les modèles
---  • API Mimir.Htop et Mimir.Viz pour monitoring temps réel
---
--- Remarques :
---  • Les fonctions retournent souvent (ok:boolean, value) ou (ok:boolean, err:string)
---  • ⚠️  Toujours appeler Mimir.Allocator.configure() au début des scripts!
---  • Les tables de stats sont des structs (tables Lua avec champs nommés)
---  • Les "Mimir.Layers.*" sont des opérations bas niveau (préférer Mimir.Model.forward())
---  • Mimir.MemoryGuard: API moderne recommandée (Mimir.Guard: API legacy compatible)
---
--- CLI (qualité de vie / IDE) :
---  • `mimir --config <config.json> --override <path=value> [--override ...]`
---    Permet de surcharger une config sans éditer le JSON (pratique pour les launch configs).
---  • Côté scripts Lua, beaucoup de scripts utilisent `scripts/modules/args.lua`.
---    Ce parseur supporte aussi `--override key=value` (si le script appelle `Args.apply_overrides(cfg, opts)`).
---    Exemples:
---      mimir --config config.json --override max_vocab=64000
---      mimir --config config.json --override optimizer=\"adamw\" --override weight_decay=0.01
---=============================================================================
-
---=============================================================================
 -- Namespace Mimir
---=============================================================================
 
----@class Mimir
-Mimir = {}
-
----@class Mimir
----@field Model MimirModelAPI
----@field model MimirModelAPI @Alias de `Mimir.Model`
----@field Architectures MimirArchitecturesAPI
----@field Layers MimirLayersAPI
----@field Checkpoint MimirCheckpointAPI
----@field Tokenizer MimirTokenizerAPI
----@field Dataset MimirDatasetAPI
----@field IO MimirIOAPI
----@field Memory MimirMemoryAPI
----@field Guard MimirGuardAPI
----@field MemoryGuard MimirMemoryGuardAPI
----@field Allocator MimirAllocatorAPI
----@field Htop MimirHtopAPI
----@field Viz MimirVizAPI
----@field Serialization MimirSerializationAPI
----@field NeuroPulse MimirNeuroPulseAPI
-
---=============================================================================
--- Aliases / Types de base
---=============================================================================
-
----@alias int integer
----@alias float number
----@alias bool boolean
----@alias bytes integer
-
----@alias TokenId integer
----@alias TokenIds TokenId[]     -- liste d'IDs token (indices Lua 1..N)
----@alias TokenText string
-
----@alias ModelType
----| "t2i_autoencoder"
----| "ponyxl_ddpm"
----| "ponyxl_sdxl_stub"
----| "ponyxl_sdxl_unet2d"
----| "ponyxl_sdxl"
----| "basic_mlp"
+---| "hf_vae_decoder"
 ---| "transformer"
----| "vae_text"
----| "vae_text_decode"
----| "vit"
----| "vae"
----| "vae_conv"
----| "vae_conv_decode"
----| "resnet"
----| "unet"
----| "mobilenet"
----| "vgg16"
----| "vgg19"
----| "diffusion"
----| "cond_diffusion"
----| "sd3_5"
----| "neuropulse"
----| "gan_latent"
-
----@alias ArchitectureName
----| "basic_mlp"
----| "transformer"
----| "vae_text"
----| "vae_text_decode"
----| "vit"
----| "vae"
----| "vae_conv"
----| "vae_conv_decode"
----| "resnet"
----| "unet"
----| "mobilenet"
----| "vgg16"
----| "vgg19"
----| "ponyxl_ddpm"
----| "diffusion"
----| "gan_latent"
----| "cond_diffusion"
----| "sd3_5"
-
 ---Lire un JSON depuis le disque.
 ---@param path string
 ---@return table|nil json
@@ -296,6 +166,22 @@ function write_file(path, content) end
 ---@field latent_w? int
 ---@field latent_c? int
 ---@field base_channels? int
+---@field stochastic_latent? boolean
+---@field use_attention? boolean
+---@field use_attn? boolean
+---@field enc_norm? string
+---@field enc_gn_groups? int
+---@field dec_norm? string
+---@field dec_gn_groups? int
+---@field decoder_upsample? string
+---@field attn_heads? int
+---@field resnet_max_tokens? int
+---@field attn_max_tokens? int
+---@field text_cond? boolean
+---@field vocab_size? int
+---@field seq_len? int
+---@field text_d_model? int
+---@field proj_dim? int
 
 ---@class ResNetConfig: ModelConfig
 ---@field image_w? int
@@ -410,6 +296,55 @@ function write_file(path, content) end
 ---@field viz_ddpm_every_steps? int @0=off, sinon: toutes les N steps on affiche des frames DDPM
 ---@field viz_ddpm_num_steps? int @Nb timesteps affichés
 
+---@class ExternalSafeTensorsBaseConfig: ModelConfig
+---@field source_safetensors string @Chemin vers le fichier safetensors source à refléter
+---@field include_prefixes? string[] @Limiter la création aux tenseurs commençant par un de ces préfixes
+---@field exclude_prefixes? string[] @Exclure les tenseurs commençant par un de ces préfixes
+---@field max_tensors? int @Limiter le nombre de tenseurs créés (0=tous)
+
+---@class HFCLIPTextEncoder1Config: ModelConfig
+---@field vocab_size? int
+---@field padding_idx? int
+---@field seq_len? int
+---@field d_model? int
+---@field num_layers? int
+---@field num_heads? int
+---@field mlp_hidden? int
+---@field causal? boolean
+
+---@class HFCLIPTextEncoder2Config: ModelConfig
+---@field vocab_size? int
+---@field padding_idx? int
+---@field seq_len? int
+---@field d_model? int
+---@field num_layers? int
+---@field num_heads? int
+---@field mlp_hidden? int
+---@field proj_dim? int
+---@field causal? boolean
+---@field include_logit_scale? boolean
+
+---@class HFVaeDecoderConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field latent_w? int
+---@field latent_h? int
+---@field latent_c? int
+---@field num_heads? int
+---@field norm_groups? int
+
+---@class HFSDXLTransformerBlockConfig: ModelConfig
+---@field q_len? int
+---@field kv_len? int
+---@field d_model? int
+---@field context_dim? int
+---@field num_heads? int
+---@field ff_hidden? int
+---@field self_attn_qkv_bias? boolean
+---@field self_attn_out_bias? boolean
+---@field cross_attn_out_bias? boolean
+
 -- NOTE: les schémas ci-dessus reflètent le registre C++ (ModelArchitectures::defaultConfig).
 -- Pour obtenir la config exacte à jour côté runtime:
 --   local cfg = Mimir.Architectures.default_config("transformer")
@@ -520,8 +455,13 @@ Mimir.Model = {}
 ---@overload fun(model_type: "gan_latent", config?: GanLatentConfig): (boolean, string?)
 ---@overload fun(model_type: "sd3_5", config?: SD35Config): (boolean, string?)
 ---@overload fun(model_type: "ponyxl_ddpm", config?: PonyXLDDPMConfig): (boolean, string?)
+---@overload fun(model_type: "external_safetensors_base", config: ExternalSafeTensorsBaseConfig): (boolean, string?)
+---@overload fun(model_type: "hf_clip_text_encoder_1", config?: HFCLIPTextEncoder1Config): (boolean, string?)
+---@overload fun(model_type: "hf_clip_text_encoder_2", config?: HFCLIPTextEncoder2Config): (boolean, string?)
+---@overload fun(model_type: "hf_vae_decoder", config?: HFVaeDecoderConfig): (boolean, string?)
+---@overload fun(model_type: "hf_sdxl_transformer_block", config?: HFSDXLTransformerBlockConfig): (boolean, string?)
 ---@param model_type ModelType
----@param config? ModelConfig|BasicMLPConfig|TransformerConfig|ViTConfig|VAEConfig|ResNetConfig|UNetConfig|MobileNetConfig|VGG16Config|VGG19Config|DiffusionConfig|PonyXLDDPMConfig|table
+---@param config? ModelConfig|BasicMLPConfig|TransformerConfig|ViTConfig|VAEConfig|ResNetConfig|UNetConfig|MobileNetConfig|VGG16Config|VGG19Config|DiffusionConfig|PonyXLDDPMConfig|ExternalSafeTensorsBaseConfig|HFCLIPTextEncoder1Config|HFCLIPTextEncoder2Config|HFVaeDecoderConfig|HFSDXLTransformerBlockConfig|table
 ---@return boolean ok
 ---@return string? err
 function Mimir.Model.create(model_type, config) end
@@ -589,10 +529,28 @@ function Mimir.Model.ponyxl_ddpm_validate_step(cfg) end
 function Mimir.Model.ponyxl_ddpm_viz_reconstruct_step(cfg) end
 
 ---Génération texte→image PonyXL-DDPM.
----@param cfg table
----@return boolean ok
----@return string? err
-function Mimir.Model.ponyxl_ddpm_text2img(cfg) end
+---@param prompt string
+---@param seed? integer
+---@param sample_steps? integer
+---@param guidance_scale? number
+---@param max_side? integer
+---@return integer[]? pixels_u8
+---@return integer? w
+---@return integer? h
+---@return integer|string? channels_or_err
+function Mimir.Model.ponyxl_ddpm_text2img(prompt, seed, sample_steps, guidance_scale, max_side) end
+
+---Génération texte→latent PonyXL-DDPM.
+---Retourne le latent final x0 au format tokens HWC aplati.
+---@param prompt string
+---@param seed? integer
+---@param sample_steps? integer
+---@param guidance_scale? number
+---@return number[]? latent
+---@return integer? latent_w
+---@return integer? latent_h
+---@return integer|string? latent_c_or_err
+function Mimir.Model.ponyxl_ddpm_text2img_latent(prompt, seed, sample_steps, guidance_scale) end
 
 ---Définir un facteur d'échelle VAE utilisé par PonyXL-DDPM.
 ---@param scale number
@@ -605,10 +563,12 @@ function Mimir.Model.ponyxl_ddpm_set_vae_scale(scale) end
 function Mimir.Model.ponyxl_ddpm_get_vae_scale() end
 
 ---Retourne des moments (mu) du VAE (API PonyXL-DDPM).
----@param cfg table
----@return boolean ok
----@return table|string? moments_or_err
-function Mimir.Model.ponyxl_ddpm_vae_mu_moments(cfg) end
+---@param image_u8 integer[]
+---@param w integer
+---@param h integer
+---@return {sum:number, sumsq:number, n:integer}? moments
+---@return string? err
+function Mimir.Model.ponyxl_ddpm_vae_mu_moments(image_u8, w, h) end
 
 ---[DÉPRÉCIÉ] Sauvegarder le modèle (ancienne API).
 ---⚠️  Utilisez Mimir.Serialization.save() pour la nouvelle API v2.4
@@ -809,10 +769,40 @@ function Mimir.Architectures.available() end
 ---@overload fun(name: "gan_latent"): GanLatentConfig
 ---@overload fun(name: "sd3_5"): SD35Config
 ---@overload fun(name: "ponyxl_ddpm"): PonyXLDDPMConfig
+---@overload fun(name: "external_safetensors_base"): ExternalSafeTensorsBaseConfig
+---@overload fun(name: "hf_clip_text_encoder_1"): HFCLIPTextEncoder1Config
+---@overload fun(name: "hf_clip_text_encoder_2"): HFCLIPTextEncoder2Config
+---@overload fun(name: "hf_vae_decoder"): HFVaeDecoderConfig
+---@overload fun(name: "hf_sdxl_transformer_block"): HFSDXLTransformerBlockConfig
 ---@param name ArchitectureName|string
 ---@return table|nil config
 ---@return string? err
 function Mimir.Architectures.default_config(name) end
+
+---@class ArchitectureInfo
+---@field name string @Nom canonique de l'architecture (clé du registry).
+---@field description string @Description courte (peut être vide).
+---@field config table @Config par défaut complète (peut contenir un champ `dtype`).
+
+---Lire toutes les infos du registry pour une (ou toutes les) architecture(s).
+---Sans argument: renvoie la liste complète des entrées du registry.
+---Avec un nom: renvoie l'entrée correspondante, ou `(nil, err)` si inconnue.
+---@overload fun(): ArchitectureInfo[]
+---@overload fun(name: ArchitectureName|string): ArchitectureInfo|nil, string?
+---@param name? ArchitectureName|string
+---@return ArchitectureInfo[]|ArchitectureInfo|nil info
+---@return string? err
+function Mimir.Architectures.info(name) end
+
+---@class DTypeInfo
+---@field name string @Nom canonique (ex: "float32", "bfloat16").
+---@field aliases string @Alias acceptés, séparés par des virgules (ex: "f32, float32").
+---@field bytes integer @Taille en octets d'un élément.
+---@field kind "float"|"int"|"uint"|"bool" @Famille du dtype.
+
+---Lister les dtypes pris en charge par le framework.
+---@return DTypeInfo[] dtypes
+function Mimir.Architectures.dtypes() end
 
 --=============================================================================
 -- Module: Mimir.Layers (placeholder / low-level)

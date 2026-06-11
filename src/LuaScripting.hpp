@@ -83,6 +83,7 @@ private:
     static int lua_ponyxlDdpmValidateStep(lua_State* L);
     static int lua_ponyxlDdpmVizReconstructStep(lua_State* L);
     static int lua_ponyxlDdpmText2Img(lua_State* L);
+    static int lua_ponyxlDdpmText2ImgLatent(lua_State* L);
     static int lua_ponyxlDdpmSetVaeScale(lua_State* L);
     static int lua_ponyxlDdpmGetVaeScale(lua_State* L);
     static int lua_ponyxlDdpmVaeMuMoments(lua_State* L);
@@ -105,6 +106,8 @@ private:
     // === ModelArchitectures API ===
     static int lua_archAvailable(lua_State* L);
     static int lua_archDefaultConfig(lua_State* L);
+    static int lua_archInfo(lua_State* L);
+    static int lua_archDtypes(lua_State* L);
     
     // === Layer Operations API ===
     static int lua_computeConv2D(lua_State* L);

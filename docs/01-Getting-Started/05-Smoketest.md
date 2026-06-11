@@ -27,7 +27,7 @@ cmake --build build -j
 ### Ops / layers
 
 ```bash
-./bin/mimir --lua scripts/tests/test_list_archi_conf.lua
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
 ```
 
 ### Sérialisation
@@ -41,7 +41,7 @@ cmake --build build -j
 Tests rapides :
 
 ```bash
-./bin/mimir --lua scripts/tests/test_list_archi_conf.lua
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
 ./bin/mimir --lua scripts/tests/test_vae_conv_generate.lua
 ./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
 ```

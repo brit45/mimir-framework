@@ -2,6 +2,7 @@
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Serialization/Serialization.hpp"
 #include "Serialization/DebugJsonDump.hpp"
+#include "DType.hpp"
 #include "AdvancedRAMManager.hpp"
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
@@ -242,6 +243,9 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_ponyxlDdpmText2Img);
     lua_setfield(L, -2, "ponyxl_ddpm_text2img");
 
+    lua_pushcfunction(L, lua_ponyxlDdpmText2ImgLatent);
+    lua_setfield(L, -2, "ponyxl_ddpm_text2img_latent");
+
     lua_pushcfunction(L, lua_ponyxlDdpmSetVaeScale);
     lua_setfield(L, -2, "ponyxl_ddpm_set_vae_scale");
 
@@ -266,6 +270,12 @@ void LuaScripting::registerAPI() {
 
     lua_pushcfunction(L, lua_archDefaultConfig);
     lua_setfield(L, -2, "default_config");
+    
+    lua_pushcfunction(L, lua_archInfo);
+    lua_setfield(L, -2, "info");
+    
+    lua_pushcfunction(L, lua_archDtypes);
+    lua_setfield(L, -2, "dtypes");
     
     lua_setfield(L, -2, "Architectures");  // Mimir.Architectures
     
@@ -2116,6 +2126,31 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                     // Backward + step
                     ctx.currentModel->backwardPass(grad);
+
+                    // Vraie norme L2 globale + max abs des gradients (avant clipping/step).
+                    // Sans ça, les métriques vgg16_feat affichaient grad_norm=grad_max=0
+                    // (valeurs codées en dur), masquant toute explosion de gradient.
+                    float grad_norm_val = 0.0f;
+                    float grad_max_val = 0.0f;
+                    {
+                        double sum_sq = 0.0;
+                        float max_abs = 0.0f;
+                        for (const auto& layer : ctx.currentModel->getLayers()) {
+                            for (float g : layer.grad_weights) {
+                                sum_sq += (double)g * (double)g;
+                                const float a = std::fabs(g);
+                                if (a > max_abs) max_abs = a;
+                            }
+                            for (float g : layer.grad_bias) {
+                                sum_sq += (double)g * (double)g;
+                                const float a = std::fabs(g);
+                                if (a > max_abs) max_abs = a;
+                            }
+                        }
+                        grad_norm_val = (float)std::sqrt(sum_sq);
+                        grad_max_val = max_abs;
+                    }
+
                     poll_viz_live_params();
                     ctx.currentModel->optimizerStep(opt, step_learning_rate(), nullptr);
 
@@ -2130,6 +2165,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     if ((global_step % log_every) == 0) {
                         ctx.addLog("step=" + std::to_string(global_step) +
                                    " loss=" + std::to_string((float)loss) +
+                                   " grad_norm=" + std::to_string(grad_norm_val) +
                                    " lr=" + std::to_string(opt.getCurrentLR()) +
                                    " (vgg16_feat)");
                     }
@@ -2143,8 +2179,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         m.avg_loss = (float)loss;
                         m.lr = opt.getCurrentLR();
                         m.mse = (float)loss;
-                        m.grad_norm = 0.0f;
-                        m.grad_max = 0.0f;
+                        m.grad_norm = grad_norm_val;
+                        m.grad_max = grad_max_val;
                         m.params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
                         m.recon_loss_type = "mse";
                         m.opt_type = (int)opt.type;
@@ -3556,6 +3592,99 @@ int LuaScripting::lua_archDefaultConfig(lua_State* L) {
     }
 }
 
+// Renvoie toutes les infos présentes dans le registry pour une architecture.
+// Sans argument: renvoie un tableau (liste) d'entrées complètes pour toutes
+// les architectures. Avec un nom: renvoie l'entrée correspondante.
+// Chaque entrée est une table { name=..., description=..., config={...} }.
+int LuaScripting::lua_archInfo(lua_State* L) {
+    auto pushEntry = [L](const ModelArchitectures::Entry& e) {
+        lua_newtable(L);
+        lua_pushstring(L, e.name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, e.description.c_str());
+        lua_setfield(L, -2, "description");
+        jsonToLuaTable(L, e.default_config);
+        lua_setfield(L, -2, "config");
+    };
+
+    try {
+        auto& reg = ModelArchitectures::Registry::instance();
+
+        // Cas 1: un nom est fourni -> entrée unique.
+        if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+            const char* name = luaL_checkstring(L, 1);
+            const ModelArchitectures::Entry* e = reg.find(name);
+            if (e == nullptr) {
+                lua_pushnil(L);
+                lua_pushstring(L, (std::string("unknown architecture: ") + name).c_str());
+                return 2;
+            }
+            pushEntry(*e);
+            return 1;
+        }
+
+        // Cas 2: aucun nom -> liste complète de toutes les entrées.
+        const auto names = ModelArchitectures::available();
+        lua_createtable(L, static_cast<int>(names.size()), 0);
+        int i = 1;
+        for (const auto& name : names) {
+            const ModelArchitectures::Entry* e = reg.find(name);
+            if (e != nullptr) {
+                pushEntry(*e);
+                lua_rawseti(L, -2, i++);
+            }
+        }
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+// Renvoie la liste des dtypes pris en charge par le framework.
+// Chaque entrée: { name=<canonique>, aliases=<csv>, bytes=<n>, kind="float|int|uint|bool" }.
+int LuaScripting::lua_archDtypes(lua_State* L) {
+    struct DtInfo {
+        Mimir::DType dt;
+        const char* aliases;
+        const char* kind;
+    };
+    // Ordre logique d'affichage (flottants d'abord, puis entiers, puis bool).
+    static const DtInfo kAll[] = {
+        { Mimir::DType::F32,  "float, f32, float32",   "float" },
+        { Mimir::DType::F16,  "f16, float16, fp16",    "float" },
+        { Mimir::DType::BF16, "bf16, bfloat16",        "float" },
+        { Mimir::DType::F64,  "double, f64, float64",  "float" },
+        { Mimir::DType::I8,   "i8, int8",              "int"   },
+        { Mimir::DType::I16,  "i16, int16",            "int"   },
+        { Mimir::DType::I32,  "i32, int32",            "int"   },
+        { Mimir::DType::I64,  "i64, int64",            "int"   },
+        { Mimir::DType::U8,   "u8, uint8",             "uint"  },
+        { Mimir::DType::U16,  "u16, uint16",           "uint"  },
+        { Mimir::DType::U32,  "u32, uint32",           "uint"  },
+        { Mimir::DType::U64,  "u64, uint64",           "uint"  },
+        { Mimir::DType::BOOL, "bool, b1",              "bool"  },
+    };
+
+    const int n = static_cast<int>(sizeof(kAll) / sizeof(kAll[0]));
+    lua_createtable(L, n, 0);
+    for (int i = 0; i < n; ++i) {
+        const auto& e = kAll[i];
+        lua_newtable(L);
+        lua_pushstring(L, Mimir::dtype_to_string(e.dt));
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, e.aliases);
+        lua_setfield(L, -2, "aliases");
+        lua_pushinteger(L, static_cast<lua_Integer>(Mimir::dtype_size_bytes(e.dt)));
+        lua_setfield(L, -2, "bytes");
+        lua_pushstring(L, e.kind);
+        lua_setfield(L, -2, "kind");
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
 int LuaScripting::lua_saveModel(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
@@ -3849,6 +3978,14 @@ int LuaScripting::lua_loadCheckpoint(lua_State* L) {
 
         lua_getfield(L, options_idx, "validate_checksums");
         if (lua_isboolean(L, -1)) options.validate_checksums = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, options_idx, "mapping_json");
+        if (lua_isstring(L, -1)) options.mapping_json = lua_tostring(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, options_idx, "tensor_mapping_json");
+        if (options.mapping_json.empty() && lua_isstring(L, -1)) options.mapping_json = lua_tostring(L, -1);
         lua_pop(L, 1);
     }
 
@@ -5148,6 +5285,59 @@ int LuaScripting::lua_ponyxlDdpmText2Img(lua_State* L) {
         lua_pushinteger(L, (lua_Integer)rp.w);
         lua_pushinteger(L, (lua_Integer)rp.h);
         lua_pushinteger(L, (lua_Integer)rp.channels);
+        return 4;
+    } catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_ponyxlDdpmText2ImgLatent(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+
+    const char* prompt = luaL_checkstring(L, 1);
+    const int seed = (int)luaL_optinteger(L, 2, 12345);
+    const int sample_steps = (int)luaL_optinteger(L, 3, 50);
+    const float guidance_scale = (float)luaL_optnumber(L, 4, 1.0);
+
+    try {
+        auto* pony = dynamic_cast<PonyXLDDPMModel*>(ctx.currentModel.get());
+        if (!pony) {
+            lua_pushnil(L);
+            lua_pushstring(L, "Le modèle courant n'est pas un PonyXLDDPMModel (type=ponyxl_ddpm attendu)");
+            return 2;
+        }
+
+        const PonyXLDDPMModel::ReconPreview rp = pony->text2imgSdxlLatentDiffusion(
+            prompt ? std::string(prompt) : std::string(),
+            seed,
+            sample_steps,
+            guidance_scale,
+            0,
+            false
+        );
+
+        if (rp.latent.empty() || rp.latent_w <= 0 || rp.latent_h <= 0 || rp.latent_c <= 0) {
+            lua_pushnil(L);
+            lua_pushstring(L, "text2img_latent a retourné un latent vide");
+            return 2;
+        }
+
+        lua_createtable(L, (int)rp.latent.size(), 0);
+        for (size_t i = 0; i < rp.latent.size(); ++i) {
+            lua_pushnumber(L, (lua_Number)rp.latent[i]);
+            lua_rawseti(L, -2, (lua_Integer)i + 1);
+        }
+        lua_pushinteger(L, (lua_Integer)rp.latent_w);
+        lua_pushinteger(L, (lua_Integer)rp.latent_h);
+        lua_pushinteger(L, (lua_Integer)rp.latent_c);
         return 4;
     } catch (const std::exception& e) {
         lua_pushnil(L);

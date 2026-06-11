@@ -5,6 +5,22 @@ Toutes les modifications notables du Mímir Framework sont documentées ici.
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### ✨ Ajouté — Introspection du registre d'architectures
+
+- **`Mimir.Architectures.info([name])`** : lit toutes les infos du registry
+  (`name`, `description`, `config`). Sans argument → liste complète ; avec un nom
+  → entrée unique (ou `(nil, err)`). Seul accesseur exposant le champ `description`.
+  - Binding C++ : `LuaScripting::lua_archInfo`.
+- **`Mimir.Architectures.dtypes()`** : liste les dtypes pris en charge par le
+  framework (`name`, `aliases`, `bytes`, `kind`), sourcés depuis `src/DType.hpp`.
+  - Binding C++ : `LuaScripting::lua_archDtypes`.
+- **Outil `scripts/tools/inspect_architectures.lua`** (anciennement
+  `scripts/tests/test_list_archi_conf.lua`) : CLI d'inspection avec sorties en
+  tableaux colorés — `-a/--show-archs` (archis + dtypes), `-l <arch> -p`
+  (paramètres + dtype par défaut), `-d/--dtypes`. Parsing via `scripts/modules/args.lua`.
+
 ## [3.0.1] - 2026-05-25
 
 ### 🐛 Correctifs

@@ -139,6 +139,8 @@ log("first arch:", names[1])
 |---|---|---|---|---|
 |`Mimir.Architectures.available()`|Liste les architectures disponibles|`LuaScripting::lua_archAvailable`|`ModelArchitectures::available` (`src/Models/Registry/ModelArchitectures.*`)||
 |`Mimir.Architectures.default_config(name)`|Renvoie la config par défaut de l’architecture|`LuaScripting::lua_archDefaultConfig`|`ModelArchitectures::defaultConfig`||
+|`Mimir.Architectures.info([name])`|Renvoie nom + description + config (toutes les archis ou une seule)|`LuaScripting::lua_archInfo`|`ModelArchitectures::Registry::find` / `available`|seul accesseur exposant `description`|
+|`Mimir.Architectures.dtypes()`|Liste les dtypes pris en charge (name, aliases, bytes, kind)|`LuaScripting::lua_archDtypes`|`Mimir::DType` (`src/DType.hpp`)||
 
 ---
 
