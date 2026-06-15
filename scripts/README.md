@@ -43,7 +43,9 @@ Outils d'inspection et d'analyse:
 
 - `inspect_architectures.lua` - Liste les architectures + dtypes, et affiche les paramètres d'une archi (`-a`, `-l <arch> -p`, `-d`)
 - `analyze_model.lua` - Analyse un checkpoint/modèle (SafeTensors / RawFolder / DebugJson)
-
+- `build_tags_vocab.lua` - Construit un vocab de tags depuis un dataset (`.txt` séparés par des points)
+- `convert_checkpoint2safetensor.lua` - Convertit un checkpoint RawFolder → SafeTensors
+- `convert_safetensors2raw_folder.lua` - Convertit un checkpoint SafeTensors → RawFolder
 
 ### ⚡ Benchmarks (`benchmarks/`)
 
