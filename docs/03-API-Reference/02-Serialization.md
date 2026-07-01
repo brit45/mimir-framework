@@ -56,4 +56,4 @@ assert(ok, err)
 
 ## Côté Lua
 
-Chercher des exemples dans `scripts/` et la définition dans `src/LuaScripting.cpp` (module `Mimir.Serialization`).
+Chercher des exemples dans `scripts/` et la définition dans `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (module `Mimir.Serialization`).

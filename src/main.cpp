@@ -148,66 +148,6 @@ static bool readJsonFile(const std::string& path, json& out, std::string& err)
     return true;
 }
 
-static void pushJsonToLua(lua_State* L, const json& v, int depth = 0)
-{
-    if (!L) return;
-    if (depth > 128) {
-        lua_pushstring(L, "<max-depth>");
-        return;
-    }
-
-    if (v.is_null()) {
-        lua_pushnil(L);
-        return;
-    }
-    if (v.is_boolean()) {
-        lua_pushboolean(L, v.get<bool>() ? 1 : 0);
-        return;
-    }
-    if (v.is_number_integer()) {
-        const long long x = v.get<long long>();
-        lua_pushinteger(L, static_cast<lua_Integer>(x));
-        return;
-    }
-    if (v.is_number_unsigned()) {
-        const unsigned long long x = v.get<unsigned long long>();
-        lua_pushinteger(L, static_cast<lua_Integer>(x));
-        return;
-    }
-    if (v.is_number_float()) {
-        lua_pushnumber(L, static_cast<lua_Number>(v.get<double>()));
-        return;
-    }
-    if (v.is_string()) {
-        const std::string s = v.get<std::string>();
-        lua_pushlstring(L, s.c_str(), s.size());
-        return;
-    }
-    if (v.is_array()) {
-        lua_createtable(L, static_cast<int>(v.size()), 0);
-        int idx = 1;
-        for (const auto& it : v) {
-            pushJsonToLua(L, it, depth + 1);
-            lua_rawseti(L, -2, idx++);
-        }
-        return;
-    }
-    if (v.is_object()) {
-        lua_createtable(L, 0, static_cast<int>(v.size()));
-        for (auto it = v.begin(); it != v.end(); ++it) {
-            const std::string& k = it.key();
-            lua_pushlstring(L, k.c_str(), k.size());
-            pushJsonToLua(L, it.value(), depth + 1);
-            lua_settable(L, -3);
-        }
-        return;
-    }
-
-    // Fallback: dump as string.
-    const std::string dumped = v.dump();
-    lua_pushlstring(L, dumped.c_str(), dumped.size());
-}
-
 void printUsage(const char *prog)
 {
     std::cout << "Usage: " << prog << " [OPTIONS]\n";
@@ -319,15 +259,7 @@ int main(int argc, char **argv)
                 // statiques (ordre non garanti entre TUs) et provoquer des UAF/SEGV.
                 {
                     auto& ctx = LuaContext::getInstance();
-                    ctx.currentModel.reset();
-                    ctx.currentTokenizer.reset();
-                    ctx.currentEncoder.reset();
-                    ctx.asyncMonitor.reset();
-                    ctx.currentSequences.clear();
-                    ctx.currentDataset.clear();
-                    ctx.currentConfig = json{};
-                    ctx.modelType.clear();
-                    ctx.modelConfig = json{};
+                    ctx.resetRuntimeState();
                 }
                 std::cerr << "\n✅ Script Lua exécuté avec succès\n";
             } catch (const std::exception& e) {
@@ -463,13 +395,7 @@ int main(int argc, char **argv)
             try {
                 LuaScripting lua;
                 lua.setArgs(script_path, script_args);
-                lua.setString("CONF_PATH", conf_abs);
-                lua.setString("CONF_DIR", conf_dir);
-
-                if (lua.getState()) {
-                    pushJsonToLua(lua.getState(), conf);
-                    lua_setglobal(lua.getState(), "CONF");
-                }
+                lua.setSystemConfig(conf, conf_abs, conf_dir);
 
                 if (!lua.loadScript(script_path)) {
                     std::cerr << "❌ Échec exécution Lua: " << script_path << "\n";
@@ -493,15 +419,7 @@ int main(int argc, char **argv)
         // IMPORTANT: libérer explicitement les ressources LuaContext avant exit.
         {
             auto& ctx = LuaContext::getInstance();
-            ctx.currentModel.reset();
-            ctx.currentTokenizer.reset();
-            ctx.currentEncoder.reset();
-            ctx.asyncMonitor.reset();
-            ctx.currentSequences.clear();
-            ctx.currentDataset.clear();
-            ctx.currentConfig = json{};
-            ctx.modelType.clear();
-            ctx.modelConfig = json{};
+            ctx.resetRuntimeState();
         }
 
         std::cerr << "\n✅ --conf: scripts exécutés avec succès\n";

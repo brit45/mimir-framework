@@ -1,6 +1,6 @@
 # API : `Mimir.Dataset`
 
-Source : `src/LuaScripting.cpp`.
+Source : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 ## `load(dir: string) -> (bool, n|err)`
 

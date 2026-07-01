@@ -4,7 +4,7 @@ Cette page décrit le comportement **réel** du loader de dataset actuellement e
 
 Sources principales :
 
-- API Lua: `src/LuaScripting.cpp` (`lua_loadDataset`, `lua_getDataset`, `lua_prepareSequences`)
+- API Lua: `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (`lua_loadDataset`, `lua_getDataset`, `lua_prepareSequences`)
 - Indexation + lazy-loading: `src/Helpers.hpp` (`loadDataset`, `DatasetItem`, `DatasetMemoryManager`, `DatasetManager`)
 
 ## Vue d’ensemble

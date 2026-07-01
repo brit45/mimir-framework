@@ -1,0 +1,123 @@
+# Comment Fonctionne Le Framework
+
+Ce chapitre decrit la boucle centrale du framework, du point de vue developpeur.
+
+## 1. Vue d'ensemble
+
+Le framework tourne autour de 5 blocs :
+
+1. `Model` : topologie, forward/backward, et etat d'entrainement.
+2. `Layer` : unite de calcul (Linear, Conv2d, Add, Norm, etc.).
+3. Registre d'architectures : fabrique de modeles a partir d'un nom + config.
+4. Runtime backend : execution CPU/GPU des operations.
+5. Bridges scripting : exposition de l'API framework (Lua aujourd'hui, autres demain).
+
+## 2. Cycle de vie standard d'un modele
+
+Cycle conseille en production :
+
+1. `create` du modele (depuis le registre).
+2. `allocateParams`.
+3. `initializeWeights` ou chargement checkpoint.
+4. `forwardPass` / `forwardPassNamed`.
+5. training step (`trainStep*`) puis `optimizerStep` si entrainement.
+6. sauvegarde (`Serialization`).
+
+Le pipeline doit rester deterministic et verifiable sur ce cycle.
+
+## 3. Topologie et execution
+
+La topologie est une liste ordonnee de `layers` dans `Model`.
+
+- Chaque layer a un `name`, un `type` et un `params_count`.
+- Les dimensions et metadonnees (features/channels/stride/padding/etc.) sont stockees sur le layer.
+- Les routes de donnees utilisent `inputs` et `output` (nommes).
+
+Consequence :
+
+- si les I/O sont mal nommes, le graphe devient incoherent,
+- si les dimensions sont mal parametrees, l'execution leve une erreur ou produit des sorties invalides.
+
+## 4. Pourquoi le registre est central
+
+Le registre est la porte d'entree stable pour les architectures.
+
+- Il mappe un nom (`vae_conv`, `transformer`, etc.) vers une fonction de creation.
+- Il fournit une config par defaut coherente.
+- Il harmonise CLI, scripts, et outillage (`inspect_architectures.lua`).
+
+Sans registre, les scripts finissent en hardcoding fragile.
+
+## 5. Runtime et dispatch
+
+Le runtime concret execute les ops.
+
+- `AbstractRuntime` definit le contrat minimum.
+- Le backend peut refuser une op (retour `false`) et le framework peut fallback.
+- Le tuning runtime est pilote par `RuntimeConfig::fromEnv(...)`.
+
+Point cle : toujours privilegier la correction avant la performance.
+
+## 6. Contrat scripting et stabilite API
+
+Le contrat systeme (globals/aliases) est centralise dans `ScriptingContext`.
+
+Exemples :
+
+- namespace global : `Mimir`
+- conf runtime : `CONF`, `CONF_PATH`, `CONF_DIR`
+- args script : `arg`
+- aliases : `model`, `tokenizer`, `dataset`, `MemoryGuard`, etc.
+
+Objectif : un script conceptuellement identique doit fonctionner entre langages de scripting.
+
+## 7. Contraintes metier a respecter
+
+Le framework est oriente recherche/production reproductible. En pratique :
+
+1. Pipeline config-driven prioritaire (`--conf`) pour rejouer un run a l'identique.
+2. Pas de changement silencieux de schema de config.
+3. Pas de rupture de contrat sur les aliases scripting systeme.
+4. Tout ajout runtime doit garder un fallback correct.
+5. Toute nouvelle architecture doit etre inspectable via l'outillage registry.
+
+## 8. Demo metier - run reproductible en mode conf
+
+Exemple de config minimale:
+
+```json
+{
+	"script": "scripts/templates/template_conf_load_and_train.lua",
+	"arch": "vae_conv",
+	"seed": 42,
+	"epochs": 1,
+	"batch_size": 2,
+	"dataset_path": "dataset_2"
+}
+```
+
+Commande de demo :
+
+```bash
+./bin/mimir --conf config.json
+```
+
+Ce que le dev doit verifier :
+
+1. Le script recoit bien `CONF`, `CONF_PATH`, `CONF_DIR`.
+2. Le meme `seed` produit des courbes comparables entre runs.
+3. Les logs permettent de retracer archi/config/runtime utilises.
+
+## 9. Demo metier - boucle d'analyse architecture
+
+Avant un changement de modele, lancer une photo de reference :
+
+```bash
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -l vae_conv -p --layers --stats
+```
+
+But metier :
+
+- valider que le schema des layers est coherent,
+- valider que le nombre de parametres n'a pas derive sans justification,
+- garder un point de comparaison avant/apres refactor.

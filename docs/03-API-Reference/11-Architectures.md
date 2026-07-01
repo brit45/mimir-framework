@@ -2,7 +2,7 @@
 
 Le registre d’architectures est la manière recommandée de créer des modèles.
 
-Source : `src/Models/Registry/ModelArchitectures.cpp` et bindings `src/LuaScripting.cpp`.
+Source : `src/Models/Registry/ModelArchitectures.cpp` et bindings `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 Ce module fournit :
 

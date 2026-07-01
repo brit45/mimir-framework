@@ -2,7 +2,7 @@
 
 NeuroPulse est un module “texte → paramètres neuro/audio/lumière”, avec rendu optionnel.
 
-Source : `src/LuaScripting.cpp`, `src/Models/NeuroPulse.*`.
+Source : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`, `src/Models/NeuroPulse.*`.
 
 ## `params(text: string, opts?: table) -> table`
 

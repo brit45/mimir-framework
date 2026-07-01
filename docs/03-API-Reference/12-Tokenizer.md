@@ -1,6 +1,6 @@
 # API : `Mimir.Tokenizer`
 
-Source : `src/LuaScripting.cpp`.
+Source : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 ## Création
 

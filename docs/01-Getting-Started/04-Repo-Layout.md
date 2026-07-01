@@ -14,7 +14,7 @@ Repères utiles pour naviguer vite.
 
 ## Fichiers clefs (source de vérité)
 
-- API Lua : `src/LuaScripting.cpp`
+- API Lua : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`
 - Runtime modèle / exécution layers : `src/Model.cpp`
 - Définition layers : `src/Layers.hpp`, `src/LayerTypes.hpp`
 - Registre des architectures : `src/Models/Registry/ModelArchitectures.cpp`

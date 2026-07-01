@@ -205,6 +205,17 @@ Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent
 
 - Contribuer : [docs/06-Contributing/01-Contributing.md](06-Contributing/01-Contributing.md)
 - Ajouter une architecture + registre + script Lua + outils : [docs/06-Contributing/02-New-Architecture-And-Tools.md](06-Contributing/02-New-Architecture-And-Tools.md)
+- Chapitre développeur complet (models, runtimes, features, scripting multi-langage) : [docs/06-Contributing/03-Extending-Models-Runtimes-And-Features.md](06-Contributing/03-Extending-Models-Runtimes-And-Features.md)
+- Tutoriel pas-à-pas: ajouter une entrée Python (transposable Ruby/JS/Perl/Java/Rust) : [docs/06-Contributing/04-Tutorial-Add-Python-Scripting-Entry.md](06-Contributing/04-Tutorial-Add-Python-Scripting-Entry.md)
+
+## 7) Devs (guide d'implémentation)
+
+- Index développeur : [docs/07-Devs/00-INDEX.md](07-Devs/00-INDEX.md)
+- Fonctionnement du framework : [docs/07-Devs/01-How-The-Framework-Works.md](07-Devs/01-How-The-Framework-Works.md)
+- Construire un modèle (model.push + set_layer_io) : [docs/07-Devs/02-Building-Models-And-Layers.md](07-Devs/02-Building-Models-And-Layers.md)
+- Config + registre d'architectures : [docs/07-Devs/03-Config-And-Registry.md](07-Devs/03-Config-And-Registry.md)
+- Modifier / ajouter un runtime : [docs/07-Devs/04-Runtime-Development.md](07-Devs/04-Runtime-Development.md)
+- Contrat API scripting inter-langages : [docs/07-Devs/05-Scripting-System-Contract.md](07-Devs/05-Scripting-System-Contract.md)
 
 ## Convention de noms
 
@@ -214,7 +225,8 @@ Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent
 
 ## Où est la “vérité” ?
 
-- API Lua exportée : [src/LuaScripting.cpp](../src/LuaScripting.cpp)
+- Contrat API scripting (globals/aliases partagés) : [src/scriptings/ScriptingContext.hpp](../src/scriptings/ScriptingContext.hpp)
+- API Lua exportée (implémentation) : [src/scriptings/Lua/luaScripting/LuaScripting.cpp](../src/scriptings/Lua/luaScripting/LuaScripting.cpp)
 - Moteur et exécution des layers : [src/Model.cpp](../src/Model.cpp)
 - Registre des architectures : [src/Models/Registry/ModelArchitectures.cpp](../src/Models/Registry/ModelArchitectures.cpp)
 - Tokenizer/ConditioningEncoder : [src/Tokenizer.cpp](../src/Tokenizer.cpp), [src/Encoder.cpp](../src/Encoder.cpp)

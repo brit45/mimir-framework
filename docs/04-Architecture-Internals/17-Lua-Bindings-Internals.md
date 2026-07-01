@@ -4,8 +4,13 @@ Cette page explique comment l’API Lua est exposée et comment elle appelle le 
 
 Source de vérité :
 
-- Déclaration : `src/LuaScripting.hpp`
-- Implémentation : `src/LuaScripting.cpp`
+- Contrat scripting commun : `src/scriptings/ScriptingContext.hpp`, `src/scriptings/ScriptingRuntime.hpp`
+- Déclaration Lua : `src/scriptings/Lua/luaScripting/LuaScripting.hpp`
+- Implémentation Lua :
+	- `src/scriptings/Lua/luaScripting/LuaScripting.cpp`
+	- `src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp`
+	- `src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp`
+	- `src/scriptings/Lua/luaScripting/LuaScriptingRuntimeAndViz.cpp`
 - Modèle : `src/Model.hpp`, `src/Model.cpp`
 - Registre d’architectures : `src/Models/Registry/ModelArchitectures.hpp/.cpp`
 
@@ -34,6 +39,7 @@ Le header liste les endpoints principaux :
 ## 3) `LuaContext` : singleton runtime
 
 Le code définit un singleton `LuaContext` global, accessible depuis les callbacks Lua.
+`LuaContext` hérite de `ScriptingContext` pour partager la même API système entre langages de scripting.
 
 Rôle :
 
@@ -53,3 +59,9 @@ Rôle :
 - Appeler `forward` avant `allocate_params/init_weights` renvoie généralement un message d’erreur (poids non alloués).
 - En mode htop/viz, écrire sur stdout peut casser le rendu (note dans `LuaScripting.hpp`).
 - Les tailles doivent être cohérentes (seq_len, d_model, etc.) sinon le runtime lève des exceptions.
+
+## 6) Contrat API système (stabilité inter-langages)
+
+Les noms globaux et aliases système (`Mimir`, `CONF`, `CONF_PATH`, `CONF_DIR`, `arg`, `model`, `tokenizer`, etc.) sont normalisés dans `ScriptingContext` via les constantes `kGlobal*` et `kAlias*`.
+
+Objectif : empêcher les divergences d'API entre bridges (Lua aujourd'hui, Python/Ruby/JS demain).

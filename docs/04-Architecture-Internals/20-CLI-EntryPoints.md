@@ -6,7 +6,8 @@ Cette page documente le binaire CLI : parsing des arguments, chemins d’exécut
 Source de vérité :
 
 - Entry point : `src/main.cpp`
-- Scripting Lua : `src/LuaScripting.hpp/.cpp`
+- Scripting Lua : `src/scriptings/Lua/luaScripting/LuaScripting.hpp/.cpp`
+- Contrat API système partagé : `src/scriptings/ScriptingContext.hpp`
 - Config → modèle : `src/Models/Registry/ModelArchitectures.hpp/.cpp`
 - Sécurité mémoire : `src/MemorySafety.hpp` + `src/MemoryGuard.hpp`
 

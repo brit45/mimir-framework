@@ -7,7 +7,7 @@ Source de vérité :
 - Tokenizer : `src/Tokenizer.hpp`, `src/Tokenizer.cpp`
 - ConditioningEncoder : `src/Encoder.hpp`, `src/Encoder.cpp`
 - Runtime forward tokens : `src/Model.cpp` (`forwardPassView(const std::vector<int>&)`)
-- Bindings Lua : `src/LuaScripting.cpp/.hpp`
+- Bindings Lua : `src/scriptings/Lua/luaScripting/LuaScripting.cpp/.hpp`
 
 ## 1) Tokenizer : responsabilités
 

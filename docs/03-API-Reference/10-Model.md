@@ -4,7 +4,7 @@
 
 > **Note :** Mímir ne gère qu'un seul modèle actif à la fois par contexte. Toutes les fonctions de ce module opèrent sur ce modèle global.
 
-Source C++ : `src/LuaScripting.cpp` — liaisons Lua → C++.
+Source C++ : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` — liaisons Lua → C++.
 
 ---
 

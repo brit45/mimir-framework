@@ -17,7 +17,7 @@ Mimir.Dataset.load("dataset_2/")
 assert(Mimir.Model.train(100, 1e-4))
 ```
 
-L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, PonyXL DDPM fait des passes de diffusion multi-timestep, VAEConv calcule la reconstruction + KL, etc. Ces comportements sont codés dans `src/LuaScripting.cpp` → `lua_trainModel`.
+L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, PonyXL DDPM fait des passes de diffusion multi-timestep, VAEConv calcule la reconstruction + KL, etc. Ces comportements sont codés dans `src/scriptings/Lua/luaScripting/LuaScripting.cpp` → `lua_trainModel`.
 
 ### Style boucle manuelle
 

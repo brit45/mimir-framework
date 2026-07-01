@@ -288,7 +288,10 @@ set(MIMIR_SOURCES
     src/Visualizer.cpp
     src/tensors.cpp
     src/Sha256.cpp
-    src/LuaScripting.cpp
+    src/scriptings/Lua/luaScripting/LuaScripting.cpp
+    src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp
+    src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp
+    src/scriptings/Lua/luaScripting/LuaScriptingRuntimeAndViz.cpp
     src/ConfigOverrides.cpp
     src/Helpers.cpp
     src/stb_image_impl.cpp
@@ -334,6 +337,9 @@ set(MIMIR_HEADERS
     src/tensors.hpp
     src/Sha256.hpp
     src/LuaScripting.hpp
+    src/scriptings/ScriptingRuntime.hpp
+    src/scriptings/ScriptingContext.hpp
+    src/scriptings/Lua/luaScripting/LuaScripting.hpp
     src/Helpers.hpp
     src/Layers.hpp
     src/Autograd.hpp
@@ -406,6 +412,7 @@ if(ENABLE_SFML AND SFML_FOUND)
         ${MIMIR_SOURCES}
         ${MIMIR_HEADERS}
         src/runtimes/cpu/DynamicTensorAllocator.hpp
+        src/scriptings/ScriptingContext.hpp
     )
     target_compile_definitions(mimir_core PUBLIC ENABLE_SFML)
 else()

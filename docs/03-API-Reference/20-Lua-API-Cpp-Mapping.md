@@ -2,7 +2,7 @@
 
 Cette page est un **sommaire** “appel Lua ↔ binding C++ ↔ à quoi ça fait référence”.
 
-- Source de vérité : `src/LuaScripting.cpp` (fonction `LuaScripting::registerAPI()`).
+- Source de vérité : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (fonction `LuaScripting::registerAPI()`).
 - Les fonctions C++ listées ci-dessous sont les **bindings** (souvent `LuaScripting::lua_*`).
 - La colonne “Référence interne” pointe les **classes / fichiers** réellement utilisés derrière.
 

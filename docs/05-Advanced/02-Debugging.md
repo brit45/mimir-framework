@@ -16,7 +16,7 @@ Point d’entrée conseillé : [04-Source-Code-Map.md](04-Source-Code-Map.md).
 1) **Activer un garde-fou mémoire** (strict) :
 	 - `Mimir.MemoryGuard.setLimit(gb)` (alias moderne)
 	 - ou `Mimir.Guard.setLimit(gb)` (alias)
-	 - Note : si la valeur est <= 1000, c’est interprété en **GB**, sinon en **bytes** (implémenté dans `src/LuaScripting.cpp`).
+	 - Note : si la valeur est <= 1000, c’est interprété en **GB**, sinon en **bytes** (implémenté dans `src/scriptings/Lua/luaScripting/LuaScripting.cpp`).
 2) **Configurer l’allocateur dynamique** : `Mimir.Allocator.configure({max_ram_gb = ..., enable_compression = true})`
 3) Démarrer petit : réduire `seq_len`, `d_model`, `num_layers`, batch.
 4) Sur NaN : réduire LR, activer un clipping global.

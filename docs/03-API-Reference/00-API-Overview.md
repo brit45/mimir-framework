@@ -1,6 +1,8 @@
 # API Lua - vue d’ensemble
 
-La source de vérité de l’API exposée est `src/LuaScripting.cpp`.
+La source de vérité de l’API exposée est `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
+
+Le contrat système commun (noms globaux + aliases, partagé entre langages de scripting) est défini dans `src/scriptings/ScriptingContext.hpp`.
 
 ## Modules principaux
 

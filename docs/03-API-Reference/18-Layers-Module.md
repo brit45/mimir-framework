@@ -6,7 +6,7 @@ Statut (important) : dans la version actuelle, **toutes ces fonctions sont des s
 
 - `(false, "Non implémenté - utilisez model.forward() à la place")`
 
-Source de vérité : `src/LuaScripting.cpp` (section “Layer Operations API”).
+Source de vérité : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (section “Layer Operations API”).
 
 ## Exemple (script) — tester le statut
 

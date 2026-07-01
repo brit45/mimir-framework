@@ -141,4 +141,4 @@ Note importante:
 
 ## Où c’est piloté depuis Lua ?
 
-La mise en place/activation du monitoring est exposée côté Lua via `src/LuaScripting.cpp` (voir la doc API: `docs/03-API-Reference/15-Viz-Htop.md`).
+La mise en place/activation du monitoring est exposée côté Lua via `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (voir la doc API: `docs/03-API-Reference/15-Viz-Htop.md`).

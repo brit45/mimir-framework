@@ -8,7 +8,7 @@ Objectif :
 - rester compatible avec des scripts historiques
 - éviter les ambiguïtés (`arg` vs `Mimir.Args`, collisions de noms, etc.)
 
-Source de vérité : `src/LuaScripting.cpp`.
+Source de vérité : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 ## 1) Globals injectés
 
@@ -65,4 +65,4 @@ local Model = Mimir.Model
 local Ser = Mimir.Serialization
 ```
 
-- Quand tu as un doute sur l’API, la source de vérité est le fichier `src/LuaScripting.cpp`.
+- Quand tu as un doute sur l’API, la source de vérité est le fichier `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.

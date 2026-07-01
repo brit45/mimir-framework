@@ -1,6 +1,6 @@
 # API : `Mimir.Serialization`
 
-Source : `src/LuaScripting.cpp` et `src/Serialization/*`.
+Source : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` et `src/Serialization/*`.
 
 ## Formats
 

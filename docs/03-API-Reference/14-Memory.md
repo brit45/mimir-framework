@@ -1,6 +1,6 @@
 # API : mémoire
 
-Source : `src/LuaScripting.cpp`.
+Source : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 ## `Mimir.Memory`
 

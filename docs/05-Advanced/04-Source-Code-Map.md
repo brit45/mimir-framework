@@ -11,7 +11,7 @@ Pages Advanced associées (explications orientées usage) :
 Objectif : quand une fonctionnalité est mentionnée dans la doc (mémoire stricte, forward tokens, multi-input, sérialisation…), vous devez pouvoir retrouver rapidement **le fichier source qui fait foi**, et comprendre le rôle exact de chaque composant.
 
 > Notes
-> - La plupart des features sont exposées via l’API Lua (bindings dans `src/LuaScripting.cpp`).
+> - La plupart des features sont exposées via l’API Lua (bindings dans `src/scriptings/Lua/luaScripting/LuaScripting.cpp`).
 > - Les modèles « prêts à l’emploi » sont construits via le registre d’architectures (`src/Models/Registry/ModelArchitectures.*`).
 
 ## 1) Point d’entrée et exposition API
@@ -21,7 +21,7 @@ Objectif : quand une fonctionnalité est mentionnée dans la doc (mémoire stric
 - Rôle : point d’entrée du binaire (init, chargement, exécution Lua / modes CLI selon build).
 - À lire quand : vous voulez comprendre comment le runtime démarre, et à quel moment les sous-systèmes (Lua, compute backends, etc.) sont initialisés.
 
-### `src/LuaScripting.hpp` / `src/LuaScripting.cpp`
+### `src/scriptings/Lua/luaScripting/LuaScripting.hpp` / `src/scriptings/Lua/luaScripting/LuaScripting.cpp`
 
 - Rôle : **API publique** (bindings Lua) sous la table globale `Mimir`.
 - Contient :
@@ -271,8 +271,8 @@ Documentation détaillée : [docs/04-Architecture-Internals/03-Hardware-Backends
 ## Lecture guidée (par tâche)
 
 - "Je veux activer l'accélération GPU" : lire [docs/05-Advanced/05-GPU-Acceleration.md](05-GPU-Acceleration.md), puis variables d'environnement `MIMIR_CUDA_*` / `MIMIR_ROCM_*`, puis internals dans `src/runtimes/cuda/CudaRuntime.cpp`.
-- "Je veux comprendre l'exécution d'un forward multi-input" : `src/LuaScripting.cpp` (forward), puis `src/Model.cpp` (forwardPassNamed), puis `src/Layers.hpp` (inputs/output).
+- "Je veux comprendre l'exécution d'un forward multi-input" : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (forward), puis `src/Model.cpp` (forwardPassNamed), puis `src/Layers.hpp` (inputs/output).
 - "Je veux comprendre la mémoire stricte (OOM explicites)" : `src/MemoryGuard.hpp`, `src/DynamicTensorAllocator.hpp`, `src/RuntimeAllocator.hpp`, et les usages dans `src/Model.cpp` et `src/tensors.cpp`.
 - "Je veux comprendre le Transformer causal" : `src/Models/NLP/TransformerModel.cpp` (builder) + ops dans `src/LayerOps*` + forward tokens dans `src/Model.cpp`.
-- "Je veux un dump exploitable pour debug" : `src/Serialization/DebugJsonDump.*` + binding `Mimir.Serialization.save_enhanced_debug` dans `src/LuaScripting.cpp`.
+- "Je veux un dump exploitable pour debug" : `src/Serialization/DebugJsonDump.*` + binding `Mimir.Serialization.save_enhanced_debug` dans `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 - "Je veux ajouter un nouveau fast-path GPU" : `src/runtimes/AbstractRuntime.hpp` (RuntimeConfig) → `src/runtimes/cuda/CudaRuntime.cpp` (case + DeviceBuf) → `src/runtimes/rocm/RocmRuntime.cpp` (miroir).

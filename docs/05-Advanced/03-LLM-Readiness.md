@@ -9,13 +9,13 @@ Point d’entrée conseillé : [04-Source-Code-Map.md](04-Source-Code-Map.md).
 - Une architecture Transformer côté registry (builder) : `src/Models/NLP/TransformerModel.cpp`.
 - Un chemin “tokens int” (Embedding lit dans un store d’ints) : ex. conventions `__input__` côté NLP (voir aussi la carte du code source).
 - Des kernels CPU pour attention et matmul (OpenMP/SIMD selon build) : `src/LayerOps.hpp`, `src/SIMD_Ops.hpp`.
-- Une API tokenizer/encoder en Lua : `Mimir.Tokenizer.*` et `Mimir.Model.encode_prompt(...)` (bindings dans `src/LuaScripting.cpp`).
+- Une API tokenizer/encoder en Lua : `Mimir.Tokenizer.*` et `Mimir.Model.encode_prompt(...)` (bindings dans `src/scriptings/Lua/luaScripting/LuaScripting.cpp`).
 
 ## 2) Ce que `Mimir.Model.infer()` fait vraiment (important)
 
 `Mimir.Model.infer(prompt)` est présent, mais aujourd’hui ce n’est pas une “generation” autoregressive complète :
 
-- côté C++ : `src/LuaScripting.cpp` tokenize une string si un tokenizer existe, encode si un encoder existe, puis appelle `Model::forward(output)`.
+- côté C++ : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` tokenize une string si un tokenizer existe, encode si un encoder existe, puis appelle `Model::forward(output)`.
 - la “décode” ensuite via `Model::eval(...)`.
 
 Or `Model::eval(...)` (voir `src/Model.cpp`) produit actuellement :
@@ -45,7 +45,7 @@ Pour passer de “Transformer entraînable” à “LLM utilisable” :
 - Registry + config merge : `src/Models/Registry/ModelArchitectures.*`.
 - Builder Transformer : `src/Models/NLP/TransformerModel.cpp`.
 - Ops d’attention : `src/LayerOps.hpp`.
-- Bindings Lua (forward, infer, encode prompt) : `src/LuaScripting.cpp`.
+- Bindings Lua (forward, infer, encode prompt) : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 Et côté scripts (utile pour comprendre l’intention et l’usage actuel) :
 
