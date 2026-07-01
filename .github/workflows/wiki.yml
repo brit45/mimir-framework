@@ -34,29 +34,24 @@ jobs:
           DOCS_ROOT   = pathlib.Path("docs")
           WIKI_DIR    = pathlib.Path("/tmp/wiki")
 
-          # ── Section directory → human prefix ──────────────────────────────────
-          SECTION_PREFIX = {
-              "01-Getting-Started":        "Getting-Started",
-              "02-User-Guide":             "User-Guide",
-              "03-API-Reference":          "API-Reference",
-              "04-Architecture-Internals": "Architecture-Internals",
-              "05-Advanced":               "Advanced",
-              "06-Contributing":           "Contributing",
-          }
-
-          # ── Human-readable section titles for _Sidebar.md ────────────────────
-          SECTION_TITLE = {
-              "01-Getting-Started":        "Getting Started",
-              "02-User-Guide":             "User Guide",
-              "03-API-Reference":          "API Reference",
-              "04-Architecture-Internals": "Architecture Internals",
-              "05-Advanced":               "Advanced",
-              "06-Contributing":           "Contributing",
-          }
-
           def strip_num(name: str) -> str:
               """Remove leading NN- numeric prefix from a filename or dir name."""
               return re.sub(r"^\d+-", "", name)
+
+          def section_prefix(name: str) -> str:
+              """Top-level docs section directory → wiki-safe prefix."""
+              return strip_num(name).replace(" ", "-")
+
+          def section_title(name: str) -> str:
+              """Top-level docs section directory → human title for sidebar."""
+              return strip_num(name).replace("-", " ")
+
+          def section_sort_key(name: str):
+              """Sort docs sections by numeric prefix when present, then lexicographically."""
+              m = re.match(r"^(\d+)-", name)
+              if m:
+                  return (0, int(m.group(1)), name)
+              return (1, 10_000, name)
 
           def wiki_page_name(rel: pathlib.PurePosixPath) -> str:
               """
@@ -74,11 +69,21 @@ jobs:
                   if parts[0] == "00-INDEX.md":
                       return "Home"
                   return strip_num(stem)
-              # section file – keep the numeric prefix in the filename part
+
+              # Support nested files under docs/<section>/... recursively.
               section_dir = parts[0]
-              file_stem   = pathlib.Path(parts[1]).stem
-              prefix      = SECTION_PREFIX.get(section_dir, strip_num(section_dir))
-              return f"{prefix}-{file_stem}"
+              prefix = section_prefix(section_dir)
+
+              tail_parts: list[str] = []
+              for i, p in enumerate(parts[1:]):
+                  is_last = (i == len(parts[1:]) - 1)
+                  if is_last:
+                      tail_parts.append(pathlib.Path(p).stem)
+                  else:
+                      tail_parts.append(strip_num(p).replace(" ", "-"))
+
+              tail = "-".join([t for t in tail_parts if t])
+              return f"{prefix}-{tail}" if tail else prefix
 
           def fix_links(content: str, rel_doc_path: pathlib.PurePosixPath) -> str:
               """
@@ -190,36 +195,33 @@ jobs:
               if f.name != ".git":
                   f.unlink() if f.is_file() else shutil.rmtree(f)
 
-          # ── Collect docs files in order ───────────────────────────────────────
-          ordered_sections = [
-              "01-Getting-Started",
-              "02-User-Guide",
-              "03-API-Reference",
-              "04-Architecture-Internals",
-              "05-Advanced",
-              "06-Contributing",
-          ]
-
+          # ── Collect docs files automatically (recursive) ─────────────────────
           # (section_dir_or_None, rel_path_relative_to_docs)
           docs_files: list[tuple[str | None, pathlib.PurePosixPath]] = []
 
-          # Root index
-          if (DOCS_ROOT / "00-INDEX.md").is_file():
+          all_md = sorted(
+              [p for p in DOCS_ROOT.rglob("*.md") if p.is_file()],
+              key=lambda p: p.relative_to(DOCS_ROOT).as_posix(),
+          )
+
+          # Ensure Home is first when docs/00-INDEX.md exists.
+          home = DOCS_ROOT / "00-INDEX.md"
+          if home.is_file():
               docs_files.append((None, pathlib.PurePosixPath("00-INDEX.md")))
 
-          for sec in ordered_sections:
-              sec_dir = DOCS_ROOT / sec
-              if not sec_dir.is_dir():
+          for md in all_md:
+              rel = pathlib.PurePosixPath(md.relative_to(DOCS_ROOT).as_posix())
+              if rel.as_posix() == "00-INDEX.md":
                   continue
-              for md in sorted(sec_dir.glob("*.md")):
-                  docs_files.append(
-                      (sec, pathlib.PurePosixPath(f"{sec}/{md.name}"))
-                  )
+              parts = rel.parts
+              sec = parts[0] if len(parts) > 1 else None
+              docs_files.append((sec, rel))
 
           # ── Copy files with link rewriting ────────────────────────────────────
           # sidebar_entries maps section dir → list of (wiki_page_name, human_display)
           SidebarEntry = tuple[str, str]
           sidebar_entries: dict[str, list[SidebarEntry]] = {}
+          root_entries: list[SidebarEntry] = []
 
           for sec, rel in docs_files:
               page_name = wiki_page_name(rel)
@@ -229,18 +231,37 @@ jobs:
               (WIKI_DIR / f"{page_name}.md").write_text(content, encoding="utf-8")
 
               if sec is not None:
-                  display = strip_num(pathlib.Path(rel.name).stem).replace("-", " ")
+                  # Display keeps subpath context inside a section when nested.
+                  rel_parts = list(rel.parts[1:])
+                  display_parts: list[str] = []
+                  for i, part in enumerate(rel_parts):
+                      is_last = (i == len(rel_parts) - 1)
+                      if is_last:
+                          display_parts.append(strip_num(pathlib.Path(part).stem).replace("-", " "))
+                      else:
+                          display_parts.append(section_title(part))
+                  display = " / ".join([d for d in display_parts if d]).strip()
                   sidebar_entries.setdefault(sec, []).append((page_name, display))
+              elif rel.as_posix() != "00-INDEX.md":
+                  display = strip_num(pathlib.Path(rel.name).stem).replace("-", " ")
+                  root_entries.append((page_name, display))
 
           # ── Generate _Sidebar.md ──────────────────────────────────────────────
           sidebar_lines = ["## Navigation\n", "**[[Home]]**\n"]
+
+          if root_entries:
+              sidebar_lines.append("\n### General\n")
+              for page_name, display in sorted(root_entries, key=lambda e: e[1].lower()):
+                  sidebar_lines.append(f"- [[{display}|{page_name}]]\n")
+
+          ordered_sections = sorted(sidebar_entries.keys(), key=section_sort_key)
           for sec in ordered_sections:
               entries = sidebar_entries.get(sec, [])
               if not entries:
                   continue
-              title = SECTION_TITLE.get(sec, strip_num(sec))
+              title = section_title(sec)
               sidebar_lines.append(f"\n### {title}\n")
-              for page_name, display in entries:
+              for page_name, display in sorted(entries, key=lambda e: e[1].lower()):
                   sidebar_lines.append(f"- [[{display}|{page_name}]]\n")
 
           (WIKI_DIR / "_Sidebar.md").write_text("".join(sidebar_lines), encoding="utf-8")
