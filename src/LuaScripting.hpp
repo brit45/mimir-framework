@@ -76,6 +76,7 @@ private:
     static int lua_allocateParams(lua_State* L);
     static int lua_initWeights(lua_State* L);
     static int lua_totalParams(lua_State* L);
+    static int lua_getModelLayers(lua_State* L);
     static int lua_pushLayer(lua_State* L);
     static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
@@ -83,6 +84,7 @@ private:
     static int lua_ponyxlDdpmValidateStep(lua_State* L);
     static int lua_ponyxlDdpmVizReconstructStep(lua_State* L);
     static int lua_ponyxlDdpmText2Img(lua_State* L);
+    static int lua_ponyxlDdpmText2ImgLatent(lua_State* L);
     static int lua_ponyxlDdpmSetVaeScale(lua_State* L);
     static int lua_ponyxlDdpmGetVaeScale(lua_State* L);
     static int lua_ponyxlDdpmVaeMuMoments(lua_State* L);
@@ -105,6 +107,8 @@ private:
     // === ModelArchitectures API ===
     static int lua_archAvailable(lua_State* L);
     static int lua_archDefaultConfig(lua_State* L);
+    static int lua_archInfo(lua_State* L);
+    static int lua_archDtypes(lua_State* L);
     
     // === Layer Operations API ===
     static int lua_computeConv2D(lua_State* L);
@@ -237,7 +241,7 @@ public:
     // Stockage des objets C++ accessibles depuis Lua
     std::shared_ptr<Model> currentModel;
     std::shared_ptr<Tokenizer> currentTokenizer;
-    std::shared_ptr<Encoder> currentEncoder;
+    std::shared_ptr<ConditioningEncoder> currentEncoder;
     
     // AsyncMonitor pour htop et viz
     std::shared_ptr<AsyncMonitor> asyncMonitor;
@@ -301,7 +305,7 @@ public:
             }
         }
 
-        std::cout << out << std::endl;
+        std::cerr << out << std::endl;
     }
     
 private:

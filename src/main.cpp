@@ -233,10 +233,10 @@ int main(int argc, char **argv)
         // Préfixe "       Mímir Framework v" = 24 chars affichage (ASCII sauf "í" qui occupe 2 octets
         // mais 1 char affichage — on calcule le padding sur la taille d'affichage).
         const int trailing = std::max(0, 40 - 24 - static_cast<int>(ver.size()));
-        std::cout << "╔════════════════════════════════════════╗\n";
-        std::cout << "║       Mímir Framework v" << ver << std::string(trailing, ' ') << "║\n";
-        std::cout << "║     Deep Learning Architectures        ║\n";
-        std::cout << "╚════════════════════════════════════════╝\n\n";
+        std::cerr << "╔════════════════════════════════════════╗\n";
+        std::cerr << "║       Mímir Framework v" << ver << std::string(trailing, ' ') << "║\n";
+        std::cerr << "║     Deep Learning Architectures        ║\n";
+        std::cerr << "╚════════════════════════════════════════╝\n\n";
     }
 
     // Préparer le spill dir + nettoyage fin de run.
@@ -249,29 +249,29 @@ int main(int argc, char **argv)
     }
     
     // 🛡️ SÉCURITÉ MÉMOIRE: Vérification au démarrage
-    std::cout << "🛡️  Vérification de la sécurité mémoire...\n";
+    std::cerr << "🛡️  Vérification de la sécurité mémoire...\n";
     MemorySafety::validateLegacyDisabled();
     MemorySafety::runMemoryIntegrityTest();
-    std::cout << "\n";
+    std::cerr << "\n";
     
 #ifdef _OPENMP
     int num_threads = omp_get_max_threads();
-    std::cout << "🔧 OpenMP: " << num_threads << " threads disponibles\n";
+    std::cerr << "🔧 OpenMP: " << num_threads << " threads disponibles\n";
     omp_set_num_threads(num_threads);
 #endif
     
-    std::cout << "🚀 Optimisations hardware:\n";
-    std::cout << "  • AVX2: " << (Model::hasAVX2() ? "✓" : "✗") << "\n";
-    std::cout << "  • FMA: " << (Model::hasFMA() ? "✓" : "✗") << "\n";
-    std::cout << "  • F16C: " << (Model::hasF16C() ? "✓" : "✗") << "\n";
-    std::cout << "  • BMI2: " << (Model::hasBMI2() ? "✓" : "✗") << "\n";
-    std::cout << "  • CUDA: " << cudaAccelStatus() << "\n";
-    std::cout << "  • ROCM: " << rocmAccelStatus() << "\n";
-    std::cout << "\n";
+    std::cerr << "🚀 Optimisations hardware:\n";
+    std::cerr << "  • AVX2: " << (Model::hasAVX2() ? "✓" : "✗") << "\n";
+    std::cerr << "  • FMA: " << (Model::hasFMA() ? "✓" : "✗") << "\n";
+    std::cerr << "  • F16C: " << (Model::hasF16C() ? "✓" : "✗") << "\n";
+    std::cerr << "  • BMI2: " << (Model::hasBMI2() ? "✓" : "✗") << "\n";
+    std::cerr << "  • CUDA: " << cudaAccelStatus() << "\n";
+    std::cerr << "  • ROCM: " << rocmAccelStatus() << "\n";
+    std::cerr << "\n";
     
     if (argc < 2) {
-        std::cout << "💡 Utilisez --help pour voir les options\n";
-        std::cout << "💡 Ou:      " << argv[0] << " --lua scripts/test_lua_api.lua\n\n";
+        std::cerr << "💡 Utilisez --help pour voir les options\n";
+        std::cerr << "💡 Ou:      " << argv[0] << " --lua scripts/test_lua_api.lua\n\n";
         return 0;
     }
 
@@ -283,8 +283,8 @@ int main(int argc, char **argv)
         }
         if (std::string(argv[i]) == "--lua" && i + 1 < argc) {
             const std::string lua_script = argv[++i];
-            std::cout << "📜 Exécution du script Lua: " << lua_script << "\n";
-            std::cout << "═══════════════════════════════════════════════\n\n";
+            std::cerr << "📜 Exécution du script Lua: " << lua_script << "\n";
+            std::cerr << "═══════════════════════════════════════════════\n\n";
             
             if (!fs::exists(lua_script)) {
                 std::cerr << "❌ Fichier non trouvé: " << lua_script << "\n";
@@ -308,7 +308,7 @@ int main(int argc, char **argv)
                 {
                     auto& ctx = LuaContext::getInstance();
                     if (ctx.modelType == "ponyxl_ddpm" && ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
-                        std::cout << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
+                        std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
                         ctx.asyncMonitor->waitForVizClose();
                     }
                 }
@@ -329,7 +329,7 @@ int main(int argc, char **argv)
                     ctx.modelType.clear();
                     ctx.modelConfig = json{};
                 }
-                std::cout << "\n✅ Script Lua exécuté avec succès\n";
+                std::cerr << "\n✅ Script Lua exécuté avec succès\n";
             } catch (const std::exception& e) {
                 std::cerr << "❌ Erreur Lua: " << e.what() << "\n";
                 return 1;
@@ -372,7 +372,7 @@ int main(int argc, char **argv)
     }
 
     if (!conf_path.empty()) {
-        std::cout << "⚙️  Chargement de la conf: " << conf_path << "\n";
+        std::cerr << "⚙️  Chargement de la conf: " << conf_path << "\n";
 
         if (!fs::exists(conf_path)) {
             std::cerr << "❌ Fichier non trouvé: " << conf_path << "\n";
@@ -389,16 +389,16 @@ int main(int argc, char **argv)
         }
 
         if (!overrides.empty()) {
-            std::cout << "🧩 Application des overrides (--override) sur la conf:\n";
+            std::cerr << "🧩 Application des overrides (--override) sur la conf:\n";
             for (const auto& o : overrides) {
                 std::string err;
                 if (!applyOverride(conf, o, err)) {
                     std::cerr << "❌ " << err << "\n";
                     return 1;
                 }
-                std::cout << "  • " << o << "\n";
+                std::cerr << "  • " << o << "\n";
             }
-            std::cout << "\n";
+            std::cerr << "\n";
         }
 
         const json* lua_conf = nullptr;
@@ -458,7 +458,7 @@ int main(int argc, char **argv)
                 return 1;
             }
 
-            std::cout << "📜 [conf] Script Lua (" << (si + 1) << "/" << scripts.size() << "): " << script_path << "\n";
+            std::cerr << "📜 [conf] Script Lua (" << (si + 1) << "/" << scripts.size() << "): " << script_path << "\n";
 
             try {
                 LuaScripting lua;
@@ -485,7 +485,7 @@ int main(int argc, char **argv)
         {
             auto& ctx = LuaContext::getInstance();
             if (ctx.modelType == "ponyxl_ddpm" && ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
-                std::cout << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
+                std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
                 ctx.asyncMonitor->waitForVizClose();
             }
         }
@@ -504,12 +504,12 @@ int main(int argc, char **argv)
             ctx.modelConfig = json{};
         }
 
-        std::cout << "\n✅ --conf: scripts exécutés avec succès\n";
+        std::cerr << "\n✅ --conf: scripts exécutés avec succès\n";
         return 0;
     }
 
     if (!config_path.empty()) {
-        std::cout << "⚙️  Chargement de la configuration: " << config_path << "\n";
+        std::cerr << "⚙️  Chargement de la configuration: " << config_path << "\n";
 
         if (!fs::exists(config_path)) {
             std::cerr << "❌ Fichier non trouvé: " << config_path << "\n";
@@ -526,21 +526,21 @@ int main(int argc, char **argv)
         }
 
         if (!overrides.empty()) {
-            std::cout << "🧩 Application des overrides (--override) sur la config:\n";
+            std::cerr << "🧩 Application des overrides (--override) sur la config:\n";
             for (const auto& o : overrides) {
                 std::string err;
                 if (!applyOverride(config, o, err)) {
                     std::cerr << "❌ " << err << "\n";
                     return 1;
                 }
-                std::cout << "  • " << o << "\n";
+                std::cerr << "  • " << o << "\n";
             }
-            std::cout << "\n";
+            std::cerr << "\n";
         }
 
         std::string arch_name;
         json cfg = ModelArchitectures::cfgFromConfig(config, &arch_name);
-        std::cout << "🏗️  Architecture: " << arch_name << "\n\n";
+        std::cerr << "🏗️  Architecture: " << arch_name << "\n\n";
 
         // Construire le modèle selon la config résolue.
         std::shared_ptr<Model> model = ModelArchitectures::create(arch_name, cfg);
@@ -565,7 +565,7 @@ int main(int argc, char **argv)
                 if (config.contains("tokenizer") && config["tokenizer"].is_object()) {
                     vocab_size = config["tokenizer"].value("max_vocab", vocab_size);
                 }
-                auto enc = std::make_shared<Encoder>(dim, std::max(1, vocab_size));
+                auto enc = std::make_shared<ConditioningEncoder>(dim, std::max(1, vocab_size));
                 // Optionnel: seed
                 uint64_t seed = 0;
                 if (config.contains("inference") && config["inference"].is_object()) {
@@ -581,8 +581,8 @@ int main(int argc, char **argv)
         model->allocateParams();
         model->initializeWeights("he");
 
-        std::cout << "✅ Modèle créé avec " << model->totalParamCount() << " paramètres\n";
-        std::cout << "💡 Entraînement à implémenter selon vos besoins\n";
+        std::cerr << "✅ Modèle créé avec " << model->totalParamCount() << " paramètres\n";
+        std::cerr << "💡 Entraînement à implémenter selon vos besoins\n";
 
         return 0;
     }

@@ -523,17 +523,17 @@ std::vector<std::vector<int>> Tokenizer::batchTokenize(
 }
 
 void Tokenizer::printVocabStats() const {
-    std::cout << "\n📊 Statistiques du Vocabulaire" << std::endl;
-    std::cout << "================================" << std::endl;
-    std::cout << "  Taille actuelle : " << vocabSize << " / " << maxVocab << std::endl;
-    std::cout << "  Tokens spéciaux : 7 (<PAD>, <UNK>, <SEQ>, <MOD>, <MAG>, <BOS>, <EOS>)" << std::endl;
-    std::cout << "  Tokens utilisateur : " << (vocabSize > 7 ? (vocabSize - 7) : 0) << std::endl;
-    std::cout << "  Max séquence : " << maxSequenceLength << std::endl;
+    std::cerr << "\n📊 Statistiques du Vocabulaire" << std::endl;
+    std::cerr << "================================" << std::endl;
+    std::cerr << "  Taille actuelle : " << vocabSize << " / " << maxVocab << std::endl;
+    std::cerr << "  Tokens spéciaux : 7 (<PAD>, <UNK>, <SEQ>, <MOD>, <MAG>, <BOS>, <EOS>)" << std::endl;
+    std::cerr << "  Tokens utilisateur : " << (vocabSize > 7 ? (vocabSize - 7) : 0) << std::endl;
+    std::cerr << "  Max séquence : " << maxSequenceLength << std::endl;
     
     // Afficher les 10 premiers tokens
-    std::cout << "\n  Premiers tokens :" << std::endl;
+    std::cerr << "\n  Premiers tokens :" << std::endl;
     for (size_t i = 0; i < std::min<size_t>(10, vocab.size()); ++i) {
-        std::cout << "    [" << i << "] " << getTokenById(static_cast<int>(i)) << std::endl;
+        std::cerr << "    [" << i << "] " << getTokenById(static_cast<int>(i)) << std::endl;
     }
 }
 
@@ -557,7 +557,7 @@ void Tokenizer::learnBPEFromCorpus(
     const std::vector<std::string>& corpus, 
     int num_merges
 ) {
-    std::cout << "\n🔤 Apprentissage BPE..." << std::endl;
+    std::cerr << "\n🔤 Apprentissage BPE..." << std::endl;
     
     // 1. Compter les paires de tokens
     std::unordered_map<std::pair<std::string, std::string>, int, PairHash> pair_counts;
@@ -590,7 +590,7 @@ void Tokenizer::learnBPEFromCorpus(
         bpeMerges[max_pair->first] = merge;
         
         if ((merge + 1) % 100 == 0) {
-            std::cout << "  Merge " << (merge + 1) << "/" << num_merges 
+            std::cerr << "  Merge " << (merge + 1) << "/" << num_merges 
                       << " : " << max_pair->first.first << " + " 
                       << max_pair->first.second << " → " << merged 
                       << " (freq: " << max_pair->second << ")" << std::endl;
@@ -599,7 +599,7 @@ void Tokenizer::learnBPEFromCorpus(
         pair_counts.erase(max_pair);
     }
     
-    std::cout << "  ✓ BPE terminé : " << bpeMerges.size() << " merges appris" << std::endl;
+    std::cerr << "  ✓ BPE terminé : " << bpeMerges.size() << " merges appris" << std::endl;
 }
 
 std::vector<int> Tokenizer::tokenizeBPE(const std::string& text) const {

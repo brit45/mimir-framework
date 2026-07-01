@@ -4,7 +4,7 @@
 
 #include <vector>
 
-static void fill_embeddings(Encoder& enc) {
+static void fill_embeddings(ConditioningEncoder& enc) {
     // Fill token embeddings with deterministic values: emb[id][d] = id*10 + d.
     for (int id = 0; id < enc.vocab_size; ++id) {
         for (int d = 0; d < enc.dim; ++d) {
@@ -17,7 +17,7 @@ static void fill_embeddings(Encoder& enc) {
 int main() {
     // 1) ensureDim should resize safely when empty.
     {
-        Encoder enc(4, 16);
+        ConditioningEncoder enc(4, 16);
         enc.ensureDim(6, 123);
         TASSERT_TRUE(enc.dim == 6);
         enc.ensureSpecialEmbeddings(456);
@@ -28,7 +28,7 @@ int main() {
 
     // 2) encode() deterministic averaging with magik prefix weighting.
     {
-        Encoder enc(4, 32);
+        ConditioningEncoder enc(4, 32);
         enc.ensureVocabSize(5, 123);
         enc.ensureSpecialEmbeddings(123);
         enc.setSeqEmbedding({});
@@ -55,7 +55,7 @@ int main() {
 
     // 3) JSON round-trip preserves metadata and special embeddings.
     {
-        Encoder enc(8, 64);
+        ConditioningEncoder enc(8, 64);
         enc.ensureVocabSize(10, 42);
         enc.ensureSpecialEmbeddings(7);
         enc.magik_prefix_count = 3;
@@ -71,7 +71,7 @@ int main() {
 
         json j = enc.to_json();
 
-        Encoder dst(1, 1);
+        ConditioningEncoder dst(1, 1);
         dst.from_json(j);
 
         TASSERT_TRUE(dst.dim == 8);

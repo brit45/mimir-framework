@@ -64,6 +64,7 @@ local function write_ppm_rgb_u8(path, pixels, w, h)
 
   local f, err = io.open(path, "wb")
   if not f then die("open(" .. tostring(path) .. ") a échoué: " .. tostring(err)) end
+  ---@cast f file*
   f:write(string.format("P6\n%d %d\n255\n", w, h))
 
   local chunk = {}

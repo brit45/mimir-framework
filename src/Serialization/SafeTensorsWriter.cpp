@@ -119,6 +119,7 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
         arch["total_params"] = model.totalParamCount();
         arch["num_layers"] = layers.size();
         arch["model_config"] = model.modelConfig;
+        arch["model_config"]["dtype"] = dtype_to_string(float_storage);
 
         json layers_array = json::array();
         for (const auto& layer : layers) {

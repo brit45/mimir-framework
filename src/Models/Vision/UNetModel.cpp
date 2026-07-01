@@ -80,13 +80,19 @@ void UNetModel::buildInto(Model& model, const Config& cfg) {
                             int channels,
                             int in_h,
                             int in_w) {
+        const int out_h = std::max(1, in_h * 2);
+        const int out_w = std::max(1, in_w * 2);
         model.push(name, "UpsampleNearest", 0);
         if (auto* U = model.getLayerByName(name)) {
             U->inputs = {in};
             U->output = out;
             U->in_channels = channels;
-            U->out_h = in_h;
-            U->out_w = in_w;
+            U->input_height = in_h;
+            U->input_width = in_w;
+            U->output_height = out_h;
+            U->output_width = out_w;
+            U->out_h = out_h;
+            U->out_w = out_w;
             U->scale_h = 2.0f;
             U->scale_w = 2.0f;
         }

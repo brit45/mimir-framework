@@ -100,7 +100,7 @@ private:
     std::ostream& out()
     {
         if (out_) return *out_;
-        return std::cout;
+        return std::cerr;
     }
 
     static std::string rtrimNewlines(std::string s)
@@ -186,6 +186,11 @@ private:
         float opt_beta2;
         float opt_eps;
         float opt_weight_decay;
+        // Métriques de validation (renseignées uniquement pour is_val=true)
+        float val_loss = 0.f;
+        float val_mse  = 0.f;
+        int   val_step = -1;
+        bool  is_val   = false;
     };
 
     bool csv_enabled = true;
@@ -210,7 +215,7 @@ private:
             return;
         }
 
-        file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay" << std::endl;
+        file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step" << std::endl;
 
         for (const auto& record : csv_history) {
             file << record.step << ","
@@ -240,7 +245,10 @@ private:
                  << record.opt_beta1 << ","
                  << record.opt_beta2 << ","
                  << std::scientific << std::setprecision(8) << record.opt_eps << ","
-                 << std::fixed << std::setprecision(6) << record.opt_weight_decay << std::endl;
+                 << std::fixed << std::setprecision(6) << record.opt_weight_decay
+                 << "," << (record.is_val ? std::to_string(record.val_loss) : "")
+                 << "," << (record.is_val ? std::to_string(record.val_mse)  : "")
+                 << "," << (record.is_val ? std::to_string(record.val_step)  : "") << std::endl;
         }
     }
 
@@ -569,6 +577,20 @@ public:
     void setCsvEnabled(bool enabled)
     {
         csv_enabled = enabled;
+    }
+
+    // Enregistre une ligne de validation dans le CSV (thread-safe : appelé depuis le thread d'entraînement).
+    void addValidationRecord(float val_loss_v, float val_mse_v, int val_step_v)
+    {
+        if (!csv_enabled) return;
+        CsvRecord r{};
+        r.step     = static_cast<int>(csv_history.size());
+        r.val_loss = val_loss_v;
+        r.val_mse  = val_mse_v;
+        r.val_step = val_step_v;
+        r.is_val   = true;
+        csv_history.push_back(r);
+        saveLossHistoryCsv(csv_log_file);
     }
 
     void setCsvLogFile(const std::string& filepath)

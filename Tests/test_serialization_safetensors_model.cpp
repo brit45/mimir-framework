@@ -102,7 +102,7 @@ int main() {
         tok.setMaxSequenceLength(16);
         tok.tokenizeEnsure("hello world");
 
-        Encoder enc(8, 128);
+        ConditioningEncoder enc(8, 128);
         enc.ensureVocabSize(tok.getVocabSize(), 777u);
         enc.ensureSpecialEmbeddings(42u);
 

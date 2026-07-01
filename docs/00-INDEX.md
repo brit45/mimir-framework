@@ -1,15 +1,31 @@
 # Documentation Mímir (réécrite)
 
-Version framework : **3.0.0**  
-Révision documentation : **2026-05-25**
+Version framework : **3.1.0**  
+Révision documentation : **2026-07-01**
 
 Cette documentation remplace l’ancienne doc (archivée dans [docs_archive/2026-02-14/](../docs_archive/2026-02-14/)).
 
-Si tu as l’impression que “la doc n’explique rien”, commence par les 3 pages ci-dessous :
+---
 
-- [docs/01-Getting-Started/01-Quick-Start.md](01-Getting-Started/01-Quick-Start.md) (faire tourner un script + forward)
-- [docs/02-User-Guide/02-Model-Lifecycle.md](02-User-Guide/02-Model-Lifecycle.md) (ordre des appels et pourquoi)
-- [docs/03-API-Reference/19-Globals.md](03-API-Reference/19-Globals.md) (ce que le runtime injecte, alias, pièges)
+## 🚀 NOUVEAU — Démarrage rapide (5-10 min)
+
+**👉 Si tu débutes, commence ICI :**
+
+→ **[🚀 GET STARTED](01-Getting-Started/00-GET-STARTED.md)** — Démarrage rapide en 5 étapes
+- Vérifier les prérequis
+- Compiler le framework
+- Exécuter un test rapide
+- Créer ton premier modèle
+- Sauvegarder un checkpoint
+
+Puis lis dans cet ordre :
+1. [Compilation & dépendances détaillées](01-Getting-Started/02-Installation.md) (si problèmes de build)
+2. [Cycle de vie d'un modèle](02-User-Guide/02-Model-Lifecycle.md) (comprendre create/allocate/init/forward)
+3. [API Lua de base](03-API-Reference/19-Globals.md) (ce que le runtime injecte)
+
+---
+
+## 📚 Documentation complète par section
 
 ## Index par tâche (guide rapide)
 
@@ -29,7 +45,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 ./bin/mimir --lua scripts/templates/template_new_model.lua
 ```
 
-- Démarrer rapidement avec la Pipeline API (v3.0)
+- Démarrer rapidement avec la Pipeline API (v3.0+)
   - Lis : [docs/02-User-Guide/06-Lua-Scripting.md](02-User-Guide/06-Lua-Scripting.md)
   - Lance :
 
@@ -72,7 +88,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 | `text_ids` | ids int | entrée texte dédiée (NLP) |
 | `x` | float | sortie principale (convention) |
 
-### Champs de config Transformer (v3.0)
+### Champs de config Transformer (v3.0+)
 
 | Champ | Sens |
 | --- | --- |
@@ -99,6 +115,12 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - Organisation du repo : [docs/01-Getting-Started/04-Repo-Layout.md](01-Getting-Started/04-Repo-Layout.md)
 - Smoketest (valider l’environnement rapidement) : [docs/01-Getting-Started/05-Smoketest.md](01-Getting-Started/05-Smoketest.md)
 
+Parcours conseillé si tu reviens sur le projet après plusieurs semaines :
+
+1. valide le binaire avec le smoketest,
+2. relis le lifecycle modèle,
+3. seulement ensuite ouvre la référence API détaillée.
+
 ## 2) Utiliser le framework
 
 - Concepts essentiels : [docs/02-User-Guide/01-Core-Concepts.md](02-User-Guide/01-Core-Concepts.md)
@@ -107,11 +129,13 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - Entraînement : [docs/02-User-Guide/04-Training.md](02-User-Guide/04-Training.md)
 - Inférence : [docs/02-User-Guide/05-Inference.md](02-User-Guide/05-Inference.md)
 - Scripting Lua (args, globals) : [docs/02-User-Guide/06-Lua-Scripting.md](02-User-Guide/06-Lua-Scripting.md)
-- Tokenizer & Encoder : [docs/02-User-Guide/07-Tokenizer-Encoder.md](02-User-Guide/07-Tokenizer-Encoder.md)
+- Tokenizer & ConditioningEncoder : [docs/02-User-Guide/07-Tokenizer-Encoder.md](02-User-Guide/07-Tokenizer-Encoder.md)
 - Checkpoints / reprise : [docs/02-User-Guide/08-Checkpoints.md](02-User-Guide/08-Checkpoints.md)
 - Analyse d’un artefact modèle sur disque (SafeTensors / RawFolder / DebugJson) : [docs/02-User-Guide/08-Checkpoints.md](02-User-Guide/08-Checkpoints.md)
 - Mémoire (Allocator, MemoryGuard) : [docs/02-User-Guide/09-Memory.md](02-User-Guide/09-Memory.md)
 - Scripts d’exemples : [docs/02-User-Guide/10-Examples.md](02-User-Guide/10-Examples.md)
+- **Config-driven scripting** (`--conf` mode, workflows, automation) : [docs/02-User-Guide/08-Config-Driven-Scripting.md](02-User-Guide/08-Config-Driven-Scripting.md)
+- Scripts d'exemples : [docs/02-User-Guide/10-Examples.md](02-User-Guide/10-Examples.md)
 - Tutoriel VAEText : [docs/02-User-Guide/11-VAEText.md](02-User-Guide/11-VAEText.md)
 - Tutoriel Transformer/GPT : [docs/02-User-Guide/12-Transformer-GPT.md](02-User-Guide/12-Transformer-GPT.md)
 - Tutoriel diffusion (PonyXL/SD3.5) : [docs/02-User-Guide/13-Diffusion.md](02-User-Guide/13-Diffusion.md)
@@ -134,7 +158,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - Globals & aliases : [docs/03-API-Reference/19-Globals.md](03-API-Reference/19-Globals.md)
 - Mapping Lua ↔ C++ (sommaire) : [docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md](03-API-Reference/20-Lua-API-Cpp-Mapping.md)
 
-## 🆕 Nouveautés v3.0.0 (résumé)
+## 🆕 Nouveautés de la série 3.0 (résumé)
 
 | Quoi | Où |
 | --- | --- |
@@ -146,6 +170,8 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 | Nouveaux templates : `template_pipeline_only.lua` + `template_pipeline_args.lua` | [scripts/README.md](../scripts/README.md) |
 | pipeline_api.lua : dtype robuste (Mimir.model / Mimir.Model) | [scripts/README.md](../scripts/README.md) |
 | Détection hardware au démarrage (AVX2/FMA/F16C/BMI2 + CUDA/ROCm) | `bin/mimir --help` |
+
+Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent encore de fonctionnalités “nouvelles en v3.0”. Lis cela comme “introduit dans la branche 3.0, toujours valable en 3.0.1”, et non comme une indication que la version courante serait restée sur la première release de cette branche.
 
 ## 4) Internals (comment ça marche)
 
@@ -161,7 +187,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - Autograd / gradients / backward : [docs/04-Architecture-Internals/13-Autograd-Gradients.md](04-Architecture-Internals/13-Autograd-Gradients.md)
 - Layers / `LayerOps` / layouts : [docs/04-Architecture-Internals/14-Layers-And-Ops.md](04-Architecture-Internals/14-Layers-And-Ops.md)
 - Sérialisation (implémentation) : [docs/04-Architecture-Internals/15-Serialization-Internals.md](04-Architecture-Internals/15-Serialization-Internals.md)
-- Tokenizer / Encoder (implémentation) : [docs/04-Architecture-Internals/16-Tokenizer-Encoder-Internals.md](04-Architecture-Internals/16-Tokenizer-Encoder-Internals.md)
+- Tokenizer / ConditioningEncoder (implémentation) : [docs/04-Architecture-Internals/16-Tokenizer-Encoder-Internals.md](04-Architecture-Internals/16-Tokenizer-Encoder-Internals.md)
 - Bindings Lua (implémentation) : [docs/04-Architecture-Internals/17-Lua-Bindings-Internals.md](04-Architecture-Internals/17-Lua-Bindings-Internals.md)
 - RuntimeAllocator / scratchpads : [docs/04-Architecture-Internals/18-RuntimeAllocator-And-Scratchpads.md](04-Architecture-Internals/18-RuntimeAllocator-And-Scratchpads.md)
 - Registre modèles / builders : [docs/04-Architecture-Internals/19-Models-Registry-And-Builders.md](04-Architecture-Internals/19-Models-Registry-And-Builders.md)
@@ -178,6 +204,7 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 ## 6) Contribution
 
 - Contribuer : [docs/06-Contributing/01-Contributing.md](06-Contributing/01-Contributing.md)
+- Ajouter une architecture + registre + script Lua + outils : [docs/06-Contributing/02-New-Architecture-And-Tools.md](06-Contributing/02-New-Architecture-And-Tools.md)
 
 ## Convention de noms
 
@@ -190,4 +217,4 @@ Si tu as l’impression que “la doc n’explique rien”, commence par les 3 p
 - API Lua exportée : [src/LuaScripting.cpp](../src/LuaScripting.cpp)
 - Moteur et exécution des layers : [src/Model.cpp](../src/Model.cpp)
 - Registre des architectures : [src/Models/Registry/ModelArchitectures.cpp](../src/Models/Registry/ModelArchitectures.cpp)
-- Tokenizer/Encoder : [src/Tokenizer.cpp](../src/Tokenizer.cpp), [src/Encoder.cpp](../src/Encoder.cpp)
+- Tokenizer/ConditioningEncoder : [src/Tokenizer.cpp](../src/Tokenizer.cpp), [src/Encoder.cpp](../src/Encoder.cpp)

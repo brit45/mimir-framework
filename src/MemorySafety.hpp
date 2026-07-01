@@ -22,20 +22,20 @@ inline void printMemoryReport() {
     auto& guard = MemoryGuard::instance();
     auto& allocator = DynamicTensorAllocator::instance();
     
-    std::cout << "\n╔══════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║           RAPPORT DE SÉCURITÉ MÉMOIRE                    ║" << std::endl;
-    std::cout << "╠══════════════════════════════════════════════════════════╣" << std::endl;
+    std::cerr << "\n╔══════════════════════════════════════════════════════════╗" << std::endl;
+    std::cerr << "║           RAPPORT DE SÉCURITÉ MÉMOIRE                    ║" << std::endl;
+    std::cerr << "╠══════════════════════════════════════════════════════════╣" << std::endl;
     
     // Stats MemoryGuard
     guard.printStats();
     
     // Stats DynamicTensorAllocator
-    std::cout << "\n╔══════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║           DYNAMIC TENSOR ALLOCATOR                        ║" << std::endl;
-    std::cout << "╠══════════════════════════════════════════════════════════╣" << std::endl;
+    std::cerr << "\n╔══════════════════════════════════════════════════════════╗" << std::endl;
+    std::cerr << "║           DYNAMIC TENSOR ALLOCATOR                        ║" << std::endl;
+    std::cerr << "╠══════════════════════════════════════════════════════════╣" << std::endl;
     allocator.printStats();
     
-    std::cout << "\n" << std::endl;
+    std::cerr << "\n" << std::endl;
 }
 
 /**
@@ -69,13 +69,13 @@ inline void checkMemoryPressure(float warning_threshold = 0.8f) {
     float usage = guard.getUsagePercent() / 100.0f;
     
     if (usage >= warning_threshold) {
-        std::cout << "\n⚠️  ALERTE MÉMOIRE: " << (usage * 100.0f) << "% utilisé!" << std::endl;
-        std::cout << "   Seuil d'alerte: " << (warning_threshold * 100.0f) << "%" << std::endl;
-        std::cout << "   RAM disponible: " 
+        std::cerr << "\n⚠️  ALERTE MÉMOIRE: " << (usage * 100.0f) << "% utilisé!" << std::endl;
+        std::cerr << "   Seuil d'alerte: " << (warning_threshold * 100.0f) << "%" << std::endl;
+        std::cerr << "   RAM disponible: " 
                   << (getAvailableRAM() / 1024 / 1024) << " MB" << std::endl;
         
         if (usage >= 0.95f) {
-            std::cout << "🚨 CRITIQUE: Proche de la limite! Risque de refus d'allocation." << std::endl;
+            std::cerr << "🚨 CRITIQUE: Proche de la limite! Risque de refus d'allocation." << std::endl;
         }
     }
 }
@@ -86,8 +86,8 @@ inline void checkMemoryPressure(float warning_threshold = 0.8f) {
  */
 inline void enableStrictMode(bool enable = true) {
     if (enable) {
-        std::cout << "🔒 MODE STRICT ACTIVÉ" << std::endl;
-        std::cout << "   Toute allocation doit passer par DynamicTensorAllocator" << std::endl;
+        std::cerr << "🔒 MODE STRICT ACTIVÉ" << std::endl;
+        std::cerr << "   Toute allocation doit passer par DynamicTensorAllocator" << std::endl;
         // TODO: Ajouter hook pour détecter malloc/new direct
     }
 }
@@ -103,7 +103,7 @@ inline void validateLegacyDisabled() {
     std::cerr << "   ou ne pas définir cette macro du tout.\n" << std::endl;
     return;
 #else
-    std::cout << "✅ Structure legacy désactivée (configuration optimale)" << std::endl;
+    std::cerr << "✅ Structure legacy désactivée (configuration optimale)" << std::endl;
 #endif
 }
 
@@ -111,34 +111,34 @@ inline void validateLegacyDisabled() {
  * Test d'intégrité du système de mémoire
  */
 inline bool runMemoryIntegrityTest() {
-    std::cout << "\n🧪 TEST D'INTÉGRITÉ MÉMOIRE" << std::endl;
-    std::cout << "═══════════════════════════" << std::endl;
+    std::cerr << "\n🧪 TEST D'INTÉGRITÉ MÉMOIRE" << std::endl;
+    std::cerr << "═══════════════════════════" << std::endl;
     
     bool all_passed = true;
     
     // Test 1: MemoryGuard répond
-    std::cout << "Test 1: MemoryGuard accessible... ";
+    std::cerr << "Test 1: MemoryGuard accessible... ";
     try {
         auto& guard = MemoryGuard::instance();
         size_t limit = guard.getLimit();
-        std::cout << "✓ (Limite: " << (limit / 1024 / 1024 / 1024) << " GB)" << std::endl;
+        std::cerr << "✓ (Limite: " << (limit / 1024 / 1024 / 1024) << " GB)" << std::endl;
     } catch (...) {
-        std::cout << "✗ ÉCHEC" << std::endl;
+        std::cerr << "✗ ÉCHEC" << std::endl;
         all_passed = false;
     }
     
     // Test 2: DynamicTensorAllocator répond
-    std::cout << "Test 2: DynamicTensorAllocator accessible... ";
+    std::cerr << "Test 2: DynamicTensorAllocator accessible... ";
     try {
         auto& allocator = DynamicTensorAllocator::instance();
-        std::cout << "✓" << std::endl;
+        std::cerr << "✓" << std::endl;
     } catch (...) {
-        std::cout << "✗ ÉCHEC" << std::endl;
+        std::cerr << "✗ ÉCHEC" << std::endl;
         all_passed = false;
     }
     
     // Test 3: Allocation/libération basique
-    std::cout << "Test 3: Cycle allocation/libération... ";
+    std::cerr << "Test 3: Cycle allocation/libération... ";
     try {
         auto& guard = MemoryGuard::instance();
         size_t before = guard.getCurrentBytes();
@@ -148,26 +148,26 @@ inline bool runMemoryIntegrityTest() {
             size_t after = guard.getCurrentBytes();
             
             if (after == before) {
-                std::cout << "✓" << std::endl;
+                std::cerr << "✓" << std::endl;
             } else {
-                std::cout << "✗ Fuite mémoire détectée!" << std::endl;
+                std::cerr << "✗ Fuite mémoire détectée!" << std::endl;
                 all_passed = false;
             }
         } else {
-            std::cout << "✗ Allocation refusée (RAM insuffisante?)" << std::endl;
+            std::cerr << "✗ Allocation refusée (RAM insuffisante?)" << std::endl;
             all_passed = false;
         }
     } catch (...) {
-        std::cout << "✗ ÉCHEC" << std::endl;
+        std::cerr << "✗ ÉCHEC" << std::endl;
         all_passed = false;
     }
     
     // Test 4: Vérifier legacy params
-    std::cout << "Test 4: Structure legacy désactivée... ";
+    std::cerr << "Test 4: Structure legacy désactivée... ";
     validateLegacyDisabled();
     
-    std::cout << "\n" << (all_passed ? "✅ TOUS LES TESTS PASSÉS" : "❌ CERTAINS TESTS ONT ÉCHOUÉ") << std::endl;
-    std::cout << "═══════════════════════════\n" << std::endl;
+    std::cerr << "\n" << (all_passed ? "✅ TOUS LES TESTS PASSÉS" : "❌ CERTAINS TESTS ONT ÉCHOUÉ") << std::endl;
+    std::cerr << "═══════════════════════════\n" << std::endl;
     
     return all_passed;
 }
@@ -177,7 +177,7 @@ inline bool runMemoryIntegrityTest() {
  */
 #ifdef DEBUG
     #define TRACE_ALLOC(size, tag) \
-        std::cout << "🔍 [ALLOC] " << __FILE__ << ":" << __LINE__ \
+        std::cerr << "🔍 [ALLOC] " << __FILE__ << ":" << __LINE__ \
                   << " - " << (size / 1024) << " KB (" << tag << ")" << std::endl;
 #else
     #define TRACE_ALLOC(size, tag)

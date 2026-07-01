@@ -215,7 +215,13 @@ bool RawCheckpointReader::load_architecture(
                 // This ensures subsequent saves use the same float storage policy.
                 try {
                     if (model.modelConfig.contains("dtype") && model.modelConfig["dtype"].is_string()) {
-                        model.setDefaultDType(model.modelConfig["dtype"].get<std::string>());
+                        const std::string raw_dtype = model.modelConfig["dtype"].get<std::string>();
+                        const auto dt = ::Mimir::parse_dtype_safetensors(raw_dtype);
+                        if (dt == ::Mimir::DType::UNKNOWN) {
+                            throw std::runtime_error("unknown dtype in model_config: " + raw_dtype);
+                        }
+                        const std::string canonical_dtype = ::Mimir::dtype_to_string(dt);
+                        model.setDefaultDType(canonical_dtype);
                     }
                 } catch (...) {
                     if (options.strict_mode) {
@@ -338,7 +344,7 @@ bool RawCheckpointReader::load_encoder(
         
     } catch (const std::exception& e) {
         if (error) {
-            *error = std::string("Encoder load error: ") + e.what();
+            *error = std::string("ConditioningEncoder load error: ") + e.what();
         }
         return false;
     }

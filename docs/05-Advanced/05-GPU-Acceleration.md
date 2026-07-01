@@ -1,0 +1,256 @@
+# Accélération GPU
+
+Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles — PonyXL, VAEConv 512 px, Transformers profonds — le CPU devient rapidement le goulot d'étranglement.
+
+Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécution spécialisés qui délèguent les opérations lourdes (multiplications matricielles, convolutions, attention) à cuBLAS (NVIDIA) ou rocBLAS (AMD). Le reste des layers continue de s'exécuter sur CPU, sans aucun changement dans vos scripts Lua.
+
+> **Conseil :** si vous voulez juste démarrer rapidement, allez directement à la section [Recettes par modèle](#recettes-par-modèle).
+
+---
+
+## Comment ça marche
+
+Mímir maintient une **pile de runtimes** ordonnée par priorité :
+
+```
+1. CUDA Runtime   (si ENABLE_CUDA compilé et MIMIR_CUDA=1)
+2. ROCm  Runtime  (si ENABLE_ROCM compilé et MIMIR_ROCM=1)
+3. CPU   Runtime  (toujours actif, fallback universel)
+```
+
+Pour chaque layer à exécuter, le runtime le plus prioritaire *tente* de le prendre en charge. Il vérifie deux conditions :
+
+1. **A-t-il un fast-path pour ce type de layer ?** (Linear, Conv2d, etc.)
+2. **La taille du tenseur dépasse-t-elle le seuil minimal ?** (en dessous du seuil, le transfert mémoire host↔device coûterait plus que le calcul lui-même)
+
+Si l'une des deux conditions échoue, le runtime passe la main au suivant. Ce **fallback est silencieux et automatique** — vous n'avez pas à le gérer.
+
+**Exemple :**
+
+```
+[Layer Linear 4096×4096] → CUDA actif ? Seuil atteint ? → oui → cuBLAS SGEMM ✓
+[Layer GroupNorm]         → CUDA actif ? Fast-path dispo ? → non → CPU       ✓
+[Layer Linear 16×16]      → CUDA actif ? Seuil atteint ?  → non → CPU        ✓
+```
+
+> **Note :** les fast-paths GPU ne modifient pas les résultats numériques au-delà de la précision float32 habituelle. Si vous observez des divergences par rapport à une exécution CPU-seul, activez le [mode verbeux](#diagnostic) pour voir exactement quels layers passent par GPU.
+
+---
+
+## Prérequis
+
+### Pour NVIDIA (CUDA / cuBLAS)
+
+Vous avez besoin de :
+
+- Un GPU NVIDIA avec support CUDA (Compute Capability ≥ 5.0 recommandé)
+- CUDA Toolkit installé (`nvcc`, `libcudart`, `libcublas`)
+- Mímir compilé avec `-DENABLE_CUDA=ON`
+
+```bash
+# Dans le dossier build/
+cmake -DENABLE_CUDA=ON ..
+cmake --build . -j$(nproc)
+```
+
+### Pour AMD (ROCm / rocBLAS)
+
+Vous avez besoin de :
+
+- Un GPU AMD compatible ROCm (RX 5000 ou supérieur, gamme Instinct)
+- ROCm 5.x ou supérieur installé (`hipcc`, `libhip`, `librocblas`)
+- Mímir compilé avec `-DENABLE_ROCM=ON`
+
+```bash
+cmake -DENABLE_ROCM=ON ..
+cmake --build . -j$(nproc)
+```
+
+> **Avertissement :** si le build n'inclut pas `ENABLE_CUDA` ou `ENABLE_ROCM`, les variables d'environnement correspondantes seront ignorées sans message d'erreur. Vérifiez la sortie de `cmake` pour confirmer que le backend est activé.
+
+### Pour Vulkan (legacy)
+
+Vulkan est un backend **hérité** qui ne supporte que les layers `Linear` en inférence. À moins d'avoir une raison spécifique, préférez CUDA ou ROCm.
+
+- Vulkan SDK installé, `glslangValidator` disponible
+- Compilé avec `-DENABLE_VULKAN=ON`
+
+---
+
+## Activation pas à pas
+
+Tous les fast-paths sont **désactivés par défaut**, même si le build les inclut. Vous devez les activer explicitement via des variables d'environnement, ce qui vous permet d'ajuster finement ce qui passe par GPU.
+
+### Activer tous les fast-paths sur CUDA
+
+```bash
+export MIMIR_CUDA=1            # Activer le runtime CUDA
+export MIMIR_CUDA_LINEAR=1     # Linear → cuBLAS SGEMM
+export MIMIR_CUDA_CONV=1       # Conv2d → im2col + SGEMM
+export MIMIR_CUDA_NORM=1       # LayerNorm/RMSNorm → hybride GPU
+export MIMIR_CUDA_ATTENTION=1  # Attention → multi-SGEMM
+
+./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua
+```
+
+### Activer tous les fast-paths sur ROCm
+
+```bash
+export MIMIR_ROCM=1
+export MIMIR_ROCM_LINEAR=1
+export MIMIR_ROCM_CONV=1
+export MIMIR_ROCM_NORM=1
+export MIMIR_ROCM_ATTENTION=1
+
+./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua
+```
+
+> **Conseil :** ajoutez ces exports dans votre script de lancement (`.sh`) ou dans votre `.env` pour ne pas les réécrire à chaque fois. Voir `run_mimir.sh` à la racine du projet comme exemple.
+
+---
+
+## Comprendre les seuils d'opérations
+
+Chaque fast-path possède un **seuil minimal de MACs** (Multiply-Accumulate operations). En dessous de ce seuil, Mímir préfère le CPU, car transférer de petits tenseurs entre la RAM et la VRAM prendrait plus de temps que le calcul lui-même.
+
+| Fast-path | Variable de seuil | Valeur par défaut |
+|---|---|---|
+| `Linear` | `MIMIR_CUDA_LINEAR_MIN_OPS` | `1 048 576` (~1 M MACs) |
+| `Conv2d` | `MIMIR_CUDA_CONV_MIN_OPS` | `262 144` (~256 K MACs) |
+| `LayerNorm` / `RMSNorm` | `MIMIR_CUDA_NORM_MIN_ELEMS` | `4 096` (éléments) |
+| `Attention` | `MIMIR_CUDA_ATTENTION_MIN_OPS` | `262 144` (~256 K MACs) |
+
+Pour les variables ROCm, remplacez `CUDA` par `ROCM`.
+
+**Quand réduire les seuils ?** Si le mode verbeux indique qu'un fast-path est systématiquement ignoré parce que les tenseurs sont petits, abaissez le seuil :
+
+```bash
+export MIMIR_CUDA_LINEAR_MIN_OPS=65536   # 64 K au lieu de 1 M
+export MIMIR_CUDA_CONV_MIN_OPS=16384     # 16 K au lieu de 256 K
+```
+
+> **Note :** des seuils trop bas sur des micro-layers peuvent dégrader les performances à cause de l'overhead de synchronisation (`cudaDeviceSynchronize`). En cas de doute, comparez les temps d'exécution avec et sans les réductions de seuil.
+
+---
+
+## Fast-paths disponibles par type de layer
+
+Ce tableau récapitule ce qui est délégué au GPU et ce qui reste toujours sur CPU.
+
+| Type de layer | CUDA / ROCm | Remarques |
+|---|---|---|
+| `Linear` | ✓ SGEMM | Disponible en training et en inférence |
+| `Conv2d` | ✓ im2col + SGEMM | **Inférence uniquement** (`training=false`) |
+| `LayerNorm` | ✓ Hybride | Normalisation sur CPU, affine (gamma/beta) sur GPU |
+| `RMSNorm` | ✓ Hybride | Même stratégie que LayerNorm |
+| `GroupNorm` | ✗ CPU | Layout de mémoire incompatible avec cuBLAS |
+| `BatchNorm2d` | ✗ CPU | Idem GroupNorm |
+| `SelfAttention` | ✓ Multi-SGEMM | Scores + contexte sur GPU, softmax sur CPU |
+| `MultiHeadAttention` | ✓ Multi-SGEMM | Exécuté tête par tête en boucle sur GPU |
+| `CrossAttention` | ✓ Multi-SGEMM | Supporte `qlen ≠ kvlen` |
+| Tous les autres | ✗ CPU | Fallback silencieux automatique |
+
+> **Pourquoi Conv2d est-il désactivé en training ?**
+> Le fast-path Conv2d actuel implémente uniquement le forward pass via im2col+SGEMM. La passe backward (calcul des gradients des filtres et de l'entrée) n'est pas encore implémentée en GPU. En mode training, Mímir retombe donc sur l'implémentation CPU qui, elle, supporte le backward.
+
+---
+
+## Recettes par modèle
+
+### PonyXL / DDPM (recommandé)
+
+PonyXL est le modèle qui bénéficie le plus de l'accélération GPU : il contient de nombreux blocs `SelfAttention`, `CrossAttention` et des couches `Linear` larges dans les blocs UNet.
+
+```bash
+export MIMIR_CUDA=1
+export MIMIR_CUDA_LINEAR=1
+export MIMIR_CUDA_ATTENTION=1
+export MIMIR_CUDA_NORM=1
+# Conv2d non activé car le DDPM entraîne en mode training=true
+```
+
+### VAEConv (encodeur/décodeur convolutionnel)
+
+VAEConv est dominé par des blocs Conv2d. Le fast-path Conv2d est utile **lors de la génération d'images** (`training=false`), pas pendant l'entraînement.
+
+```bash
+export MIMIR_CUDA=1
+export MIMIR_CUDA_CONV=1       # Utile pour la validation/génération
+export MIMIR_CUDA_NORM=1
+export MIMIR_CUDA_LINEAR=1
+```
+
+### VGG16 / Classification par tags
+
+Ce modèle mélange Conv2d (feature extraction) et Linear (classifier). Même restriction sur Conv2d en training.
+
+```bash
+export MIMIR_CUDA=1
+export MIMIR_CUDA_CONV=1
+export MIMIR_CUDA_LINEAR=1
+```
+
+---
+
+## Sélection du device GPU
+
+Par défaut, Mímir utilise le premier GPU (index 0). Pour choisir un autre device (sur une machine multi-GPU) :
+
+```bash
+export MIMIR_CUDA_DEVICE=1   # Utiliser le 2ème GPU NVIDIA
+export MIMIR_ROCM_DEVICE=0   # Utiliser le 1er GPU AMD
+```
+
+---
+
+## Diagnostic
+
+### Mode verbeux
+
+Activez le mode verbeux pour savoir exactement ce qui passe par GPU :
+
+```bash
+export MIMIR_CUDA_VERBOSE=1
+```
+
+Exemple de sortie :
+
+```
+[CUDA] Linear 4096x4096: SGEMM (ops=16777216 >= 1048576) ✓
+[CUDA] Conv2d 64x3x3: training=true → fallback CPU
+[CUDA] LayerNorm 512: hybride (512 >= 4096 ? non) → fallback CPU
+```
+
+Chaque ligne indique le type de layer, sa taille, la décision prise et la raison.
+
+---
+
+## Problèmes courants
+
+**"Mon fast-path Conv2d n'est jamais utilisé pendant l'entraînement"**
+
+C'est normal. Le fast-path Conv2d est uniquement disponible en inférence (`training=false`). Pendant la passe forward en training, Mímir utilise l'implémentation CPU qui supporte le backward. Voir le tableau [ci-dessus](#fast-paths-disponibles-par-type-de-layer).
+
+**"Les performances sont pires qu'en CPU-only"**
+
+Les layers trop petits génèrent de nombreux aller-retours host↔device. Essayez d'augmenter les seuils ou de n'activer que les fast-paths pour les layers vraiment lourds (typiquement `Linear` et `Attention`).
+
+**"J'obtiens des résultats numériquement différents avec GPU"**
+
+Les opérations en virgule flottante ne sont pas strictement associatives — l'ordre des additions change légèrement les résultats. C'est normal et attendu. Si les différences sont supérieures à ~1e-4 en float32, activez le mode verbeux et vérifiez qu'aucun layer ne produit des NaN.
+
+**"Le build ne détecte pas CUDA alors que le Toolkit est installé"**
+
+Vérifiez que `nvcc` est dans votre `PATH` et que `CUDA_TOOLKIT_ROOT_DIR` est défini si CMake ne le trouve pas automatiquement :
+
+```bash
+cmake -DENABLE_CUDA=ON -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda ..
+```
+
+---
+
+## Voir aussi
+
+- [Architecture des backends hardware](../04-Architecture-Internals/03-Hardware-Backends.md) — détails d'implémentation C++
+- [Internals GPU Runtimes](../04-Architecture-Internals/21-GPU-Runtimes.md) — guide pour étendre les runtimes
+- [Entraînement](../02-User-Guide/04-Training.md) — workflow d'entraînement complet

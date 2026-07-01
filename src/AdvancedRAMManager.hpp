@@ -178,9 +178,9 @@ public:
     void blockAllocations(bool block = true) {
         allocations_blocked_ = block;
         if (block) {
-            std::cout << "🔒 AdvancedRAMManager: Allocations BLOQUÉES" << std::endl;
+            std::cerr << "🔒 AdvancedRAMManager: Allocations BLOQUÉES" << std::endl;
         } else {
-            std::cout << "🔓 AdvancedRAMManager: Allocations DÉBLOQUÉES" << std::endl;
+            std::cerr << "🔓 AdvancedRAMManager: Allocations DÉBLOQUÉES" << std::endl;
         }
     }
     
@@ -189,9 +189,9 @@ public:
     void freezeAllocations(bool freeze = true) {
         freeze_mode_ = freeze;
         if (freeze) {
-            std::cout << "❄️  AdvancedRAMManager: Mode FREEZE activé" << std::endl;
+            std::cerr << "❄️  AdvancedRAMManager: Mode FREEZE activé" << std::endl;
         } else {
-            std::cout << "☀️  AdvancedRAMManager: Mode FREEZE désactivé" << std::endl;
+            std::cerr << "☀️  AdvancedRAMManager: Mode FREEZE désactivé" << std::endl;
         }
     }
     
@@ -444,7 +444,7 @@ public:
         }
         
         if (!to_preload.empty()) {
-            std::cout << "🔮 Prédiction: préchargement de " << to_preload.size() 
+            std::cerr << "🔮 Prédiction: préchargement de " << to_preload.size() 
                      << " items" << std::endl;
         }
     }
@@ -489,70 +489,70 @@ public:
     void printDetailedStats() const {
         std::lock_guard<std::mutex> lock(mutex_);
         
-        std::cout << "\n╔═══════════════════════════════════════════════════════╗" << std::endl;
-        std::cout << "║        ADVANCED RAM MANAGER - STATISTIQUES           ║" << std::endl;
-        std::cout << "╠═══════════════════════════════════════════════════════╣" << std::endl;
+        std::cerr << "\n╔═══════════════════════════════════════════════════════╗" << std::endl;
+        std::cerr << "║        ADVANCED RAM MANAGER - STATISTIQUES           ║" << std::endl;
+        std::cerr << "╠═══════════════════════════════════════════════════════╣" << std::endl;
         
         // RAM
-        std::cout << "║ 💾 RAM:                                               ║" << std::endl;
-        std::cout << "║   Current:     " << std::setw(8) << (current_ram_bytes_ / 1024 / 1024) 
+        std::cerr << "║ 💾 RAM:                                               ║" << std::endl;
+        std::cerr << "║   Current:     " << std::setw(8) << (current_ram_bytes_ / 1024 / 1024) 
                   << " MB                         ║" << std::endl;
-        std::cout << "║   Peak:        " << std::setw(8) << (peak_ram_bytes_ / 1024 / 1024) 
+        std::cerr << "║   Peak:        " << std::setw(8) << (peak_ram_bytes_ / 1024 / 1024) 
                   << " MB                         ║" << std::endl;
-        std::cout << "║   Max:         " << std::setw(8) << (max_ram_bytes_ / 1024 / 1024) 
+        std::cerr << "║   Max:         " << std::setw(8) << (max_ram_bytes_ / 1024 / 1024) 
                   << " MB                         ║" << std::endl;
-        std::cout << "║   Usage:       " << std::setw(6) << std::fixed << std::setprecision(1)
+        std::cerr << "║   Usage:       " << std::setw(6) << std::fixed << std::setprecision(1)
                   << getUsagePercent() << " %                           ║" << std::endl;
         
         // Allocations
-        std::cout << "║ 📊 Allocations:                                       ║" << std::endl;
-        std::cout << "║   Active:      " << std::setw(8) << allocations_.size() 
+        std::cerr << "║ 📊 Allocations:                                       ║" << std::endl;
+        std::cerr << "║   Active:      " << std::setw(8) << allocations_.size() 
                   << "                            ║" << std::endl;
-        std::cout << "║   Total:       " << std::setw(8) << total_allocations_ 
+        std::cerr << "║   Total:       " << std::setw(8) << total_allocations_ 
                   << "                            ║" << std::endl;
-        std::cout << "║   Evictions:   " << std::setw(8) << total_evictions_ 
+        std::cerr << "║   Evictions:   " << std::setw(8) << total_evictions_ 
                   << "                            ║" << std::endl;
         
         // Compression
         if (config_.enable_compression) {
-            std::cout << "║ 🗜️  Compression:                                       ║" << std::endl;
-            std::cout << "║   Savings:     " << std::setw(8) << (compression_savings_ / 1024 / 1024) 
+            std::cerr << "║ 🗜️  Compression:                                       ║" << std::endl;
+            std::cerr << "║   Savings:     " << std::setw(8) << (compression_savings_ / 1024 / 1024) 
                       << " MB                         ║" << std::endl;
             
             size_t compressed_count = 0;
             for (const auto& [k, v] : allocations_) {
                 if (v.is_compressed) compressed_count++;
             }
-            std::cout << "║   Compressed:  " << std::setw(8) << compressed_count 
+            std::cerr << "║   Compressed:  " << std::setw(8) << compressed_count 
                       << " / " << allocations_.size() << "                     ║" << std::endl;
         }
         
         // Cache
-        std::cout << "║ 💨 Cache:                                             ║" << std::endl;
+        std::cerr << "║ 💨 Cache:                                             ║" << std::endl;
         size_t total_hits = cache_hits_compressed_ + cache_hits_uncompressed_;
-        std::cout << "║   Hits:        " << std::setw(8) << total_hits 
+        std::cerr << "║   Hits:        " << std::setw(8) << total_hits 
                   << "                            ║" << std::endl;
-        std::cout << "║   Misses:      " << std::setw(8) << cache_misses_ 
+        std::cerr << "║   Misses:      " << std::setw(8) << cache_misses_ 
                   << "                            ║" << std::endl;
         if (total_hits + cache_misses_ > 0) {
             float hit_rate = 100.0f * total_hits / (total_hits + cache_misses_);
-            std::cout << "║   Hit rate:    " << std::setw(6) << std::fixed << std::setprecision(1)
+            std::cerr << "║   Hit rate:    " << std::setw(6) << std::fixed << std::setprecision(1)
                       << hit_rate << " %                           ║" << std::endl;
         }
         
         // Modalités
         auto modal_stats = getModalityStats();
-        std::cout << "║ 🎨 Modalités:                                         ║" << std::endl;
-        std::cout << "║   Text:        " << std::setw(8) << modal_stats.count_text 
+        std::cerr << "║ 🎨 Modalités:                                         ║" << std::endl;
+        std::cerr << "║   Text:        " << std::setw(8) << modal_stats.count_text 
                   << " items (" << (modal_stats.text_bytes / 1024) << " KB)       ║" << std::endl;
-        std::cout << "║   Images:      " << std::setw(8) << modal_stats.count_image 
+        std::cerr << "║   Images:      " << std::setw(8) << modal_stats.count_image 
                   << " items (" << (modal_stats.image_bytes / 1024 / 1024) << " MB)       ║" << std::endl;
-        std::cout << "║   Audio:       " << std::setw(8) << modal_stats.count_audio 
+        std::cerr << "║   Audio:       " << std::setw(8) << modal_stats.count_audio 
                   << " items (" << (modal_stats.audio_bytes / 1024) << " KB)       ║" << std::endl;
-        std::cout << "║   Video:       " << std::setw(8) << modal_stats.count_video 
+        std::cerr << "║   Video:       " << std::setw(8) << modal_stats.count_video 
                   << " items (" << (modal_stats.video_bytes / 1024 / 1024) << " MB)       ║" << std::endl;
         
-        std::cout << "╚═══════════════════════════════════════════════════════╝" << std::endl;
+        std::cerr << "╚═══════════════════════════════════════════════════════╝" << std::endl;
     }
     
     // Getters
@@ -844,7 +844,7 @@ private:
         }
         
         if (count > 0) {
-            std::cout << "⟳ LRU éviction: " << count << " items, libéré " 
+            std::cerr << "⟳ LRU éviction: " << count << " items, libéré " 
                      << (freed / 1024 / 1024) << " MB" << std::endl;
         }
     }

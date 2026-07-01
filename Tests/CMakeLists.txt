@@ -46,3 +46,8 @@ mimir_add_test(ModelTest.TrainStepFreeze             test_model_train_step_freez
 mimir_add_test(FrameworkTest.DType                   test_dtype.cpp)
 mimir_add_test(FrameworkTest.PlannerLifetimes        test_planner_lifetimes.cpp)
 mimir_add_test(FrameworkTest.PlannerFusionAndScratch test_planner_fusion_and_scratch.cpp)
+
+mimir_add_test(RuntimeTest.MathLinear      test_runtime_math_linear.cpp)
+mimir_add_test(RuntimeTest.MathConv2d     test_runtime_math_conv2d.cpp)
+mimir_add_test(RuntimeTest.MathNorms      test_runtime_math_norms.cpp)
+mimir_add_test(RuntimeTest.MathAttention  test_runtime_math_attention.cpp)

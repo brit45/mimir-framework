@@ -9,7 +9,7 @@
 // Forward declarations
 class Model;
 class Tokenizer;
-class Encoder;
+class ConditioningEncoder;
 
 namespace Mimir {
 namespace Serialization {
@@ -63,6 +63,7 @@ struct LoadOptions {
     bool load_encoder = true;
     bool strict_mode = true;        // Fail on missing tensors
     bool validate_checksums = true;
+    std::string mapping_json;       // Optional JSON mapping for external tensor names -> Mimir executable layers
 
     // When checkpoints include architecture/config metadata, callers sometimes
     // want to load ONLY weights into an already-constructed model (e.g. load a

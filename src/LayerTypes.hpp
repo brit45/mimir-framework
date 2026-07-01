@@ -37,6 +37,7 @@ enum class LayerType {
     ReLU,
     LeakyReLU,
     GELU,
+    GEGLU,
     SiLU,           // Swish
     Tanh,
     Sigmoid,
@@ -110,6 +111,7 @@ enum class LayerType {
     
     // === Special ===
     Identity,
+    Constant,
     Lambda,
 
     // === Custom (Mímir) ===
@@ -148,6 +150,7 @@ inline std::string normalize_type(const std::string& type) {
     if (type == "Relu") return "ReLU";
     if (type == "RELU") return "ReLU";
     if (type == "Gelu") return "GELU";
+    if (type == "Geglu") return "GEGLU";
     if (type == "Silu") return "SiLU";
     if (type == "silu") return "SiLU";
     if (type == "swish") return "SiLU";
@@ -196,6 +199,7 @@ inline LayerType string_to_type(const std::string& str) {
         {"ReLU", LayerType::ReLU},
         {"LeakyReLU", LayerType::LeakyReLU},
         {"GELU", LayerType::GELU},
+        {"GEGLU", LayerType::GEGLU},
         {"SiLU", LayerType::SiLU},
         {"Tanh", LayerType::Tanh},
         {"Sigmoid", LayerType::Sigmoid},
@@ -269,6 +273,7 @@ inline LayerType string_to_type(const std::string& str) {
         
         // Special
         {"Identity", LayerType::Identity},
+        {"Constant", LayerType::Constant},
         {"Lambda", LayerType::Lambda},
 
         // Custom
@@ -312,6 +317,7 @@ inline std::string type_to_string(LayerType type) {
         case LayerType::ReLU: return "ReLU";
         case LayerType::LeakyReLU: return "LeakyReLU";
         case LayerType::GELU: return "GELU";
+        case LayerType::GEGLU: return "GEGLU";
         case LayerType::SiLU: return "SiLU";
         case LayerType::Tanh: return "Tanh";
         case LayerType::Sigmoid: return "Sigmoid";
@@ -382,6 +388,7 @@ inline std::string type_to_string(LayerType type) {
         
         // Special
         case LayerType::Identity: return "Identity";
+        case LayerType::Constant: return "Constant";
         case LayerType::Lambda: return "Lambda";
         
         default: return "UNKNOWN";
@@ -404,7 +411,7 @@ inline std::vector<std::string> get_all_supported_types() {
         "Linear", "Bilinear",
         "Embedding", "EmbeddingBag",
         "BatchNorm2d", "BatchNorm1d", "LayerNorm", "GroupNorm", "InstanceNorm2d", "RMSNorm",
-        "ReLU", "LeakyReLU", "GELU", "SiLU", "Tanh", "Sigmoid", "Softmax", "LogSoftmax", 
+        "ReLU", "LeakyReLU", "GELU", "GEGLU", "SiLU", "Tanh", "Sigmoid", "Softmax", "LogSoftmax", 
         "Softplus", "Mish", "HardSigmoid", "HardSwish",
         "MaxPool2d", "AvgPool2d", "AdaptiveAvgPool2d", "GlobalAvgPool2d", "MaxPool1d", "AvgPool1d", "TokenMeanPool",
         "Dropout", "Dropout2d", "AlphaDropout",
@@ -415,7 +422,7 @@ inline std::vector<std::string> get_all_supported_types() {
         "UpsampleNearest", "UpsampleBilinear", "UpsampleBicubic", "PixelShuffle",
         "LSTM", "GRU", "RNN",
         "ZeroPad2d", "ReflectionPad2d", "ReplicationPad2d",
-        "Identity", "Lambda"
+        "Identity", "Constant", "Lambda"
     };
 }
 

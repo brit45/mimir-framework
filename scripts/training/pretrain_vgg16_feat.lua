@@ -102,6 +102,10 @@ local epsilon = opt_num("epsilon", 1e-8)
 local weight_decay = opt_num("weight-decay", 1e-6)
 local decay_strategy = opt_str("decay-strategy", "cosine")
 local warmup_steps = opt_int("warmup-steps", opt_int("lr-warmup-steps", 0))
+-- Gradient clipping (L2 global). 0 = désactivé. Consommé par Model::optimizerStep
+-- (lit modelConfig["grad_clip_norm"]). Indispensable ici: la boucle vgg16_feat
+-- explose sans clipping (gradient explosion -> loss ~1e13).
+local grad_clip_norm = opt_num("grad-clip-norm", opt_num("clip-norm", 1.0))
 
 os.execute("mkdir -p '" .. out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
 
@@ -114,6 +118,7 @@ log(string.format("- epochs=%d lr=%.6g seed=%d", epochs, lr, seed))
 log(string.format("- autosave_every_epochs=%d max_items=%d log_every=%d", autosave_every_epochs, max_items, log_every))
 log(string.format("- pretrain_grid=%d", pretrain_grid))
 log(string.format("- optimizer=%s wd=%.3g decay=%s warmup_steps=%d", optimizer, weight_decay, decay_strategy, warmup_steps))
+log(string.format("- grad_clip_norm=%.3g", grad_clip_norm))
 
 -- Dataset
 local ok_ds, n_or_err = Mimir.Dataset.load(dataset_root, image_w, image_h, 1, true, 'dataset_cache.json', 10240, true)
@@ -148,6 +153,9 @@ cfg.epsilon = epsilon
 cfg.weight_decay = weight_decay
 cfg.decay_strategy = decay_strategy
 cfg.warmup_steps = warmup_steps
+if grad_clip_norm and grad_clip_norm > 0 then
+  cfg.grad_clip_norm = grad_clip_norm
+end
 
 assert_ok(Mimir.Model.create("vgg16_feat", cfg), nil, "Model.create(vgg16_feat) failed")
 apply_dtype(cfg)

@@ -17,6 +17,8 @@ struct ParsedVizLabel {
     std::vector<std::string> parts;
 
     std::string model;
+    std::string layer_path;
+    std::string layer_type;
     std::string tag;        // ex: DS/OUT/VAL/PRE/ACT/?
     std::string headline;   // ex: Dataset / Sortie / Validation / Prétraitement / Activations
     std::string short_text; // ex: unet2d/down_0/conv_in
@@ -94,6 +96,178 @@ static bool contains_part(const std::vector<std::string>& parts, const std::stri
     return std::any_of(parts.begin(), parts.end(), [&](const std::string& p) { return p == needle; });
 }
 
+static std::string join_parts(const std::vector<std::string>& parts, size_t start, size_t end) {
+    if (end <= start || start >= parts.size()) return {};
+    end = std::min(end, parts.size());
+    std::string out;
+    for (size_t i = start; i < end; ++i) {
+        if (parts[i].empty()) continue;
+        if (!out.empty()) out += "/";
+        out += parts[i];
+    }
+    return out;
+}
+
+static bool is_norm_type_name(const std::string& t) {
+    return t == "BatchNorm1d" || t == "BatchNorm2d" || t == "InstanceNorm2d" ||
+           t == "GroupNorm" || t == "LayerNorm" || t == "RMSNorm";
+}
+
+static bool is_attention_type_name(const std::string& t) {
+    return t == "SelfAttention" || t == "CrossAttention" || t == "MultiHeadAttention";
+}
+
+static bool is_upsample_type_name(const std::string& t) {
+    return t == "ConvTranspose2d" || t == "UpsampleNearest" || t == "UpsampleBilinear" ||
+           t == "UpsampleBicubic" || t == "PixelShuffle";
+}
+
+static std::string short_layer_type_name(const std::string& t) {
+    if (t == "Conv2d") return "conv";
+    if (t == "ConvTranspose2d") return "deconv";
+    if (t == "DepthwiseConv2d") return "dwconv";
+    if (t == "GroupNorm") return "gn";
+    if (t == "LayerNorm") return "ln";
+    if (t == "RMSNorm") return "rms";
+    if (t == "BatchNorm1d" || t == "BatchNorm2d") return "bn";
+    if (t == "InstanceNorm2d") return "in";
+    if (t == "SelfAttention") return "attn";
+    if (t == "CrossAttention") return "xattn";
+    if (t == "MultiHeadAttention") return "mha";
+    if (t == "Reparameterize") return "reparam";
+    if (t == "UpsampleNearest") return "up";
+    if (t == "UpsampleBilinear") return "upbil";
+    if (t == "UpsampleBicubic") return "upbic";
+    if (t == "PixelShuffle") return "pix";
+    if (t == "Add") return "add";
+    if (t == "Concat") return "cat";
+    if (t == "Permute") return "perm";
+    if (t == "Reshape" || t == "View") return "shape";
+    if (t == "Identity") return "id";
+    return {};
+}
+
+static std::string strip_known_block_suffixes(const std::string& s) {
+    if (s == "n" || s == "norm") return {};
+    if (s == "bot_n") return "bot";
+    if (s == "out_n") return "out";
+    if (s.size() >= 2 && s[0] == 'n') {
+        bool all_digits = true;
+        for (size_t i = 1; i < s.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(s[i]))) {
+                all_digits = false;
+                break;
+            }
+        }
+        if (all_digits) return {};
+    }
+    const std::array<std::string, 8> suffixes = {
+        std::string("_norm"), std::string("_gn"), std::string("_ln"), std::string("_bn"),
+        std::string("_in"), std::string("_rms"), std::string("/norm"), std::string("/n")
+    };
+    for (const auto& suffix : suffixes) {
+        if (s.size() > suffix.size() && s.rfind(suffix) == s.size() - suffix.size()) {
+            return s.substr(0, s.size() - suffix.size());
+        }
+    }
+    return s;
+}
+
+static std::string canonical_path_role(const std::string& s) {
+    if (s.empty()) return {};
+    if (s == "self_attn" || s == "attn") return "attn";
+    if (s == "cross_attn") return "xattn";
+    if (s == "multi_attn") return "mha";
+    if (s == "lm_head" || s == "classifier") return "head";
+    if (s == "out_proj" || s == "text_proj" || s == "img_proj") return "proj";
+    if (s == "final_ln" || s == "final_norm") return "final";
+    if (s == "recon_to_hwc" || s == "out_to_hwc") return "out";
+    if (s == "recon_chw" || s == "recon" || s == "out_concat" || s == "out_pack") return "out";
+    if (s == "tok_emb") return "tok";
+    if (s == "meanpool") return "pool";
+
+    const std::array<std::pair<const char*, const char*>, 9> suffix_roles = {{
+        {"_attn", "attn"},
+        {"_proj", "proj"},
+        {"_head", "head"},
+        {"_out", "out"},
+        {"_pool", "pool"},
+        {"_norm", "norm"},
+        {"_gn", "gn"},
+        {"_ln", "ln"},
+        {"_fc", "fc"},
+    }};
+    for (const auto& [suffix, role] : suffix_roles) {
+        const std::string suf(suffix);
+        if (s.size() > suf.size() && s.rfind(suf) == s.size() - suf.size()) {
+            return role;
+        }
+    }
+
+    return strip_known_block_suffixes(s);
+}
+
+static std::string find_label_anchor(const std::vector<std::string>& tail_parts,
+                                     const std::string& alias,
+                                     const std::string& role) {
+    for (size_t i = tail_parts.size(); i > 0; --i) {
+        const std::string token = canonical_path_role(tail_parts[i - 1]);
+        if (token.empty()) continue;
+        if (!alias.empty() && token == alias) continue;
+        if (!role.empty() && token == role) continue;
+        if (token == "vec" || token == "act" || token == "id") continue;
+        return token;
+    }
+    return {};
+}
+
+static std::string format_block_short_text(const std::vector<std::string>& tail_parts,
+                                           const std::string& tag,
+                                           const std::string& alias,
+                                           const std::string& layer_type,
+                                           const std::string& fallback) {
+    const std::string role = canonical_path_role(tail_parts.empty() ? std::string() : tail_parts.back());
+    const std::string anchor = find_label_anchor(tail_parts, alias, role);
+
+    if (tag == "N" && !alias.empty()) {
+        return anchor.empty() ? alias : (anchor + "/" + alias);
+    }
+    if (tag == "AT" && !alias.empty()) {
+        return anchor.empty() ? alias : (anchor + "/" + alias);
+    }
+    if (tag == "LAT" && !alias.empty()) {
+        return anchor.empty() ? alias : (anchor + "/" + alias);
+    }
+
+    if (role == "proj" || role == "head" || role == "out" || role == "pool") {
+        return anchor.empty() ? role : (anchor + "/" + role);
+    }
+    if (role == "final") {
+        if (!alias.empty() && (alias == "ln" || alias == "gn" || alias == "bn" || alias == "rms")) {
+            return std::string("final/") + alias;
+        }
+        return "final";
+    }
+    if (role == "fc") {
+        return anchor.empty() ? std::string("fc") : (anchor + "/fc");
+    }
+
+    std::vector<std::string> normalized;
+    normalized.reserve(tail_parts.size());
+    for (const auto& part : tail_parts) {
+        const std::string token = canonical_path_role(part);
+        if (!token.empty()) normalized.push_back(token);
+    }
+    if (!normalized.empty()) {
+        const size_t keep = std::min<size_t>(3, normalized.size());
+        const size_t from = normalized.size() > keep ? (normalized.size() - keep) : 0;
+        return join_parts(normalized, from, normalized.size());
+    }
+
+    (void)layer_type;
+    return fallback;
+}
+
 static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
     ParsedVizLabel out;
     out.raw = label_raw;
@@ -134,19 +308,6 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
                t == "Softplus" || t == "Mish" || t == "HardSigmoid" || t == "HardSwish";
     };
 
-    auto join_tail = [&](size_t start, size_t end) -> std::string {
-        if (end <= start) return {};
-        // Garder jusqu'à 3 segments de fin (meilleur tradeoff lisibilité / place)
-        const size_t keep = std::min<size_t>(3, end - start);
-        const size_t from = end - keep;
-        std::string tail;
-        for (size_t i = from; i < end; ++i) {
-            if (!tail.empty()) tail += "/";
-            tail += out.parts[i];
-        }
-        return tail;
-    };
-
     // Catégorisation heuristique (labels émis par LuaScripting + viz taps Model.cpp)
     // 1) Format viz taps: <model>/blocks/<path>/<LayerType> (ou .../<LayerType>/vec)
     if (idx_blocks >= 0) {
@@ -158,9 +319,26 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
             if (out.parts.size() >= 2) t = out.parts[out.parts.size() - 2];
         }
 
+        out.layer_type = t;
+
         if (is_activation_type(t)) {
             out.tag = "ACT";
             out.headline = "Activations";
+        } else if (is_norm_type_name(t)) {
+            out.tag = "N";
+            out.headline = "Norm";
+        } else if (is_attention_type_name(t)) {
+            out.tag = "AT";
+            out.headline = "Attention";
+        } else if (is_upsample_type_name(t)) {
+            out.tag = "UP";
+            out.headline = "Upsample";
+        } else if (t == "Reparameterize") {
+            out.tag = "LAT";
+            out.headline = "Latent";
+        } else if (t == "Add" || t == "Concat") {
+            out.tag = "RES";
+            out.headline = "Fusion";
         } else {
             out.tag = "L";
             out.headline = "Layer";
@@ -168,8 +346,19 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
 
         const size_t start = static_cast<size_t>(idx_blocks + 1);
         const size_t end = (out.parts.size() > drop) ? (out.parts.size() - drop) : start;
-        const std::string tail = join_tail(start, end);
-        out.short_text = tail.empty() ? std::string("blocks") : tail;
+        out.layer_path = join_parts(out.parts, start, end);
+
+        std::vector<std::string> tail_parts;
+        for (size_t i = start; i < end; ++i) tail_parts.push_back(out.parts[i]);
+
+        const std::string alias = short_layer_type_name(t);
+        out.short_text = format_block_short_text(
+            tail_parts,
+            out.tag,
+            alias,
+            t,
+            out.layer_path.empty() ? std::string("blocks") : out.layer_path);
+        if (out.short_text.empty()) out.short_text = out.layer_path.empty() ? std::string("blocks") : out.layer_path;
     } else if (idx_val >= 0) {
         out.tag = "VAL";
         out.headline = "Validation";
@@ -251,6 +440,11 @@ static sf::Color color_for_tag(const std::string& tag) {
     if (tag == "OUT") return sf::Color(220, 160, 120);
     if (tag == "VAL") return sf::Color(160, 220, 160);
     if (tag == "ACT") return sf::Color(160, 160, 220);
+    if (tag == "N") return sf::Color(120, 205, 175);
+    if (tag == "AT") return sf::Color(185, 145, 230);
+    if (tag == "UP") return sf::Color(235, 170, 105);
+    if (tag == "LAT") return sf::Color(230, 125, 165);
+    if (tag == "RES") return sf::Color(205, 190, 120);
     if (tag == "L") return sf::Color(180, 180, 200);
     if (tag == "T") return sf::Color(180, 170, 140);
     return sf::Color(140, 140, 150);
@@ -266,6 +460,50 @@ static void position_sprite_centered_in_box(sf::Sprite& sprite, float x, float y
     const float oy = (box_size - dh) * 0.5f;
     // Ajuster avec left/top au cas où localBounds n'est pas (0,0).
     sprite.setPosition(x + ox - lb.left * sc.x, y + oy - lb.top * sc.y);
+}
+
+static bool is_layer_block_preview_smoothing_candidate(const ParsedVizLabel& p, int channels) {
+    if (channels != 1 && channels != 3 && channels != 4) return false;
+    if (p.tag == "DS" || p.tag == "PRE" || p.tag == "OUT" || p.tag == "VAL" || p.tag == "ACT") return false;
+
+    const std::string& path = p.layer_path;
+    if (path.find("raw_in") != std::string::npos ||
+        path.find("in_reshape") != std::string::npos ||
+        path.find("recon") != std::string::npos ||
+        path.find("to_hwc") != std::string::npos) {
+        return false;
+    }
+
+    return true;
+}
+
+static std::vector<uint8_t> smooth_preview_pixels(const std::vector<uint8_t>& pixels, int w, int h, int channels) {
+    if (w <= 2 || h <= 2) return pixels;
+    if (channels != 1 && channels != 3 && channels != 4) return pixels;
+
+    std::vector<uint8_t> out = pixels;
+    const int color_channels = (channels == 4) ? 3 : channels;
+
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            const size_t dst = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * static_cast<size_t>(channels);
+            for (int cc = 0; cc < color_channels; ++cc) {
+                int acc = 0;
+                for (int ky = -1; ky <= 1; ++ky) {
+                    for (int kx = -1; kx <= 1; ++kx) {
+                        const size_t src = (static_cast<size_t>(y + ky) * static_cast<size_t>(w) + static_cast<size_t>(x + kx)) * static_cast<size_t>(channels) + static_cast<size_t>(cc);
+                        acc += static_cast<int>(pixels[src]);
+                    }
+                }
+                out[dst + static_cast<size_t>(cc)] = static_cast<uint8_t>(std::clamp(acc / 9, 0, 255));
+            }
+            if (channels == 4) {
+                out[dst + 3] = pixels[dst + 3];
+            }
+        }
+    }
+
+    return out;
 }
 
 // -----------------------------------------------------------------------------
@@ -484,7 +722,7 @@ bool Visualizer::initialize() {
             }
         }
 
-        std::cout << "✓ Fenêtre de visualisation SFML initialisée (" 
+        std::cerr << "✓ Fenêtre de visualisation SFML initialisée (" 
                   << window_width << "x" << window_height << ")" << std::endl;
 
         // Initialiser et tenter de restaurer le dernier layout sauvegardé.
@@ -534,7 +772,7 @@ bool Visualizer::initialize() {
 
                     const bool ok = applyUILayout(*chosen);
                     if (ok && chosen_name) {
-                        std::cout << "✓ Layout appliqué par défaut (" << chosen_name << ")" << std::endl;
+                        std::cerr << "✓ Layout appliqué par défaut (" << chosen_name << ")" << std::endl;
                     }
                 }
             }
@@ -660,7 +898,7 @@ void Visualizer::saveUILayoutToLast() {
     settings["version"] = 1;
     settings["last"] = serializeUILayout();
     saveUISettings(settings);
-    std::cout << "✓ Layout sauvegardé (last) -> " << kVizUISettingsFile << std::endl;
+    std::cerr << "✓ Layout sauvegardé (last) -> " << kVizUISettingsFile << std::endl;
 }
 
 void Visualizer::saveUILayoutToSlot(int slot) {
@@ -674,24 +912,24 @@ void Visualizer::saveUILayoutToSlot(int slot) {
     }
     settings["slots"][std::to_string(slot)] = serializeUILayout();
     saveUISettings(settings);
-    std::cout << "✓ Layout sauvegardé (slot " << slot << ") -> " << kVizUISettingsFile << std::endl;
+    std::cerr << "✓ Layout sauvegardé (slot " << slot << ") -> " << kVizUISettingsFile << std::endl;
 }
 
 void Visualizer::loadUILayoutFromSlot(int slot) {
     slot = std::clamp(slot, 0, 9);
     json settings;
     if (!loadUISettings(settings)) {
-        std::cout << "⚠️  Aucun settings UI trouvé: " << kVizUISettingsFile << std::endl;
+        std::cerr << "⚠️  Aucun settings UI trouvé: " << kVizUISettingsFile << std::endl;
         return;
     }
     try {
         if (!settings.contains("slots") || !settings["slots"].is_object()) {
-            std::cout << "⚠️  Aucun slot dans settings UI" << std::endl;
+            std::cerr << "⚠️  Aucun slot dans settings UI" << std::endl;
             return;
         }
         const std::string key = std::to_string(slot);
         if (!settings["slots"].contains(key)) {
-            std::cout << "⚠️  Slot UI inexistant: " << slot << std::endl;
+            std::cerr << "⚠️  Slot UI inexistant: " << slot << std::endl;
             return;
         }
 
@@ -724,12 +962,12 @@ void Visualizer::loadUILayoutFromSlot(int slot) {
 
         const bool ok = applyUILayout(layout);
         if (ok) {
-            std::cout << "✓ Layout chargé (slot " << slot << ")" << std::endl;
+            std::cerr << "✓ Layout chargé (slot " << slot << ")" << std::endl;
         } else {
-            std::cout << "⚠️  Échec application layout (slot " << slot << ")" << std::endl;
+            std::cerr << "⚠️  Échec application layout (slot " << slot << ")" << std::endl;
         }
     } catch (...) {
-        std::cout << "⚠️  Settings UI invalides" << std::endl;
+        std::cerr << "⚠️  Settings UI invalides" << std::endl;
     }
 }
 
@@ -1375,6 +1613,24 @@ void Visualizer::processEvents() {
                 show_prompt_text_ = !show_prompt_text_;
             }
 
+            if (event.key.code == sf::Keyboard::A) {
+                smooth_layer_block_previews_ = !smooth_layer_block_previews_;
+                rebuildAllTextures();
+            }
+
+            // Toggle heatmap / couleurs naturelles pour Blocks/Layers
+            if (event.key.code == sf::Keyboard::M) {
+                heatmap_mode_ = !heatmap_mode_;
+                // Swap pixels actifs / alternatifs pour chaque block
+                for (auto& img : layer_block_images) {
+                    if (!img.pixels_alt.empty()) {
+                        std::swap(img.pixels, img.pixels_alt);
+                        std::swap(img.channels, img.channels_alt);
+                    }
+                }
+                rebuildLayerBlockTextures();
+            }
+
             // Zoom overlay
             if (event.key.code == sf::Keyboard::Z || event.key.code == sf::Keyboard::Enter) {
                 zoom_active_ = !zoom_active_;
@@ -1681,7 +1937,10 @@ void Visualizer::rebuildAllTextures() {
     if (has_understanding_image) rebuild_one(understanding_image);
     for (auto& img : generated_images) rebuild_one(img);
     if (has_output_thumb_) rebuild_one(output_thumb_);
-    for (auto& img : layer_block_images) rebuild_one(img);
+    for (size_t i = 0; i < layer_block_images.size(); ++i) {
+        const std::string label = (i < layer_block_labels.size()) ? layer_block_labels[i] : std::string();
+        createLayerBlockTexture(layer_block_images[i], label);
+    }
 }
 
 void Visualizer::renderHelpOverlay() {
@@ -1713,6 +1972,8 @@ void Visualizer::renderHelpOverlay() {
     line("Tab / F1-F5 : sélectionner (dataset / projection / understanding / blocks / generated)");
     line("←/→ : naviguer dans les blocks (si focus=blocks)");
     line("G : afficher/masquer le graph");
+    line("A : activer/masquer le lissage des previews de blocks");
+    line("M : basculer heatmap color\u00e9e / niveaux de gris naturels (Blocks/Layers)");
     line("P : afficher/masquer le texte du prompt");
     line("R : actualiser (rebuild textures + reload architecture)");
     line("S : sauvegarder la structure UI (layout last)");
@@ -1853,7 +2114,7 @@ void Visualizer::maybeLoadArchitecture() {
 
         architecture_loaded = !arch_layer_names.empty();
         if (architecture_loaded) {
-            std::cout << "✓ Visualizer: architecture chargée: " << arch_layer_names.size()
+            std::cerr << "✓ Visualizer: architecture chargée: " << arch_layer_names.size()
                       << " layers (" << arch_tensor_sinks.size() << " sinks)" << std::endl;
         }
     } catch (...) {
@@ -2023,19 +2284,69 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
             continue;
         }
 
+        // Le vecteur packé final (ex: recon||mu||logvar) n'est pas un tip image utile.
+        // L'afficher comme pseudo-image carrée produit un bruit trompeur dans Outputs.
+        if (f.label.find("/vec") != std::string::npos &&
+            (p.layer_path.find("out_concat") != std::string::npos ||
+             p.layer_path.find("out_pack") != std::string::npos)) {
+            continue;
+        }
+
         ImageData img;
-        img.pixels = f.pixels;
         img.prompt = f.label;
         img.w = f.w;
         img.h = f.h;
-        img.channels = f.channels;
         img.display_size = 120;
-        createImageTexture(img, f.w, f.h, f.channels, 120);
+
+        if (!heatmap_mode_ && !f.pixels_real.empty()) {
+            // Mode naturel actif : pixels actifs = niveaux de gris, heatmap en alt
+            img.pixels      = f.pixels_real;
+            img.channels    = 1;
+            img.pixels_alt  = f.pixels;
+            img.channels_alt = f.channels;
+        } else {
+            // Mode heatmap (par défaut) ou pas de version naturelle
+            img.pixels      = f.pixels;
+            img.channels    = f.channels;
+            img.pixels_alt  = f.pixels_real;
+            img.channels_alt = 1;
+        }
+
+        createLayerBlockTexture(img, f.label);
         layer_block_images.push_back(std::move(img));
         layer_block_labels.push_back(f.label);
     }
 
     has_layer_blocks = !layer_block_images.empty();
+}
+
+void Visualizer::rebuildLayerBlockTextures() {
+    for (size_t i = 0; i < layer_block_images.size(); ++i) {
+        const std::string label = (i < layer_block_labels.size()) ? layer_block_labels[i] : std::string();
+        createLayerBlockTexture(layer_block_images[i], label);
+    }
+}
+
+void Visualizer::createLayerBlockTexture(ImageData& img, const std::string& label) {
+    if (img.w <= 0 || img.h <= 0 || img.display_size <= 0) return;
+    if (img.channels != 1 && img.channels != 3 && img.channels != 4) return;
+    if (img.pixels.empty()) return;
+
+    const ParsedVizLabel p = parse_viz_label(label);
+    const bool smooth_preview = smooth_layer_block_previews_ &&
+                                is_layer_block_preview_smoothing_candidate(p, img.channels);
+
+    if (!smooth_preview) {
+        createImageTexture(img, img.w, img.h, img.channels, img.display_size);
+        return;
+    }
+
+    ImageData tmp = img;
+    tmp.pixels = smooth_preview_pixels(img.pixels, img.w, img.h, img.channels);
+    createImageTexture(tmp, tmp.w, tmp.h, tmp.channels, tmp.display_size);
+    img.texture = std::move(tmp.texture);
+    img.sprite = tmp.sprite;
+    img.sprite.setTexture(img.texture);
 }
 
 void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float mse,
@@ -2135,6 +2446,13 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     record.opt_beta2 = opt_beta2;
     record.opt_eps = opt_eps;
     record.opt_weight_decay = opt_weight_decay;
+    // Métriques de validation : renseignées uniquement quand val_ok=true.
+    // val_recon = loss primaire (img-space MSE pour DDPM, recon loss pour VAE).
+    // val_kl    = second indicateur (eps-space MSE pour DDPM, KL pour VAE).
+    record.is_val      = val_ok;
+    record.val_loss    = val_ok ? val_recon : 0.f;
+    record.val_mse     = val_ok ? val_kl    : 0.f;
+    record.val_step_id = val_ok ? val_step  : -1;
     full_loss_history.push_back(record);
     
     // Sauvegarder automatiquement l'historique après chaque ajout
@@ -2357,10 +2675,8 @@ void Visualizer::renderLayerBlocks() {
     const bool show_projection = (has_projection_thumb_ && has_projection_image && !projection_thumb_.pixels.empty());
     const bool show_output = (has_output_thumb_ && !output_thumb_.pixels.empty());
 
-    const int extras = (show_projection ? 1 : 0) + (show_output ? 1 : 0);
     const int blocks_count = has_blocks ? static_cast<int>(layer_block_images.size()) : 0;
-    const int total_items = extras + blocks_count;
-    if (total_items <= 0) return;
+    if (!show_projection && !show_output && blocks_count <= 0) return;
 
     last_block_rects_.clear();
 
@@ -2371,22 +2687,10 @@ void Visualizer::renderLayerBlocks() {
     const int start_y = static_cast<int>(area.top);
 
     const int label_h = 18;
+    const int section_h = 22;
+    const int section_gap = 8;
     const int max_cols = std::max(1, static_cast<int>(area.width) / (thumb + margin));
     const int cell_h = thumb + label_h + margin;
-    const int total_rows = (total_items + max_cols - 1) / std::max(1, max_cols);
-    const float content_h = static_cast<float>(std::max(0, total_rows) * std::max(1, cell_h));
-    // PS (user): MAJ en temps réel des scrollers avec les valeurs runtime.
-    // Ici: si le runtime ajoute/retire des items, on conserve la position relative
-    // tant que l'utilisateur n'est pas en train de drag.
-    const float prev_max = blocks_scroll_max_;
-    const float prev_y = blocks_scroll_y_;
-
-    blocks_scroll_max_ = std::max(0.0f, content_h - area.height);
-    if (!dragging_blocks_scrollbar_ && prev_max > 1e-6f) {
-        const float t = std::clamp(prev_y / prev_max, 0.0f, 1.0f);
-        blocks_scroll_y_ = t * blocks_scroll_max_;
-    }
-    blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
 
     // Focus rectangles doivent correspondre aux vrais blocks (index = layer_block_images idx).
     last_block_rects_.reserve(static_cast<size_t>(std::max(0, blocks_count)));
@@ -2412,8 +2716,6 @@ void Visualizer::renderLayerBlocks() {
         }
     }
 
-    int extra_idx = 0;
-
     auto apply_arch_hint = [&](ParsedVizLabel& p) {
         if (!architecture_loaded) return;
         if (!p.path.empty()) {
@@ -2438,49 +2740,263 @@ void Visualizer::renderLayerBlocks() {
         }
     };
 
-    for (int slot = 0; slot < total_items; ++slot) {
-        const int col = slot % max_cols;
-        const int row = slot / max_cols;
-        const int x = start_x + col * (thumb + margin);
-        const int y = start_y + row * (thumb + label_h + margin) - static_cast<int>(std::lround((double)blocks_scroll_y_));
+    struct BlockPanelEntry {
+        bool is_header = false;
+        bool is_extra = false;
+        int block_index = -1;
+        ImageData* img = nullptr;
+        ParsedVizLabel parsed;
+        std::string section;
+        std::string text_override;
+        std::string tag_override;
+    };
+
+    auto starts_with = [](const std::string& s, const std::string& prefix) {
+        return s.rfind(prefix, 0) == 0;
+    };
+
+    auto section_color = [&](const std::string& section) -> sf::Color {
+        if (section == "Inputs") return sf::Color(110, 145, 205, 210);
+        if (section == "Text / Cond") return sf::Color(122, 188, 142, 210);
+        if (section == "ConditioningEncoder") return sf::Color(96, 168, 214, 210);
+        if (section == "Down Blocks") return sf::Color(88, 176, 198, 210);
+        if (section == "Bottleneck") return sf::Color(160, 118, 220, 210);
+        if (section == "Backbone") return sf::Color(132, 132, 218, 210);
+        if (section == "Up Blocks") return sf::Color(232, 170, 102, 210);
+        if (section == "Latent") return sf::Color(214, 106, 172, 210);
+        if (section == "Decoder") return sf::Color(233, 152, 92, 210);
+        if (section == "Heads") return sf::Color(206, 196, 110, 210);
+        if (section == "Outputs") return sf::Color(188, 188, 120, 210);
+        return sf::Color(100, 100, 112, 210);
+    };
+
+    auto section_for = [&](const ParsedVizLabel& p, bool is_extra) -> std::string {
+        if (is_extra) return "Outputs";
+        const std::string lp = !p.layer_path.empty() ? p.layer_path : p.short_text;
+        if (lp.empty()) return "Blocks";
+
+        const auto parts = split(lp, '/');
+        const std::string first = parts.empty() ? std::string() : parts.front();
+        const std::string last = parts.empty() ? std::string() : parts.back();
+
+        auto any_part = [&](const std::function<bool(const std::string&)>& pred) {
+            return std::any_of(parts.begin(), parts.end(), pred);
+        };
+        auto has_exact = [&](std::initializer_list<const char*> names) {
+            for (const char* name : names) {
+                if (any_part([&](const std::string& part) { return part == name; })) return true;
+            }
+            return false;
+        };
+        auto has_prefix = [&](std::initializer_list<const char*> prefixes) {
+            for (const char* prefix : prefixes) {
+                if (any_part([&](const std::string& part) { return starts_with(part, prefix); })) return true;
+            }
+            return false;
+        };
+        auto has_substr = [&](std::initializer_list<const char*> needles) {
+            for (const char* needle : needles) {
+                if (any_part([&](const std::string& part) { return part.find(needle) != std::string::npos; })) return true;
+            }
+            return false;
+        };
+
+        const bool is_latent =
+            p.tag == "LAT" ||
+            has_exact({"mu", "logvar", "latent", "z"}) ||
+            has_prefix({"mu", "logvar", "latent", "reparam"}) ||
+            has_substr({"latent", "logvar", "reparam"});
+        const bool is_text_cond =
+            has_substr({"text", "token", "prompt", "context", "embed", "cond"}) ||
+            has_exact({"tok_emb", "meanpool", "pool", "add_pos", "text_proj"});
+        const bool is_input =
+            has_exact({"input", "in", "raw_in", "raw_z", "in_vec", "in_hwc", "in_chw", "init"}) ||
+            has_prefix({"input", "raw_", "in_"});
+        const bool is_encoder =
+            first == "enc" || has_exact({"encoder"}) || has_prefix({"enc", "encoder"});
+        const bool is_decoder =
+            first == "dec" || has_exact({"decoder"}) || has_prefix({"dec", "decoder"});
+        const bool is_down = has_prefix({"down"});
+        const bool is_up = has_prefix({"up"});
+        const bool is_bottleneck =
+            has_exact({"mid", "bottleneck", "bridge"}) ||
+            has_prefix({"mid", "bot", "bottleneck", "bridge"}) ||
+            has_substr({"bot_", "mid_"});
+        const bool is_backbone =
+            has_exact({"unet", "transformer", "transformer_block", "backbone", "trunk", "layers", "blocks"}) ||
+            has_prefix({"unet", "transformer", "block", "layer"});
+        const bool is_head =
+            has_exact({"head", "lm_head", "classifier", "proj", "out_proj", "text_proj"}) ||
+            has_prefix({"head", "proj", "final_"}) ||
+            has_substr({"_head", "_proj"});
+        const bool is_output =
+            p.tag == "OUT" ||
+            has_exact({"out", "output", "out_pack", "out_concat", "recon", "recon_chw", "recon_to_hwc", "out_to_hwc", "final"}) ||
+            has_prefix({"out", "output", "recon"}) ||
+            has_substr({"recon", "to_hwc", "out_concat", "out_pack"}) ||
+            last == "tanh";
+
+        if (is_latent) {
+            return "Latent";
+        }
+        if (is_text_cond) {
+            return "Text / Cond";
+        }
+        if (is_input && !is_encoder && !is_decoder && !is_backbone) {
+            return "Inputs";
+        }
+        if (is_bottleneck) {
+            return "Bottleneck";
+        }
+        if (is_output) return "Outputs";
+        if (is_encoder) return is_down ? "Down Blocks" : "ConditioningEncoder";
+        if (is_down) return "Down Blocks";
+        if (is_backbone && !is_up) return "Backbone";
+        if (is_up) return "Up Blocks";
+        if (is_decoder) return "Decoder";
+        if (is_head && !is_output) return "Heads";
+        if (is_input) return "Inputs";
+        return "Blocks";
+    };
+
+    std::vector<BlockPanelEntry> entries;
+    entries.reserve(static_cast<size_t>(blocks_count + 8));
+    std::string current_section;
+
+    auto push_header = [&](const std::string& section) {
+        if (section.empty() || section == current_section) return;
+        current_section = section;
+        BlockPanelEntry h;
+        h.is_header = true;
+        h.section = section;
+        entries.push_back(std::move(h));
+    };
+
+    if (show_projection || show_output) {
+        push_header("Outputs");
+        if (show_projection) {
+            BlockPanelEntry e;
+            e.is_extra = true;
+            e.img = &projection_thumb_;
+            e.parsed = parse_viz_label(projection_label.empty() ? std::string("mimir/output/projection") : projection_label);
+            e.section = "Outputs";
+            e.text_override = "Projection";
+            e.tag_override = "OUT";
+            entries.push_back(std::move(e));
+        }
+        if (show_output) {
+            BlockPanelEntry e;
+            e.is_extra = true;
+            e.img = &output_thumb_;
+            e.parsed = parse_viz_label(output_thumb_label_.empty() ? std::string("mimir/output") : output_thumb_label_);
+            e.section = "Outputs";
+            e.text_override = "Sortie";
+            e.tag_override = "OUT";
+            entries.push_back(std::move(e));
+        }
+    }
+
+    for (int bi = 0; bi < blocks_count; ++bi) {
+        const std::string parsed_label = (bi >= 0 && bi < static_cast<int>(layer_block_labels.size()))
+            ? layer_block_labels[static_cast<size_t>(bi)]
+            : std::string();
+        ParsedVizLabel parsed = parse_viz_label(parsed_label);
+        apply_arch_hint(parsed);
+        const std::string section = section_for(parsed, false);
+        push_header(section);
+
+        BlockPanelEntry e;
+        e.block_index = bi;
+        e.img = &layer_block_images[static_cast<size_t>(bi)];
+        e.parsed = std::move(parsed);
+        e.section = section;
+        entries.push_back(std::move(e));
+    }
+
+    if (entries.empty()) return;
+
+    std::vector<sf::Vector2f> entry_positions;
+    entry_positions.reserve(entries.size());
+
+    int layout_col = 0;
+    int layout_y = start_y;
+    for (const auto& entry : entries) {
+        if (entry.is_header) {
+            if (layout_col != 0) {
+                layout_col = 0;
+                layout_y += cell_h;
+            }
+            entry_positions.emplace_back(static_cast<float>(start_x), static_cast<float>(layout_y));
+            layout_y += section_h + section_gap;
+        } else {
+            const int x = start_x + layout_col * (thumb + margin);
+            entry_positions.emplace_back(static_cast<float>(x), static_cast<float>(layout_y));
+            layout_col += 1;
+            if (layout_col >= max_cols) {
+                layout_col = 0;
+                layout_y += cell_h;
+            }
+        }
+    }
+
+    const float content_h = static_cast<float>((layout_y - start_y) + ((layout_col != 0) ? cell_h : 0));
+
+    // PS (user): MAJ en temps réel des scrollers avec les valeurs runtime.
+    // Ici: si le runtime ajoute/retire des items, on conserve la position relative
+    // tant que l'utilisateur n'est pas en train de drag.
+    const float prev_max = blocks_scroll_max_;
+    const float prev_y = blocks_scroll_y_;
+
+    blocks_scroll_max_ = std::max(0.0f, content_h - area.height);
+    if (!dragging_blocks_scrollbar_ && prev_max > 1e-6f) {
+        const float t = std::clamp(prev_y / prev_max, 0.0f, 1.0f);
+        blocks_scroll_y_ = t * blocks_scroll_max_;
+    }
+    blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
+        const int x = static_cast<int>(std::lround(entry_positions[i].x));
+        const int base_y = static_cast<int>(std::lround(entry_positions[i].y));
+        const int y = base_y - static_cast<int>(std::lround((double)blocks_scroll_y_));
+
+        if (entry.is_header) {
+            if ((y - section_h) > static_cast<int>(area.top + area.height)) continue;
+            if ((y + section_h + section_gap) < static_cast<int>(area.top)) continue;
+
+            const float bar_w = std::max(80.0f, area.width - 12.0f);
+            sf::RectangleShape bar(sf::Vector2f(bar_w, static_cast<float>(section_h)));
+            bar.setPosition(static_cast<float>(start_x), static_cast<float>(y));
+            bar.setFillColor(sf::Color(28, 30, 38, 220));
+            bar.setOutlineColor(section_color(entry.section));
+            bar.setOutlineThickness(1.0f);
+            window->draw(bar);
+
+            sf::RectangleShape accent(sf::Vector2f(8.0f, static_cast<float>(section_h)));
+            accent.setPosition(static_cast<float>(start_x), static_cast<float>(y));
+            accent.setFillColor(section_color(entry.section));
+            window->draw(accent);
+
+            if (font_loaded) {
+                sf::Text t;
+                t.setFont(font);
+                t.setCharacterSize(13);
+                t.setStyle(sf::Text::Bold);
+                t.setFillColor(sf::Color(236, 236, 240));
+                t.setPosition(static_cast<float>(start_x + 14), static_cast<float>(y + 2));
+                t.setString(sf::String::fromUtf8(entry.section.begin(), entry.section.end()));
+                window->draw(t);
+            }
+            continue;
+        }
+
+        if (!entry.img) continue;
 
         // Cull (best-effort) pour limiter les draws
         if ((y - cell_h) > static_cast<int>(area.top + area.height)) continue;
         if ((y + 2 * cell_h) < static_cast<int>(area.top)) continue;
 
-        ImageData* img_ptr = nullptr;
-        std::string parsed_label;
-        std::string text_override;
-        std::string tag_override;
-
-        const bool is_extra = (slot < extras);
-        if (is_extra) {
-            // Ordre: Projection puis Sortie
-            if (show_projection && extra_idx == 0) {
-                img_ptr = &projection_thumb_;
-                parsed_label = projection_label.empty() ? std::string("mimir/output/projection") : projection_label;
-                text_override = "Projection";
-                tag_override = "OUT";
-            } else {
-                img_ptr = &output_thumb_;
-                parsed_label = output_thumb_label_.empty() ? std::string("mimir/output") : output_thumb_label_;
-                text_override = "Sortie";
-                tag_override = "OUT";
-            }
-            extra_idx++;
-        } else {
-            const int bi = slot - extras;
-            if (bi < 0 || bi >= blocks_count) break;
-            img_ptr = &layer_block_images[static_cast<size_t>(bi)];
-            parsed_label = (bi >= 0 && bi < static_cast<int>(layer_block_labels.size())) ? layer_block_labels[static_cast<size_t>(bi)] : std::string();
-        }
-
-        if (!img_ptr) continue;
-        auto parsed = parse_viz_label(parsed_label);
-        if (!is_extra) {
-            apply_arch_hint(parsed);
-        }
-        const std::string use_tag = is_extra ? tag_override : parsed.tag;
+        const std::string use_tag = entry.is_extra ? entry.tag_override : entry.parsed.tag;
 
         // Frame
         sf::RectangleShape frame(sf::Vector2f(thumb + 4, thumb + 4));
@@ -2490,12 +3006,9 @@ void Visualizer::renderLayerBlocks() {
         frame.setOutlineThickness(1);
         window->draw(frame);
 
-        // Focus rectangles: uniquement pour les vrais blocks/layers (ne pas casser le focus/zoom existant).
-        if (!is_extra) {
-            // S'assurer que l'index correspond à bi (slot - extras)
-            const int bi = slot - extras;
+        if (!entry.is_extra) {
+            const int bi = entry.block_index;
             if (bi >= 0 && bi < blocks_count) {
-                // Remplir jusqu'à bi si besoin (garde l'alignement index->rect)
                 while ((int)last_block_rects_.size() < bi) {
                     last_block_rects_.push_back(sf::FloatRect(0.f, 0.f, 0.f, 0.f));
                 }
@@ -2507,11 +3020,9 @@ void Visualizer::renderLayerBlocks() {
             }
         }
 
-        // Image
-        position_sprite_centered_in_box(img_ptr->sprite, static_cast<float>(x), static_cast<float>(y), static_cast<float>(thumb));
-        window->draw(img_ptr->sprite);
+        position_sprite_centered_in_box(entry.img->sprite, static_cast<float>(x), static_cast<float>(y), static_cast<float>(thumb));
+        window->draw(entry.img->sprite);
 
-        // Label
         sf::RectangleShape label(sf::Vector2f(static_cast<float>(thumb), static_cast<float>(label_h)));
         label.setPosition(static_cast<float>(x), static_cast<float>(y + thumb + 3));
         label.setFillColor(sf::Color(50, 50, 60, 200));
@@ -2525,14 +3036,12 @@ void Visualizer::renderLayerBlocks() {
             t.setPosition(static_cast<float>(x + 4), static_cast<float>(y + thumb + 1));
 
             std::string text;
-            if (is_extra) {
-                text = text_override;
+            if (entry.is_extra) {
+                text = entry.text_override;
+            } else if (entry.parsed.tag != "ACT") {
+                text = "[" + entry.parsed.tag + "] " + entry.parsed.short_text;
             } else {
-                if (parsed.tag != "ACT") {
-                    text = "[" + parsed.tag + "] " + parsed.short_text;
-                } else {
-                    text = parsed.short_text;
-                }
+                text = entry.parsed.short_text;
             }
             text = clamp_text_end(text, 18);
             t.setString(sf::String::fromUtf8(text.begin(), text.end()));
@@ -3224,6 +3733,18 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
         return (idx < n) ? img_data.pixels[idx] : 0;
     };
 
+    bool force_opaque_alpha = false;
+    if (channels == 4) {
+        bool any_alpha = false;
+        for (size_t i = 3; i < n; i += 4) {
+            if (img_data.pixels[i] != 0) {
+                any_alpha = true;
+                break;
+            }
+        }
+        force_opaque_alpha = !any_alpha;
+    }
+
     for (int yy = 0; yy < h; ++yy) {
         for (int xx = 0; xx < w; ++xx) {
             const size_t base = (static_cast<size_t>(yy) * static_cast<size_t>(w) + static_cast<size_t>(xx)) * stride;
@@ -3234,13 +3755,14 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
             } else if (channels == 3) {
                 c = sf::Color(at(base + 0), at(base + 1), at(base + 2), 255);
             } else {
-                c = sf::Color(at(base + 0), at(base + 1), at(base + 2), at(base + 3));
+                c = sf::Color(at(base + 0), at(base + 1), at(base + 2), force_opaque_alpha ? 255 : at(base + 3));
             }
             sfml_image.setPixel(static_cast<unsigned>(xx), static_cast<unsigned>(yy), c);
         }
     }
 
     img_data.texture.loadFromImage(sfml_image);
+    img_data.texture.setSmooth(true);
     img_data.sprite.setTexture(img_data.texture);
 
     // Mettre à l'échelle pour affichage (fit-to-square)
@@ -3271,7 +3793,7 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
     }
     
     // En-tête CSV (métriques complètes)
-    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay" << std::endl;
+    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step" << std::endl;
     
     // Écrire tout l'historique complet (toutes les epochs et tous les steps)
     for (const auto& record : full_loss_history) {
@@ -3304,8 +3826,17 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
              // opt_eps est souvent ~1e-8 : en fixed(6) ça apparaît comme 0.000000.
              // On l'encode en scientifique pour préserver l'information.
              << std::scientific << std::setprecision(8) << record.opt_eps << ","
-             << std::fixed << std::setprecision(6) << record.opt_weight_decay << std::endl;
+             << std::fixed << std::setprecision(6) << record.opt_weight_decay;
+        // Colonnes de validation : vides si ce step n'est pas un step de validation.
+        if (record.is_val) {
+            file << "," << record.val_loss
+                 << "," << record.val_mse
+                 << "," << record.val_step_id;
+        } else {
+            file << ",,,";
+        }
+        file << std::endl;
     }
-    
+
     file.close();
 }

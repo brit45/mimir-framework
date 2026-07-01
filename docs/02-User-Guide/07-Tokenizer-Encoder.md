@@ -1,15 +1,15 @@
-# Tokenizer & Encoder
+# Tokenizer & ConditioningEncoder
 
 ## Objectif
 
 - `Tokenizer` : texte ↔ ids.
-- `Encoder` : embeddings (vecteurs) associés au tokenizer/vocab.
+- `ConditioningEncoder` : embeddings (vecteurs) associés au tokenizer/vocab.
 
 ## Synchronisation modèle
 
-Le runtime maintient un invariant : **tout modèle doit avoir un encoder**.
+Le runtime maintient un invariant : **tout modèle doit avoir un conditioning encoder**.
 
-Lors de `Mimir.Model.create(...)`, si aucun encoder n’est disponible, un encoder par défaut est créé à partir de la config (`embed_dim` ou `d_model`) et du vocab du tokenizer.
+Lors de `Mimir.Model.create(...)`, si aucun conditioning encoder n’est disponible, un conditioning encoder par défaut est créé à partir de la config (`embed_dim` ou `d_model`) et du vocab du tokenizer.
 
 ## Tokenizer gelé vs composé
 

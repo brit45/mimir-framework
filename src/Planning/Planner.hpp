@@ -71,6 +71,12 @@ analyze_tensor_lifetimes(const std::vector<Layer>& layers) {
 enum class FusionKind : uint8_t {
     NONE = 0,
     CONV2D_RELU = 1,
+    GENERIC_ACTIVATION = 2,
+    GENERIC_SPLIT = 3,
+    GENERIC_CHUNK = 4,
+    GENERIC_ACTIVATION_SPLIT = 5,
+    GENERIC_ACTIVATION_CHUNK = 6,
+    GENERIC_UNARY_SHAPE = 7,
 };
 
 struct PlannedOp {
@@ -82,16 +88,92 @@ struct ExecutionPlan {
     // Static scheduling: fixed op order
     std::vector<PlannedOp> ops;
 
+    // Skip fused consumer layers at runtime.
+    std::vector<uint8_t> skip_layer;
+
     // Per-layer fusion flags for cheap hot-path checks
     std::vector<uint8_t> fuse_relu_for_conv2d;
+
+    // Generic inference-time fusions.
+    std::vector<int> fuse_activation_consumer;
+    std::vector<int> fuse_unary_consumer;
+    std::vector<int> fuse_split_consumer;
+    std::vector<uint8_t> fuse_split_kind; // 0=none, 1=Split, 2=Chunk
 
     bool empty() const { return ops.empty(); }
 };
 
+inline const std::vector<std::string>& planner_inputs_for(const Layer& layer) {
+    static const std::vector<std::string> kDefaultX = {"x"};
+    return (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultX : layer.inputs;
+}
+
+inline std::string planner_output_name_for(const Layer& layer) {
+    return layer.output.empty() ? "x" : layer.output;
+}
+
+inline bool is_fusible_activation_layer(const Layer& layer) {
+    switch (layer.type_enum) {
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::GELU:
+        case LayerType::GEGLU:
+        case LayerType::SiLU:
+        case LayerType::Tanh:
+        case LayerType::Sigmoid:
+        case LayerType::Softmax:
+        case LayerType::LogSoftmax:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool is_fusible_split_layer(const Layer& layer) {
+    return layer.type_enum == LayerType::Split || layer.type_enum == LayerType::Chunk;
+}
+
+inline bool is_fusible_unary_shape_layer(const Layer& layer) {
+    switch (layer.type_enum) {
+        case LayerType::Identity:
+        case LayerType::Flatten:
+        case LayerType::Reshape:
+        case LayerType::View:
+        case LayerType::Transpose:
+        case LayerType::Permute:
+        case LayerType::Squeeze:
+        case LayerType::Unsqueeze:
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layers, bool training) {
     ExecutionPlan plan;
     plan.ops.reserve(layers.size());
+    plan.skip_layer.assign(layers.size(), 0);
     plan.fuse_relu_for_conv2d.assign(layers.size(), 0);
+    plan.fuse_activation_consumer.assign(layers.size(), -1);
+    plan.fuse_unary_consumer.assign(layers.size(), -1);
+    plan.fuse_split_consumer.assign(layers.size(), -1);
+    plan.fuse_split_kind.assign(layers.size(), 0);
+
+    std::unordered_map<std::string, int> tensor_use_count;
+    for (const auto& layer : layers) {
+        for (const auto& in : planner_inputs_for(layer)) {
+            ++tensor_use_count[in];
+        }
+    }
+
+    auto consumes_single_tensor = [](const Layer& consumer, const std::string& expected_input) -> bool {
+        const auto& inputs = planner_inputs_for(consumer);
+        return inputs.size() == 1 && inputs[0] == expected_input;
+    };
 
     for (size_t i = 0; i < layers.size(); ++i) {
         const Layer& layer = layers[i];
@@ -100,10 +182,63 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
         op.layer_index = static_cast<int>(i);
         op.fusion = FusionKind::NONE;
 
+        if (plan.skip_layer[i] != 0) {
+            plan.ops.push_back(op);
+            continue;
+        }
+
         // Conservative: do not fuse in training (backward/masks/precision considerations).
         if (!training && layer.type_enum == LayerType::Conv2d && layer.activation == ActivationType::RELU) {
             op.fusion = FusionKind::CONV2D_RELU;
             plan.fuse_relu_for_conv2d[i] = 1;
+        }
+
+        if (!training) {
+            const std::string producer_out = planner_output_name_for(layer);
+            const bool producer_has_single_consumer = tensor_use_count[producer_out] == 1;
+
+            auto maybe_mark_split = [&](size_t producer_idx, size_t consumer_idx, bool after_activation) {
+                const Layer& split_layer = layers[consumer_idx];
+                plan.fuse_split_consumer[producer_idx] = static_cast<int>(consumer_idx);
+                plan.fuse_split_kind[producer_idx] = (split_layer.type_enum == LayerType::Split) ? 1 : 2;
+                plan.skip_layer[consumer_idx] = 1;
+                if (after_activation) {
+                    op.fusion = (split_layer.type_enum == LayerType::Split)
+                        ? FusionKind::GENERIC_ACTIVATION_SPLIT
+                        : FusionKind::GENERIC_ACTIVATION_CHUNK;
+                } else {
+                    op.fusion = (split_layer.type_enum == LayerType::Split)
+                        ? FusionKind::GENERIC_SPLIT
+                        : FusionKind::GENERIC_CHUNK;
+                }
+            };
+
+            if (producer_has_single_consumer && (i + 1) < layers.size()) {
+                const Layer& next = layers[i + 1];
+                if (is_fusible_activation_layer(next) && consumes_single_tensor(next, producer_out)) {
+                    plan.fuse_activation_consumer[i] = static_cast<int>(i + 1);
+                    plan.skip_layer[i + 1] = 1;
+                    if (op.fusion == FusionKind::NONE) {
+                        op.fusion = FusionKind::GENERIC_ACTIVATION;
+                    }
+
+                    const std::string activation_out = planner_output_name_for(next);
+                    if (tensor_use_count[activation_out] == 1 && (i + 2) < layers.size()) {
+                        const Layer& after_activation = layers[i + 2];
+                        if (is_fusible_split_layer(after_activation) && consumes_single_tensor(after_activation, activation_out)) {
+                            maybe_mark_split(i, i + 2, true);
+                        }
+                    }
+                } else if (is_fusible_unary_shape_layer(next) && consumes_single_tensor(next, producer_out)) {
+                    plan.fuse_unary_consumer[i] = static_cast<int>(i + 1);
+                    plan.skip_layer[i + 1] = 1;
+                    if (op.fusion == FusionKind::NONE) {
+                        op.fusion = FusionKind::GENERIC_UNARY_SHAPE;
+                    }
+                } else if (is_fusible_split_layer(next) && consumes_single_tensor(next, producer_out)) {
+                    maybe_mark_split(i, i + 1, false);
+                }
+            }
         }
 
         plan.ops.push_back(op);

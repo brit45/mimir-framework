@@ -1,11 +1,11 @@
-# Internals : Tokenizer / Encoder (C++)
+# Internals : Tokenizer / ConditioningEncoder (C++)
 
-Cette page documente les composants NLP côté C++ : le `Tokenizer`, l’`Encoder`, et comment ils s’intègrent au `Model` (conventions `mag/mod`, ids int vs floats).
+Cette page documente les composants NLP côté C++ : le `Tokenizer`, le `ConditioningEncoder`, et comment ils s’intègrent au `Model` (conventions `mag/mod`, ids int vs floats).
 
 Source de vérité :
 
 - Tokenizer : `src/Tokenizer.hpp`, `src/Tokenizer.cpp`
-- Encoder : `src/Encoder.hpp`, `src/Encoder.cpp`
+- ConditioningEncoder : `src/Encoder.hpp`, `src/Encoder.cpp`
 - Runtime forward tokens : `src/Model.cpp` (`forwardPassView(const std::vector<int>&)`)
 - Bindings Lua : `src/LuaScripting.cpp/.hpp`
 
@@ -25,7 +25,7 @@ Invariants typiques :
 - le vocab doit contenir les tokens spéciaux (`ensureSpecialTokens`).
 - `maxSequenceLength` borne certaines fonctions de padding/batching.
 
-## 2) Encoder : conventions `mag` / `mod`
+## 2) ConditioningEncoder : conventions `mag` / `mod`
 
 Le runtime mentionne une convention :
 
