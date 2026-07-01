@@ -68,7 +68,6 @@ jobs:
 
       - name: Run unit tests (CTest)
         run: |
-          export DOTNET_ROOT="$HOME/.dotnet"
           export PATH="$HOME/.dotnet/tools:$HOME/.cargo/bin:$PATH"
           ctest --test-dir build --output-on-failure --timeout 120
 
