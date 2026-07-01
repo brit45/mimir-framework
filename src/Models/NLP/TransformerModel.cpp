@@ -45,7 +45,7 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["output_dim"] = out_dim;
     model.modelConfig["causal"] = cfg.causal;
 
-    // Encoder externe: utilisé pour fournir mag/mod (broadcast add).
+    // ConditioningEncoder externe: utilisé pour fournir mag/mod (broadcast add).
     // Il doit avoir exactement d_model dimensions.
     model.getMutableEncoder().ensureDim(d_model);
 
@@ -60,7 +60,7 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
         L->padding_idx = cfg.padding_idx;
     }
 
-    // Injecter mag/mod (embeddings spéciaux Encoder) dans le flux token embeddings.
+    // Injecter mag/mod (embeddings spéciaux ConditioningEncoder) dans le flux token embeddings.
     // Add supporte le broadcast: (seq_len*d_model) + (d_model).
     model.push("transformer/mag_in", "Identity", 0);
     if (auto* L = model.getLayerByName("transformer/mag_in")) {
@@ -88,14 +88,15 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
     for (int i = 0; i < layers; ++i) {
         const std::string p = "transformer/block" + std::to_string(i + 1);
 
-        // Pre-LN
-        model.push(p + "/ln1", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(in_dim));
+        // Pre-LN (par-token: normalise sur d_model, pas sur in_dim)
+        model.push(p + "/ln1", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
         if (auto* L = model.getLayerByName(p + "/ln1")) {
             L->inputs = {x};
             L->output = p + "/ln1_out";
             L->affine = true;
             L->use_bias = true;
             L->eps = 1e-5f;
+            L->in_features = d_model;  // LN par token
         }
 
         // Attention
@@ -117,14 +118,15 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
             L->output = p + "/res1";
         }
 
-        // LN2
-        model.push(p + "/ln2", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(in_dim));
+        // LN2 (par-token)
+        model.push(p + "/ln2", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
         if (auto* L = model.getLayerByName(p + "/ln2")) {
             L->inputs = {p + "/res1"};
             L->output = p + "/ln2_out";
             L->affine = true;
             L->use_bias = true;
             L->eps = 1e-5f;
+            L->in_features = d_model;  // LN par token
         }
 
         // MLP over the flattened sequence (float-only API)

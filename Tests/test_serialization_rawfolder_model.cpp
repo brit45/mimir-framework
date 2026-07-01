@@ -87,7 +87,7 @@ int main() {
         tok.setMaxSequenceLength(8);
         tok.tokenizeEnsure("alpha beta");
 
-        Encoder enc(8, 64);
+        ConditioningEncoder enc(8, 64);
         enc.ensureVocabSize(tok.getVocabSize(), 9u);
         enc.ensureSpecialEmbeddings(10u);
 

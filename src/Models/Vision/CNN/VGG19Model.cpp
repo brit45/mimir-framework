@@ -118,11 +118,11 @@ void VGG19Model::buildInto(Model& model, const Config& cfg) {
     model.push("vgg19/fc1_act", "GELU", 0);
     if (auto* L = model.getLayerByName("vgg19/fc1_act")) {
         L->inputs = {"vgg19/fc1_y"};
-        L->output = "vgg19/fc1_act";
+        L->output = "vgg19/fc1_h";  // tenseur renommé: évite collision layer-name == tensor-name
     }
     model.push("vgg19/head", "Linear", static_cast<size_t>(fc_hidden) * static_cast<size_t>(num_classes) + static_cast<size_t>(num_classes));
     if (auto* L = model.getLayerByName("vgg19/head")) {
-        L->inputs = {"vgg19/fc1_act"};
+        L->inputs = {"vgg19/fc1_h"};
         L->output = "x";
         L->in_features = fc_hidden;
         L->out_features = num_classes;

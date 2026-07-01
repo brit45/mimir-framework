@@ -490,13 +490,13 @@ struct DatasetMemoryManager {
     }
     
     void printStats() const {
-        std::cout << "\n💾 RAM Manager Stats:" << std::endl;
-        std::cout << "   Current: " << (current_ram_bytes / 1024 / 1024) << " MB" << std::endl;
-        std::cout << "   Peak:    " << (peak_ram_bytes / 1024 / 1024) << " MB" << std::endl;
-        std::cout << "   Max:     " << (max_ram_bytes / 1024 / 1024) << " MB" << std::endl;
-        std::cout << "   Usage:   " << std::fixed << std::setprecision(1) 
+        std::cerr << "\n💾 RAM Manager Stats:" << std::endl;
+        std::cerr << "   Current: " << (current_ram_bytes / 1024 / 1024) << " MB" << std::endl;
+        std::cerr << "   Peak:    " << (peak_ram_bytes / 1024 / 1024) << " MB" << std::endl;
+        std::cerr << "   Max:     " << (max_ram_bytes / 1024 / 1024) << " MB" << std::endl;
+        std::cerr << "   Usage:   " << std::fixed << std::setprecision(1) 
                   << getUsagePercent() << "%" << std::endl;
-        std::cout << "   Active allocations: " << allocations.size() << std::endl;
+        std::cerr << "   Active allocations: " << allocations.size() << std::endl;
     }
     
 private:
@@ -927,7 +927,7 @@ public:
         }
         
         if (freed > 0) {
-            std::cout << "  ⟳ LRU éviction: libéré " << (freed / 1024 / 1024) << " MB" << std::endl;
+            std::cerr << "  ⟳ LRU éviction: libéré " << (freed / 1024 / 1024) << " MB" << std::endl;
         }
     }
     
@@ -959,7 +959,7 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     std::vector<DatasetItem> items;
     if (root_dir.empty()) return items;
 
-    std::cout << "\n📂 Indexation du dataset (lazy loading activé)..." << std::endl;
+    std::cerr << "\n📂 Indexation du dataset (lazy loading activé)..." << std::endl;
 
     // Phase 1: Indexer tous les fichiers par clé "linkable".
     // IMPORTANT: on utilise le chemin *relatif* sans extension (et pas seulement le basename)
@@ -1078,9 +1078,9 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     }
     
     // Rapport de validation (sans chargement de données)
-    std::cout << "\n📊 Dataset Indexing Report:" << std::endl;
-    std::cout << "   Items indexés:      " << valid_items << std::endl;
-    std::cout << "   Linkables détectés: " << total_linkables << std::endl;
+    std::cerr << "\n📊 Dataset Indexing Report:" << std::endl;
+    std::cerr << "   Items indexés:      " << valid_items << std::endl;
+    std::cerr << "   Linkables détectés: " << total_linkables << std::endl;
     
     if (total_linkables > 0) {
         size_t valid_linkables = 0;
@@ -1089,13 +1089,13 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
                 valid_linkables++;
             }
         }
-        std::cout << "   Linkables validés:  " << valid_linkables << " ✓" << std::endl;
-        std::cout << "   Ratio:              " 
+        std::cerr << "   Linkables validés:  " << valid_linkables << " ✓" << std::endl;
+        std::cerr << "   Ratio:              " 
                   << std::fixed << std::setprecision(1) 
                   << (100.0 * valid_linkables / total_linkables) << "%" << std::endl;
     }
     
-    std::cout << "   Seuil modalités:    " << min_modalities << std::endl;
+    std::cerr << "   Seuil modalités:    " << min_modalities << std::endl;
     
     // Statistiques de complétude
     if (!items.empty()) {
@@ -1104,13 +1104,13 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
             avg_completeness += item.completeness();
         }
         avg_completeness /= items.size();
-        std::cout << "   Complétude moy.:    " 
+        std::cerr << "   Complétude moy.:    " 
                   << std::fixed << std::setprecision(1) 
                   << avg_completeness << "%" << std::endl;
     }
     
-    std::cout << "\n   ⚡ Mode: Lazy loading (données chargées à la demande)" << std::endl;
-    std::cout << "   💾 RAM utilisée:    0 MB (métadonnées uniquement)" << std::endl;
+    std::cerr << "\n   ⚡ Mode: Lazy loading (données chargées à la demande)" << std::endl;
+    std::cerr << "   💾 RAM utilisée:    0 MB (métadonnées uniquement)" << std::endl;
 
     return items;
 }
@@ -1166,9 +1166,9 @@ struct DatasetCache {
             
             // Vérifier le hash
             if (cache.dataset_hash != expected_hash) {
-                std::cout << "⚠️  Cache invalide (hash mismatch), rechargement..." << std::endl;
-                std::cout << "   Attendu: " << expected_hash.substr(0, 16) << "..." << std::endl;
-                std::cout << "   Trouvé:  " << cache.dataset_hash.substr(0, 16) << "..." << std::endl;
+                std::cerr << "⚠️  Cache invalide (hash mismatch), rechargement..." << std::endl;
+                std::cerr << "   Attendu: " << expected_hash.substr(0, 16) << "..." << std::endl;
+                std::cerr << "   Trouvé:  " << cache.dataset_hash.substr(0, 16) << "..." << std::endl;
                 return std::nullopt;
             }
             
@@ -1210,26 +1210,26 @@ static inline std::vector<DatasetItem> loadDatasetCached(
     auto& mgr = DatasetMemoryManager::instance();
     mgr.setMaxRAM(max_ram_mb * 1024ULL * 1024ULL);
     
-    std::cout << "\n💾 RAM Manager initialisé:" << std::endl;
-    std::cout << "   Limite:      " << max_ram_mb << " MB" << std::endl;
-    std::cout << "   Lazy loading: " << (lazy_loading ? "✓" : "✗") << std::endl;
+    std::cerr << "\n💾 RAM Manager initialisé:" << std::endl;
+    std::cerr << "   Limite:      " << max_ram_mb << " MB" << std::endl;
+    std::cerr << "   Lazy loading: " << (lazy_loading ? "✓" : "✗") << std::endl;
     
-    std::cout << "\n🔐 Calcul SHA256 du dataset..." << std::endl;
+    std::cerr << "\n🔐 Calcul SHA256 du dataset..." << std::endl;
     std::string dataset_hash = datasetSHA256Hash(root_dir);
-    std::cout << "   Hash: " << dataset_hash.substr(0, 16) << "..." << std::endl;
+    std::cerr << "   Hash: " << dataset_hash.substr(0, 16) << "..." << std::endl;
     
     // Essayer de charger depuis le cache
     auto cached = DatasetCache::load(cache_path, dataset_hash);
     if (cached.has_value()) {
-        std::cout << "✓ Cache valide trouvé, chargement rapide..." << std::endl;
+        std::cerr << "✓ Cache valide trouvé, chargement rapide..." << std::endl;
         
         if (lazy_loading) {
             // Mode lazy: ne rien charger maintenant
-            std::cout << "  ⚡ Mode lazy: données seront chargées à la demande" << std::endl;
-            std::cout << "  💾 RAM utilisée: 0 MB (métadonnées uniquement)" << std::endl;
+            std::cerr << "  ⚡ Mode lazy: données seront chargées à la demande" << std::endl;
+            std::cerr << "  💾 RAM utilisée: 0 MB (métadonnées uniquement)" << std::endl;
         } else {
             // Mode eager: charger les images immédiatement
-            std::cout << "  ⏳ Chargement des images..." << std::endl;
+            std::cerr << "  ⏳ Chargement des images..." << std::endl;
             size_t loaded_images = 0;
             size_t failed = 0;
             
@@ -1237,7 +1237,7 @@ static inline std::vector<DatasetItem> loadDatasetCached(
                 if (!item.image_file.empty()) {
                     // Vérifier si on a assez de RAM
                     if (!mgr.canAllocate(target_w * target_h)) {
-                        std::cout << "  ⚠️  Limite RAM atteinte, arrêt du chargement" << std::endl;
+                        std::cerr << "  ⚠️  Limite RAM atteinte, arrêt du chargement" << std::endl;
                         break;
                     }
                     
@@ -1250,15 +1250,15 @@ static inline std::vector<DatasetItem> loadDatasetCached(
                 
                 // Progress tous les 100 items
                 if ((loaded_images + failed) % 100 == 0) {
-                    std::cout << "  Progression: " << loaded_images << " chargées, " 
+                    std::cerr << "  Progression: " << loaded_images << " chargées, " 
                              << failed << " échecs, RAM: " 
                              << (mgr.getCurrentRAM() / 1024 / 1024) << " MB" << std::endl;
                 }
             }
             
-            std::cout << "  ✓ Images chargées: " << loaded_images << std::endl;
+            std::cerr << "  ✓ Images chargées: " << loaded_images << std::endl;
             if (failed > 0) {
-                std::cout << "  ⚠️  Échecs: " << failed << std::endl;
+                std::cerr << "  ⚠️  Échecs: " << failed << std::endl;
             }
             mgr.printStats();
         }
@@ -1267,7 +1267,7 @@ static inline std::vector<DatasetItem> loadDatasetCached(
     }
     
     // Pas de cache ou invalide, chargement normal
-    std::cout << "⟳ Indexation du dataset..." << std::endl;
+    std::cerr << "⟳ Indexation du dataset..." << std::endl;
     auto items = loadDataset(root_dir, target_w, target_h, min_modalities);
     
     // Sauvegarder le cache
@@ -1276,9 +1276,9 @@ static inline std::vector<DatasetItem> loadDatasetCached(
     cache.items = items;
     
     if (cache.save(cache_path)) {
-        std::cout << "✓ Cache sauvegardé: " << cache_path << std::endl;
+        std::cerr << "✓ Cache sauvegardé: " << cache_path << std::endl;
     } else {
-        std::cout << "⚠️  Échec sauvegarde du cache" << std::endl;
+        std::cerr << "⚠️  Échec sauvegarde du cache" << std::endl;
     }
     
     return items;

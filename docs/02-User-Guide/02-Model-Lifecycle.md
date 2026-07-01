@@ -4,17 +4,19 @@ Cette page explique **l’ordre des appels** et surtout **pourquoi** cet ordre e
 
 Si tu suis ce lifecycle, tu évites 90% des “ça crash / ça renvoie vide / ça explose en mémoire”.
 
-## Vue d’ensemble (ordre recommandé)
+## Vue d'ensemble (ordre recommandé - Moderne)
+
+**Workflow simplifié (v3.0+):** depuis la v3.0, `Model.create()` construit automatiquement le réseau — pas besoin d'appeler `build()` séparément.
 
 | Étape | Appel | Ce que ça fait | Quand |
 | ---: | --- | --- | --- |
-| 1 | `Architectures.default_config` | récupère une config canonique | toujours |
-| 2 | `Model.create` | fixe type+cfg dans le contexte runtime | toujours |
-| 3 | `Model.build` | construit la structure/layers | toujours |
-| 4 | `Model.allocate_params` | alloue les poids | avant init/load |
-| 5a | `Model.init_weights` | init aléatoire | entraînement from scratch |
-| 5b | `Serialization.load` | charge un checkpoint | reprise/inférence |
-| 6 | `Model.forward` | exécute | entraînement/inférence |
+| 1 | `Model.create(name, cfg)` | récupère config, construit le réseau via registry | toujours |
+| 2 | `Model.allocate_params()` | alloue les poids en mémoire | avant init/load |
+| 3a | `Model.init_weights(method, seed)` | init aléatoire | entraînement from scratch |
+| 3b | `Serialization.load(path)` | charge les poids depuis checkpoint | reprise/inférence |
+| 4 | `Model.forward(input, training)` | exécute le forward pass | entraînement/inférence |
+
+> **Note :** `Model.build()` existe toujours pour compatibilité avec les scripts legacy, mais c'est maintenant un **no-op** — le réseau est déjà construit à l'étape 1 par `create()`.
 
 ## 1) Récupérer une config (et la surcharger)
 
@@ -29,16 +31,16 @@ cfg.dtype = "float16" -- optionnel: contrôle le dtype de stockage au save (runt
 
 Conseil : évite de fabriquer une config “from scratch” : tu risques d’oublier des champs attendus.
 
-## 2) Create + build (structure)
+## 2) Create (structure + construction automatique)
 
 ```lua
-assert(Mimir.Model.create("transformer", cfg))
-assert(Mimir.Model.build())
+local ok, err = Mimir.Model.create("transformer", cfg)
+assert(ok, err)
+
+-- Le réseau est maintenant construit et prêt pour allocation/init
 ```
 
-Important : `build()` reconstruit la structure à partir de `ctx.modelType` + `ctx.modelConfig`.
-
-Règle simple : décide de ta config, puis appelle `create()` et seulement ensuite `build()`.
+Important : `create()` lance automatiquement la construction du réseau **via le registre C++**. Vous n'avez PAS besoin d'appeler `build()` séparément (il y a seulement un no-op pour rétrocompatibilité).
 
 ## Types de layers gérés (table rapide)
 
@@ -179,6 +181,25 @@ local ok, err = Mimir.Serialization.load("checkpoint/my_model.safetensors")
 assert(ok ~= false, err)
 
 Note dtype : si le checkpoint embarque `model_config.dtype`, il est réappliqué automatiquement au modèle au load (utile pour garder des saves cohérents en reprise).
+```
+
+Note dtype : si le checkpoint embarque `model_config.dtype`, il est réappliqué automatiquement au modèle au load. C’est utile si tu veux reprendre un run puis réécrire un checkpoint sans changer la politique de stockage des tenseurs float.
+
+Exemple de reprise minimal :
+
+```lua
+local cfg, err = Mimir.Architectures.default_config("transformer")
+assert(cfg, err)
+
+assert(Mimir.Model.create("transformer", cfg))
+-- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
+assert(Mimir.Model.allocate_params())
+
+local ok, load_err = Mimir.Serialization.load("checkpoint/my_model.safetensors")
+assert(ok ~= false, load_err)
+
+local out = Mimir.Model.forward({ __input__ = {1, 1, 1, 1} }, false)
+assert(out)
 ```
 
 Conseil : la config doit matcher (ex: `seq_len`, `vocab_size`, dims). Sinon tu auras un mismatch de shapes.

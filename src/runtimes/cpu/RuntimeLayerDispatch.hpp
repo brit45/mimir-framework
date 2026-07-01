@@ -230,36 +230,8 @@ inline bool cpu_forward_layer(
             // ====================================================================
             case LayerType::BatchNorm2d:
             case LayerType::BatchNorm1d: {
-                if (x.empty()) {
-                    outputs.resize(1);
-                    outputs[0].clear();
-                    return true;
-                }
-
                 outputs.resize(1);
-                outputs[0] = x;
-
-                float mean = 0.0f;
-                for (float v : x) mean += v;
-                mean /= static_cast<float>(x.size());
-
-                float var = 0.0f;
-                for (float v : x) {
-                    const float d = v - mean;
-                    var += d * d;
-                }
-                var /= static_cast<float>(x.size());
-
-                const float stdv = std::sqrt(var + layer.eps);
-                const float* w = layer.getWeights();
-                const size_t w_sz = layer.getWeightsSize();
-
-                for (size_t i = 0; i < outputs[0].size(); ++i) {
-                    outputs[0][i] = (outputs[0][i] - mean) / stdv;
-                    if (layer.affine && w && i < w_sz) {
-                        outputs[0][i] *= w[i];
-                    }
-                }
+                outputs[0] = LayerOps::batchnorm_forward(x, layer, training);
                 return true;
             }
 
@@ -304,6 +276,12 @@ inline bool cpu_forward_layer(
             case LayerType::GELU: {
                 outputs.resize(1);
                 outputs[0] = LayerOps::gelu_forward(x);
+                return true;
+            }
+            case LayerType::GEGLU: {
+                if (layer.seq_len <= 0 || layer.out_features <= 0) return false;
+                outputs.resize(1);
+                outputs[0] = LayerOps::geglu_forward(x, layer.seq_len, layer.out_features);
                 return true;
             }
             case LayerType::SiLU: {
@@ -722,6 +700,15 @@ inline bool cpu_forward_layer(
             // ====================================================================
             // ATTENTION
             // ====================================================================
+            case LayerType::Constant: {
+                const float* weights = layer.getWeights();
+                if (!weights) return false;
+                const size_t n = layer.getWeightsSize();
+                outputs.resize(1);
+                outputs[0].assign(weights, weights + n);
+                return true;
+            }
+
             case LayerType::SelfAttention:
             case LayerType::MultiHeadAttention: {
                 const float* weights = layer.getWeights();
@@ -734,15 +721,33 @@ inline bool cpu_forward_layer(
 
                 const int qkv_size = embed_dim * embed_dim * 3;
                 const int out_size = embed_dim * embed_dim;
+                const int qkv_bias_size = embed_dim * 3;
+                const int out_bias_size = embed_dim;
+                const size_t expected_no_bias = static_cast<size_t>(qkv_size + out_size);
+                const size_t expected_out_bias_only = expected_no_bias + static_cast<size_t>(out_bias_size);
+                const size_t expected_with_bias = expected_no_bias + static_cast<size_t>(qkv_bias_size + out_bias_size);
+                const size_t actual_size = layer.getWeightsSize();
+                const bool has_full_bias = (actual_size >= expected_with_bias);
+                const bool has_out_bias_only = (!has_full_bias && actual_size >= expected_out_bias_only);
 
                 std::vector<float> qkv_weight(weights, weights + qkv_size);
                 std::vector<float> out_weight(weights + qkv_size, weights + qkv_size + out_size);
+                std::vector<float> qkv_bias;
+                std::vector<float> out_bias;
+                if (has_full_bias) {
+                    const float* bias_ptr = weights + qkv_size + out_size;
+                    qkv_bias.assign(bias_ptr, bias_ptr + qkv_bias_size);
+                    out_bias.assign(bias_ptr + qkv_bias_size, bias_ptr + qkv_bias_size + out_bias_size);
+                } else if (has_out_bias_only) {
+                    const float* bias_ptr = weights + qkv_size + out_size;
+                    out_bias.assign(bias_ptr, bias_ptr + out_bias_size);
+                }
 
                 outputs.resize(1);
                 if (layer.type_enum == LayerType::SelfAttention) {
-                    outputs[0] = LayerOps::self_attention_forward(x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal);
+                    outputs[0] = LayerOps::self_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
                 } else {
-                    outputs[0] = LayerOps::multihead_attention_forward(x, qkv_weight, out_weight, seq_len, embed_dim, num_heads, causal);
+                    outputs[0] = LayerOps::multihead_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
                 }
                 return true;
             }
@@ -761,26 +766,34 @@ inline bool cpu_forward_layer(
                 if (embed_dim <= 0 && layer.head_dim > 0 && num_heads > 0) {
                     embed_dim = layer.head_dim * num_heads;
                 }
+                const int kv_embed_dim = layer.in_features > 0 ? layer.in_features : embed_dim;
                 if (embed_dim <= 0) return false;
                 if ((q_in.size() % static_cast<size_t>(embed_dim)) != 0) return false;
-                if ((kv_in.size() % static_cast<size_t>(embed_dim)) != 0) return false;
+                if ((kv_in.size() % static_cast<size_t>(kv_embed_dim)) != 0) return false;
 
                 const int query_len = static_cast<int>(q_in.size() / static_cast<size_t>(embed_dim));
-                const int kv_len = static_cast<int>(kv_in.size() / static_cast<size_t>(embed_dim));
+                const int kv_len = static_cast<int>(kv_in.size() / static_cast<size_t>(kv_embed_dim));
                 if (query_len <= 0 || kv_len <= 0) return false;
 
                 const int q_size = embed_dim * embed_dim;
-                const int kv_size = embed_dim * (2 * embed_dim);
+                const int kv_size = kv_embed_dim * (2 * embed_dim);
                 const int out_size = embed_dim * embed_dim;
+                const int out_bias_size = embed_dim;
 
                 std::vector<float> q_weight(weights, weights + q_size);
                 std::vector<float> kv_weight(weights + q_size, weights + q_size + kv_size);
                 std::vector<float> out_weight(weights + q_size + kv_size, weights + q_size + kv_size + out_size);
+                std::vector<float> out_bias;
+                const size_t expected_with_bias = static_cast<size_t>(q_size + kv_size + out_size + out_bias_size);
+                if (layer.getWeightsSize() >= expected_with_bias) {
+                    const float* bias_ptr = weights + q_size + kv_size + out_size;
+                    out_bias.assign(bias_ptr, bias_ptr + out_bias_size);
+                }
 
                 outputs.resize(1);
                 outputs[0] = LayerOps::cross_attention_forward(
-                    q_in, kv_in, q_weight, kv_weight, out_weight,
-                    query_len, kv_len, embed_dim, num_heads, causal
+                    q_in, kv_in, q_weight, kv_weight, out_weight, out_bias,
+                    query_len, kv_len, embed_dim, kv_embed_dim, num_heads, causal
                 );
                 return true;
             }
@@ -789,36 +802,42 @@ inline bool cpu_forward_layer(
             // UPSAMPLING
             // ====================================================================
             case LayerType::UpsampleNearest: {
-                if (layer.out_h <= 0 || layer.out_w <= 0 || layer.in_channels <= 0) return false;
-                const int in_h = layer.out_h;
-                const int in_w = layer.out_w;
+                if (layer.in_channels <= 0) return false;
+                const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+                const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+                if (in_h <= 0 || in_w <= 0) return false;
                 const int c = layer.in_channels;
-                const int sh = layer.scale_h > 0 ? layer.scale_h : 2;
-                const int sw = layer.scale_w > 0 ? layer.scale_w : 2;
+                const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : 0);
+                const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : 0);
+                const int sh = layer.scale_h > 0 ? static_cast<int>(std::lround(layer.scale_h))
+                                                 : ((out_h > 0) ? std::max(1, out_h / in_h) : 2);
+                const int sw = layer.scale_w > 0 ? static_cast<int>(std::lround(layer.scale_w))
+                                                 : ((out_w > 0) ? std::max(1, out_w / in_w) : 2);
                 outputs.resize(1);
                 outputs[0] = LayerOps::upsample_nearest_forward(x, in_h, in_w, c, sh, sw);
                 return true;
             }
 
             case LayerType::UpsampleBilinear: {
-                if (layer.out_h <= 0 || layer.out_w <= 0 || layer.in_channels <= 0) return false;
-                const int in_h = layer.out_h;
-                const int in_w = layer.out_w;
+                if (layer.in_channels <= 0) return false;
+                const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+                const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+                if (in_h <= 0 || in_w <= 0) return false;
                 const int c = layer.in_channels;
-                const int out_h = in_h * 2;
-                const int out_w = in_w * 2;
+                const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_h) * std::max(0.0f, layer.scale_h)))));
+                const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_w) * std::max(0.0f, layer.scale_w)))));
                 outputs.resize(1);
                 outputs[0] = LayerOps::upsample_bilinear_forward(x, in_h, in_w, c, out_h, out_w);
                 return true;
             }
 
             case LayerType::UpsampleBicubic: {
-                if (layer.out_h <= 0 || layer.out_w <= 0) return false;
-                const int in_h = layer.out_h;
-                const int in_w = layer.out_w;
+                const int in_h = layer.input_height > 0 ? layer.input_height : layer.out_h;
+                const int in_w = layer.input_width > 0 ? layer.input_width : layer.out_w;
+                if (in_h <= 0 || in_w <= 0) return false;
                 const int c = layer.in_channels > 0 ? layer.in_channels : 3;
-                const int out_h = in_h * 2;
-                const int out_w = in_w * 2;
+                const int out_h = layer.output_height > 0 ? layer.output_height : (layer.out_h > 0 ? layer.out_h : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_h) * std::max(0.0f, layer.scale_h)))));
+                const int out_w = layer.output_width > 0 ? layer.output_width : (layer.out_w > 0 ? layer.out_w : std::max(1, static_cast<int>(std::lround(static_cast<float>(in_w) * std::max(0.0f, layer.scale_w)))));
                 outputs.resize(1);
                 outputs[0] = LayerOpsExt::upsample_bicubic_forward(x, in_h, in_w, c, out_h, out_w);
                 return true;

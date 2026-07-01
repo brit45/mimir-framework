@@ -237,6 +237,126 @@ bool SafeTensorsReader::apply_tensors_to_model(
             tensor_map[tensor.name] = &tensor;
         }
 
+        json mapping_root = json::object();
+        json mapped_layers = json::object();
+        if (!options.mapping_json.empty()) {
+            std::ifstream mf(options.mapping_json);
+            if (!mf) {
+                if (error) *error = "Failed to open mapping JSON: " + options.mapping_json;
+                return false;
+            }
+            try {
+                mf >> mapping_root;
+                if (mapping_root.is_object() && mapping_root.contains("layers") && mapping_root["layers"].is_object()) {
+                    mapped_layers = mapping_root["layers"];
+                } else if (mapping_root.is_object()) {
+                    mapped_layers = mapping_root;
+                } else {
+                    if (error) *error = "Invalid mapping JSON root: " + options.mapping_json;
+                    return false;
+                }
+            } catch (const std::exception& e) {
+                if (error) *error = std::string("Failed to parse mapping JSON: ") + e.what();
+                return false;
+            }
+        }
+
+        auto load_tensor_as_fp32 = [&](const std::string& source_name, std::vector<float>& out) -> bool {
+            auto it = tensor_map.find(source_name);
+            if (it == tensor_map.end()) {
+                if (error) *error = "Missing mapped source tensor: " + source_name;
+                return false;
+            }
+            const ParsedTensor& tensor = *it->second;
+            size_t element_count = 1;
+            for (size_t dim : tensor.shape) element_count *= dim;
+            out.resize(element_count);
+
+            if (tensor.dtype == DType::Float32) {
+                return load_tensor_data(path, data_offset, tensor, out.data(), out.size() * sizeof(float), error);
+            }
+            if (tensor.dtype == DType::Float16) {
+                std::vector<uint16_t> tmp(element_count);
+                if (!load_tensor_data(path, data_offset, tensor, tmp.data(), tmp.size() * sizeof(uint16_t), error)) return false;
+                HardwareOpt::fp16_to_fp32_f16c(out.data(), tmp.data(), element_count);
+                return true;
+            }
+            if (tensor.dtype == DType::BFloat16) {
+                std::vector<uint16_t> tmp(element_count);
+                if (!load_tensor_data(path, data_offset, tensor, tmp.data(), tmp.size() * sizeof(uint16_t), error)) return false;
+                HardwareOpt::bf16_to_fp32(out.data(), tmp.data(), element_count);
+                return true;
+            }
+            if (tensor.dtype == DType::Float64) {
+                std::vector<double> tmp(element_count);
+                if (!load_tensor_data(path, data_offset, tensor, tmp.data(), tmp.size() * sizeof(double), error)) return false;
+                for (size_t i = 0; i < element_count; ++i) out[i] = static_cast<float>(tmp[i]);
+                return true;
+            }
+
+            if (error) *error = "Unsupported dtype for mapped tensor: " + source_name;
+            return false;
+        };
+
+        auto apply_mapped_layer = [&](Layer& layer, const json& spec) -> bool {
+            if (!spec.is_object()) {
+                if (error) *error = "Invalid mapping spec for layer: " + layer.name;
+                return false;
+            }
+
+            std::vector<float> packed;
+            auto append_tensor = [&](const char* key) -> bool {
+                auto it = spec.find(key);
+                if (it == spec.end()) return true;
+                if (!it->is_string()) {
+                    if (error) *error = std::string("Mapping key '") + key + "' must be a string for layer: " + layer.name;
+                    return false;
+                }
+                std::vector<float> tmp;
+                if (!load_tensor_as_fp32(it->get<std::string>(), tmp)) return false;
+                packed.insert(packed.end(), tmp.begin(), tmp.end());
+                return true;
+            };
+
+            if (spec.contains("tensor")) {
+                if (!append_tensor("tensor")) return false;
+            } else if (spec.contains("q_weight") || spec.contains("k_weight") || spec.contains("v_weight") ||
+                       spec.contains("q_bias") || spec.contains("k_bias") || spec.contains("v_bias")) {
+                if (!append_tensor("q_weight")) return false;
+                if (!append_tensor("k_weight")) return false;
+                if (!append_tensor("v_weight")) return false;
+                if (!append_tensor("out_weight")) return false;
+                if (!append_tensor("q_bias")) return false;
+                if (!append_tensor("k_bias")) return false;
+                if (!append_tensor("v_bias")) return false;
+                if (!append_tensor("out_bias")) return false;
+            } else if (spec.contains("qkv_weight") || spec.contains("out_weight")) {
+                if (!append_tensor("qkv_weight")) return false;
+                if (!append_tensor("out_weight")) return false;
+                if (!append_tensor("qkv_bias")) return false;
+                if (!append_tensor("out_bias")) return false;
+            } else {
+                if (!append_tensor("weight")) return false;
+                if (!append_tensor("bias")) return false;
+            }
+
+            const size_t actual_size = layer.weight_block->getSize();
+            if (packed.size() != actual_size) {
+                if (error) {
+                    *error = "Mapped size mismatch for " + layer.name + ": expected " + std::to_string(actual_size) + " got " + std::to_string(packed.size());
+                }
+                return false;
+            }
+
+            float* data_ptr = layer.weight_block->getData();
+            if (!data_ptr) {
+                if (error) *error = "Failed to get data pointer for mapped layer: " + layer.name;
+                return false;
+            }
+            std::copy(packed.begin(), packed.end(), data_ptr);
+            return true;
+        };
+
         // Load architecture/config JSON (if present)
         {
             auto it = tensor_map.find("model/architecture_json");
@@ -261,7 +381,13 @@ bool SafeTensorsReader::apply_tensors_to_model(
                             // This ensures subsequent saves use the same float storage policy.
                             try {
                                 if (model.modelConfig.contains("dtype") && model.modelConfig["dtype"].is_string()) {
-                                    model.setDefaultDType(model.modelConfig["dtype"].get<std::string>());
+                                    const std::string raw_dtype = model.modelConfig["dtype"].get<std::string>();
+                                    const auto dt = ::Mimir::parse_dtype_safetensors(raw_dtype);
+                                    if (dt == ::Mimir::DType::UNKNOWN) {
+                                        throw std::runtime_error("unknown dtype in model_config: " + raw_dtype);
+                                    }
+                                    const std::string canonical_dtype = ::Mimir::dtype_to_string(dt);
+                                    model.setDefaultDType(canonical_dtype);
                                 }
                             } catch (...) {
                                 if (options.strict_mode) {
@@ -297,11 +423,26 @@ bool SafeTensorsReader::apply_tensors_to_model(
             if (!layer.weight_block) {
                 continue;  // Layer has no weights
             }
+
+            auto map_it = mapped_layers.find(layer.name);
+            if (map_it != mapped_layers.end()) {
+                if (!apply_mapped_layer(layer, map_it.value())) {
+                    return false;
+                }
+                continue;
+            }
             
-            // Try to find tensor with name "layerN/weights"
+            // Standard Mimir checkpoints use "<layer>/weights".
+            // External/base models may mirror the original safetensors keys exactly.
             std::string tensor_name = layer.name + "/weights";
-            
+
             auto it = tensor_map.find(tensor_name);
+            if (it == tensor_map.end()) {
+                it = tensor_map.find(layer.name);
+                if (it != tensor_map.end()) {
+                    tensor_name = layer.name;
+                }
+            }
             if (it != tensor_map.end()) {
                 const ParsedTensor* tensor = it->second;
                 

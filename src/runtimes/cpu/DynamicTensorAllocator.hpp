@@ -65,10 +65,10 @@ public:
         auto& ram_mgr = AdvancedRAMManager::instance();
         ram_mgr.configure(ram_config);
         
-        std::cout << "🚀 DynamicTensorAllocator configuré:" << std::endl;
-        std::cout << "   - Limite RAM: " << std::fixed << std::setprecision(2) << max_ram_gb << " GB" << std::endl;
-        std::cout << "   - Compression: " << (enable_compression ? "activée" : "désactivée") << std::endl;
-        std::cout << "   - Lazy mode: " << (lazy_mode_ ? "activé" : "désactivé") << std::endl;
+        std::cerr << "🚀 DynamicTensorAllocator configuré:" << std::endl;
+        std::cerr << "   - Limite RAM: " << std::fixed << std::setprecision(2) << max_ram_gb << " GB" << std::endl;
+        std::cerr << "   - Compression: " << (enable_compression ? "activée" : "désactivée") << std::endl;
+        std::cerr << "   - Lazy mode: " << (lazy_mode_ ? "activé" : "désactivé") << std::endl;
     }
     
     // Allouer un tenseur (retourne un handle)
@@ -95,7 +95,7 @@ public:
             ensureBelowPressureLocked(0.90f, bytes_needed);
 
             if (!guard.requestAllocation(bytes_needed, tag)) {
-                std::cout << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
+                std::cerr << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
                 evictLRULocked(bytes_needed);
                 if (!guard.requestAllocation(bytes_needed, tag)) {
                     std::cerr << "❌ Impossible d'allouer tenseur même après éviction!" << std::endl;
@@ -136,7 +136,7 @@ public:
             ensureBelowPressureLocked(0.90f, bytes_needed);
 
             if (!guard.requestAllocation(bytes_needed, handle->cache_key)) {
-                std::cout << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
+                std::cerr << "⚠️  Mémoire insuffisante, tentative d'éviction..." << std::endl;
                 evictLRULocked(bytes_needed);
                 if (!guard.requestAllocation(bytes_needed, handle->cache_key)) {
                     std::cerr << "❌ Impossible d'allouer tenseur même après éviction!" << std::endl;
@@ -225,9 +225,9 @@ public:
     void printStats() {
         std::lock_guard<std::mutex> lock(mutex_);
         
-        std::cout << "\n╔═══════════════════════════════════════════════════════╗" << std::endl;
-        std::cout << "║      DYNAMIC TENSOR ALLOCATOR - STATISTIQUES         ║" << std::endl;
-        std::cout << "╠═══════════════════════════════════════════════════════╣" << std::endl;
+        std::cerr << "\n╔═══════════════════════════════════════════════════════╗" << std::endl;
+        std::cerr << "║      DYNAMIC TENSOR ALLOCATOR - STATISTIQUES         ║" << std::endl;
+        std::cerr << "╠═══════════════════════════════════════════════════════╣" << std::endl;
         
         size_t loaded_count = 0;
         size_t compressed_count = 0;
@@ -239,11 +239,11 @@ public:
             total_size += handle->size * sizeof(float);
         }
         
-        std::cout << "║ Tenseurs totaux:  " << handles_.size() << std::endl;
-        std::cout << "║ Chargés:          " << loaded_count << std::endl;
-        std::cout << "║ Compressés:       " << compressed_count << std::endl;
-        std::cout << "║ Taille totale:    " << (total_size / 1024 / 1024) << " MB" << std::endl;
-        std::cout << "╚═══════════════════════════════════════════════════════╝" << std::endl;
+        std::cerr << "║ Tenseurs totaux:  " << handles_.size() << std::endl;
+        std::cerr << "║ Chargés:          " << loaded_count << std::endl;
+        std::cerr << "║ Compressés:       " << compressed_count << std::endl;
+        std::cerr << "║ Taille totale:    " << (total_size / 1024 / 1024) << " MB" << std::endl;
+        std::cerr << "╚═══════════════════════════════════════════════════════╝" << std::endl;
         
         // Afficher stats MemoryGuard
         MemoryGuard::instance().printStats();
@@ -348,7 +348,7 @@ private:
         const size_t after_bytes = guard.getCurrentBytes();
         const size_t freed_actual = (before_bytes >= after_bytes) ? (before_bytes - after_bytes) : 0;
 
-        std::cout << "⟳ Éviction LRU: ~" << (freed_estimated / 1024 / 1024)
+        std::cerr << "⟳ Éviction LRU: ~" << (freed_estimated / 1024 / 1024)
                   << " MB candidats, " << (freed_actual / 1024 / 1024)
                   << " MB libérés (MemoryGuard)" << std::endl;
     }

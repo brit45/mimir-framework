@@ -13,64 +13,10 @@
 -- ⚠️  IMPORTANT: Ce fichier est synchronisé avec src/LuaScripting.cpp
 --    Toute modification de l'API C++ doit être reflétée ici.
 --    Dernière synchronisation: 25 mai 2026 - 15 modules, 130+ fonctions
---
--- Objectifs :
---  • Autocomplétion IDE, signatures, types, docstrings
---  • Stable : les scripts Lua sont l'API publique
---  • Documentation de référence pour les utilisateurs
---
--- 🆕 Nouveautés v3.0.0 (25 mai 2026) :
---  • Nouveau module `Mimir.IO` (read_image_rgb_u8 / readImageRGBU8)
---  • `Mimir.Model.create_from_config(full_cfg)` — création depuis config complète (mode --conf)
---  • `Mimir.Model.dtype()` / `Mimir.Model.dtype("float16")` — préférence dtype côté modèle
 --  • Alias `Mimir.model` (lowercase) + stub explicite `Mimir.model.dtype`
---  • Helpers PonyXL-DDPM : train_step, validate_step, viz_reconstruct_step, text2img,
---    set_vae_scale, get_vae_scale, vae_mu_moments
---  • Module `pipeline_api.lua` : dtype robuste (supporte Mimir.model et Mimir.Model)
---  • Nouveaux templates : template_pipeline_only.lua, template_pipeline_args.lua
---  • template_new_model.lua : archi par défaut valide (vae_conv), fallback auto, tokenizer
---    conditionnel selon archi, Allocator.get_stats() non bloquant
---
--- Nouveautés v2.3.0 (28 décembre 2025) :
---  • Multi-Input / Branch Support - TensorStore system
---  • model.set_layer_io() - Configuration des entrées/sorties des layers
 --  • Operations multi-input complètes (Add, Multiply, Concat, MatMul, Split)
---  • Support residual connections et skip connections
---  • Documentation complète (MULTI_INPUT_SUPPORT.md)
---  • Mode Strict activé (0 pass-through, RUNTIME_CHECK/RUNTIME_ERROR_STRICT)
---
--- Nouveautés v2.1.0 :
---  • Scripts réorganisés en catégories (demos, examples, tests, etc.)
---  • Documentation corrigée (33 fixes)
---  • Synchronisation API validée (114 fonctions)
---
 -- Historique v2.0.0 :
---  • MemoryGuard API (limite stricte 10 GB par défaut)
---  • Mimir.Allocator.configure() pour configuration mémoire (OBLIGATOIRE)
---  • Modes train()/eval() pour tous les modèles
---  • API Mimir.Htop et Mimir.Viz pour monitoring temps réel
---
--- Remarques :
---  • Les fonctions retournent souvent (ok:boolean, value) ou (ok:boolean, err:string)
---  • ⚠️  Toujours appeler Mimir.Allocator.configure() au début des scripts!
---  • Les tables de stats sont des structs (tables Lua avec champs nommés)
---  • Les "Mimir.Layers.*" sont des opérations bas niveau (préférer Mimir.Model.forward())
---  • Mimir.MemoryGuard: API moderne recommandée (Mimir.Guard: API legacy compatible)
---
--- CLI (qualité de vie / IDE) :
---  • `mimir --config <config.json> --override <path=value> [--override ...]`
---    Permet de surcharger une config sans éditer le JSON (pratique pour les launch configs).
---  • Côté scripts Lua, beaucoup de scripts utilisent `scripts/modules/args.lua`.
---    Ce parseur supporte aussi `--override key=value` (si le script appelle `Args.apply_overrides(cfg, opts)`).
---    Exemples:
---      mimir --config config.json --override max_vocab=64000
---      mimir --config config.json --override optimizer=\"adamw\" --override weight_decay=0.01
---=============================================================================
-
---=============================================================================
 -- Namespace Mimir
---=============================================================================
-
 ---@class Mimir
 Mimir = {}
 
@@ -102,7 +48,7 @@ Mimir = {}
 ---@alias bytes integer
 
 ---@alias TokenId integer
----@alias TokenIds TokenId[]     -- liste d'IDs token (indices Lua 1..N)
+---@alias TokenIds TokenId[]
 ---@alias TokenText string
 
 ---@alias ModelType
@@ -129,6 +75,11 @@ Mimir = {}
 ---| "sd3_5"
 ---| "neuropulse"
 ---| "gan_latent"
+---| "external_safetensors_base"
+---| "hf_clip_text_encoder_1"
+---| "hf_clip_text_encoder_2"
+---| "hf_vae_decoder"
+---| "hf_sdxl_transformer_block"
 
 ---@alias ArchitectureName
 ---| "basic_mlp"
@@ -149,6 +100,11 @@ Mimir = {}
 ---| "gan_latent"
 ---| "cond_diffusion"
 ---| "sd3_5"
+---| "external_safetensors_base"
+---| "hf_clip_text_encoder_1"
+---| "hf_clip_text_encoder_2"
+---| "hf_vae_decoder"
+---| "hf_sdxl_transformer_block"
 
 ---Lire un JSON depuis le disque.
 ---@param path string
@@ -221,6 +177,9 @@ function write_file(path, content) end
 ---@field seed? int @Seed générique - lu par `Model.train()` et certains helpers
 ---@field autosave_every_epochs? int @Autosave checkpoint toutes les N epochs (0=désactivé)
 ---@field autosave_every_epoch? int @Alias de autosave_every_epochs
+---@field csv_file? string @Chemin CSV htop explicite (ex: "runs/myrun/metrics.csv") — appliqué par `Model.train()` à tous les types de modèles
+---@field csv_path? string @Alias de csv_file
+---@field csv_dir? string @Dossier CSV : génère `{csv_dir}/{name}_htop_metrics.csv` (htop) ou `{csv_dir}/{name}_partN_epochM.csv` (ponyxl_ddpm)
 ---@field viz_taps_max_frames? int @Limite frames "viz taps" (si viz active)
 ---@field viz_taps_max_side? int @Limite taille preview "viz taps" (si viz active)
 ---@field validate_every_steps? int @Validation toutes les N étapes d'optimizer (0 = désactivé)
@@ -296,6 +255,22 @@ function write_file(path, content) end
 ---@field latent_w? int
 ---@field latent_c? int
 ---@field base_channels? int
+---@field stochastic_latent? boolean
+---@field use_attention? boolean
+---@field use_attn? boolean
+---@field enc_norm? string
+---@field enc_gn_groups? int
+---@field dec_norm? string
+---@field dec_gn_groups? int
+---@field decoder_upsample? string
+---@field attn_heads? int
+---@field resnet_max_tokens? int
+---@field attn_max_tokens? int
+---@field text_cond? boolean
+---@field vocab_size? int
+---@field seq_len? int
+---@field text_d_model? int
+---@field proj_dim? int
 
 ---@class ResNetConfig: ModelConfig
 ---@field image_w? int
@@ -410,6 +385,55 @@ function write_file(path, content) end
 ---@field viz_ddpm_every_steps? int @0=off, sinon: toutes les N steps on affiche des frames DDPM
 ---@field viz_ddpm_num_steps? int @Nb timesteps affichés
 
+---@class ExternalSafeTensorsBaseConfig: ModelConfig
+---@field source_safetensors string @Chemin vers le fichier safetensors source à refléter
+---@field include_prefixes? string[] @Limiter la création aux tenseurs commençant par un de ces préfixes
+---@field exclude_prefixes? string[] @Exclure les tenseurs commençant par un de ces préfixes
+---@field max_tensors? int @Limiter le nombre de tenseurs créés (0=tous)
+
+---@class HFCLIPTextEncoder1Config: ModelConfig
+---@field vocab_size? int
+---@field padding_idx? int
+---@field seq_len? int
+---@field d_model? int
+---@field num_layers? int
+---@field num_heads? int
+---@field mlp_hidden? int
+---@field causal? boolean
+
+---@class HFCLIPTextEncoder2Config: ModelConfig
+---@field vocab_size? int
+---@field padding_idx? int
+---@field seq_len? int
+---@field d_model? int
+---@field num_layers? int
+---@field num_heads? int
+---@field mlp_hidden? int
+---@field proj_dim? int
+---@field causal? boolean
+---@field include_logit_scale? boolean
+
+---@class HFVaeDecoderConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field latent_w? int
+---@field latent_h? int
+---@field latent_c? int
+---@field num_heads? int
+---@field norm_groups? int
+
+---@class HFSDXLTransformerBlockConfig: ModelConfig
+---@field q_len? int
+---@field kv_len? int
+---@field d_model? int
+---@field context_dim? int
+---@field num_heads? int
+---@field ff_hidden? int
+---@field self_attn_qkv_bias? boolean
+---@field self_attn_out_bias? boolean
+---@field cross_attn_out_bias? boolean
+
 -- NOTE: les schémas ci-dessus reflètent le registre C++ (ModelArchitectures::defaultConfig).
 -- Pour obtenir la config exacte à jour côté runtime:
 --   local cfg = Mimir.Architectures.default_config("transformer")
@@ -495,6 +519,8 @@ function write_file(path, content) end
 -- Module: Mimir.Model
 --=============================================================================
 
+Mimir = {}
+
 ---@class MimirModelAPI
 Mimir.Model = {}
 
@@ -520,8 +546,13 @@ Mimir.Model = {}
 ---@overload fun(model_type: "gan_latent", config?: GanLatentConfig): (boolean, string?)
 ---@overload fun(model_type: "sd3_5", config?: SD35Config): (boolean, string?)
 ---@overload fun(model_type: "ponyxl_ddpm", config?: PonyXLDDPMConfig): (boolean, string?)
+---@overload fun(model_type: "external_safetensors_base", config: ExternalSafeTensorsBaseConfig): (boolean, string?)
+---@overload fun(model_type: "hf_clip_text_encoder_1", config?: HFCLIPTextEncoder1Config): (boolean, string?)
+---@overload fun(model_type: "hf_clip_text_encoder_2", config?: HFCLIPTextEncoder2Config): (boolean, string?)
+---@overload fun(model_type: "hf_vae_decoder", config?: HFVaeDecoderConfig): (boolean, string?)
+---@overload fun(model_type: "hf_sdxl_transformer_block", config?: HFSDXLTransformerBlockConfig): (boolean, string?)
 ---@param model_type ModelType
----@param config? ModelConfig|BasicMLPConfig|TransformerConfig|ViTConfig|VAEConfig|ResNetConfig|UNetConfig|MobileNetConfig|VGG16Config|VGG19Config|DiffusionConfig|PonyXLDDPMConfig|table
+---@param config? ModelConfig|BasicMLPConfig|TransformerConfig|ViTConfig|VAEConfig|ResNetConfig|UNetConfig|MobileNetConfig|VGG16Config|VGG19Config|DiffusionConfig|PonyXLDDPMConfig|ExternalSafeTensorsBaseConfig|HFCLIPTextEncoder1Config|HFCLIPTextEncoder2Config|HFVaeDecoderConfig|HFSDXLTransformerBlockConfig|table
 ---@return boolean ok
 ---@return string? err
 function Mimir.Model.create(model_type, config) end
@@ -589,10 +620,28 @@ function Mimir.Model.ponyxl_ddpm_validate_step(cfg) end
 function Mimir.Model.ponyxl_ddpm_viz_reconstruct_step(cfg) end
 
 ---Génération texte→image PonyXL-DDPM.
----@param cfg table
----@return boolean ok
----@return string? err
-function Mimir.Model.ponyxl_ddpm_text2img(cfg) end
+---@param prompt string
+---@param seed? integer
+---@param sample_steps? integer
+---@param guidance_scale? number
+---@param max_side? integer
+---@return integer[]? pixels_u8
+---@return integer? w
+---@return integer? h
+---@return integer|string? channels_or_err
+function Mimir.Model.ponyxl_ddpm_text2img(prompt, seed, sample_steps, guidance_scale, max_side) end
+
+---Génération texte→latent PonyXL-DDPM.
+---Retourne le latent final x0 au format tokens HWC aplati.
+---@param prompt string
+---@param seed? integer
+---@param sample_steps? integer
+---@param guidance_scale? number
+---@return number[]? latent
+---@return integer? latent_w
+---@return integer? latent_h
+---@return integer|string? latent_c_or_err
+function Mimir.Model.ponyxl_ddpm_text2img_latent(prompt, seed, sample_steps, guidance_scale) end
 
 ---Définir un facteur d'échelle VAE utilisé par PonyXL-DDPM.
 ---@param scale number
@@ -605,10 +654,12 @@ function Mimir.Model.ponyxl_ddpm_set_vae_scale(scale) end
 function Mimir.Model.ponyxl_ddpm_get_vae_scale() end
 
 ---Retourne des moments (mu) du VAE (API PonyXL-DDPM).
----@param cfg table
----@return boolean ok
----@return table|string? moments_or_err
-function Mimir.Model.ponyxl_ddpm_vae_mu_moments(cfg) end
+---@param image_u8 integer[]
+---@param w integer
+---@param h integer
+---@return {sum:number, sumsq:number, n:integer}? moments
+---@return string? err
+function Mimir.Model.ponyxl_ddpm_vae_mu_moments(image_u8, w, h) end
 
 ---[DÉPRÉCIÉ] Sauvegarder le modèle (ancienne API).
 ---⚠️  Utilisez Mimir.Serialization.save() pour la nouvelle API v2.4
@@ -809,10 +860,40 @@ function Mimir.Architectures.available() end
 ---@overload fun(name: "gan_latent"): GanLatentConfig
 ---@overload fun(name: "sd3_5"): SD35Config
 ---@overload fun(name: "ponyxl_ddpm"): PonyXLDDPMConfig
+---@overload fun(name: "external_safetensors_base"): ExternalSafeTensorsBaseConfig
+---@overload fun(name: "hf_clip_text_encoder_1"): HFCLIPTextEncoder1Config
+---@overload fun(name: "hf_clip_text_encoder_2"): HFCLIPTextEncoder2Config
+---@overload fun(name: "hf_vae_decoder"): HFVaeDecoderConfig
+---@overload fun(name: "hf_sdxl_transformer_block"): HFSDXLTransformerBlockConfig
 ---@param name ArchitectureName|string
 ---@return table|nil config
 ---@return string? err
 function Mimir.Architectures.default_config(name) end
+
+---@class ArchitectureInfo
+---@field name string @Nom canonique de l'architecture (clé du registry).
+---@field description string @Description courte (peut être vide).
+---@field config table @Config par défaut complète (peut contenir un champ `dtype`).
+
+---Lire toutes les infos du registry pour une (ou toutes les) architecture(s).
+---Sans argument: renvoie la liste complète des entrées du registry.
+---Avec un nom: renvoie l'entrée correspondante, ou `(nil, err)` si inconnue.
+---@overload fun(): ArchitectureInfo[]
+---@overload fun(name: ArchitectureName|string): ArchitectureInfo|nil, string?
+---@param name? ArchitectureName|string
+---@return ArchitectureInfo[]|ArchitectureInfo|nil info
+---@return string? err
+function Mimir.Architectures.info(name) end
+
+---@class DTypeInfo
+---@field name string @Nom canonique (ex: "float32", "bfloat16").
+---@field aliases string @Alias acceptés, séparés par des virgules (ex: "f32, float32").
+---@field bytes integer @Taille en octets d'un élément.
+---@field kind "float"|"int"|"uint"|"bool" @Famille du dtype.
+
+---Lister les dtypes pris en charge par le framework.
+---@return DTypeInfo[] dtypes
+function Mimir.Architectures.dtypes() end
 
 --=============================================================================
 -- Module: Mimir.Layers (placeholder / low-level)
@@ -1729,58 +1810,116 @@ function print(...) end
 --=============================================================================
 -- Pipeline API (optionnel)
 --=============================================================================
--- Si vous chargez pipeline_api.lua dans votre script, l'IDE bénéficiera aussi
--- de ces signatures. Ces fonctions sont en Lua pur, mais on les déclare ici
--- pour l'autocomplétion (sans dépendre du require dans l'IDE).
+-- Si vous chargez `scripts/modules/pipeline_api.lua` (ou `pipeline.lua`),
+-- l'IDE bénéficiera de ces signatures pour l'autocomplétion.
 
----@class PipelineConfig
----@field dataset_dir string
----@field out_dir string
----@field model_type ModelType
----@field model_config table
----@field tokenizer_vocab int
----@field max_seq_len int
----@field epochs int
----@field lr float
----@field min_lr? float
----@field warmup_epochs? int
----@field save_every? int
----@field gen_every? int
----@field prompt? string
----@field max_ram_gb? float
----@field enable_compression? bool
----@field enable_htop? bool
----@field enable_viz? bool
+---@class PipelineOptions
+---@field name? string
+---@field fallback_config? table
+---@field allowed_keys? string[]
+---@field legacy_mapper? fun(cfg:table, user:table)
+---@field create_tokenizer? boolean
 
+---@class PipelineAPI
+---@field name string
+---@field config table
+---@field base_config table
+---@field arch? string
+---@field model? boolean
+---@field tokenizer? boolean
+---@field trained boolean
+---@field steps table
+local Pipeline = {}
 
---=============================================================================
--- Module: Pipeline
---=============================================================================
+---@param arch string
+---@param patch? table
+---@return boolean ok
+---@return table|string cfg_or_err
+function Pipeline:loadDefaultConfig(arch, patch) end
 
----@class Pipeline
-Pipeline = {}
+---@param patch table
+---@return boolean ok
+---@return table|string cfg_or_err
+function Pipeline:patchConfig(patch) end
 
----@param cfg PipelineConfig|table
+---@param cfg table
+---@return boolean ok
+---@return table|string cfg_or_err
+function Pipeline:setConfig(cfg) end
+
+---@return table
+function Pipeline:getConfig() end
+
+---@return table
+function Pipeline:getBaseConfig() end
+
+---@return boolean ok
+---@return integer|string? params_or_err
+function Pipeline:build() end
+
+---@param dataset_path? string
+---@param epochs? integer
+---@param lr? number
 ---@return boolean ok
 ---@return string? err
-function Pipeline.setup(cfg) end
+function Pipeline:train(dataset_path, epochs, lr) end
 
----Exécuter un pipeline training complet (si présent).
+---@param input any
+---@return any
+function Pipeline:infer(input) end
+
+---@param path string
 ---@return boolean ok
 ---@return string? err
-function Pipeline.run() end
+function Pipeline:save(path) end
 
----Sauvegarder un checkpoint pipeline (si présent).
----@param tag string
----@return boolean ok
----@return string? err
-function Pipeline.save(tag) end
+---@class PipelineManagerAPI
+---@field pipelines table<string, PipelineAPI>
+local PipelineManager = {}
 
----Tenter une reprise depuis un checkpoint (si présent).
----@param dir string
----@return boolean ok
----@return string? err
-function Pipeline.resume(dir) end
+---@return PipelineManagerAPI
+function PipelineManager:new() end
+
+---@param name string
+---@param pipeline PipelineAPI
+function PipelineManager:add(name, pipeline) end
+
+---@param name string
+---@return PipelineAPI|nil
+function PipelineManager:get(name) end
+
+function PipelineManager:list() end
+
+---@param base_path string
+function PipelineManager:save_all(base_path) end
+
+---@class PipelineModule
+---@field Pipeline PipelineAPI
+---@field PipelineManager PipelineManagerAPI
+---@field FromRegistry fun(model_type:string, config?:table, options?:PipelineOptions):PipelineAPI|nil, string?
+---@field Transformer fun(config?:table):PipelineAPI
+---@field UNet fun(config?:table):PipelineAPI
+---@field VAE fun(config?:table):PipelineAPI
+---@field ViT fun(config?:table):PipelineAPI
+---@field GAN fun(config?:table):PipelineAPI
+---@field Diffusion fun(config?:table):PipelineAPI
+---@field ResNet fun(config?:table):PipelineAPI
+---@field MobileNet fun(config?:table):PipelineAPI
+
+---@type PipelineModule
+PipelineModule = {
+	Pipeline = Pipeline,
+	PipelineManager = PipelineManager,
+	FromRegistry = function(model_type, config, options) end,
+	Transformer = function(config) end,
+	UNet = function(config) end,
+	VAE = function(config) end,
+	ViT = function(config) end,
+	GAN = function(config) end,
+	Diffusion = function(config) end,
+	ResNet = function(config) end,
+	MobileNet = function(config) end,
+}
 
 --=============================================================================
 -- Exports globaux (pour l'IDE)

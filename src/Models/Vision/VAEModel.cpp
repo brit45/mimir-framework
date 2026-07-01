@@ -40,7 +40,7 @@ void VAEModel::buildInto(Model& model, const Config& cfg) {
         L->output = "vae/in";
     }
 
-    // Encoder (MLP)
+    // ConditioningEncoder (MLP)
     model.push("vae/enc_fc1", "Linear", static_cast<size_t>(image_dim) * static_cast<size_t>(hidden) + static_cast<size_t>(hidden));
     if (auto* L = model.getLayerByName("vae/enc_fc1")) {
         L->inputs = {"vae/in"};

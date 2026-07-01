@@ -64,10 +64,26 @@ RuntimeConfig RuntimeConfig::fromEnv(const char* backend_upper) {
 
     // Fast-path Linear
     {
-        const std::string linear_flag = make_env_name(backend_upper, "_LINEAR");
-        const std::string linear_min_ops = make_env_name(backend_upper, "_LINEAR_MIN_OPS");
-        cfg.linear_enabled = env_flag_true(linear_flag.c_str(), false);
-        cfg.linear_min_ops = env_int(linear_min_ops.c_str(), 1 << 20);
+        cfg.linear_enabled = env_flag_true(make_env_name(backend_upper, "_LINEAR").c_str(), false);
+        cfg.linear_min_ops = env_int(make_env_name(backend_upper, "_LINEAR_MIN_OPS").c_str(), 1 << 20);
+    }
+
+    // Fast-path Conv
+    {
+        cfg.conv_enabled  = env_flag_true(make_env_name(backend_upper, "_CONV").c_str(), false);
+        cfg.conv_min_ops  = env_int(make_env_name(backend_upper, "_CONV_MIN_OPS").c_str(), 1 << 18);
+    }
+
+    // Fast-path Normalization
+    {
+        cfg.norm_enabled       = env_flag_true(make_env_name(backend_upper, "_NORM").c_str(), false);
+        cfg.norm_min_elements  = env_int(make_env_name(backend_upper, "_NORM_MIN_ELEMS").c_str(), 1 << 12);
+    }
+
+    // Fast-path Attention
+    {
+        cfg.attention_enabled  = env_flag_true(make_env_name(backend_upper, "_ATTENTION").c_str(), false);
+        cfg.attention_min_ops  = env_int(make_env_name(backend_upper, "_ATTENTION_MIN_OPS").c_str(), 1 << 18);
     }
 
     // Device index (optionnel)

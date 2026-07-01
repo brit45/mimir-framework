@@ -37,6 +37,14 @@ Les pages ci-dessous existent déjà et seront enrichies au fil des passes (plus
 - `docs/04-Architecture-Internals/19-Models-Registry-And-Builders.md`
 - `docs/04-Architecture-Internals/20-CLI-EntryPoints.md`
 
+### GPU Runtimes (CUDA / ROCm)
+
+- `docs/04-Architecture-Internals/21-GPU-Runtimes.md` — implémentation interne des fast-paths cuBLAS/rocBLAS (im2col, hybride Norm, Attention multi-SGEMM, DeviceBuf, pattern de dispatch).
+
+### Execution Planner
+
+- `docs/04-Architecture-Internals/22-Planning.md` — analyse des durées de vie des tenseurs, fusions Conv2d+ReLU, scratchpad pré-alloué.
+
 ## Convention
 
 - Quand un comportement diverge entre “int path” (Embedding/ids) et “float path”, la doc l’indique explicitement.

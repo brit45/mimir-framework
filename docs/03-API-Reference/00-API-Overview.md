@@ -5,7 +5,7 @@ La source de vérité de l’API exposée est `src/LuaScripting.cpp`.
 ## Modules principaux
 
 - `Mimir.Model` : create/build/allocate/init/forward/backward + helpers d'entraînement + `dtype` + `create_from_config`
-- `Mimir.Architectures` : liste et config par défaut des architectures
+- `Mimir.Architectures` : liste et config par défaut des architectures (+ `info`, `dtypes`)
 - `Mimir.Serialization` : save/load, formats, debug dumps
 - `Mimir.Tokenizer` : tokenize/detokenize, BPE
 - `Mimir.Dataset` : chargement et itération (selon scripts)

@@ -2,7 +2,7 @@ name: Publish Wiki
 
 on:
   push:
-    branches: [main]
+    branches: [develop]
     paths:
       - "docs/**"
       - ".github/workflows/wiki.yml"
@@ -22,12 +22,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           python3 - <<'PYEOF'
           import os, re, shutil, subprocess, sys, pathlib
 
           REPO         = os.environ["REPO"]
           GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+          BRANCH       = os.environ.get("BRANCH", "develop")
           WIKI_URL    = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{REPO}.wiki.git"
           DOCS_ROOT   = pathlib.Path("docs")
           WIKI_DIR    = pathlib.Path("/tmp/wiki")
@@ -116,6 +118,22 @@ jobs:
                           pathlib.Path("/dummy/" + resolved).resolve().relative_to("/dummy")
                       )
                   except (ValueError, RuntimeError):
+                      # Le chemin remonte au-dessus de docs/ (ex: ../src/ depuis 00-INDEX.md).
+                      # On tente de résoudre depuis la racine du dépôt.
+                      try:
+                          repo_norm = pathlib.PurePosixPath(
+                              pathlib.Path("/repo/docs/" + base_dir.as_posix() + "/" + path_obj.as_posix())
+                              .resolve()
+                              .relative_to("/repo")
+                          )
+                          repo_s = repo_norm.as_posix()
+                          if (repo_s.startswith("src/")
+                                  or repo_s.startswith("scripts/")
+                                  or repo_s.startswith("Tests/")):
+                              gh_url = f"https://github.com/{REPO}/blob/{BRANCH}/{repo_s}"
+                              return f"[{text}]({gh_url}{anchor})"
+                      except (ValueError, RuntimeError):
+                          pass
                       return m.group(0)
 
                   norm_s = norm.as_posix()
@@ -144,8 +162,8 @@ jobs:
                   if (norm_s.startswith("src/")
                           or norm_s.startswith("scripts/")
                           or norm_s.startswith("Tests/")):
-                      gh_url = f"https://github.com/{REPO}/blob/main/{norm_s}"
-                      return f"[{text}]({gh_url})"
+                      gh_url = f"https://github.com/{REPO}/blob/{BRANCH}/{norm_s}"
+                      return f"[{text}]({gh_url}{anchor})"
 
                   return m.group(0)
 

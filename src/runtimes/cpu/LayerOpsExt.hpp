@@ -350,34 +350,35 @@ inline std::vector<float> rms_norm_forward(
     const Layer& layer
 ) {
     const float eps = layer.eps;
-    const int normalized_size = layer.target_shape.empty() ?
-                                 input.size() : layer.target_shape[0];
-    (void)normalized_size;
-    
-    std::vector<float> output(input.size());
-    
-    // Compute RMS
-    float rms_sq = 0.0f;
-    for (size_t i = 0; i < input.size(); ++i) {
-        rms_sq += input[i] * input[i];
+    int normalized_size = 0;
+    if (layer.in_features > 0) {
+        normalized_size = layer.in_features;
+    } else if (layer.embed_dim > 0) {
+        normalized_size = layer.embed_dim;
+    } else if (!layer.shape.empty() && layer.shape.back() > 0) {
+        normalized_size = layer.shape.back();
+    } else if (!layer.target_shape.empty() && layer.target_shape.back() > 0) {
+        normalized_size = layer.target_shape.back();
+    } else {
+        normalized_size = static_cast<int>(input.size());
     }
-    rms_sq /= input.size();
-    float rms = std::sqrt(rms_sq + eps);
-    
-    // Normalize
-    const float* weights = layer.getWeights();
-    const size_t weights_size = (layer.affine && weights) ? layer.getWeightsSize() : 0;
-    
-    #pragma omp simd
-    for (size_t i = 0; i < input.size(); ++i) {
-        output[i] = input[i] / rms;
-        
-        // Apply gamma (weight) if available
-        if (weights_size && i < weights_size) {
-            output[i] *= weights[i];
+
+    if (normalized_size <= 0 || (input.size() % static_cast<size_t>(normalized_size)) != 0ULL) {
+        throw std::runtime_error("RMSNorm: invalid normalized_size");
+    }
+
+    std::vector<float> output = input;
+    std::vector<float> gamma(static_cast<size_t>(normalized_size), 1.0f);
+    if (layer.affine) {
+        const float* weights = layer.getWeights();
+        const size_t weights_size = weights ? layer.getWeightsSize() : 0ULL;
+        const size_t copy_n = std::min(static_cast<size_t>(normalized_size), weights_size);
+        if (copy_n > 0) {
+            std::copy(weights, weights + copy_n, gamma.begin());
         }
     }
-    
+
+    Normalization::rms_norm(output, gamma, normalized_size, eps);
     return output;
 }
 
@@ -703,51 +704,57 @@ inline std::vector<float> upsample_bicubic_forward(
     int in_h, int in_w, int channels,
     int out_h, int out_w
 ) {
-    // Pour simplifier, utiliser bilinéaire (bicubique complet = complexe)
-    // TODO: Implémenter vraie interpolation bicubique avec coefficients cubiques
     std::vector<float> output(channels * out_h * out_w, 0.0f);
-    
+
+    auto cubic_weight = [](float x) -> float {
+        constexpr float a = -0.75f;
+        x = std::abs(x);
+        if (x <= 1.0f) {
+            return ((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f;
+        }
+        if (x < 2.0f) {
+            return (((a * x - 5.0f * a) * x + 8.0f * a) * x) - 4.0f * a;
+        }
+        return 0.0f;
+    };
+
     const float scale_h = static_cast<float>(in_h) / out_h;
     const float scale_w = static_cast<float>(in_w) / out_w;
-    
+
     const size_t out_hw = static_cast<size_t>(out_h) * static_cast<size_t>(out_w);
     const size_t in_hw = static_cast<size_t>(in_h) * static_cast<size_t>(in_w);
     const size_t total = static_cast<size_t>(channels) * out_hw;
-    #pragma omp simd
+
+    #pragma omp parallel for if(total >= 65536) schedule(static)
     for (size_t idx = 0; idx < total; ++idx) {
         const int c = static_cast<int>(idx / out_hw);
         const size_t rem = idx - static_cast<size_t>(c) * out_hw;
         const int oh = static_cast<int>(rem / static_cast<size_t>(out_w));
         const int ow = static_cast<int>(rem - static_cast<size_t>(oh) * static_cast<size_t>(out_w));
 
-        float ih_f = (oh + 0.5f) * scale_h - 0.5f;
-        float iw_f = (ow + 0.5f) * scale_w - 0.5f;
-
-        ih_f = std::max(0.0f, std::min(ih_f, in_h - 1.0f));
-        iw_f = std::max(0.0f, std::min(iw_f, in_w - 1.0f));
-
-        int ih0 = static_cast<int>(std::floor(ih_f));
-        int iw0 = static_cast<int>(std::floor(iw_f));
-        int ih1 = std::min(ih0 + 1, in_h - 1);
-        int iw1 = std::min(iw0 + 1, in_w - 1);
-
-        float dh = ih_f - ih0;
-        float dw = iw_f - iw0;
+        const float ih_f = (static_cast<float>(oh) + 0.5f) * scale_h - 0.5f;
+        const float iw_f = (static_cast<float>(ow) + 0.5f) * scale_w - 0.5f;
+        const int ih_base = static_cast<int>(std::floor(ih_f));
+        const int iw_base = static_cast<int>(std::floor(iw_f));
 
         const size_t base = static_cast<size_t>(c) * in_hw;
-        float v00 = input[base + static_cast<size_t>(ih0) * static_cast<size_t>(in_w) + static_cast<size_t>(iw0)];
-        float v01 = input[base + static_cast<size_t>(ih0) * static_cast<size_t>(in_w) + static_cast<size_t>(iw1)];
-        float v10 = input[base + static_cast<size_t>(ih1) * static_cast<size_t>(in_w) + static_cast<size_t>(iw0)];
-        float v11 = input[base + static_cast<size_t>(ih1) * static_cast<size_t>(in_w) + static_cast<size_t>(iw1)];
+        float sum = 0.0f;
+        float weight_sum = 0.0f;
+        for (int mh = -1; mh <= 2; ++mh) {
+            const int ih = std::max(0, std::min(ih_base + mh, in_h - 1));
+            const float wh = cubic_weight(ih_f - static_cast<float>(ih_base + mh));
+            for (int mw = -1; mw <= 2; ++mw) {
+                const int iw = std::max(0, std::min(iw_base + mw, in_w - 1));
+                const float ww = cubic_weight(iw_f - static_cast<float>(iw_base + mw));
+                const float w = wh * ww;
+                sum += w * input[base + static_cast<size_t>(ih) * static_cast<size_t>(in_w) + static_cast<size_t>(iw)];
+                weight_sum += w;
+            }
+        }
 
-        float val = v00 * (1 - dh) * (1 - dw) +
-                    v01 * (1 - dh) * dw +
-                    v10 * dh * (1 - dw) +
-                    v11 * dh * dw;
-
-        output[idx] = val;
+        output[idx] = (weight_sum != 0.0f) ? (sum / weight_sum) : 0.0f;
     }
-    
+
     return output;
 }
 

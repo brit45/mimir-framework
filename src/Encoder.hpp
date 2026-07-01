@@ -6,12 +6,12 @@
 using json = nlohmann::json;
 
 
-class Encoder
+class ConditioningEncoder
 {
     public:
 
-        Encoder(int d = 64, int Size_Vo = 4096);
-        ~Encoder();
+        ConditioningEncoder(int d = 64, int Size_Vo = 4096);
+        ~ConditioningEncoder();
 
         void initRandom(uint64_t seed = 0);
 
@@ -34,6 +34,10 @@ class Encoder
         // encode: skip PAD(0), add special embeddings for SEQ/MOD/MAG if present
         std::vector<float> encode(const std::vector<int> &tokens, uint32_t /*seed*/ = 0) const;
 
+        // Version sans allocation : écrit dans un buffer pré-alloué (taille >= dim).
+        // Préférer cette forme dans les boucles d'entraînement.
+        void encodeInto(std::vector<float>& out, const std::vector<int>& tokens) const;
+
         // train embeddings for token ids toward target embedding
         // special tokens are excluded from direct token_embeddings updates (except normal tokens)
         void trainOnTextTokens(const std::vector<int> &token_ids, const std::vector<float> &target, float lr = 0.01f);
@@ -41,7 +45,7 @@ class Encoder
         // Special embeddings: initialization + simple SGD updates
         void ensureSpecialEmbeddings(uint64_t seed = 0x51A5EEDu);
 
-        // Ensure Encoder dimension matches a model requirement.
+        // Ensure ConditioningEncoder dimension matches a model requirement.
         // Safe for freshly-constructed encoders (no token embeddings allocated).
         // If token embeddings are already present and dim mismatches, throws.
         void ensureDim(int required_dim, uint64_t seed = 0x51A5EEDu);

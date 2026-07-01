@@ -5,6 +5,62 @@ Toutes les modifications notables du Mímir Framework sont documentées ici.
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+## [3.1.0] - 2026-07-01
+
+### ✨ Ajouté — Nouveaux modèles HuggingFace / SDXL
+
+- **`hf_clip_text_encoder_1` / `hf_clip_text_encoder_2`** : encodeurs texte CLIP/OpenCLIP
+  exécutables pour checkpoints HuggingFace/PyTorch (SDXL `conditioner.embedders.*`).
+- **`hf_sdxl_transformer_block`** : bloc transformer SDXL exécutable (SelfAttention,
+  CrossAttention, FeedForward).
+- **`hf_vae_decoder`** : décodeur VAE SDXL exécutable (`first_stage_model.decoder`).
+- **`external_safetensors_base`** : base non-exécutable reflétant exactement les clés
+  d'un checkpoint safetensors externe.
+- Scripts d'inférence associés dans `scripts/inferences/` (encodeurs HF, VAE decoder,
+  bloc transformer, base safetensors, `ponyxl_ddpm_text2img_hf_vae`) et entraînement
+  direct `scripts/training/ponyxl_ddpm_direct_train.lua`.
+- Tests unitaires runtime math (`attention`, `conv2d`, `linear`, `norms`) et smoke
+  `external_safetensors_base`.
+
+### ✨ Ajouté — Introspection du registre d'architectures
+
+- **`Mimir.Architectures.info([name])`** : lit toutes les infos du registry
+  (`name`, `description`, `config`). Sans argument → liste complète ; avec un nom
+  → entrée unique (ou `(nil, err)`). Seul accesseur exposant le champ `description`.
+  - Binding C++ : `LuaScripting::lua_archInfo`.
+- **`Mimir.Architectures.dtypes()`** : liste les dtypes pris en charge par le
+  framework (`name`, `aliases`, `bytes`, `kind`), sourcés depuis `src/DType.hpp`.
+  - Binding C++ : `LuaScripting::lua_archDtypes`.
+- **Outil `scripts/tools/inspect_architectures.lua`** (anciennement
+  `scripts/tests/test_list_archi_conf.lua`) : CLI d'inspection avec sorties en
+  tableaux colorés — `-a/--show-archs` (archis + dtypes), `-l <arch> -p`
+  (paramètres + dtype par défaut), `-d/--dtypes`. Parsing via `scripts/modules/args.lua`.
+
+### ⚡ Performance
+
+- **Fast-paths GPU** Conv2d / Norm / Attention dans les runtimes CUDA et ROCm.
+
+### 🐛 Correctifs
+
+- **Sérialisation** : correction du round-trip dtype (SafeTensors / RawFolder).
+- **Stub EmmyLua (`mimir-api.lua`)** : réparation de l'en-tête corrompu — restauration
+  de la déclaration `Mimir`, du bloc `@field`, des alias de base
+  (`int`/`float`/`bool`/`bytes`/`TokenId`/`TokenIds`) et des alias `ModelType`/
+  `ArchitectureName`, étendus avec les nouvelles architectures HF.
+
+### 📝 Documentation
+
+- Réécriture de la documentation (style MDN/Laravel) : introductions, callouts,
+  exemples progressifs ; ajout du feedback de calibration.
+
+## [3.0.1] - 2026-05-25
+
+### 🐛 Correctifs
+
+- **`Visualizer`** : ajout du membre manquant `live_ui_inited_` dans `Visualizer.hpp` — corrige une erreur de compilation avec `ENABLE_SFML=ON`.
+
 ## [3.0.0] - 2026-05-25
 
 ### 🚀 Montée de version majeure — API enrichie, nouveaux templates et robustesse

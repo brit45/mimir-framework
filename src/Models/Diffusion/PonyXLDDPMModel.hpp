@@ -63,6 +63,10 @@ public:
         int ddpm_steps = 1000;
         float ddpm_beta_start = 1e-4f;
         float ddpm_beta_end = 2e-2f;
+        std::string ddpm_schedule = "linear";  // "linear" | "cosine" (Nichol & Dhariwal 2021)
+
+        // Architecture variant
+        bool use_ldm_unet_arch = false;  // true = LdmUNet (per-block time inject, GroupNorm32, ConvTranspose2d up)
 
         // Loss utilisée pour l'entraînement DDPM (comparaison eps_pred vs eps)
         // Valeurs supportées (voir Model::computeLoss): "mse", "mae", "huber"/"smoothl1", "charbonnier", "gaussian_nll".
@@ -172,6 +176,13 @@ public:
 
         // === Encodeur texte CLIP-like (attention causale) ===
         bool text_clip_like = false;
+
+        // === Tokenizer de base ===
+        // Si non vide, le tokenizer est initialisé depuis ce fichier JSON (ex:
+        // "checkpoint/base_tokenizer/tokenizer.json") avant d'être étendu avec
+        // les tokens du dataset. Permet de composer un vocab cohérent à partir
+        // d'un tokenizer pré-entraîné.
+        std::string base_tokenizer_path = "";
     };
 
     struct StepStats {
@@ -245,6 +256,10 @@ public:
         int w = 0;
         int h = 0;
         int channels = 3;
+        std::vector<float> latent;
+        int latent_w = 0;
+        int latent_h = 0;
+        int latent_c = 0;
     };
     ReconPreview reconstructPreviewSdxlLatentDiffusion(const std::string& prompt,
                                                        const std::vector<uint8_t>& rgb,
@@ -254,8 +269,8 @@ public:
                                                        int seed = 12345,
                                                        int ddpm_step = -1);
 
-    // Génération text2img (DDIM-like, eta=0) en espace latent, puis décodage via VAE.
-    // Retourne une image RGB u8 (format identique à ReconPreview).
+    // Génération text2img (DDIM-like, eta=0) en espace latent.
+    // Remplit toujours le latent final x0; le décodage VAE est optionnel.
     // - sample_steps: nombre d'étapes d'échantillonnage (<=0 => utilise cfg.ddpm_steps)
     // - guidance_scale: CFG sur eps_pred (1.0 = pas de guidance)
     // - max_side: limite la taille max de sortie (<=0 => pas de downscale)
@@ -263,9 +278,11 @@ public:
                                              int seed = 12345,
                                              int sample_steps = 50,
                                              float guidance_scale = 1.0f,
-                                             int max_side = 0);
+                                             int max_side = 0,
+                                             bool decode_preview = true);
 
     static void buildInto(Model& model, const Config& cfg);
+    static void buildIntoLdmUNet(Model& model, const Config& cfg);
 
     static std::vector<float> imageBytesToFloatRGB(const std::vector<uint8_t>& rgb, int w, int h);
 
@@ -280,6 +297,13 @@ private:
 
     // VAE decoder (pour visualizer reconstructions en espace image, lazy-load)
     std::shared_ptr<Model> vae_decode_;
+
+    // Configuration complète du VAE lue depuis le model_config du checkpoint.
+    // Sert de base à tous les lazy-loads VAE pour garantir la compatibilité
+    // architecturale (use_attention, use_skip_connections, use_encoder_prior,
+    // decoder_upsample, resnet_max_tokens, etc.) avec le checkpoint pré-entraîné.
+    // Vide si aucun checkpoint VAE n'était accessible lors du buildFromConfig.
+    json vae_ckpt_cfg_;
 
     // Term frequency boosting: comptages par token ID et top-K cache.
     std::unordered_map<int, int> term_freq_counts_;

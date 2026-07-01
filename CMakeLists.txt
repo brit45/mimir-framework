@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(Mimir VERSION 3.0.0 LANGUAGES CXX)
+project(Mimir VERSION 3.0.1 LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet
@@ -295,7 +295,11 @@ set(MIMIR_SOURCES
     src/runtimes/AbstractRuntime.cpp
     src/runtimes/cpu/CpuRuntime.cpp
     src/Models/Registry/ModelArchitectures.cpp
+    src/Models/External/ExternalSafeTensorsModel.cpp
     src/Models/MLP/BasicMLPModel.cpp
+    src/Models/NLP/HFCLIPTextEncoder1Model.cpp
+    src/Models/NLP/HFCLIPTextEncoder2Model.cpp
+    src/Models/Vision/HFVaeDecoderModel.cpp
     src/Models/NLP/TransformerModel.cpp
     src/Models/NLP/VAETextModel.cpp
     src/Models/Vision/ViTModel.cpp
@@ -311,6 +315,7 @@ set(MIMIR_SOURCES
     src/Models/Vision/PatchDiscriminatorModel.cpp
     src/Models/Diffusion/DiffusionModel.cpp
     src/Models/Diffusion/CondDiffusionModel.cpp
+    src/Models/Diffusion/HFSDXLTransformerBlockModel.cpp
     src/Models/Diffusion/SD35Model.cpp
     src/Models/Diffusion/PonyXLDDPMModel.cpp
     src/Serialization/Serialization.cpp
@@ -349,7 +354,11 @@ set(MIMIR_HEADERS
     src/runtimes/cpu/LayerOpsExt.hpp
     src/runtimes/cpu/RuntimeLayerDispatch.hpp
     src/Models/Registry/ModelArchitectures.hpp
+    src/Models/External/ExternalSafeTensorsModel.hpp
     src/Models/MLP/BasicMLPModel.hpp
+    src/Models/NLP/HFCLIPTextEncoder1Model.hpp
+    src/Models/NLP/HFCLIPTextEncoder2Model.hpp
+    src/Models/Vision/HFVaeDecoderModel.hpp
     src/Models/NLP/TransformerModel.hpp
     src/Models/NLP/VAETextModel.hpp
     src/Models/Vision/ViTModel.hpp
@@ -364,6 +373,7 @@ set(MIMIR_HEADERS
     src/Models/Vision/PatchDiscriminatorModel.hpp
     src/Models/Diffusion/DiffusionModel.hpp
     src/Models/Diffusion/CondDiffusionModel.hpp
+    src/Models/Diffusion/HFSDXLTransformerBlockModel.hpp
     src/Models/Diffusion/SD35Model.hpp
     src/Models/Diffusion/PonyXLDDPMModel.hpp
     src/Serialization/Serialization.hpp

@@ -111,6 +111,7 @@ int main() {
             L.kernel_size = 1;
             L.stride = 1;
             L.padding = 0;
+            L.use_bias = false;
             const int k = L.get_kernel_h();
             L.params_count = static_cast<size_t>(L.out_channels) * static_cast<size_t>(L.in_channels)
                 * static_cast<size_t>(k) * static_cast<size_t>(k);

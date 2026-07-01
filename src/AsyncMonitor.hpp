@@ -388,6 +388,12 @@ public:
     std::shared_ptr<Visualizer> getViz() { return viz_; }
     bool isRunning() const { return running_; }
 
+    // Enregistrer un record de validation dans le CSV côté HtopDisplay (thread-safe).
+    void addValidationRecord(float val_loss, float val_mse, int val_step) {
+        if (!htop_) return;
+        htop_->addValidationRecord(val_loss, val_mse, val_step);
+    }
+
     // Définir le chemin du CSV de loss côté Visualizer (thread-safe).
     // Appliqué dans le thread Viz (SFML) au prochain tick.
     void setLossLogFile(const std::string& filepath) {

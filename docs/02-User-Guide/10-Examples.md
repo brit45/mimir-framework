@@ -7,7 +7,7 @@ Cette page sert de “table des matières pratique”: quoi lancer, dans quel or
 ## Exemples (démos courtes)
 
 - `scripts/templates/template_new_model.lua` : modèle minimal “de référence” (create/build/alloc/init + bonnes pratiques mémoire).
-- `scripts/tests/test_list_archi_conf.lua` : lister les archis + configs par défaut.
+- `scripts/tools/inspect_architectures.lua` : lister les archis + configs par défaut.
 - `scripts/tests/test_serialization_smoke.lua` : save/load SafeTensors (smoke).
 - `scripts/tests/test_vae_conv_generate.lua` : génération VAE Conv (smoke).
 

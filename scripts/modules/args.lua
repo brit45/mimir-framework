@@ -124,6 +124,8 @@ end
 local function normalize_key(k)
   k = tostring(k or "")
   k = k:gsub("^%-%-+", "")
+  -- Normalise les underscores en tirets (--csv_path == --csv-path, etc.)
+  k = k:gsub("_", "-")
   return k
 end
 
@@ -355,7 +357,7 @@ function M.opt_num(k, d)
 end
 
 function M.opt_int(k, d)
-  return math.floor(opt_num(k, d))
+  return math.floor(M.opt_num(k, d))
 end
 
 function M.opt_str(k, d)
