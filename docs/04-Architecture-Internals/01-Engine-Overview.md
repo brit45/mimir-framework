@@ -1,5 +1,22 @@
 # Internals - moteur d’exécution
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page décrit le flux d’exécution réel du runtime (côté C++), du point de vue de `Model` : comment les entrées sont injectées, comment les tenseurs sont routés, et comment les layers sont évalués.
 
 Sources principales :

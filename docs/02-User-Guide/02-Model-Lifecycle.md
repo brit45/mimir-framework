@@ -1,5 +1,22 @@
 # Workflow modèle (lifecycle)
 
+## Pour qui
+
+Débutant à intermédiaire.
+
+## Objectif
+
+Suivre le bon ordre d'appels pour éviter les erreurs courantes.
+
+## Avant de commencer
+
+Savoir lancer un script Lua.
+
+## Résultat attendu
+
+Tu peux créer, initialiser, charger et exécuter un modèle sans casse.
+
+
 Cette page explique **l’ordre des appels** et surtout **pourquoi** cet ordre existe.
 
 Si tu suis ce lifecycle, tu évites 90% des “ça crash / ça renvoie vide / ça explose en mémoire”.

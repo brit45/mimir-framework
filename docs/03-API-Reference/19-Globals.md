@@ -1,5 +1,22 @@
 # Globals & aliases
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 Cette page documente ce que le runtime Lua injecte **automatiquement** quand tu lances un script via `./bin/mimir --lua ...`.
 
 Objectif :

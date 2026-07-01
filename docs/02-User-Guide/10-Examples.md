@@ -1,5 +1,22 @@
 # Scripts d’exemples
 
+## Pour qui
+
+Débutant qui veut apprendre par l'exécution.
+
+## Objectif
+
+Choisir le bon script d'exemple selon ton objectif.
+
+## Avant de commencer
+
+Binaire compilé + accès aux scripts.
+
+## Résultat attendu
+
+Tu sais quoi lancer en premier, puis ensuite.
+
+
 Les scripts sont principalement dans `scripts/templates/`, `scripts/tests/` et `scripts/training/`.
 
 Cette page sert de “table des matières pratique”: quoi lancer, dans quel ordre, et avec quels pré-requis.

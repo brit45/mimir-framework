@@ -1,5 +1,22 @@
 # Scripting Lua
 
+## Pour qui
+
+Débutant script et contributeur.
+
+## Objectif
+
+Écrire des scripts Lua robustes et lisibles.
+
+## Avant de commencer
+
+Connaître les bases de Lua (variables, tables, fonctions).
+
+## Résultat attendu
+
+Tu peux créer un script réutilisable sans pièges courants.
+
+
 Ce chapitre explique **comment écrire des scripts Lua “robustes”** pour Mímir : démarrage, arguments, conventions, patterns, et pièges fréquents.
 
 ## 1) Lancer un script (et passer des args)

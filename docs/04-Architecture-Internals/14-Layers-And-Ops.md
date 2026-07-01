@@ -1,5 +1,22 @@
 # Internals : layers, `LayerType`, `LayerOps` et layouts de poids (C++)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page documente l’API interne des layers : la structure `Layer`, le registre de types, les conventions de routing `inputs/output`, et les implémentations de forward/backward.
 
 Source de vérité :

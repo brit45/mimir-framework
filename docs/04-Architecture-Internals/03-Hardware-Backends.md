@@ -1,5 +1,22 @@
 # Backends hardware : CPU / CUDA / ROCm / Vulkan / OpenCL
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Ce document décrit l'architecture interne du système de runtimes de Mímir : comment les layers sont dispatchés vers les différents backends matériels, comment `RuntimeConfig` est configuré, et comment chaque fast-path est implémenté en C++.
 
 > **Public visé :** développeurs qui souhaitent comprendre ou modifier les runtimes. Si vous cherchez simplement à activer l'accélération GPU, lisez [le guide utilisateur GPU](../05-Advanced/05-GPU-Acceleration.md) à la place.

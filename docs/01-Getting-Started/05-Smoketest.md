@@ -1,4 +1,21 @@
 
+
+## Pour qui
+
+Débutant et contributeur.
+
+## Objectif
+
+Vérifier en 5 minutes que l'environnement est sain.
+
+## Avant de commencer
+
+Build effectué au moins une fois.
+
+## Résultat attendu
+
+Tu sais dire rapidement si la machine est prête.
+
 # Smoketest (5 minutes)
 
 Objectif : vérifier rapidement que le build, la CLI et les chemins essentiels (Lua, forward, sérialisation) fonctionnent sur ta machine.

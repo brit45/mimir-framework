@@ -1,5 +1,22 @@
 # Concepts essentiels
 
+## Pour qui
+
+Débutant non ingénieur jusqu'à intermédiaire.
+
+## Objectif
+
+Comprendre le fonctionnement global du framework avec un vocabulaire simple.
+
+## Avant de commencer
+
+Connaître les notions entrée/sortie et configuration.
+
+## Résultat attendu
+
+Tu comprends comment un modèle est créé et exécuté dans Mímir.
+
+
 Cette page donne le “mental model” du framework : si tu comprends ces idées, le reste de l’API devient lisible.
 
 ## 1) Un modèle Mímir = graph de tenseurs nommés

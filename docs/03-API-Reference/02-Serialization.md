@@ -1,5 +1,22 @@
 # Sérialisation (save/load) — résumé
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 Objectif : sauvegarder et restaurer un modèle + son tokenizer/encoder de manière fiable.
 
 Pour la référence complète (formats, options, comportements), voir :

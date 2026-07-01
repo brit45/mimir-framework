@@ -1,5 +1,22 @@
 # API : `Mimir.Architectures`
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 Le registre d’architectures est la manière recommandée de créer des modèles.
 
 Source : `src/Models/Registry/ModelArchitectures.cpp` et bindings `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.

@@ -1,5 +1,22 @@
 # Organisation du dépôt
 
+## Pour qui
+
+Débutant qui découvre le dépôt.
+
+## Objectif
+
+Trouver vite où modifier selon le besoin (scripts, modèle, runtime, docs).
+
+## Avant de commencer
+
+Aucun prérequis technique fort.
+
+## Résultat attendu
+
+Tu navigues le projet sans te perdre.
+
+
 Repères utiles pour naviguer vite.
 
 ## Répertoires

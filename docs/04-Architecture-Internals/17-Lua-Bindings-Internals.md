@@ -1,5 +1,22 @@
 # Internals : bindings Lua (`LuaScripting` / `LuaContext`)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page explique comment l’API Lua est exposée et comment elle appelle le runtime C++.
 
 Source de vérité :

@@ -1,5 +1,22 @@
 # Contribuer
 
+## Pour qui
+
+Contributeur du projet.
+
+## Objectif
+
+Contribuer avec des changements cohérents et maintenables.
+
+## Avant de commencer
+
+Connaître le workflow Git et les bases du projet.
+
+## Résultat attendu
+
+Tu sais proposer des changements alignés avec les conventions du framework.
+
+
 Compléments développeurs :
 
 - Nouveau point d'entrée dev (canonique) : [docs/07-Devs/00-INDEX.md](../07-Devs/00-INDEX.md)

@@ -1,5 +1,22 @@
 # Inférence
 
+## Pour qui
+
+Débutant à intermédiaire.
+
+## Objectif
+
+Exécuter une inférence propre depuis un modèle créé ou chargé.
+
+## Avant de commencer
+
+Avoir un checkpoint ou une config d'architecture.
+
+## Résultat attendu
+
+Tu obtiens une sortie de modèle reproductible.
+
+
 Cette page se concentre sur l’inférence **via l’API Lua**.
 
 Voir aussi:

@@ -1,5 +1,22 @@
 # Internals : sérialisation (SafeTensors / RawFolder / DebugJson)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page documente l’implémentation de la sérialisation côté C++ (save/load), et comment elle s’interface avec le runtime `Model`.
 
 Source de vérité :

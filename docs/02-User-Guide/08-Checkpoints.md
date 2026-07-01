@@ -1,5 +1,22 @@
 # Checkpoints / reprise d’entraînement
 
+## Pour qui
+
+Débutant à intermédiaire.
+
+## Objectif
+
+Sauvegarder, charger et reprendre sans perdre d'état utile.
+
+## Avant de commencer
+
+Avoir un modèle en mémoire (créé ou entraîné).
+
+## Résultat attendu
+
+Tu peux reprendre un run de manière fiable.
+
+
 ## Deux APIs existent
 
 - `Mimir.Serialization.*` : API “moderne” (recommandée)

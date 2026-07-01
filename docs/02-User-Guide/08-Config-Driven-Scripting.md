@@ -1,5 +1,22 @@
 # Mode `--conf`: Config-Driven Scripting
 
+## Pour qui
+
+Débutant à intermédiaire (ops/automation).
+
+## Objectif
+
+Piloter des expériences via JSON avec --conf.
+
+## Avant de commencer
+
+Savoir éditer un fichier JSON.
+
+## Résultat attendu
+
+Tu peux rejouer une expérience avec les mêmes paramètres.
+
+
 Le mode `--conf` permet de charger une configuration JSON et d'exécuter automatiquement des scripts Lua avec cette config injectée. C'est idéal pour **automatiser des workflows complexes**, **paramétrer des expériences** et **reproduire des résultats**.
 
 ---

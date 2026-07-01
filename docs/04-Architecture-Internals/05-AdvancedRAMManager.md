@@ -1,5 +1,22 @@
 # Internals: AdvancedRAMManager (cache RAM / compression / spill disque)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page documente `AdvancedRAMManager` et comment il se positionne par rapport aux autres mécanismes mémoire (`MemoryGuard`, `DynamicTensorAllocator`).
 
 ## Source de vérité (C++)

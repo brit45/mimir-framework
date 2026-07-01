@@ -1,5 +1,22 @@
 # 🚀 GET STARTED — Démarrage rapide Mímir
 
+## Pour qui
+
+Débutant complet (aucune expérience framework requise).
+
+## Objectif
+
+Compiler Mímir et exécuter un premier test fonctionnel en quelques minutes.
+
+## Avant de commencer
+
+Avoir un terminal Linux et les droits pour compiler le projet.
+
+## Résultat attendu
+
+Tu obtiens un binaire exécutable et un smoketest qui passe.
+
+
 Cette page te montre comment **compiler**, **tester** et **utiliser** Mímir en 10 minutes.
 
 ---

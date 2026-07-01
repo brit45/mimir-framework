@@ -1,5 +1,22 @@
 # Tutoriel : Transformer causal (GPT-style)
 
+## Pour qui
+
+Intermédiaire guidé.
+
+## Objectif
+
+Monter un workflow GPT-style reproductible.
+
+## Avant de commencer
+
+Tokenizer et config Transformer prêts.
+
+## Résultat attendu
+
+Tu peux entraîner un transformer causal et lancer une génération contrôlée.
+
+
 Mímir expose une architecture `transformer` configurable, incluant un mode `causal=true`.
 
 Voir aussi:

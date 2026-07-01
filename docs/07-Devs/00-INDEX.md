@@ -1,5 +1,22 @@
 # Devs - Index
 
+## Pour qui
+
+Développeur framework (C/C++/runtime/scripting).
+
+## Objectif
+
+Implémenter ou modifier des briques techniques sans casser le contrat global.
+
+## Avant de commencer
+
+Comprendre le registre d'architectures et les conventions I/O.
+
+## Résultat attendu
+
+Tu peux livrer des évolutions compatibles avec la base existante.
+
+
 Cette section est le point d'entree principal pour les developpeurs du framework.
 
 Objectif : expliquer comment le framework fonctionne de l'interieur et comment ajouter/modifier des briques sans casser la coherence globale.
@@ -18,7 +35,7 @@ Chaque chapitre contient des demos orientees contraintes metier : reproductibili
 ## Chapitres
 
 - Fonctionnement du framework : [docs/07-Devs/01-How-The-Framework-Works.md](01-How-The-Framework-Works.md)
-- Construire un modele (model.push + set_layer_io) : [docs/07-Devs/02-Building-Models-And-Layers.md](02-Building-Models-And-Layers.md)
+- Construire un modele (model.push + wiring C/C++) : [docs/07-Devs/02-Building-Models-And-Layers.md](02-Building-Models-And-Layers.md)
 - Config et registre : [docs/07-Devs/03-Config-And-Registry.md](03-Config-And-Registry.md)
 - Runtime (modifier / ajouter) : [docs/07-Devs/04-Runtime-Development.md](04-Runtime-Development.md)
 - Contrat API scripting : [docs/07-Devs/05-Scripting-System-Contract.md](05-Scripting-System-Contract.md)

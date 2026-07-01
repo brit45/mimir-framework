@@ -1,5 +1,22 @@
 # Développeurs : Ajouter une Architecture et Utiliser les Outils
 
+## Pour qui
+
+Contributeur du projet.
+
+## Objectif
+
+Contribuer avec des changements cohérents et maintenables.
+
+## Avant de commencer
+
+Connaître le workflow Git et les bases du projet.
+
+## Résultat attendu
+
+Tu sais proposer des changements alignés avec les conventions du framework.
+
+
 Cette page explique, de manière opérationnelle, comment :
 
 - ajouter une nouvelle architecture de modèle dans le framework,

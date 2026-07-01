@@ -1,5 +1,22 @@
 # Chapitre développeur complet : Étendre le framework
 
+## Pour qui
+
+Contributeur du projet.
+
+## Objectif
+
+Contribuer avec des changements cohérents et maintenables.
+
+## Avant de commencer
+
+Connaître le workflow Git et les bases du projet.
+
+## Résultat attendu
+
+Tu sais proposer des changements alignés avec les conventions du framework.
+
+
 Ce chapitre est le guide de référence pour ajouter des capacités au framework côté code source.
 
 Objectifs :

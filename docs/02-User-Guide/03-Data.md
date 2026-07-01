@@ -1,5 +1,22 @@
 # Données / datasets
 
+## Pour qui
+
+Débutant à intermédiaire.
+
+## Objectif
+
+Préparer un dataset compatible et comprendre comment il est lu.
+
+## Avant de commencer
+
+Avoir un dossier de données local.
+
+## Résultat attendu
+
+Tu sais structurer tes fichiers pour un chargement correct.
+
+
 Cette page décrit le comportement **réel** du loader de dataset actuellement exposé à Lua via `Mimir.Dataset`, et ses limitations.
 
 Sources principales :

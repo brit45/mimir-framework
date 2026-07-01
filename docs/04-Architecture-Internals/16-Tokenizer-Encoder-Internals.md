@@ -1,5 +1,22 @@
 # Internals : Tokenizer / ConditioningEncoder (C++)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page documente les composants NLP côté C++ : le `Tokenizer`, le `ConditioningEncoder`, et comment ils s’intègrent au `Model` (conventions `mag/mod`, ids int vs floats).
 
 Source de vérité :

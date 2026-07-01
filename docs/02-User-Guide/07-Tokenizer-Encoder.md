@@ -1,5 +1,22 @@
 # Tokenizer & ConditioningEncoder
 
+## Pour qui
+
+Débutant NLP à intermédiaire.
+
+## Objectif
+
+Comprendre le rôle du tokenizer et de l'encoder dans les workflows texte.
+
+## Avant de commencer
+
+Savoir ce qu'est un vocabulaire de tokens.
+
+## Résultat attendu
+
+Tu sais quand figer ou composer le tokenizer.
+
+
 ## Objectif
 
 - `Tokenizer` : texte ↔ ids.

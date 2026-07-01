@@ -1,5 +1,22 @@
 # Tutoriel : diffusion (PonyXL / SD3.5 / autoencoder)
 
+## Pour qui
+
+Intermédiaire guidé.
+
+## Objectif
+
+Comprendre et exécuter les chemins diffusion disponibles.
+
+## Avant de commencer
+
+Checkpoints/config adaptés au modèle choisi.
+
+## Résultat attendu
+
+Tu sais lancer un pipeline diffusion sans ambiguïté de setup.
+
+
 Ce dépôt contient des architectures diffusion/autoencoder exposées via le registre.
 
 Voir aussi:

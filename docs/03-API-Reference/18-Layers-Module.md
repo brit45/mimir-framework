@@ -1,5 +1,22 @@
 # API : `Mimir.Layers` (ops)
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 `Mimir.Layers` expose des opérations “standalone” (hors graphe) pour des tests rapides.
 
 Statut (important) : dans la version actuelle, **toutes ces fonctions sont des stubs** côté C++ et renvoient :

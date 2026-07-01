@@ -1,5 +1,22 @@
 # 🔧 Installation & Compilation détaillée
 
+## Pour qui
+
+Débutant qui veut une installation stable et reproductible.
+
+## Objectif
+
+Installer les dépendances et compiler selon ton environnement.
+
+## Avant de commencer
+
+Accès internet + installation de paquets système.
+
+## Résultat attendu
+
+Tu sais quoi installer, quoi activer, et comment diagnostiquer un build.
+
+
 Pour compiler Mímir, il faut CMake, C++17 et quelques dépendances. Cette page couvre tout ce qu'il faut savoir.
 
 ---

@@ -1,5 +1,22 @@
 # API : `Mimir.Tokenizer`
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 Source : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 ## Création

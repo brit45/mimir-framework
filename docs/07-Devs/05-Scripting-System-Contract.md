@@ -1,5 +1,22 @@
 # Contrat API Scripting Inter-Langages
 
+## Pour qui
+
+Développeur framework (C/C++/runtime/scripting).
+
+## Objectif
+
+Implémenter ou modifier des briques techniques sans casser le contrat global.
+
+## Avant de commencer
+
+Comprendre le registre d'architectures et les conventions I/O.
+
+## Résultat attendu
+
+Tu peux livrer des évolutions compatibles avec la base existante.
+
+
 Ce chapitre formalise le contrat API systeme que tous les bridges de scripting doivent respecter.
 
 ## 1. Pourquoi un contrat commun

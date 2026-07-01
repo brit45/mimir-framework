@@ -1,5 +1,22 @@
 # Layers
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 Le runtime exécute une liste de layers. Chaque layer lit des tenseurs nommés et produit un tenseur de sortie.
 
 Cette page parle des **layers du graphe du modèle** (ceux qui vivent dans `Model` et sont exécutés par `model.forward()` / `Mimir.Model.forward()`).

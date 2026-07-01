@@ -1,5 +1,22 @@
 # Accélération GPU
 
+## Pour qui
+
+Utilisateur intermédiaire à avancé.
+
+## Objectif
+
+Optimiser, diagnostiquer et stabiliser des runs complexes.
+
+## Avant de commencer
+
+Avoir déjà exécuté au moins un pipeline complet.
+
+## Résultat attendu
+
+Tu peux investiguer les problèmes de perf et de stabilité.
+
+
 Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles — PonyXL, VAEConv 512 px, Transformers profonds — le CPU devient rapidement le goulot d'étranglement.
 
 Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécution spécialisés qui délèguent les opérations lourdes (multiplications matricielles, convolutions, attention) à cuBLAS (NVIDIA) ou rocBLAS (AMD). Le reste des layers continue de s'exécuter sur CPU, sans aucun changement dans vos scripts Lua.

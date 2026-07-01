@@ -1,5 +1,22 @@
 # Internals : `Helpers.hpp` (helpers C++)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page documente le contenu de `src/Helpers.hpp`.
 
 Objectif: donner une carte précise des helpers “transverses” (IO, hashing, dataset, image utils) et de leurs propriétés (déterminisme, perfs, limites).

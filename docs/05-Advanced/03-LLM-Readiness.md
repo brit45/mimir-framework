@@ -1,5 +1,22 @@
 # LLM readiness (état réel)
 
+## Pour qui
+
+Utilisateur intermédiaire à avancé.
+
+## Objectif
+
+Optimiser, diagnostiquer et stabiliser des runs complexes.
+
+## Avant de commencer
+
+Avoir déjà exécuté au moins un pipeline complet.
+
+## Résultat attendu
+
+Tu peux investiguer les problèmes de perf et de stabilité.
+
+
 Cette page décrit ce qui est **effectivement** en place dans le codebase pour un LLM, et ce qui manque pour une génération utile au quotidien.
 
 Point d’entrée conseillé : [04-Source-Code-Map.md](04-Source-Code-Map.md).

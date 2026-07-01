@@ -1,5 +1,22 @@
 # Performance (CPU)
 
+## Pour qui
+
+Utilisateur intermédiaire à avancé.
+
+## Objectif
+
+Optimiser, diagnostiquer et stabiliser des runs complexes.
+
+## Avant de commencer
+
+Avoir déjà exécuté au moins un pipeline complet.
+
+## Résultat attendu
+
+Tu peux investiguer les problèmes de perf et de stabilité.
+
+
 Cette page liste les leviers **réels** (implémentés) pour améliorer les perfs, et où les retrouver côté C/C++.
 
 Point d’entrée conseillé : [04-Source-Code-Map.md](04-Source-Code-Map.md).

@@ -1,5 +1,22 @@
 # Quick start
 
+## Pour qui
+
+Débutant à intermédiaire.
+
+## Objectif
+
+Valider rapidement le chemin minimal: build, script Lua, création de modèle.
+
+## Avant de commencer
+
+Le dépôt est cloné localement.
+
+## Résultat attendu
+
+Tu confirmes que CLI, Lua et registre fonctionnent ensemble.
+
+
 Objectif : exécuter un script Lua, créer un modèle via le registre, initialiser les poids, faire un forward.
 
 Si tu ne sais pas par où commencer, suis cette page de haut en bas sans improviser. Elle couvre le plus petit chemin utile pour vérifier que le runtime, l’API Lua et le registre d’architectures fonctionnent ensemble.

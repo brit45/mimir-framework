@@ -1,5 +1,22 @@
 # API : `Mimir.Model`
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 `Mimir.Model` est le point d'entrée principal du framework. Il regroupe toutes les opérations sur le modèle courant : création, construction du graphe de layers, allocation des poids, exécution du forward/backward, et entraînement haut-niveau.
 
 > **Note :** Mímir ne gère qu'un seul modèle actif à la fois par contexte. Toutes les fonctions de ce module opèrent sur ce modèle global.

@@ -1,5 +1,22 @@
 # Tutoriel pas-à-pas : Ajouter une entrée scripting Python
 
+## Pour qui
+
+Contributeur du projet.
+
+## Objectif
+
+Contribuer avec des changements cohérents et maintenables.
+
+## Avant de commencer
+
+Connaître le workflow Git et les bases du projet.
+
+## Résultat attendu
+
+Tu sais proposer des changements alignés avec les conventions du framework.
+
+
 Ce guide montre comment ajouter une entrée Python minimale en reprenant le design de l'intégration Lua.
 
 But :

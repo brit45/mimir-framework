@@ -1,5 +1,22 @@
 # Mémoire (Allocator, MemoryGuard)
 
+## Pour qui
+
+Débutant à intermédiaire.
+
+## Objectif
+
+Éviter les OOM avec une configuration mémoire simple et sûre.
+
+## Avant de commencer
+
+Connaître la RAM disponible sur ta machine.
+
+## Résultat attendu
+
+Tu peux stabiliser les runs longs sans crash mémoire.
+
+
 Mímir est “CPU-first” et peut allouer de gros buffers. La pratique recommandée est d’activer :
 
 1) une limite stricte (MemoryGuard)

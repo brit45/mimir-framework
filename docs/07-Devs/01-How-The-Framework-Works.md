@@ -1,5 +1,22 @@
 # Comment Fonctionne Le Framework
 
+## Pour qui
+
+Développeur framework (C/C++/runtime/scripting).
+
+## Objectif
+
+Implémenter ou modifier des briques techniques sans casser le contrat global.
+
+## Avant de commencer
+
+Comprendre le registre d'architectures et les conventions I/O.
+
+## Résultat attendu
+
+Tu peux livrer des évolutions compatibles avec la base existante.
+
+
 Ce chapitre decrit la boucle centrale du framework, du point de vue developpeur.
 
 ## 1. Vue d'ensemble

@@ -1,5 +1,22 @@
 # CLI (binaire `mimir`)
 
+## Pour qui
+
+Débutant à intermédiaire.
+
+## Objectif
+
+Comprendre les modes --lua et --conf sans ambiguïté.
+
+## Avant de commencer
+
+Binaire mimir compilé.
+
+## Résultat attendu
+
+Tu sais lancer un script, une config, et passer des overrides.
+
+
 Le binaire principal est `bin/mimir`.
 
 ## Usage

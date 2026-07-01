@@ -1,5 +1,22 @@
 # Entraînement
 
+## Pour qui
+
+Intermédiaire (mais guidé pas à pas).
+
+## Objectif
+
+Lancer un entraînement fiable avec checkpoints et mémoire maîtrisée.
+
+## Avant de commencer
+
+Comprendre la différence entre entraînement from scratch et reprise.
+
+## Résultat attendu
+
+Tu peux exécuter un run d'entraînement complet et le reprendre.
+
+
 Ce guide couvre le workflow complet pour entraîner un modèle Mímir : de la configuration mémoire jusqu'au checkpoint final. Il présente les deux styles disponibles — **haut-niveau** (recommandé pour la plupart des cas) et **boucle manuelle** (pour les entraînements personnalisés).
 
 > **Conseil :** si vous démarrez un nouvel entraînement, commencez par copier le script le plus proche de votre cas dans `scripts/training/` et adaptez les paramètres. C'est la façon la plus fiable de ne pas manquer une étape subtile.

@@ -1,5 +1,22 @@
 # Construire Un Modele Et Ses Layers
 
+## Pour qui
+
+Développeur framework (C/C++/runtime/scripting).
+
+## Objectif
+
+Implémenter ou modifier des briques techniques sans casser le contrat global.
+
+## Avant de commencer
+
+Comprendre le registre d'architectures et les conventions I/O.
+
+## Résultat attendu
+
+Tu peux livrer des évolutions compatibles avec la base existante.
+
+
 Ce chapitre explique concretement comment assembler un modele, dont `model.push(...)`, le parametrage des layers, et les routes I/O.
 
 ## 1. API de base cote C++
@@ -52,27 +69,47 @@ Conseil :
 - documenter les defaults dans la config d'architecture,
 - eviter les dependances implicites entre layers distants.
 
-## 4. Renseigner les I/O nommees
+## 4. Regle source de verite: modele declare en C/C++
 
-Cote Lua, le bridge expose :
+Dans ce framework, la declaration de topologie et le parametrage des layers se font cote C/C++ (classes de modeles + registre), pas cote Lua.
 
-- `Mimir.Model.push_layer(name, type, params_count)`
-- `Mimir.Model.set_layer_io(layer_name, inputs_table, output_name)`
+Flux normal :
 
-Exemple :
+1. Le registre cree le modele (`ModelArchitectures::create(...)`).
+2. La classe C++ (ex: `VAEConvModel::buildInto`) pousse les layers (`model.push(...)`).
+3. La classe C++ renseigne les I/O (`Layer.inputs`, `Layer.output`) et metadonnees (channels, kernel, stride, etc.).
+
+Exemple reel a lire: `src/Models/Vision/VAEConvModel.cpp`.
+
+## 5. Cote Lua: creation/chargement, pas definition principale du graphe
+
+Cote script, le chemin standard est :
 
 ```lua
-Mimir.Model.push_layer("block/add", "Add", 0)
-Mimir.Model.set_layer_io("block/add", {"skip", "main"}, "block/out")
+local cfg = Mimir.Architectures.default_config("vae_conv")
+cfg.image_w = 512
+cfg.image_h = 512
+cfg.base_channels = 16
+
+local ok, err = Mimir.Model.create("vae_conv", cfg)
+if not ok then error(err) end
 ```
 
-Utilisation :
+Note : `Mimir.Model.build()` est conserve pour compatibilite, mais en mode moderne la construction est deja faite par `Model.create(...)` via le registre.
 
-- `inputs_table` definit les dependances entrantes d'un layer,
-- `output_name` definit la sortie nommee produite,
-- pour les graphes simples, garder une convention de noms lisible (`enc/...`, `dec/...`, `x`, `text_ids`).
+## 6. API legacy a ne plus utiliser: set_layer_io
 
-## 5. Erreurs frequentes
+`Mimir.Model.set_layer_io(...)` est deprecie/obsolete et ne doit plus etre utilise dans les nouveaux scripts ni dans la documentation d'usage.
+
+Regle projet :
+
+- declaration des layers: C/C++,
+- wiring I/O (`Layer.inputs`, `Layer.output`): C/C++,
+- scripts Lua: creation via registre + execution/inspection uniquement.
+
+Pour une architecture produit (ex: `vae_conv`, `ponyxl_ddpm`, `hf_vae_decoder`), modifier la topologie dans les fichiers C/C++ du modele et son enregistrement registre.
+
+## 7. Erreurs frequentes
 
 1. Type de layer invalide dans `push`.
 2. `params_count` incoherent avec la structure reelle du layer.
@@ -80,7 +117,7 @@ Utilisation :
 4. Sortie ecrasee accidentellement (meme nom `output` sur plusieurs branches).
 5. Dimensions incompatibles entre layers relies.
 
-## 6. Checklist avant commit
+## 8. Checklist avant commit
 
 - topologie lisible (`name` explicites),
 - I/O explicites pour les layers multi-entrees,
@@ -88,31 +125,7 @@ Utilisation :
 - allocate/init/forward passent,
 - test smoke ajoute (script court).
 
-## 7. Demo complete - mini bloc avec branche skip
-
-Objectif : montrer un cas reel de `model.push(...)` + `set_layer_io` avec une somme de branche.
-
-```lua
--- 1) Layers
-Mimir.Model.push_layer("blk/conv_main", "Conv2d", 64 * 64 * 3 * 3)
-Mimir.Model.push_layer("blk/act_main", "SiLU", 0)
-Mimir.Model.push_layer("blk/conv_skip", "Conv2d", 64 * 64 * 1 * 1)
-Mimir.Model.push_layer("blk/add", "Add", 0)
-
--- 2) Routage explicite
-Mimir.Model.set_layer_io("blk/conv_main", {"x"}, "blk/main0")
-Mimir.Model.set_layer_io("blk/act_main", {"blk/main0"}, "blk/main1")
-Mimir.Model.set_layer_io("blk/conv_skip", {"x"}, "blk/skip")
-Mimir.Model.set_layer_io("blk/add", {"blk/main1", "blk/skip"}, "blk/out")
-```
-
-Ce que cette demo clarifie :
-
-1. Les layers sont decrits separement du routage.
-2. Le graphe est lisible uniquement par les noms d'IO.
-3. `Add` consomme 2 flux explicites, sans ambiguite.
-
-## 8. Demo complete - meme intention cote C++
+## 9. Demo correcte - meme intention cote C++ (source de verite)
 
 ```cpp
 model.push("blk/conv_main", "Conv2d", 64 * 64 * 3 * 3);
@@ -121,9 +134,51 @@ model.push("blk/conv_skip", "Conv2d", 64 * 64 * 1 * 1);
 model.push("blk/add", "Add", 0);
 ```
 
-Puis, via API d'IO du modele, associer les entrees/sorties nommees de la meme facon qu'en Lua.
+Puis associer les I/O directement en C++ (exemple style `VAEConvModel.cpp`) :
 
-## 9. Criteres metier de validation
+```cpp
+if (auto* l = model.getLayerByName("blk/conv_main")) {
+	l->inputs = {"__input__"};
+	l->output = "blk/main0";
+	l->in_channels = 64;
+	l->out_channels = 64;
+	l->kernel_size = 3;
+	l->stride = 1;
+	l->padding = 1;
+}
+if (auto* l = model.getLayerByName("blk/act_main")) {
+	l->inputs = {"blk/main0"};
+	l->output = "blk/main1";
+}
+if (auto* l = model.getLayerByName("blk/conv_skip")) {
+	l->inputs = {"__input__"};
+	l->output = "blk/skip";
+	l->in_channels = 64;
+	l->out_channels = 64;
+	l->kernel_size = 1;
+	l->stride = 1;
+	l->padding = 0;
+}
+if (auto* l = model.getLayerByName("blk/add")) {
+	l->inputs = {"blk/main1", "blk/skip"};
+	l->output = "x";
+}
+```
+
+## 10. Demo script correcte (registre -> create)
+
+```lua
+local cfg = Mimir.Architectures.default_config("vae_conv")
+cfg.image_w = 512
+cfg.image_h = 512
+cfg.base_channels = 16
+
+assert(Mimir.Model.create("vae_conv", cfg))
+```
+
+Ce qui est important : la topologie vient de C/C++ (classe modele), le script fournit la config et declenche la creation.
+
+## 11. Criteres metier de validation
 
 Definition de done pour ce type d'assemblage :
 
@@ -132,7 +187,7 @@ Definition de done pour ce type d'assemblage :
 3. Les outils d'inspection affichent le graphe attendu.
 4. Le bloc accepte une batch de smoke test sans NaN/shape mismatch.
 
-## 10. Demos existantes a relire
+## 12. Demos existantes a relire
 
 - `scripts/templates/template_new_model.lua`
 - `scripts/tests/test_vae_conv_resnet_smoke.lua`

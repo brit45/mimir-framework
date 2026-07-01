@@ -1,4 +1,21 @@
 ```markdown
+
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
 # Internals : CLI (binaire `mimir`) et points d’entrée
 
 Cette page documente le binaire CLI : parsing des arguments, chemins d’exécution, et conventions.

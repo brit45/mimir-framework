@@ -1,5 +1,22 @@
 # Internals : stockage `tensor` + allocation dynamique (C++)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page documente la structure `tensor` (C++) utilisée comme **bloc de stockage** pour certains buffers (notamment `Layer::weight_block`) et le sous-système d’allocation dynamique qui l’entoure.
 
 Source de vérité :

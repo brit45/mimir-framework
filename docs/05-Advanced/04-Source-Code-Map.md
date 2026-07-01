@@ -1,5 +1,22 @@
 # Advanced — Carte du code source (C/C++)
 
+## Pour qui
+
+Utilisateur intermédiaire à avancé.
+
+## Objectif
+
+Optimiser, diagnostiquer et stabiliser des runs complexes.
+
+## Avant de commencer
+
+Avoir déjà exécuté au moins un pipeline complet.
+
+## Résultat attendu
+
+Tu peux investiguer les problèmes de perf et de stabilité.
+
+
 Cette page sert de « table des matières technique » : comment le framework est structuré côté C/C++, fichier par fichier.
 
 Pages Advanced associées (explications orientées usage) :

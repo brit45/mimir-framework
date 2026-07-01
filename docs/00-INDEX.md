@@ -5,6 +5,8 @@ Révision documentation : **2026-07-01**
 
 Cette documentation remplace l’ancienne doc (archivée dans [docs_archive/2026-02-14/](../docs_archive/2026-02-14/)).
 
+Guide de style documentation : [docs/00-STYLE.md](00-STYLE.md)
+
 ---
 
 ## 🚀 NOUVEAU — Démarrage rapide (5-10 min)
@@ -212,7 +214,7 @@ Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent
 
 - Index développeur : [docs/07-Devs/00-INDEX.md](07-Devs/00-INDEX.md)
 - Fonctionnement du framework : [docs/07-Devs/01-How-The-Framework-Works.md](07-Devs/01-How-The-Framework-Works.md)
-- Construire un modèle (model.push + set_layer_io) : [docs/07-Devs/02-Building-Models-And-Layers.md](07-Devs/02-Building-Models-And-Layers.md)
+- Construire un modèle (model.push + wiring C/C++) : [docs/07-Devs/02-Building-Models-And-Layers.md](07-Devs/02-Building-Models-And-Layers.md)
 - Config + registre d'architectures : [docs/07-Devs/03-Config-And-Registry.md](07-Devs/03-Config-And-Registry.md)
 - Modifier / ajouter un runtime : [docs/07-Devs/04-Runtime-Development.md](07-Devs/04-Runtime-Development.md)
 - Contrat API scripting inter-langages : [docs/07-Devs/05-Scripting-System-Contract.md](07-Devs/05-Scripting-System-Contract.md)

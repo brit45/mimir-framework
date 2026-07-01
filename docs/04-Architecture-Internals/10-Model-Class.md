@@ -1,5 +1,22 @@
 # Internals : classe `Model` (C++)
 
+## Pour qui
+
+Développeur avancé qui modifie le moteur C/C++.
+
+## Objectif
+
+Comprendre le fonctionnement interne exact des composants runtime.
+
+## Avant de commencer
+
+Connaître les bases C++ et la structure du dépôt.
+
+## Résultat attendu
+
+Tu peux modifier le code interne en limitant les régressions.
+
+
 Cette page documente la classe C++ `Model` : ce qu’elle stocke, quelles méthodes font quoi, et comment ça correspond à l’API Lua.
 
 Source de vérité :

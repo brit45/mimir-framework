@@ -1,5 +1,22 @@
 # Tutoriel : VAEText
 
+## Pour qui
+
+Intermédiaire guidé.
+
+## Objectif
+
+Entraîner et évaluer VAEText avec les bonnes options.
+
+## Avant de commencer
+
+Dataset texte disponible.
+
+## Résultat attendu
+
+Tu peux produire un checkpoint VAEText exploitable.
+
+
 VAEText est un VAE “texte” qui reconstruit des tokens via logits, entraîné avec reconstruction (Cross-Entropy) + KL.
 
 ## Entraîner

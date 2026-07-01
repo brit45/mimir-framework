@@ -1,5 +1,22 @@
 # Mapping API Lua → C/C++ (bindings) → sous-systèmes
 
+## Pour qui
+
+Développeur et utilisateur intermédiaire/avancé.
+
+## Objectif
+
+Trouver rapidement le contrat API réel et les paramètres utilisables.
+
+## Avant de commencer
+
+Connaître les commandes de base de Mímir.
+
+## Résultat attendu
+
+Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+
+
 Cette page est un **sommaire** “appel Lua ↔ binding C++ ↔ à quoi ça fait référence”.
 
 - Source de vérité : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (fonction `LuaScripting::registerAPI()`).
@@ -71,7 +88,7 @@ end
 |`Mimir.Model.init_weights(method="he", seed=0)`|Initialise les poids (He/Xavier/…)|`LuaScripting::lua_initWeights`|`Model::initializeWeights`||
 |`Mimir.Model.total_params()`|Donne le nombre de paramètres|`LuaScripting::lua_totalParams`|`Model::totalParamCount`||
 |`Mimir.Model.push_layer(name, type, params_count)`|Ajoute un layer au graph (API bas niveau)|`LuaScripting::lua_pushLayer`|`Model::push`|Utilisé pour construire manuellement.|
-|`Mimir.Model.set_layer_io(layer, inputs, output?)`|Fixe les entrées (noms) et l’output (nom) d’un layer|`LuaScripting::lua_setLayerIO`|`Model::getLayerByName`, `Layer::inputs/output`||
+|`Mimir.Model.set_layer_io(layer, inputs, output?)`|Fixe les entrées (noms) et l’output (nom) d’un layer|`LuaScripting::lua_setLayerIO`|`Model::getLayerByName`, `Layer::inputs/output`|**Déprécié / obsolète** : ne plus utiliser dans les nouveaux scripts.|
 |`Mimir.Model.forward(input, training=true)`|Forward pass; accepte liste int/float ou map `{name->table}`|`LuaScripting::lua_forwardPass`|`Model::forwardPass` / `Model::forwardPassNamed`, viz taps (`Model::*VizTaps*`), `Visualizer::BlockFrame`|Retourne `table` ou `(nil, err)`.|
 |`Mimir.Model.forward_prompt_image_seed(text_vec, image_vec, seed, training=false)`|Forward spécialisé (texte encodé + image + seed)|`LuaScripting::lua_forwardPromptImageSeed`|`Model::forwardPromptImageSeed`, viz taps|Utile diffusion/t2i.|
 |`Mimir.Model.encode_prompt(prompt)` / `encodePrompt`|Prompt texte → vecteur embedding (via tokenizer+encoder)|`LuaScripting::lua_encodePrompt`|`Tokenizer`, `ConditioningEncoder`, config modèle (ex: `PonyXLDDPMModel::getConfig`)|Respecte `tokenizer_frozen` si présent.|
