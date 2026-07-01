@@ -1235,16 +1235,6 @@ void PonyXLDDPMModel::buildFromConfig(const Config& cfg) {
         (void)getMutableTokenizer().addToken("<GCTX" + std::to_string(i) + ">");
     }
 
-    // IMPORTANT: aligner la capacité du tokenizer sur la taille de l'embedding texte.
-    // Sinon, tokenizeEnsure() peut produire des IDs >= max_vocab, et on perd la correspondance.
-    getMutableTokenizer().setMaxVocab(static_cast<size_t>(std::max(1, cfg_.max_vocab)));
-
-    // Réserver les tokens de contexte global (appris) tôt, pour stabiliser leurs IDs.
-    const int gct = std::max(0, cfg_.global_ctx_tokens);
-    for (int i = 0; i < gct; ++i) {
-        (void)getMutableTokenizer().addToken("<GCTX" + std::to_string(i) + ">");
-    }
-
     buildInto(*this, cfg_);
 }
 
