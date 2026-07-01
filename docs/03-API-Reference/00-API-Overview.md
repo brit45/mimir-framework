@@ -21,6 +21,8 @@ La source de vérité de l’API exposée est `src/scriptings/Lua/luaScripting/L
 
 Le contrat système commun (noms globaux + aliases, partagé entre langages de scripting) est défini dans `src/scriptings/ScriptingContext.hpp`.
 
+La specification officielle du contrat de scripting est ici: [docs/03-API-Reference/00-Scripting-Contract.md](00-Scripting-Contract.md).
+
 ## Modules principaux
 
 - `Mimir.Model` : create/build/allocate/init/forward/backward + helpers d'entraînement + `dtype` + `create_from_config`

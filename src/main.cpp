@@ -1,6 +1,9 @@
 #include "Model.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "scriptings/Lua/luaScripting/LuaScripting.hpp"
+#include "scriptings/Rust/rustScripting/RustScripting.hpp"
+#include "scriptings/CSharp/csharpScripting/CSharpScripting.hpp"
+#include "scriptings/JavaScript/jsScripting/JSScripting.hpp"
 #include "AsyncMonitor.hpp"
 #include "Helpers.hpp"
 #include "HtopDisplay.hpp"
@@ -153,12 +156,18 @@ void printUsage(const char *prog)
     std::cout << "Usage: " << prog << " [OPTIONS]\n";
     std::cout << "\nOptions:\n";
     std::cout << "  --lua <script.lua>       Exécuter un script Lua\n";
+    std::cout << "  --js <script.js>         Exécuter un script JavaScript (Node.js)\n";
+    std::cout << "  --csharp <script.csx>    Exécuter un script C# (dotnet-script/csi)\n";
+    std::cout << "  --rust <script.rs>       Exécuter un script Rust (rust-script)\n";
     std::cout << "  --config <config.json>   Charger et entraîner depuis config\n";
     std::cout << "  --conf <config.json>     Charger une conf et exécuter lua.scripts\n";
     std::cout << "  --override <path=value>  Override (répétable) appliqué à la config du modèle\n";
     std::cout << "  --help                   Afficher cette aide\n";
     std::cout << "\nExamples:\n";
     std::cout << "  " << prog << " --lua scripts/test_lua_api.lua\n";
+    std::cout << "  " << prog << " --js scripts/examples/example.js\n";
+    std::cout << "  " << prog << " --csharp scripts/examples/example.csx\n";
+    std::cout << "  " << prog << " --rust scripts/examples/example.rs\n";
     std::cout << "  " << prog << " --config config.json\n";
     std::cout << "  " << prog << " --conf config.json\n";
     std::cout << "  " << prog << " --config config.json --override max_vocab=64000\n";
@@ -215,55 +224,87 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    // Mode --lua: on passe tous les args après le script à Lua (ne pas valider ici).
+    // Modes scripting directs: on passe tous les args après le script au runtime.
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--help") {
             printUsage(argv[0]);
             return 0;
         }
-        if (std::string(argv[i]) == "--lua" && i + 1 < argc) {
-            const std::string lua_script = argv[++i];
-            std::cerr << "📜 Exécution du script Lua: " << lua_script << "\n";
+        const std::string opt = argv[i];
+        if ((opt == "--lua" || opt == "--js" || opt == "--csharp" || opt == "--rust") && i + 1 < argc) {
+            const std::string script_path = argv[++i];
+            const std::string lang =
+                (opt == "--lua") ? "Lua" :
+                (opt == "--js") ? "JavaScript" :
+                (opt == "--csharp") ? "C#" : "Rust";
+
+            std::cerr << "📜 Exécution du script " << lang << ": " << script_path << "\n";
             std::cerr << "═══════════════════════════════════════════════\n\n";
             
-            if (!fs::exists(lua_script)) {
-                std::cerr << "❌ Fichier non trouvé: " << lua_script << "\n";
+            if (!fs::exists(script_path)) {
+                std::cerr << "❌ Fichier non trouvé: " << script_path << "\n";
                 return 1;
             }
             
             try {
-                LuaScripting lua;
                 std::vector<std::string> script_args;
                 for (int j = i + 1; j < argc; ++j) {
                     script_args.emplace_back(argv[j]);
                 }
-                lua.setArgs(lua_script, script_args);
-                if (!lua.loadScript(lua_script)) {
-                    std::cerr << "❌ Échec exécution Lua: " << lua_script << "\n";
-                    return 1;
-                }
 
-                // UX: en ponyxl_ddpm, garder la Viz ouverte après la fin du script.
-                // (Sinon le process se termine et SFML se ferme.)
-                {
-                    auto& ctx = LuaContext::getInstance();
-                    if (ctx.modelType == "ponyxl_ddpm" && ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
-                        std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
-                        ctx.asyncMonitor->waitForVizClose();
+                if (opt == "--lua") {
+                    LuaScripting lua;
+                    lua.setArgs(script_path, script_args);
+                    if (!lua.loadScript(script_path)) {
+                        std::cerr << "❌ Échec exécution Lua: " << script_path << "\n";
+                        return 1;
                     }
+
+                    // UX: en ponyxl_ddpm, garder la Viz ouverte après la fin du script.
+                    {
+                        auto& ctx = LuaContext::getInstance();
+                        if (ctx.modelType == "ponyxl_ddpm" && ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
+                            std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
+                            ctx.asyncMonitor->waitForVizClose();
+                        }
+                    }
+
+                    {
+                        auto& ctx = LuaContext::getInstance();
+                        ctx.resetRuntimeState();
+                    }
+                } else if (opt == "--js") {
+                    JSScripting js;
+                    js.registerAPI();
+                    js.setArgs(script_path, script_args);
+                    if (!js.loadScript(script_path)) {
+                        std::cerr << "❌ Échec exécution JS: " << script_path << "\n";
+                        return 1;
+                    }
+                    JSContext::getInstance().resetRuntimeState();
+                } else if (opt == "--csharp") {
+                    CSharpScripting cs;
+                    cs.registerAPI();
+                    cs.setArgs(script_path, script_args);
+                    if (!cs.loadScript(script_path)) {
+                        std::cerr << "❌ Échec exécution C#: " << script_path << "\n";
+                        return 1;
+                    }
+                    CSharpContext::getInstance().resetRuntimeState();
+                } else if (opt == "--rust") {
+                    RustScripting rs;
+                    rs.registerAPI();
+                    rs.setArgs(script_path, script_args);
+                    if (!rs.loadScript(script_path)) {
+                        std::cerr << "❌ Échec exécution Rust: " << script_path << "\n";
+                        return 1;
+                    }
+                    RustContext::getInstance().resetRuntimeState();
                 }
 
-                // IMPORTANT: libérer explicitement les ressources détenues par LuaContext
-                // avant la terminaison du process.
-                // Sinon, elles peuvent être détruites pendant la phase de destructeurs
-                // statiques (ordre non garanti entre TUs) et provoquer des UAF/SEGV.
-                {
-                    auto& ctx = LuaContext::getInstance();
-                    ctx.resetRuntimeState();
-                }
-                std::cerr << "\n✅ Script Lua exécuté avec succès\n";
+                std::cerr << "\n✅ Script " << lang << " exécuté avec succès\n";
             } catch (const std::exception& e) {
-                std::cerr << "❌ Erreur Lua: " << e.what() << "\n";
+                std::cerr << "❌ Erreur script " << lang << ": " << e.what() << "\n";
                 return 1;
             }
             
@@ -285,7 +326,7 @@ int main(int argc, char **argv)
             overrides.emplace_back(argv[++i]);
         } else if (a == "--help") {
             // déjà géré plus haut
-        } else if (a == "--lua") {
+        } else if (a == "--lua" || a == "--js" || a == "--csharp" || a == "--rust") {
             // déjà géré plus haut
             ++i;
         } else {

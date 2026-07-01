@@ -13,6 +13,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Read project version
         id: version
         run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
@@ -30,6 +43,14 @@ jobs:
             liblua5.3-dev \
             liblz4-dev
 
+      - name: Install runtime bridge dependencies
+        run: |
+          set -euo pipefail
+          cargo install rust-script --locked
+          dotnet tool install -g dotnet-script
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Configure (CMake)
         run: |
           cmake -S . -B build \
@@ -46,7 +67,10 @@ jobs:
         run: cmake --build build
 
       - name: Run unit tests (CTest)
-        run: ctest --test-dir build --output-on-failure --timeout 30
+        run: |
+          export DOTNET_ROOT="$HOME/.dotnet"
+          export PATH="$HOME/.dotnet/tools:$HOME/.cargo/bin:$PATH"
+          ctest --test-dir build --output-on-failure --timeout 120
 
       - name: Upload CTest logs
         if: always()

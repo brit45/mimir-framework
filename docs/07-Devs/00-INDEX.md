@@ -17,6 +17,8 @@ Comprendre le registre d'architectures et les conventions I/O.
 Tu peux livrer des évolutions compatibles avec la base existante.
 
 
+Note de statut: Lua est le bridge de reference pour le scripting metier. Les bridges JS, C# et Rust existent, mais restent partiels tant que la parite n'est pas complete.
+
 Cette section est le point d'entree principal pour les developpeurs du framework.
 
 Objectif : expliquer comment le framework fonctionne de l'interieur et comment ajouter/modifier des briques sans casser la coherence globale.

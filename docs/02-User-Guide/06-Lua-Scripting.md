@@ -19,6 +19,12 @@ Tu peux créer un script réutilisable sans pièges courants.
 
 Ce chapitre explique **comment écrire des scripts Lua “robustes”** pour Mímir : démarrage, arguments, conventions, patterns, et pièges fréquents.
 
+## Etat des autres bindings
+
+- Lua est le chemin supporte complet pour le scripting metier.
+- Les bridges JS, C# et Rust existent, mais ils sont encore incomplets.
+- Si tu lis ce guide pour migrer un script, considere Lua comme la reference; les autres langages doivent etre valides au cas par cas.
+
 ## 1) Lancer un script (et passer des args)
 
 Un script se lance via :

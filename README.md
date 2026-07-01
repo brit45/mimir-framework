@@ -2,6 +2,12 @@
 
 ![logo](./logo.png)
 
+## Framework Philosophy
+
+**[Framework Philosophy](./docs/00-Framework-Philosophy.md)** — pourquoi C++, Lua, JSON, CPU-first, Registry, Planner, runtime independant et architectures compilees.
+
+**[Scripting Contract](./docs/03-API-Reference/00-Scripting-Contract.md)** — specification officielle que tous les bridges doivent implementer.
+
 <div align="center">
 
 | Branche | unit-tests | publish-wiki |

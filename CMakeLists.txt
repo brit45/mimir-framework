@@ -292,6 +292,10 @@ set(MIMIR_SOURCES
     src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp
     src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp
     src/scriptings/Lua/luaScripting/LuaScriptingRuntimeAndViz.cpp
+    src/scriptings/ScriptingBridgeCommon.cpp
+    src/scriptings/Rust/rustScripting/RustScripting.cpp
+    src/scriptings/CSharp/csharpScripting/CSharpScripting.cpp
+    src/scriptings/JavaScript/jsScripting/JSScripting.cpp
     src/ConfigOverrides.cpp
     src/Helpers.cpp
     src/stb_image_impl.cpp
@@ -338,7 +342,11 @@ set(MIMIR_HEADERS
     src/Sha256.hpp
     src/scriptings/ScriptingRuntime.hpp
     src/scriptings/ScriptingContext.hpp
+    src/scriptings/ScriptingBridgeCommon.hpp
     src/scriptings/Lua/luaScripting/LuaScripting.hpp
+    src/scriptings/Rust/rustScripting/RustScripting.hpp
+    src/scriptings/CSharp/csharpScripting/CSharpScripting.hpp
+    src/scriptings/JavaScript/jsScripting/JSScripting.hpp
     src/Helpers.hpp
     src/Layers.hpp
     src/Autograd.hpp

@@ -19,6 +19,13 @@ Tu peux livrer des évolutions compatibles avec la base existante.
 
 Ce chapitre formalise le contrat API systeme que tous les bridges de scripting doivent respecter.
 
+## Etat des bindings
+
+- Lua est le bridge de reference et reste le seul contrat complet et stable aujourd'hui.
+- Les bindings JS, C# et Rust existent, mais ils sont encore incomplets.
+- La parite progresse par morceaux: certaines APIs sont disponibles, d'autres renvoient encore une erreur explicite ou une sortie partielle.
+- Toute documentation ou demo pour un bridge non-Lua doit le signaler clairement.
+
 ## 1. Pourquoi un contrat commun
 
 Sans contrat central, chaque langage derive avec ses propres noms globaux et comportements.
@@ -81,6 +88,7 @@ Cela assure la compatibilite des workflows.
 3. Exposer les memes noms systeme (`kGlobal*`, `kAlias*`).
 4. Garantir le meme contrat d'erreur.
 5. Ajouter un smoke test equivalent au bridge Lua.
+6. Tant que le bridge n'a pas la parite fonctionnelle, le documenter comme experimental / incomplet.
 
 ## 7. Demo metier - script portable entre bridges
 
@@ -118,6 +126,8 @@ Exemple de commande (bridge Lua actuel) :
 ```
 
 Si un bridge ne passe pas cette matrice, il n'est pas pret pour un workflow metier stable.
+
+Aujourd'hui, seule la matrice Lua est complete. Les autres bridges doivent etre valides au cas par cas et annonces comme partiels.
 
 ## 9. Regle d'evolution API
 

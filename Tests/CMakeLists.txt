@@ -33,6 +33,10 @@ mimir_add_test(SerializationTest.RawFolderModel   test_serialization_rawfolder_m
 mimir_add_test(SerializationTest.DebugJsonModel    test_serialization_debug_json_model.cpp)
 mimir_add_test(SerializationTest.StrictMissingAssets test_serialization_strict_missing_assets.cpp)
 
+# Bridge API multi-runtime
+mimir_add_test(BridgeTest.API test_bridge_api.cpp)
+set_tests_properties(BridgeTest.API PROPERTIES TIMEOUT 120)
+
 mimir_add_test(FrameworkTest.TokenizerJsonControlChars test_tokenizer_json_control_chars.cpp)
 mimir_add_test(FrameworkTest.OverrideErrors           test_override_errors.cpp)
 

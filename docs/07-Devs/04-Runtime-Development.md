@@ -19,6 +19,12 @@ Tu peux livrer des évolutions compatibles avec la base existante.
 
 Ce chapitre explique comment modifier un runtime existant ou en ajouter un nouveau.
 
+## Etat des runtimes de scripting
+
+- Lua reste la reference fonctionnelle pour le scripting metier.
+- Les runtimes JS, C# et Rust servent de couches de transition et de validation progressive.
+- Ils ne doivent pas etre presents comme des remplacements complets de Lua tant que la parite n'est pas atteinte.
+
 ## 1. Contrat runtime
 
 Le contrat de base est dans `src/runtimes/AbstractRuntime.hpp`.
@@ -143,3 +149,4 @@ But metier :
 3. Test de fallback (retour `false`) sur op non supportee.
 4. Logs exploitables en mode verbose.
 5. Pas de regression sur scripts de smoke existants.
+6. Si le runtime est un bridge de scripting non-Lua, documenter explicitement les APIs non encore supportees.
