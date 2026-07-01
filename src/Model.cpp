@@ -5527,10 +5527,6 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             const float* __restrict__ xptr = dense_input ? x.data() : nullptr;
             const int HW = height * width;
 
-            const bool dense_input = (x.size() == static_cast<size_t>(in_channels) * static_cast<size_t>(height) * static_cast<size_t>(width));
-            const float* __restrict__ xptr = dense_input ? x.data() : nullptr;
-            const int HW = height * width;
-
             // Choix d'une tuile M pour limiter la mémoire (X_col et C_tile).
             // Cible ~32MB pour X_col.
             const size_t target_bytes = 32ULL * 1024ULL * 1024ULL;
