@@ -1,12 +1,12 @@
 name: Publish Wiki
 
 on:
-  push:
-    branches: [develop]
-    paths:
-      - "docs/**"
-      - ".github/workflows/wiki.yml"
-  workflow_dispatch:
+    push:
+        branches: [main, develop]
+        paths:
+            - "docs/**"
+            - ".github/workflows/wiki.yml"
+    workflow_dispatch:
 
 jobs:
   publish-wiki:
