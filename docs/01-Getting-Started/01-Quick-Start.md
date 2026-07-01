@@ -56,7 +56,7 @@ cfg.mlp_hidden = 1024
 cfg.output_dim = 256
 
 assert(Mimir.Model.create("transformer", cfg))
-assert(Mimir.Model.build())
+-- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
 assert(Mimir.Model.allocate_params())
 assert(Mimir.Model.init_weights("xavier", 42))
 

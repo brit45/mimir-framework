@@ -30,28 +30,28 @@ Les fonctions sont exposées sous `Mimir.Serialization`.
 - Valider les checksums en chargement si dispo.
 - Ne pas changer `seq_len` ou `vocab_size` après entraînement sans stratégie explicite (sinon shapes incompatibles).
 
-## Exemple : init → save → load
+## Exemple : init → save → load (workflow moderne)
 
 ```lua
 local cfg, err = Mimir.Architectures.default_config("transformer")
 assert(cfg, err)
 cfg.seq_len = 64
 cfg.vocab_size = 2000
-cfg.dtype = "float16" -- contrôle le dtype de stockage au save (runtime reste float32-first)
+cfg.dtype = "float16"  -- contrôle dtype de stockage (runtime reste float32-first)
 
+-- Création (construire le réseau automatiquement)
 assert(Mimir.Model.create("transformer", cfg))
-assert(Mimir.Model.build())
 assert(Mimir.Model.allocate_params())
 assert(Mimir.Model.init_weights("xavier", 42))
 
-assert(Mimir.Serialization.save("/tmp/mimir_checkpoint.safetensors"))
+-- Sauvegarde
+assert(Mimir.Serialization.save("/tmp/checkpoint.safetensors"))
 
--- Plus tard (ou dans un autre run)
-assert(Mimir.Model.create("transformer", cfg))
-assert(Mimir.Model.build())
+-- Chargement (plus tard, ou dans un autre run)
+assert(Mimir.Model.create("transformer", cfg))  -- recréer le réseau
 assert(Mimir.Model.allocate_params())
-local ok, load_err = Mimir.Serialization.load("/tmp/mimir_checkpoint.safetensors")
-assert(ok ~= false, load_err)
+local ok, err = Mimir.Serialization.load("/tmp/checkpoint.safetensors")
+assert(ok, err)
 ```
 
 ## Côté Lua

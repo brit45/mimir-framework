@@ -113,10 +113,7 @@ local cfg = {
 }
 
 assert(Mimir.Model.create("ponyxl_sdxl", cfg))
-
-local ok, nb_params = Mimir.Model.build()
-assert(ok, nb_params)
-print(string.format("Modèle : %.1f M paramètres", nb_params / 1e6))
+-- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
 
 assert(Mimir.Model.allocate_params())
 ```

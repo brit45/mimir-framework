@@ -177,6 +177,9 @@ function write_file(path, content) end
 ---@field seed? int @Seed générique - lu par `Model.train()` et certains helpers
 ---@field autosave_every_epochs? int @Autosave checkpoint toutes les N epochs (0=désactivé)
 ---@field autosave_every_epoch? int @Alias de autosave_every_epochs
+---@field csv_file? string @Chemin CSV htop explicite (ex: "runs/myrun/metrics.csv") — appliqué par `Model.train()` à tous les types de modèles
+---@field csv_path? string @Alias de csv_file
+---@field csv_dir? string @Dossier CSV : génère `{csv_dir}/{name}_htop_metrics.csv` (htop) ou `{csv_dir}/{name}_partN_epochM.csv` (ponyxl_ddpm)
 ---@field viz_taps_max_frames? int @Limite frames "viz taps" (si viz active)
 ---@field viz_taps_max_side? int @Limite taille preview "viz taps" (si viz active)
 ---@field validate_every_steps? int @Validation toutes les N étapes d'optimizer (0 = désactivé)
@@ -1807,58 +1810,116 @@ function print(...) end
 --=============================================================================
 -- Pipeline API (optionnel)
 --=============================================================================
--- Si vous chargez pipeline_api.lua dans votre script, l'IDE bénéficiera aussi
--- de ces signatures. Ces fonctions sont en Lua pur, mais on les déclare ici
--- pour l'autocomplétion (sans dépendre du require dans l'IDE).
+-- Si vous chargez `scripts/modules/pipeline_api.lua` (ou `pipeline.lua`),
+-- l'IDE bénéficiera de ces signatures pour l'autocomplétion.
 
----@class PipelineConfig
----@field dataset_dir string
----@field out_dir string
----@field model_type ModelType
----@field model_config table
----@field tokenizer_vocab int
----@field max_seq_len int
----@field epochs int
----@field lr float
----@field min_lr? float
----@field warmup_epochs? int
----@field save_every? int
----@field gen_every? int
----@field prompt? string
----@field max_ram_gb? float
----@field enable_compression? bool
----@field enable_htop? bool
----@field enable_viz? bool
+---@class PipelineOptions
+---@field name? string
+---@field fallback_config? table
+---@field allowed_keys? string[]
+---@field legacy_mapper? fun(cfg:table, user:table)
+---@field create_tokenizer? boolean
 
+---@class PipelineAPI
+---@field name string
+---@field config table
+---@field base_config table
+---@field arch? string
+---@field model? boolean
+---@field tokenizer? boolean
+---@field trained boolean
+---@field steps table
+local Pipeline = {}
 
---=============================================================================
--- Module: Pipeline
---=============================================================================
+---@param arch string
+---@param patch? table
+---@return boolean ok
+---@return table|string cfg_or_err
+function Pipeline:loadDefaultConfig(arch, patch) end
 
----@class Pipeline
-Pipeline = {}
+---@param patch table
+---@return boolean ok
+---@return table|string cfg_or_err
+function Pipeline:patchConfig(patch) end
 
----@param cfg PipelineConfig|table
+---@param cfg table
+---@return boolean ok
+---@return table|string cfg_or_err
+function Pipeline:setConfig(cfg) end
+
+---@return table
+function Pipeline:getConfig() end
+
+---@return table
+function Pipeline:getBaseConfig() end
+
+---@return boolean ok
+---@return integer|string? params_or_err
+function Pipeline:build() end
+
+---@param dataset_path? string
+---@param epochs? integer
+---@param lr? number
 ---@return boolean ok
 ---@return string? err
-function Pipeline.setup(cfg) end
+function Pipeline:train(dataset_path, epochs, lr) end
 
----Exécuter un pipeline training complet (si présent).
+---@param input any
+---@return any
+function Pipeline:infer(input) end
+
+---@param path string
 ---@return boolean ok
 ---@return string? err
-function Pipeline.run() end
+function Pipeline:save(path) end
 
----Sauvegarder un checkpoint pipeline (si présent).
----@param tag string
----@return boolean ok
----@return string? err
-function Pipeline.save(tag) end
+---@class PipelineManagerAPI
+---@field pipelines table<string, PipelineAPI>
+local PipelineManager = {}
 
----Tenter une reprise depuis un checkpoint (si présent).
----@param dir string
----@return boolean ok
----@return string? err
-function Pipeline.resume(dir) end
+---@return PipelineManagerAPI
+function PipelineManager:new() end
+
+---@param name string
+---@param pipeline PipelineAPI
+function PipelineManager:add(name, pipeline) end
+
+---@param name string
+---@return PipelineAPI|nil
+function PipelineManager:get(name) end
+
+function PipelineManager:list() end
+
+---@param base_path string
+function PipelineManager:save_all(base_path) end
+
+---@class PipelineModule
+---@field Pipeline PipelineAPI
+---@field PipelineManager PipelineManagerAPI
+---@field FromRegistry fun(model_type:string, config?:table, options?:PipelineOptions):PipelineAPI|nil, string?
+---@field Transformer fun(config?:table):PipelineAPI
+---@field UNet fun(config?:table):PipelineAPI
+---@field VAE fun(config?:table):PipelineAPI
+---@field ViT fun(config?:table):PipelineAPI
+---@field GAN fun(config?:table):PipelineAPI
+---@field Diffusion fun(config?:table):PipelineAPI
+---@field ResNet fun(config?:table):PipelineAPI
+---@field MobileNet fun(config?:table):PipelineAPI
+
+---@type PipelineModule
+PipelineModule = {
+	Pipeline = Pipeline,
+	PipelineManager = PipelineManager,
+	FromRegistry = function(model_type, config, options) end,
+	Transformer = function(config) end,
+	UNet = function(config) end,
+	VAE = function(config) end,
+	ViT = function(config) end,
+	GAN = function(config) end,
+	Diffusion = function(config) end,
+	ResNet = function(config) end,
+	MobileNet = function(config) end,
+}
 
 --=============================================================================
 -- Exports globaux (pour l'IDE)

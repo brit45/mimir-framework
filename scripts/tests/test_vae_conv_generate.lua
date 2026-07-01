@@ -1,16 +1,31 @@
--- Test reconstruction d'image via VAEConv (encoder+decoder).
+-- Test reconstruction/encodage/décodage d'image via VAEConv.
 --
--- Usage:
+-- Mode par défaut — reconstruction complète (encoder + décodeur) :
 --   ./bin/mimir --lua scripts/tests/test_vae_conv_generate.lua -- \
 --     --in 01.ppm \
 --     --checkpoint checkpoint/vae_conv_base_tok_latent-128-2/epoch_0024_stop \
 --     --out scripts/tests/out_vae_conv_recon.ppm
 --
+-- Mode encodage (--encode) — compresse l'image vers un fichier latent binaire :
+--   ./bin/mimir --lua scripts/tests/test_vae_conv_generate.lua -- \
+--     --encode \
+--     --in 01.ppm \
+--     --checkpoint checkpoint/vae_conv_base_tok_latent-128-2/epoch_0024_stop \
+--     --out scripts/tests/out_vae_conv.lat
+--
+-- Mode décodage (--decode) — reconstruit une image depuis un fichier latent :
+--   ./bin/mimir --lua scripts/tests/test_vae_conv_generate.lua -- \
+--     --decode \
+--     --in scripts/tests/out_vae_conv.lat \
+--     --checkpoint checkpoint/vae_conv_base_tok_latent-128-2/epoch_0024_stop \
+--     --out scripts/tests/out_vae_conv_decoded.ppm
+--
 -- Par défaut, si l'image d'entrée n'a pas la même taille que le checkpoint,
 -- elle est redimensionnée (nearest-neighbor) vers la taille attendue.
 -- Désactiver via: --no-resize
 --
--- Sortie: image PPM (P6) RGB, pixels en [0,255].
+-- Sortie reconstruction/décodage : image PPM (P6) RGB, pixels en [0,255].
+-- Sortie encodage : fichier binaire .lat (header texte + float32 LE).
 
 ---@diagnostic disable: need-check-nil, inject-field
 
@@ -313,15 +328,40 @@ local function infer_cfg_from_checkpoint(ckpt_dir)
     return nil, "read_json failed: " .. tostring(arch_path)
   end
 
+  -- Chemin rapide : model_config est stocké directement dans architecture.json
+  -- depuis le patch VAEConv 2026-06. Contient TOUS les flags architecturaux
+  -- (use_attention, decoder_upsample, use_skip_connections, use_encoder_prior,
+  -- resnet_max_tokens, etc.) en plus des dimensions image/latent.
+  local mc = arch.model_config or arch.modelConfig
+  if type(mc) == "table" and (tonumber(mc.image_w) or 0) > 0 then
+    local function mci(k) return math.floor(tonumber(mc[k] or 0)) end
+    return {
+      image_w              = mci("image_w"),
+      image_h              = mci("image_h"),
+      image_c              = math.max(1, mci("image_c")),
+      latent_h             = mci("latent_h"),
+      latent_w             = mci("latent_w"),
+      latent_c             = mci("latent_c"),
+      base_channels        = mci("base_channels"),
+      use_attention        = mc.use_attention,
+      resnet_max_tokens    = mc.resnet_max_tokens,
+      use_skip_connections = mc.use_skip_connections,
+      use_encoder_prior    = mc.use_encoder_prior,
+      decoder_upsample     = mc.decoder_upsample,
+      stochastic_latent    = mc.stochastic_latent,
+    }, nil
+  end
+
+  -- Repli legacy : parser les layers manuellement (anciens checkpoints sans model_config)
+  local layers = arch.layers
+  if type(layers) ~= "table" then
+    return nil, "architecture.json missing layers and model_config"
+  end
+
   local image_w = tonumber(arch.image_width) or tonumber(arch.image_w) or 0
   local image_h = tonumber(arch.image_height) or tonumber(arch.image_h) or 0
   if image_w <= 0 or image_h <= 0 then
     return nil, "invalid image dimensions in architecture.json"
-  end
-
-  local layers = arch.layers
-  if type(layers) ~= "table" then
-    return nil, "architecture.json missing layers"
   end
 
   local function find_layer(name)
@@ -372,14 +412,14 @@ local function infer_cfg_from_checkpoint(ckpt_dir)
   local latent_w = math.floor(image_w / div)
 
   return {
-    image_w = image_w,
-    image_h = image_h,
-    image_c = image_c,
-    latent_h = latent_h,
-    latent_w = latent_w,
-    latent_c = math.floor(latent_c),
+    image_w       = image_w,
+    image_h       = image_h,
+    image_c       = image_c,
+    latent_h      = latent_h,
+    latent_w      = latent_w,
+    latent_c      = math.floor(latent_c),
     base_channels = math.floor(base_channels),
-    downsamples = downsamples,
+    downsamples   = downsamples,
   }, nil
 end
 
@@ -423,6 +463,82 @@ local function write_ppm_rgb_f32_hwc(path, pixels, w, h)
 end
 
 -- --------------------------------------------------------------------------
+-- Écriture / lecture fichier latent binaire (.lat)
+--
+-- Format :
+--   Ligne 1 : "MIMIR_LATENT\n"
+--   Ligne 2 : "{latent_h} {latent_w} {latent_c}\n"
+--   Suite   : latent_h * latent_w * latent_c floats 32 bits little-endian
+--
+-- Le vecteur stocké est z_biased (= sortie de la couche Reparameterize + prior_bias),
+-- i.e. ce que dec/conv_in reçoit dans le modèle complet. vae_conv_decode peut
+-- donc l'utiliser directement sans connaissance de l'architecture.
+-- --------------------------------------------------------------------------
+local function write_latent_bin(path, latent, lh, lw, lc)
+  if type(latent) ~= "table" then return false, "latent must be table" end
+  local expected = lh * lw * lc
+  if #latent ~= expected then
+    return false, string.format("latent size mismatch: got=%d expected=%d", #latent, expected)
+  end
+
+  local f, ferr = io.open(path, "wb")
+  if not f then return false, ferr end
+
+  local ok_w, werr = pcall(function()
+    f:write(string.format("MIMIR_LATENT\n%d %d %d\n", lh, lw, lc))
+    for i = 1, expected do
+      f:write(string.pack("<f", tonumber(latent[i]) or 0.0))
+    end
+  end)
+  f:close()
+  if not ok_w then return false, werr end
+  return true, nil
+end
+
+local function read_latent_bin(path)
+  local f, ferr = io.open(path, "rb")
+  if not f then return nil, ferr end
+
+  local magic = f:read("*l")
+  if magic ~= "MIMIR_LATENT" then
+    f:close()
+    return nil, "invalid latent file (bad magic): " .. tostring(magic)
+  end
+
+  local dims_line = f:read("*l")
+  if not dims_line then
+    f:close()
+    return nil, "invalid latent file (missing dims)"
+  end
+  local lh, lw, lc = dims_line:match("^(%d+)%s+(%d+)%s+(%d+)$")
+  lh = tonumber(lh)
+  lw = tonumber(lw)
+  lc = tonumber(lc)
+  if not lh or not lw or not lc or lh <= 0 or lw <= 0 or lc <= 0 then
+    f:close()
+    return nil, "invalid latent file (bad dims): " .. tostring(dims_line)
+  end
+
+  local n = lh * lw * lc
+  local float_bytes = n * 4
+  local data = f:read(float_bytes)
+  f:close()
+
+  if not data or #data ~= float_bytes then
+    return nil, string.format("truncated latent payload: got=%d expected=%d", data and #data or 0, float_bytes)
+  end
+
+  local latent = {}
+  latent[n] = 0.0
+  for i = 0, n - 1 do
+    local v = string.unpack("<f", data, i * 4 + 1)
+    latent[i + 1] = v
+  end
+
+  return { latent = latent, latent_h = lh, latent_w = lw, latent_c = lc }, nil
+end
+
+-- --------------------------------------------------------------------------
 -- Main
 -- --------------------------------------------------------------------------
 local DEFAULT_CKPT = "checkpoint/vae_conv_base_tok_latent-128-2/epoch_0024_stop"
@@ -455,22 +571,20 @@ end
 local cfg = Mimir.Architectures.default_config("vae_conv")
 if type(cfg) ~= "table" then die("default_config(vae_conv) failed") end
 
-local inferred_image_w = math.tointeger(inferred.image_w)
-local inferred_image_h = math.tointeger(inferred.image_h)
-if not inferred_image_w or not inferred_image_h then
-  die("infer_cfg_from_checkpoint returned non-integer image size")
+-- Appliquer tous les champs inférés depuis le checkpoint (dimensions + flags architecturaux)
+local cfg_fields = {
+  "image_w", "image_h", "image_c",
+  "latent_h", "latent_w", "latent_c", "base_channels",
+  -- flags architecturaux (depuis model_config, patch 2026-06)
+  "use_attention", "resnet_max_tokens",
+  "use_skip_connections", "use_encoder_prior", "decoder_upsample",
+}
+for _, k in ipairs(cfg_fields) do
+  if inferred[k] ~= nil then cfg[k] = inferred[k] end
 end
-
-cfg.image_w = inferred_image_w
-cfg.image_h = inferred_image_h
-cfg.image_c = inferred.image_c
-cfg.latent_h = inferred.latent_h
-cfg.latent_w = inferred.latent_w
-cfg.latent_c = inferred.latent_c
-cfg.base_channels = inferred.base_channels
 cfg.latent_dim = cfg.latent_h * cfg.latent_w * cfg.latent_c
 cfg.text_cond = false
-cfg.stochastic_latent = false
+cfg.stochastic_latent = false  -- encodeur déterministe (mu uniquement)
 
 -- Allow manual overrides (optionnels)
 if opts["image-w"] then cfg.image_w = opt_int("image-w", cfg.image_w) end
@@ -482,93 +596,238 @@ if opts["latent-c"] then cfg.latent_c = opt_int("latent-c", cfg.latent_c) end
 if opts["base-channels"] then cfg.base_channels = opt_int("base-channels", cfg.base_channels) end
 cfg.latent_dim = cfg.latent_h * cfg.latent_w * cfg.latent_c
 
-logx(string.format("[test_vae_conv_generate] cfg image=%dx%dx%d latent=%dx%dx%d base=%d", cfg.image_w, cfg.image_h, cfg.image_c, cfg.latent_h, cfg.latent_w, cfg.latent_c, cfg.base_channels))
+logx(string.format("[test_vae_conv_generate] cfg image=%dx%dx%d latent=%dx%dx%d base=%d use_attn=%s skip=%s enc_prior=%s upsample=%s",
+  cfg.image_w, cfg.image_h, cfg.image_c,
+  cfg.latent_h, cfg.latent_w, cfg.latent_c,
+  cfg.base_channels,
+  tostring(cfg.use_attention),
+  tostring(cfg.use_skip_connections),
+  tostring(cfg.use_encoder_prior),
+  tostring(cfg.decoder_upsample)))
 
--- Lire l'image PPM d'entrée et l'adapter à la taille attendue
-local ppm, err_ppm = read_ppm(in_path)
-if not ppm then die("read_ppm failed: " .. tostring(err_ppm)) end
+-- Détection du mode
+local MODE = "recon"
+if opts["encode"] == true then MODE = "encode" end
+if opts["decode"] == true then MODE = "decode" end
+logx("[test_vae_conv_generate] mode=" .. MODE)
 
-local input_u8 = nil
-if ppm.fmt == "P6" then
-  if ppm.w == cfg.image_w and ppm.h == cfg.image_h then
-    input_u8 = sample_resize_p6_bytes_to_u8(ppm.data, ppm.w, ppm.h, cfg.image_w, cfg.image_h, ppm.maxval)
-  else
-    if not RESIZE_INPUT then
-      die(string.format("input size mismatch: got=%dx%d expected=%dx%d (use --resize or provide matching PPM)", ppm.w, ppm.h, cfg.image_w, cfg.image_h))
+-- ==========================================================================
+-- MODE ENCODE : image PPM → fichier latent (.lat)
+-- Utilise le modèle vae_conv complet et extrait z_biased depuis le pack de sortie.
+-- Le pack C++ est recon || z_biased || logvar (z_biased = reparam + prior_bias).
+-- ==========================================================================
+if MODE == "encode" then
+
+  local ppm, err_ppm = read_ppm(in_path)
+  if not ppm then die("read_ppm failed: " .. tostring(err_ppm)) end
+
+  local input_u8 = nil
+  if ppm.fmt == "P6" then
+    if ppm.w ~= cfg.image_w or ppm.h ~= cfg.image_h then
+      if not RESIZE_INPUT then
+        die(string.format("input size mismatch: got=%dx%d expected=%dx%d", ppm.w, ppm.h, cfg.image_w, cfg.image_h))
+      end
     end
     input_u8 = sample_resize_p6_bytes_to_u8(ppm.data, ppm.w, ppm.h, cfg.image_w, cfg.image_h, ppm.maxval)
+  else
+    local src_u8 = to_rgb_u8_table(ppm)
+    if ppm.w == cfg.image_w and ppm.h == cfg.image_h then
+      input_u8 = src_u8
+    else
+      if not RESIZE_INPUT then
+        die(string.format("input size mismatch: got=%dx%d expected=%dx%d", ppm.w, ppm.h, cfg.image_w, cfg.image_h))
+      end
+      input_u8 = resize_rgb_u8_nearest(src_u8, ppm.w, ppm.h, cfg.image_w, cfg.image_h)
+    end
   end
+
+  local input_f32 = rgb_u8_to_f32_minus1_1(input_u8)
+
+  local ok_create, err_create = Mimir.Model.create("vae_conv", cfg)
+  if not ok_create then die("Model.create(vae_conv) failed: " .. tostring(err_create)) end
+
+  apply_dtype(cfg)
+
+  local ok_alloc, nparams_or_err = Mimir.Model.allocate_params()
+  if ok_alloc == false then die("Model.allocate_params failed: " .. tostring(nparams_or_err)) end
+
+  local ok_load, err_load = Mimir.Serialization.load(checkpoint_dir, "raw_folder", {
+    load_encoder = true,
+    load_tokenizer = false,
+    load_optimizer = false,
+    strict_mode = false,
+    validate_checksums = true,
+  })
+  if ok_load == false then die("Serialization.load failed: " .. tostring(err_load)) end
+
+  local image_dim  = cfg.image_w * cfg.image_h * cfg.image_c
+  local latent_dim = cfg.latent_dim
+
+  -- Forward complet : pack = recon || z_biased || logvar
+  -- z_biased = reparam(mu, logvar) + prior_bias  (ou juste z si pas de prior)
+  local packed, err_fwd = Mimir.Model.forward(input_f32, false)
+  if packed == nil then die("Model.forward failed: " .. tostring(err_fwd)) end
+  local expected_sz = image_dim + 2 * latent_dim
+  if #packed ~= expected_sz then
+    die(string.format("unexpected output size: got=%d expected=%d (image_dim=%d latent_dim=%d)",
+      #packed, expected_sz, image_dim, latent_dim))
+  end
+
+  -- Extraire z_biased directement depuis le pack (indices image_dim+1 .. image_dim+latent_dim).
+  -- Le modèle C++ expose maintenant z_biased (= sortie reparams + prior_bias) à cet offset,
+  -- aucun calcul supplémentaire n'est nécessaire côté Lua.
+  local z_biased = {}
+  z_biased[latent_dim] = 0.0
+  for i = 1, latent_dim do
+    z_biased[i] = packed[image_dim + i]
+  end
+
+  local out_lat = out_path ~= "" and out_path or "scripts/tests/out_vae_conv.lat"
+  mkdir_p(dirname(out_lat))
+  local ok_lat, err_lat = write_latent_bin(out_lat, z_biased, cfg.latent_h, cfg.latent_w, cfg.latent_c)
+  if not ok_lat then die("write_latent_bin failed: " .. tostring(err_lat)) end
+  logx(string.format("[test_vae_conv_generate] wrote latent %s (lh=%d lw=%d lc=%d dim=%d)",
+    out_lat, cfg.latent_h, cfg.latent_w, cfg.latent_c, latent_dim))
+
+-- ==========================================================================
+-- MODE DECODE : fichier latent (.lat) → image PPM
+-- Utilise uniquement le décodeur (vae_conv_decode).
+-- ==========================================================================
+elseif MODE == "decode" then
+
+  local lat_data, err_lat = read_latent_bin(in_path)
+  if not lat_data then die("read_latent_bin failed: " .. tostring(err_lat)) end
+
+  -- Vérifier compatibilité des dimensions avec le checkpoint
+  if lat_data.latent_h ~= cfg.latent_h or lat_data.latent_w ~= cfg.latent_w or lat_data.latent_c ~= cfg.latent_c then
+    die(string.format(
+      "latent dims mismatch: file=%dx%dx%d checkpoint=%dx%dx%d",
+      lat_data.latent_h, lat_data.latent_w, lat_data.latent_c,
+      cfg.latent_h, cfg.latent_w, cfg.latent_c))
+  end
+
+  local ok_create, err_create = Mimir.Model.create("vae_conv_decode", cfg)
+  if not ok_create then die("Model.create(vae_conv_decode) failed: " .. tostring(err_create)) end
+
+  apply_dtype(cfg)
+
+  local ok_alloc, nparams_or_err = Mimir.Model.allocate_params()
+  if ok_alloc == false then die("Model.allocate_params failed: " .. tostring(nparams_or_err)) end
+
+  local ok_load, err_load = Mimir.Serialization.load(checkpoint_dir, "raw_folder", {
+    load_encoder = false,
+    load_tokenizer = false,
+    load_optimizer = false,
+    strict_mode = false,
+    validate_checksums = true,
+  })
+  if ok_load == false then die("Serialization.load failed: " .. tostring(err_load)) end
+
+  local image_dim = cfg.image_w * cfg.image_h * cfg.image_c
+
+  local pixels, err_fwd = Mimir.Model.forward(lat_data.latent, false)
+  if pixels == nil then die("Model.forward(decode) failed: " .. tostring(err_fwd)) end
+  if #pixels ~= image_dim then
+    die(string.format("unexpected decode output size: got=%d expected=%d", #pixels, image_dim))
+  end
+
+  local out_ppm = out_path ~= "" and out_path or "scripts/tests/out_vae_conv_decoded.ppm"
+  mkdir_p(dirname(out_ppm))
+  local ok_w, err_w = write_ppm_rgb_f32_hwc(out_ppm, pixels, cfg.image_w, cfg.image_h)
+  if ok_w == false then die("write_ppm(decode) failed: " .. tostring(err_w)) end
+  logx("[test_vae_conv_generate] wrote decoded image " .. tostring(out_ppm))
+
+-- ==========================================================================
+-- MODE RECON (défaut) : image PPM → encoder+décodeur → image PPM reconstruite
+-- ==========================================================================
 else
-  local src_u8 = to_rgb_u8_table(ppm)
-  if ppm.w == cfg.image_w and ppm.h == cfg.image_h then
-    input_u8 = src_u8
-  else
-    if not RESIZE_INPUT then
-      die(string.format("input size mismatch: got=%dx%d expected=%dx%d (use --resize or provide matching PPM)", ppm.w, ppm.h, cfg.image_w, cfg.image_h))
+
+  local ppm, err_ppm = read_ppm(in_path)
+  if not ppm then die("read_ppm failed: " .. tostring(err_ppm)) end
+
+  local input_u8 = nil
+  if ppm.fmt == "P6" then
+    if ppm.w == cfg.image_w and ppm.h == cfg.image_h then
+      input_u8 = sample_resize_p6_bytes_to_u8(ppm.data, ppm.w, ppm.h, cfg.image_w, cfg.image_h, ppm.maxval)
+    else
+      if not RESIZE_INPUT then
+        die(string.format("input size mismatch: got=%dx%d expected=%dx%d (use --resize or provide matching PPM)", ppm.w, ppm.h, cfg.image_w, cfg.image_h))
+      end
+      input_u8 = sample_resize_p6_bytes_to_u8(ppm.data, ppm.w, ppm.h, cfg.image_w, cfg.image_h, ppm.maxval)
     end
-    input_u8 = resize_rgb_u8_nearest(src_u8, ppm.w, ppm.h, cfg.image_w, cfg.image_h)
+  else
+    local src_u8 = to_rgb_u8_table(ppm)
+    if ppm.w == cfg.image_w and ppm.h == cfg.image_h then
+      input_u8 = src_u8
+    else
+      if not RESIZE_INPUT then
+        die(string.format("input size mismatch: got=%dx%d expected=%dx%d (use --resize or provide matching PPM)", ppm.w, ppm.h, cfg.image_w, cfg.image_h))
+      end
+      input_u8 = resize_rgb_u8_nearest(src_u8, ppm.w, ppm.h, cfg.image_w, cfg.image_h)
+    end
   end
-end
 
-local input_f32 = rgb_u8_to_f32_minus1_1(input_u8)
+  local input_f32 = rgb_u8_to_f32_minus1_1(input_u8)
 
-local ok_create, err_create = Mimir.Model.create("vae_conv", cfg)
-if not ok_create then die("Model.create(vae_conv) failed: " .. tostring(err_create)) end
+  local ok_create, err_create = Mimir.Model.create("vae_conv", cfg)
+  if not ok_create then die("Model.create(vae_conv) failed: " .. tostring(err_create)) end
 
-apply_dtype(cfg)
+  apply_dtype(cfg)
 
-local ok_alloc, nparams_or_err = Mimir.Model.allocate_params()
-if ok_alloc == false then die("Model.allocate_params failed: " .. tostring(nparams_or_err)) end
+  local ok_alloc, nparams_or_err = Mimir.Model.allocate_params()
+  if ok_alloc == false then die("Model.allocate_params failed: " .. tostring(nparams_or_err)) end
 
-local ok_load, err_load = Mimir.Serialization.load(checkpoint_dir, "raw_folder", {
-  load_encoder = false,
-  load_tokenizer = false,
-  load_optimizer = false,
-  strict_mode = false,
-  validate_checksums = true,
-})
-if ok_load == false then die("Serialization.load failed: " .. tostring(err_load)) end
+  local ok_load, err_load = Mimir.Serialization.load(checkpoint_dir, "raw_folder", {
+    load_encoder = true,
+    load_tokenizer = false,
+    load_optimizer = false,
+    strict_mode = false,
+    validate_checksums = true,
+  })
+  if ok_load == false then die("Serialization.load failed: " .. tostring(err_load)) end
 
-mkdir_p(dirname(out_path))
+  mkdir_p(dirname(out_path))
 
-local image_dim = cfg.image_w * cfg.image_h * cfg.image_c
-local latent_dim = cfg.latent_dim
+  local image_dim  = cfg.image_w * cfg.image_h * cfg.image_c
+  local latent_dim = cfg.latent_dim
 
--- Forward VAEConv complet: output pack = recon || mu || logvar
-local packed, err_fwd = Mimir.Model.forward(input_f32, false)
-if packed == nil then die("Model.forward failed: " .. tostring(err_fwd)) end
-local expected = image_dim + 2 * latent_dim
-if #packed ~= expected then
-  die(string.format("unexpected output size: got=%d expected=%d (image_dim=%d latent_dim=%d)", #packed, expected, image_dim, latent_dim))
-end
+  -- Forward VAEConv complet: output pack = recon || mu || logvar
+  local packed, err_fwd = Mimir.Model.forward(input_f32, false)
+  if packed == nil then die("Model.forward failed: " .. tostring(err_fwd)) end
+  local expected_sz = image_dim + 2 * latent_dim
+  if #packed ~= expected_sz then
+    die(string.format("unexpected output size: got=%d expected=%d (image_dim=%d latent_dim=%d)", #packed, expected_sz, image_dim, latent_dim))
+  end
 
-local recon = {}
-recon[image_dim] = 0.0
-for i = 1, image_dim do
-  recon[i] = packed[i]
-end
-
-local ok_w, err_w = write_ppm_rgb_f32_hwc(out_path, recon, cfg.image_w, cfg.image_h)
-if ok_w == false then die("write_ppm failed: " .. tostring(err_w)) end
-logx("[test_vae_conv_generate] wrote recon " .. tostring(out_path))
-
-if out_in_path ~= nil and out_in_path ~= "" then
-  mkdir_p(dirname(out_in_path))
-  local ok_in, err_in = write_ppm_rgb_f32_hwc(out_in_path, input_f32, cfg.image_w, cfg.image_h)
-  if ok_in == false then die("write_ppm(input) failed: " .. tostring(err_in)) end
-  logx("[test_vae_conv_generate] wrote input " .. tostring(out_in_path))
-end
-
-if out_diff_path ~= nil and out_diff_path ~= "" then
-  mkdir_p(dirname(out_diff_path))
-  local diff = {}
-  diff[image_dim] = 0.0
+  local recon = {}
+  recon[image_dim] = 0.0
   for i = 1, image_dim do
-    diff[i] = math.abs((recon[i] or 0.0) - (input_f32[i] or 0.0))
+    recon[i] = packed[i]
   end
-  local ok_d, err_d = write_ppm_rgb_f32_hwc(out_diff_path, diff, cfg.image_w, cfg.image_h)
-  if ok_d == false then die("write_ppm(diff) failed: " .. tostring(err_d)) end
-  logx("[test_vae_conv_generate] wrote diff " .. tostring(out_diff_path))
+
+  local ok_w, err_w = write_ppm_rgb_f32_hwc(out_path, recon, cfg.image_w, cfg.image_h)
+  if ok_w == false then die("write_ppm failed: " .. tostring(err_w)) end
+  logx("[test_vae_conv_generate] wrote recon " .. tostring(out_path))
+
+  if out_in_path ~= nil and out_in_path ~= "" then
+    mkdir_p(dirname(out_in_path))
+    local ok_in, err_in = write_ppm_rgb_f32_hwc(out_in_path, input_f32, cfg.image_w, cfg.image_h)
+    if ok_in == false then die("write_ppm(input) failed: " .. tostring(err_in)) end
+    logx("[test_vae_conv_generate] wrote input " .. tostring(out_in_path))
+  end
+
+  if out_diff_path ~= nil and out_diff_path ~= "" then
+    mkdir_p(dirname(out_diff_path))
+    local diff = {}
+    diff[image_dim] = 0.0
+    for i = 1, image_dim do
+      diff[i] = math.abs((recon[i] or 0.0) - (input_f32[i] or 0.0))
+    end
+    local ok_d, err_d = write_ppm_rgb_f32_hwc(out_diff_path, diff, cfg.image_w, cfg.image_h)
+    if ok_d == false then die("write_ppm(diff) failed: " .. tostring(err_d)) end
+    logx("[test_vae_conv_generate] wrote diff " .. tostring(out_diff_path))
+  end
+
 end
 
 logx("[test_vae_conv_generate] done")

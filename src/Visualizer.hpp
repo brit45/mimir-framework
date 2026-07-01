@@ -83,7 +83,8 @@ public:
 
     // Définir les images intermédiaires (traitement par blocs/layers)
     struct BlockFrame {
-        std::vector<uint8_t> pixels;
+        std::vector<uint8_t> pixels;      // heatmap (ou naturel pour image_like)
+        std::vector<uint8_t> pixels_real; // niveaux de gris naturels (1ch), vide si image_like
         int w = 0;
         int h = 0;
         int channels = 1;
@@ -203,14 +204,66 @@ private:
 
     // Données de visualisation
     struct ImageData {
-        std::vector<uint8_t> pixels;
+        std::vector<uint8_t> pixels;     // pixels actifs (affichés)
+        std::vector<uint8_t> pixels_alt;  // pixels alternatifs (heatmap ↔ naturel)
         std::string prompt;
         int w = 0;
         int h = 0;
-        int channels = 1;
+        int channels = 1;     // canaux de pixels
+        int channels_alt = 1; // canaux de pixels_alt
         int display_size = 0;
         sf::Texture texture;
         sf::Sprite sprite;
+
+        ImageData() = default;
+
+        // Après copie ou déplacement, le sprite doit pointer vers la NOUVELLE adresse
+        // de la texture (pas celle d'un ancien objet temporaire/réalloué).
+        ImageData(const ImageData& o)
+            : pixels(o.pixels), pixels_alt(o.pixels_alt), prompt(o.prompt)
+            , w(o.w), h(o.h), channels(o.channels), channels_alt(o.channels_alt)
+            , display_size(o.display_size)
+            , texture(o.texture)
+            , sprite(o.sprite)
+        {
+            sprite.setTexture(texture, false);
+        }
+
+        ImageData(ImageData&& o) noexcept
+            : pixels(std::move(o.pixels)), pixels_alt(std::move(o.pixels_alt))
+            , prompt(std::move(o.prompt))
+            , w(o.w), h(o.h), channels(o.channels), channels_alt(o.channels_alt)
+            , display_size(o.display_size)
+            , texture(std::move(o.texture))
+            , sprite(std::move(o.sprite))
+        {
+            sprite.setTexture(texture, false);
+        }
+
+        ImageData& operator=(const ImageData& o) {
+            if (this != &o) {
+                pixels = o.pixels; pixels_alt = o.pixels_alt; prompt = o.prompt;
+                w = o.w; h = o.h; channels = o.channels; channels_alt = o.channels_alt;
+                display_size = o.display_size;
+                texture = o.texture;
+                sprite = o.sprite;
+                sprite.setTexture(texture, false);
+            }
+            return *this;
+        }
+
+        ImageData& operator=(ImageData&& o) noexcept {
+            if (this != &o) {
+                pixels = std::move(o.pixels); pixels_alt = std::move(o.pixels_alt);
+                prompt = std::move(o.prompt);
+                w = o.w; h = o.h; channels = o.channels; channels_alt = o.channels_alt;
+                display_size = o.display_size;
+                texture = std::move(o.texture);
+                sprite = std::move(o.sprite);
+                sprite.setTexture(texture, false);
+            }
+            return *this;
+        }
     };
     std::vector<ImageData> generated_images;
 
@@ -327,6 +380,11 @@ private:
         float opt_beta2;
         float opt_eps;
         float opt_weight_decay;
+        // Métriques de validation (non nulles uniquement quand is_val=true)
+        float val_loss        = 0.f;
+        float val_mse         = 0.f;
+        int   val_step_id     = -1;  // step global auquel la validation a eu lieu
+        bool  is_val          = false;
     };
     std::vector<LossRecord> full_loss_history;
 
@@ -458,6 +516,10 @@ private:
     uint64_t save_chord_armed_ms_ = 0;
     bool save_chord_consumed_ = false;
 
+    // Mode d'affichage des Blocks/Layers : true = heatmap colorée, false = couleurs naturelles
+    bool heatmap_mode_ = false;
+    void rebuildLayerBlockTextures();
+
     std::stringstream log_history;
 };
 
@@ -503,6 +565,7 @@ public:
 
     struct BlockFrame {
         std::vector<uint8_t> pixels;
+        std::vector<uint8_t> pixels_real;
         int w = 0;
         int h = 0;
         int channels = 1;

@@ -17,7 +17,7 @@ Cette page est un **sommaire** “appel Lua ↔ binding C++ ↔ à quoi ça fait
 
 |Module Lua|Rôle|Exemple d’usage (script)|Référence interne|
 |---|---|---|---|
-|`Mimir.Model`|Création/build + forward/backward + training helpers|créer → allouer → init → forward|`Model`, `ModelArchitectures`, `Optimizer`, `Gradients`, `Tokenizer`, `Encoder`|
+|`Mimir.Model`|Création/build + forward/backward + training helpers|créer → allouer → init → forward|`Model`, `ModelArchitectures`, `Optimizer`, `Gradients`, `Tokenizer`, `ConditioningEncoder`|
 |`Mimir.Architectures`|Registry des architectures|lister + demander config défaut|`src/Models/Registry/ModelArchitectures.*`|
 |`Mimir.Serialization`|Save/load checkpoints + formats|save/load en `raw_folder` ou `safetensors`|`src/Serialization/Serialization.*`|
 |`Mimir.Tokenizer`|Tokenisation/BPE + vocab + analyse|create + tokenize + detokenize|`src/Tokenizer.*`|
@@ -64,9 +64,9 @@ end
 |`Mimir.Model.create(name, cfg?)`|Crée un modèle via le registre (config défaut si absente)|`LuaScripting::lua_createModel`|`ModelArchitectures::defaultConfig/create`, `LuaContext`, `sync_model_tokenizer_encoder_from_context`||
 |`Mimir.Model.build()`|Reconstruit le modèle depuis `ctx.modelType/modelConfig`|`LuaScripting::lua_buildModel`|`ModelArchitectures::create`, `sync_model_tokenizer_encoder_from_context`|Compat/legacy : préférez `create(name, cfg)` direct.|
 |`Mimir.Model.train(epochs, lr)`|Entraîne (selon le type de modèle) + gère optimizer/scheduler/interruption|`LuaScripting::lua_trainModel`|`Optimizer`, `Model::getSerializedOptimizer/setSerializedOptimizer`, `DatasetItem`, `Mimir::Serialization::save_checkpoint`|Chemin “legacy” peut être non supporté selon modèle.|
-|`Mimir.Model.infer(input)`|Inférence texte (tokenize→encode→forward→decode)|`LuaScripting::lua_inferModel`|`Tokenizer`, `Encoder`, `Model::forward/eval`|Historique : contient un fallback si tokenizer absent.|
+|`Mimir.Model.infer(input)`|Inférence texte (tokenize→encode→forward→decode)|`LuaScripting::lua_inferModel`|`Tokenizer`, `ConditioningEncoder`, `Model::forward/eval`|Historique : contient un fallback si tokenizer absent.|
 |`Mimir.Model.save(path)`|Sauvegarde modèle (ancien format checkpoint)|`LuaScripting::lua_saveModel`|`Model::saveCheckpoint`, `Tokenizer`, `MagicToken`|**Legacy** : préférez `Mimir.Serialization.save`.|
-|`Mimir.Model.load(path)`|Charge modèle depuis dossier (cherche safetensors)|`LuaScripting::lua_loadModel`|`Model::tryLoadExistingModel`, `Tokenizer`, `Encoder`, `MagicToken`, `sync_model_tokenizer_encoder_from_context`|**Legacy** : préférez `Mimir.Serialization.load`.|
+|`Mimir.Model.load(path)`|Charge modèle depuis dossier (cherche safetensors)|`LuaScripting::lua_loadModel`|`Model::tryLoadExistingModel`, `Tokenizer`, `ConditioningEncoder`, `MagicToken`, `sync_model_tokenizer_encoder_from_context`|**Legacy** : préférez `Mimir.Serialization.load`.|
 |`Mimir.Model.allocate_params()`|Alloue les paramètres/poids du modèle|`LuaScripting::lua_allocateParams`|`Model::allocateParams`, `Model::totalParamCount`|Renvoie `(ok, nparams)` ou `(false, err)`.|
 |`Mimir.Model.init_weights(method="he", seed=0)`|Initialise les poids (He/Xavier/…)|`LuaScripting::lua_initWeights`|`Model::initializeWeights`||
 |`Mimir.Model.total_params()`|Donne le nombre de paramètres|`LuaScripting::lua_totalParams`|`Model::totalParamCount`||
@@ -74,7 +74,7 @@ end
 |`Mimir.Model.set_layer_io(layer, inputs, output?)`|Fixe les entrées (noms) et l’output (nom) d’un layer|`LuaScripting::lua_setLayerIO`|`Model::getLayerByName`, `Layer::inputs/output`||
 |`Mimir.Model.forward(input, training=true)`|Forward pass; accepte liste int/float ou map `{name->table}`|`LuaScripting::lua_forwardPass`|`Model::forwardPass` / `Model::forwardPassNamed`, viz taps (`Model::*VizTaps*`), `Visualizer::BlockFrame`|Retourne `table` ou `(nil, err)`.|
 |`Mimir.Model.forward_prompt_image_seed(text_vec, image_vec, seed, training=false)`|Forward spécialisé (texte encodé + image + seed)|`LuaScripting::lua_forwardPromptImageSeed`|`Model::forwardPromptImageSeed`, viz taps|Utile diffusion/t2i.|
-|`Mimir.Model.encode_prompt(prompt)` / `encodePrompt`|Prompt texte → vecteur embedding (via tokenizer+encoder)|`LuaScripting::lua_encodePrompt`|`Tokenizer`, `Encoder`, config modèle (ex: `PonyXLDDPMModel::getConfig`)|Respecte `tokenizer_frozen` si présent.|
+|`Mimir.Model.encode_prompt(prompt)` / `encodePrompt`|Prompt texte → vecteur embedding (via tokenizer+encoder)|`LuaScripting::lua_encodePrompt`|`Tokenizer`, `ConditioningEncoder`, config modèle (ex: `PonyXLDDPMModel::getConfig`)|Respecte `tokenizer_frozen` si présent.|
 |`Mimir.Model.backward(loss_grad)`|Backprop depuis un gradient de loss|`LuaScripting::lua_backwardPass`|`Model::backwardPass` → `Gradients`||
 |`Mimir.Model.zero_grads()`|Zéro les gradients|`LuaScripting::lua_zeroGradients`|`Model::zeroGradients`||
 |`Mimir.Model.get_gradients()`|Retourne les gradients (table)|`LuaScripting::lua_getGradients`|`Model::getGradients`||
@@ -138,9 +138,10 @@ log("first arch:", names[1])
 |Appel Lua|Effet|Binding C++|Référence interne|Notes|
 |---|---|---|---|---|
 |`Mimir.Architectures.available()`|Liste les architectures disponibles|`LuaScripting::lua_archAvailable`|`ModelArchitectures::available` (`src/Models/Registry/ModelArchitectures.*`)||
-|`Mimir.Architectures.default_config(name)`|Renvoie la config par défaut de l’architecture|`LuaScripting::lua_archDefaultConfig`|`ModelArchitectures::defaultConfig`||
+|`Mimir.Architectures.default_config(name)`|Renvoie la config par défaut de l'architecture|`LuaScripting::lua_archDefaultConfig`|`ModelArchitectures::defaultConfig`|Utilisez cette config avec `Mimir.Model.create()` pour les overrides|
 |`Mimir.Architectures.info([name])`|Renvoie nom + description + config (toutes les archis ou une seule)|`LuaScripting::lua_archInfo`|`ModelArchitectures::Registry::find` / `available`|seul accesseur exposant `description`|
 |`Mimir.Architectures.dtypes()`|Liste les dtypes pris en charge (name, aliases, bytes, kind)|`LuaScripting::lua_archDtypes`|`Mimir::DType` (`src/DType.hpp`)||
+|**N.B.:** `Architectures.create()` n'existe pas en Lua|Utilisez `Mimir.Model.create(name, cfg)` à la place|`LuaScripting::lua_createModel`|`ModelArchitectures::create` (exposé via Model, pas Architectures)||
 
 ---
 

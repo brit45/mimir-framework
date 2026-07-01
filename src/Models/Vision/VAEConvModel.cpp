@@ -11,6 +11,13 @@ VAEConvModel::VAEConvModel() {
 void VAEConvModel::buildFromConfig(const Config& cfg) {
     cfg_ = cfg;
     buildInto(*this, cfg_);
+    // ConditioningEncoder externe : embeddings mag/mod/seq appris de dimension d_model.
+    // dim=d_model << latent_dim => ensureVocabSize raisonnable (~200 Mo max).
+    if (cfg_.d_model > 0) {
+        setHasEncoder(true);
+        getMutableEncoder().ensureDim(cfg_.d_model);
+        getMutableEncoder().ensureSpecialEmbeddings();
+    }
 }
 
 static inline void check_divisible(int a, int b, const std::string& msg) {
@@ -43,7 +50,9 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     // restent disponibles via `cfg.use_attention` (nom historique).
     // Les options d'attention/texte du Config sont ignorées (conservées pour
     // compatibilité de plomberie JSON/Lua uniquement).
-    const bool use_resnet   = cfg.use_attention;
+    const bool use_resnet       = cfg.use_attention;
+    const bool use_skip_conn    = cfg.use_skip_connections;
+    const bool use_enc_prior    = cfg.use_encoder_prior;
     // Modèle PUREMENT CONVOLUTIONNEL : aucune normalisation (GroupNorm/LayerNorm)
     // n'est émise dans le graphe. Les champs enc_norm/dec_norm/*_gn_groups restent
     // dans la config pour compat plomberie mais sont forcés à "none".
@@ -101,6 +110,11 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["dec_norm"] = dec_norm_str;
     model.modelConfig["dec_gn_groups"] = dec_gn_groups_val;
     model.modelConfig["decoder_upsample"] = dec_upsample;
+    model.modelConfig["use_skip_connections"] = use_skip_conn;
+    model.modelConfig["use_encoder_prior"] = use_enc_prior;
+    model.modelConfig["use_attention"] = use_resnet;
+    model.modelConfig["resnet_max_tokens"] = resnet_max_tok;
+    if (cfg.d_model > 0) model.modelConfig["d_model"] = cfg.d_model;
     model.modelConfig["output_dim"] = image_dim + 2 * latent_dim;
 
     auto sat_mul = [](size_t a, size_t b) -> size_t {
@@ -296,6 +310,10 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     };
 
     // NOTE: pas de SelfAttention ni d'encodeur texte : graphe purement convolutionnel.
+    // Skip connections (style U-Net) : enc_skips[i] est la feature map de l'encodeur
+    // à la résolution H/2^i × W/2^i, sauvegardée avant le downsampling du niveau i.
+    std::vector<std::string> enc_skips;
+    std::vector<int> enc_skip_h, enc_skip_w;
 
     // Input vector -> HWC -> CHW
     model.push("vae_conv/raw_in", "Identity", 0);
@@ -319,7 +337,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         P->permute_dims = {2, 0, 1};
     }
 
-    // Encoder
+    // ConditioningEncoder
     std::string x = "vae_conv/in_chw";
     int cur_h = H;
     int cur_w = W;
@@ -334,6 +352,12 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     }
 
     for (int i = 0; i < downsamples; ++i) {
+        // Sauvegarde du skip avant downsampling (résolution H/2^i × W/2^i)
+        if (use_skip_conn) {
+            enc_skips.push_back(x);
+            enc_skip_h.push_back(cur_h);
+            enc_skip_w.push_back(cur_w);
+        }
         const std::string b = "vae_conv/enc/down" + std::to_string(i + 1);
         x = conv2d(b + "/conv", x, b + "/y", cur_c, cur_c, cur_h, cur_w, 3, 2, 1, true);
         cur_h = std::max(1, (cur_h + 2 * 1 - 3) / 2 + 1);
@@ -389,7 +413,31 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         L->output = "vae_conv/z";
     }
 
+    // Prior appris dans le graphe : couche Constant de taille latent_dim
+    // ajoutée additivement à z avant le décodeur.
+    // Les poids de cette couche (un vecteur CHW de taille LC*LH*LW) sont
+    // entraînés par backprop : ils capturent un biais global appris sur
+    // l'espace latent, améliorant la représentation sans interaction
+    // avec le tokenizer ni la table d'embeddings.
     std::string z_in = "vae_conv/z";
+    if (use_enc_prior) {
+        model.push("vae_conv/z_prior_bias", "Constant",
+                   static_cast<size_t>(LC) * static_cast<size_t>(LH) * static_cast<size_t>(LW));
+        if (auto* L = model.getLayerByName("vae_conv/z_prior_bias")) {
+            L->inputs  = {};
+            L->output  = "vae_conv/prior_bias_out";
+            L->in_channels  = LC;
+            L->out_channels = LC;
+            L->input_height = LH;
+            L->input_width  = LW;
+        }
+        model.push("vae_conv/z_prior_add", "Add", 0);
+        if (auto* L = model.getLayerByName("vae_conv/z_prior_add")) {
+            L->inputs = {"vae_conv/z", "vae_conv/prior_bias_out"};
+            L->output = "vae_conv/z_biased";
+        }
+        z_in = "vae_conv/z_biased";
+    }
 
     std::string y = z_in;
     int dy_h = LH;
@@ -421,6 +469,18 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
             dy_h = in_h * 2;
             dy_w = in_w * 2;
         }
+        // Skip connection encodeur→décodeur : concat + projection 1×1 (2*base → base)
+        if (use_skip_conn && i < static_cast<int>(enc_skips.size())) {
+            model.push(b + "/skip_cat", "Concat", 0);
+            if (auto* L = model.getLayerByName(b + "/skip_cat")) {
+                L->inputs      = {y, enc_skips[static_cast<size_t>(i)]};
+                L->output      = b + "/sc";
+                L->concat_axis = 0;
+            }
+            // Conv 1×1 linéaire : comprime 2*base canaux → base
+            y = conv2d(b + "/skip_proj", b + "/sc", b + "/sp",
+                       2 * dy_c, dy_c, dy_h, dy_w, 1, 1, 0, /*act=*/false);
+        }
         y = add_dec_norm(b + "/n", y, dy_c, dy_h, dy_w);
         if (resnet_gate(dy_h, dy_w)) {
             y = resblock(b + "/res", y, dy_c, dy_h, dy_w);
@@ -446,10 +506,14 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         P->permute_dims = {1, 2, 0};
     }
 
-    // Pack output recon || mu || logvar
+    // Pack output recon || z_biased || logvar
+    // z_in = vae_conv/z_biased (si use_enc_prior) ou vae_conv/z (sinon).
+    // On encode le z réellement passé au décodeur (reparam + prior) plutôt que
+    // mu brut, ce qui permet au mode --encode de lire directement le vecteur
+    // latent opérationnel sans recalcul côté Lua.
     model.push("vae_conv/out_concat", "Concat", 0);
     if (auto* L = model.getLayerByName("vae_conv/out_concat")) {
-        L->inputs = {"vae_conv/recon", "vae_conv/mu", "vae_conv/logvar"};
+        L->inputs = {"vae_conv/recon", z_in, "vae_conv/logvar"};
         L->output = "x";
         L->concat_axis = 0;
     }
@@ -623,6 +687,16 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     // Options blocs optionnels (purement convolutionnel : ResNet seulement)
     const bool use_resnet_dec  = cfg.use_attention;
     const int resnet_max_dec   = cfg.resnet_max_tokens;
+    // Skip connections : si le checkpoint a été entraîné avec use_skip_connections=true,
+    // on reconstruit le même graphe décodeur mais l'encodeur skip est remplacé par un
+    // tenseur zéro (Constant non présent dans le checkpoint → initialisé à 0).
+    // Résultat : skip_proj reçoit [decoder_feats, 0] → W_dec * decoder_feats
+    // C'est bien meilleur que bypasser skip_proj entièrement.
+    const bool use_skip_dec = cfg.use_skip_connections;
+    // Stocker dans modelConfig pour que PonyXL puisse reconstruire une architecture identique.
+    model.modelConfig["use_attention"] = use_resnet_dec;
+    model.modelConfig["resnet_max_tokens"] = resnet_max_dec;
+    model.modelConfig["use_skip_connections"] = use_skip_dec;
 
     auto resnet_gate_dec = [&](int h, int w) -> bool {
         if (!use_resnet_dec) return false;
@@ -717,6 +791,32 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
             y = deconv2d(b + "/up", y, b + "/up_y", dy_c, dy_c, in_h, in_w, 4, 2, 1, true);
             dy_h = in_h * 2;
             dy_w = in_w * 2;
+        }
+        // Skip connection avec encodeur zéro : charge les poids skip_proj du checkpoint
+        // et applique à [decoder_feats, 0]. Le Constant n'est PAS dans le checkpoint
+        // donc initialisé à zéro par l'allocateur → skip_proj applique uniquement
+        // la moitié "decoder" de ses poids, ce qui est bien plus fidèle au modèle
+        // entraîné qu'ignorer skip_proj entièrement.
+        if (use_skip_dec) {
+            const std::string zero_name = b + "/zero_enc_skip";
+            model.push(zero_name, "Constant",
+                       static_cast<size_t>(dy_c) * static_cast<size_t>(dy_h) * static_cast<size_t>(dy_w));
+            if (auto* L = model.getLayerByName(zero_name)) {
+                L->inputs  = {};
+                L->output  = zero_name + "_out";
+                L->in_channels  = dy_c;
+                L->out_channels = dy_c;
+                L->input_height = dy_h;
+                L->input_width  = dy_w;
+            }
+            model.push(b + "/skip_cat", "Concat", 0);
+            if (auto* L = model.getLayerByName(b + "/skip_cat")) {
+                L->inputs      = {y, zero_name + "_out"};
+                L->output      = b + "/sc";
+                L->concat_axis = 0;
+            }
+            y = conv2d(b + "/skip_proj", b + "/sc", b + "/sp",
+                       2 * dy_c, dy_c, dy_h, dy_w, 1, 1, 0, /*act=*/false);
         }
         y = add_dec_norm(b + "/n", y, dy_c, dy_h, dy_w);
         if (resnet_gate_dec(dy_h, dy_w)) {

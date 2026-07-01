@@ -180,13 +180,19 @@ void HFVaeDecoderModel::buildInto(Model& model, const Config& cfg) {
                              int ch,
                              int h,
                              int w) {
+        const int up_out_h = std::max(1, h * 2);
+        const int up_out_w = std::max(1, w * 2);
         model.push(prefix + "/up", "UpsampleNearest", 0);
         if (auto* L = model.getLayerByName(prefix + "/up")) {
             L->inputs = {in};
             L->output = prefix + "/up_out";
             L->in_channels = ch;
-            L->out_h = h;
-            L->out_w = w;
+            L->input_height = h;
+            L->input_width = w;
+            L->output_height = up_out_h;
+            L->output_width = up_out_w;
+            L->out_h = up_out_h;
+            L->out_w = up_out_w;
             L->scale_h = 2.0f;
             L->scale_w = 2.0f;
         }

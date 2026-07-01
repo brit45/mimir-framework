@@ -87,39 +87,9 @@ end
 > sous forme de tableaux colorés (`-a` pour archis + dtypes, `-l <arch> -p` pour
 > les paramètres d’une archi, `-d` pour les dtypes seuls).
 
-## `create(name: string, overrides?: table) -> Model | (nil, err)`
+## Création de modèles
 
-Crée un modèle depuis une architecture nommée.
-
-Comportement (côté C++ `ModelArchitectures::Registry::create`) :
-
-1) canonicalise `name` (alias/rétrocompat)
-2) charge `default_config`
-3) merge récursivement les champs de `overrides` dans la config par défaut
-4) impose `cfg["type"] = <nom canonique>`
-5) appelle la factory associée
-6) écrit `model->modelConfig = cfg` (utile pour inspection/sérialisation)
-
-Le merge est un merge “objet” :
-
-- si `base[key]` et `overrides[key]` sont des objets, merge récursif
-- sinon, la valeur override remplace la valeur base
-
-Conséquence : vous pouvez surcharger une sous-clé sans recopier tout le bloc.
-
-Exemple (pseudo-code Lua) :
-
-```lua
-local arch = "transformer"
-local cfg = Mimir.Architectures.default_config(arch)
-
--- Override minimal
-local m = Mimir.Architectures.create(arch, {
-  d_model = 256,
-  num_layers = 6,
-  causal = true,
-})
-```
+> **IMPORTANT:** `Mimir.Architectures.create()` n'existe PAS. Utilisez `Mimir.Model.create(name, cfg)` à la place.
 
 ## Alias / rétrocompat
 

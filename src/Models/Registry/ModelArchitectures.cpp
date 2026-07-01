@@ -411,6 +411,9 @@ static PonyXLDDPMModel::Config ponyxlDdpmCfgFromJson(const json& cfg) {
     out.unet_blocks_per_level = jget<int>(cfg, "unet_blocks_per_level", out.unet_blocks_per_level);
     out.unet_bottleneck_blocks = jget<int>(cfg, "unet_bottleneck_blocks", out.unet_bottleneck_blocks);
     out.text_clip_like = jget<bool>(cfg, "text_clip_like", out.text_clip_like);
+    out.base_tokenizer_path = jget<std::string>(cfg, "base_tokenizer_path", out.base_tokenizer_path);
+    out.ddpm_schedule = jget<std::string>(cfg, "ddpm_schedule", out.ddpm_schedule);
+    out.use_ldm_unet_arch = jget<bool>(cfg, "use_ldm_unet_arch", out.use_ldm_unet_arch);
 
     return out;
 }
@@ -494,7 +497,47 @@ static json ponyxlDdpmDefaultConfigJson() {
         {"unet_blocks_per_level", d.unet_blocks_per_level},
         {"unet_bottleneck_blocks", d.unet_bottleneck_blocks},
         {"text_clip_like", d.text_clip_like},
+        {"base_tokenizer_path", d.base_tokenizer_path},
+        {"ddpm_schedule", d.ddpm_schedule},
+        {"use_ldm_unet_arch", d.use_ldm_unet_arch},
     };
+}
+
+// ── LdmUNet: config helpers (dépend de ponyxlDdpmDefaultConfigJson) ──────────
+
+static PonyXLDDPMModel::Config ldmUNetCfgFromJson(const json& cfg) {
+    PonyXLDDPMModel::Config out = ponyxlDdpmCfgFromJson(cfg);
+    out.use_ldm_unet_arch = jget<bool>(cfg, "use_ldm_unet_arch", true);
+    out.ddpm_schedule     = jget<std::string>(cfg, "ddpm_schedule", "cosine");
+    out.sdxl_time_cond    = true;
+    return out;
+}
+
+static json ldmUNetDefaultConfigJson() {
+    json j = ponyxlDdpmDefaultConfigJson();
+    j["use_ldm_unet_arch"]        = true;
+    j["ddpm_schedule"]            = "cosine";
+    j["sdxl_time_cond"]           = true;
+    j["d_model"]                  = 1024;
+    j["text_ctx_len"]             = 250;
+    j["num_heads"]                = 16;
+    j["text_layers"]              = 8;
+    j["mlp_hidden"]               = 4096;
+    j["unet_depth"]               = 3;
+    j["unet_blocks_per_level"]    = 2;
+    j["unet_bottleneck_blocks"]   = 2;
+    j["latent_seq_len"]           = 256;
+    j["latent_in_dim"]            = 128;
+    j["latent_h"]                 = 16;
+    j["latent_w"]                 = 16;
+    j["vae_base_channels"]        = 256;
+    j["vae_arch"]                 = "vae_conv";
+    j["ddpm_steps"]               = 1000;
+    j["peltier_noise"]            = false;
+    j["image_w"]                  = 512;
+    j["image_h"]                  = 512;
+    j["image_c"]                  = 3;
+    return j;
 }
 
 static VAEModel::Config vaeCfgFromJson(const json& cfg) {
@@ -535,7 +578,10 @@ static VAEConvModel::Config vaeConvCfgFromJson(const json& cfg) {
     out.decoder_upsample   = jget<std::string>(cfg, "decoder_upsample", out.decoder_upsample);
     out.attn_heads         = jget<int>(cfg, "attn_heads", out.attn_heads);
     out.resnet_max_tokens  = jget<int>(cfg, "resnet_max_tokens", out.resnet_max_tokens);
-    out.attn_max_tokens    = jget<int>(cfg, "attn_max_tokens", out.attn_max_tokens);
+    out.attn_max_tokens        = jget<int>(cfg, "attn_max_tokens", out.attn_max_tokens);
+    out.use_skip_connections   = jget<bool>(cfg, "use_skip_connections", out.use_skip_connections);
+    out.use_encoder_prior      = jget<bool>(cfg, "use_encoder_prior", out.use_encoder_prior);
+    out.d_model                = jget<int>(cfg, "d_model", out.d_model);
 
     // Optional text conditioning
     out.text_cond = jget<bool>(cfg, "text_cond", out.text_cond);
@@ -566,6 +612,9 @@ static json vaeConvDefaultConfigJson() {
                 {"attn_heads", d.attn_heads},
                 {"resnet_max_tokens", d.resnet_max_tokens},
                 {"attn_max_tokens", d.attn_max_tokens},
+                {"use_skip_connections", d.use_skip_connections},
+                {"use_encoder_prior", d.use_encoder_prior},
+                {"d_model", d.d_model},
                 {"text_cond", d.text_cond},
                 {"vocab_size", d.vocab_size},
                 {"seq_len", d.seq_len},
@@ -1243,6 +1292,20 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<PonyXLDDPMModel>();
                     m->buildFromConfig(ponyxlDdpmCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "ldm_unet",
+            Entry{
+                "ldm_unet",
+                "Latent Diffusion U-Net: VAE_conv backbone + proper U-Net (ResBlock+CrossAttn+per-block time inject), d_model=1024, cosine schedule",
+                ldmUNetDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<PonyXLDDPMModel>();
+                    m->buildFromConfig(ldmUNetCfgFromJson(cfg));
                     return m;
                 },
             }

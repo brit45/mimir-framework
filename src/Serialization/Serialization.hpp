@@ -9,7 +9,7 @@
 // Forward declarations
 class Model;
 class Tokenizer;
-class Encoder;
+class ConditioningEncoder;
 
 namespace Mimir {
 namespace Serialization {

@@ -264,7 +264,7 @@ json DebugJsonDump::build_json(
         root["tokenizer"] = tok_info;
     }
     
-    // Encoder info (if present)
+    // ConditioningEncoder info (if present)
     if (options.save_encoder && model.getHasEncoder()) {
         const auto& encoder = model.getEncoder();
         json enc_info;
@@ -787,9 +787,9 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
         }
     }
     
-    // Encoder section (ONLY if model actually has an encoder)
+    // ConditioningEncoder section (ONLY if model actually has an encoder)
     if (options.save_encoder && model.getHasEncoder()) {
-        const Encoder& enc = model.getEncoder();
+        const ConditioningEncoder& enc = model.getEncoder();
         json encoder_obj;
         encoder_obj["has_encoder"] = true;
         encoder_obj["architecture"] = "ViT";  // Or get from encoder
@@ -826,7 +826,7 @@ bool DebugJsonDump::save_enhanced(
         file << std::setw(4) << j << std::endl;
         file.close();
         
-        std::cout << "[DebugJsonDump] Saved enhanced debug JSON to: " << path << std::endl;
+        std::cerr << "[DebugJsonDump] Saved enhanced debug JSON to: " << path << std::endl;
         return true;
         
     } catch (const std::exception& e) {

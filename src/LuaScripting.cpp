@@ -196,6 +196,9 @@ void LuaScripting::registerAPI() {
     
     lua_pushcfunction(L, lua_totalParams);
     lua_setfield(L, -2, "total_params");
+
+    lua_pushcfunction(L, lua_getModelLayers);
+    lua_setfield(L, -2, "get_layers");
     
     lua_pushcfunction(L, lua_pushLayer);
     lua_setfield(L, -2, "push_layer");
@@ -1069,6 +1072,58 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         autosave_every_epochs = std::max(0, autosave_every_epochs);
 
         // -----------------------------------------------------------------
+        // CSV : csv_file / csv_path / csv_dir depuis la config du modèle.
+        // Appliqué ICI (commun à tous les types) sur le HtopDisplay ET le Visualizer.
+        // Pour ponyxl_ddpm, la section spécifique peut encore overrider via csv_dir
+        // (pattern partN_epochM.csv) si aucun csv_file explicite n'est fourni.
+        // -----------------------------------------------------------------
+        {
+            std::string csv_cfg_file;
+            std::string csv_cfg_dir;
+            try {
+                if (ctx.modelConfig.contains("csv_file"))        csv_cfg_file = ctx.modelConfig["csv_file"].get<std::string>();
+                else if (ctx.modelConfig.contains("csv_path"))   csv_cfg_file = ctx.modelConfig["csv_path"].get<std::string>();
+                if (ctx.modelConfig.contains("csv_dir"))         csv_cfg_dir  = ctx.modelConfig["csv_dir"].get<std::string>();
+            } catch (...) {}
+
+            // Résoudre le chemin final pour le Visualizer (si csv_file vide, construire depuis csv_dir)
+            std::string csv_viz_file;  // chemin Visualizer résolu
+            if (!csv_cfg_file.empty()) {
+                csv_viz_file = csv_cfg_file;
+            } else if (!csv_cfg_dir.empty()) {
+                namespace fs = std::filesystem;
+                std::error_code ec;
+                fs::create_directories(csv_cfg_dir, ec);
+                std::string base_name;
+                try {
+                    if (ctx.modelConfig.contains("name"))            base_name = ctx.modelConfig["name"].get<std::string>();
+                    else if (ctx.modelConfig.contains("model_name")) base_name = ctx.modelConfig["model_name"].get<std::string>();
+                } catch (...) {}
+                if (base_name.empty()) base_name = ctx.modelType;
+                if (base_name.empty()) base_name = "model";
+                for (char& c : base_name) {
+                    const unsigned char uc = static_cast<unsigned char>(c);
+                    if (!(std::isalnum(uc) || c == '_' || c == '-')) c = '_';
+                }
+                csv_viz_file = (fs::path(csv_cfg_dir) / (base_name + "_loss_history.csv")).string();
+            }
+
+            if (ctx.asyncMonitor && !csv_viz_file.empty()) {
+                // ── HtopDisplay ──────────────────────────────────────────
+                auto h = ctx.asyncMonitor->getHtop();
+                if (h) {
+                    h->setCsvLogFile(csv_viz_file);
+                    h->setCsvEnabled(true);
+                    ctx.addLog("CSV htop  (cfg): " + csv_viz_file);
+                }
+                // ── Visualizer ───────────────────────────────────────────
+                // setLossLogFile() est thread-safe (pending appliqué au prochain tick).
+                ctx.asyncMonitor->setLossLogFile(csv_viz_file);
+                ctx.addLog("CSV viz   (cfg): " + csv_viz_file);
+            }
+        }
+
+        // -----------------------------------------------------------------
         // Resume epoch offset (UX): si on reprend depuis checkpoint_dir/epoch_XXXX,
         // afficher/nommer les epochs à partir de l'epoch précédente.
         // Exemple: reprise à 3 => UI affiche 3 (pas 1) et autosave écrit epoch_0003+.
@@ -1364,6 +1419,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             m.temp = st.temp;
             m.grad_norm = st.grad_norm;
             m.grad_max = st.grad_max_abs;
+            m.ent = st.entropy_diff;
+            m.mom = st.moment_mismatch;
             m.params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
             m.recon_loss_type = recon_loss_type;
 
@@ -1385,17 +1442,35 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         // -----------------------------------------
         if (model_type == "vae_conv") {
             int image_w = 0, image_h = 0, image_c = 3;
-            bool text_cond = false;
+            bool graph_text_cond = false;
+            bool requested_text_cond = false;
+            bool text_cond_runtime = false;
+            bool text_pipeline_enabled = false;
             int seq_len = 64;
             int pad_id = 0;
+            float text_encoder_lr = 0.01f;
+            float text_special_lr = 0.005f;
             try {
                 if (ctx.modelConfig.contains("image_w")) image_w = ctx.modelConfig["image_w"].get<int>();
                 if (ctx.modelConfig.contains("image_h")) image_h = ctx.modelConfig["image_h"].get<int>();
                 if (ctx.modelConfig.contains("image_c")) image_c = ctx.modelConfig["image_c"].get<int>();
-                if (ctx.modelConfig.contains("text_cond")) text_cond = ctx.modelConfig["text_cond"].get<bool>();
+                // text_cond: use model's own config (ground truth of what was actually built),
+                // not the Lua config which may differ (e.g. vae_conv hardcodes text_cond=false).
+                if (ctx.currentModel && ctx.currentModel->modelConfig.contains("text_cond"))
+                    graph_text_cond = ctx.currentModel->modelConfig["text_cond"].get<bool>();
+                else if (ctx.modelConfig.contains("text_cond"))
+                    graph_text_cond = ctx.modelConfig["text_cond"].get<bool>();
+                if (ctx.modelConfig.contains("text_cond"))
+                    requested_text_cond = ctx.modelConfig["text_cond"].get<bool>();
                 if (ctx.modelConfig.contains("seq_len")) seq_len = ctx.modelConfig["seq_len"].get<int>();
+                if (ctx.modelConfig.contains("text_encoder_lr")) text_encoder_lr = ctx.modelConfig["text_encoder_lr"].get<float>();
+                if (ctx.modelConfig.contains("text_special_lr")) text_special_lr = ctx.modelConfig["text_special_lr"].get<float>();
             } catch (...) {
             }
+
+            text_cond_runtime = (!graph_text_cond && requested_text_cond);
+            text_pipeline_enabled = (graph_text_cond || text_cond_runtime);
+
             if (image_w <= 0 || image_h <= 0) {
                 // fallback: dataset config
                 try {
@@ -1410,14 +1485,20 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             image_h = std::max(1, image_h);
             image_c = std::max(1, image_c);
             seq_len = std::max(1, seq_len);
+            text_encoder_lr = std::max(0.0f, text_encoder_lr);
+            text_special_lr = std::max(0.0f, text_special_lr);
 
-            if (text_cond) {
+            if (text_pipeline_enabled) {
                 if (!ctx.currentTokenizer) {
                     lua_pushboolean(L, false);
                     lua_pushstring(L, "text_cond=true mais aucun tokenizer n'est chargé");
                     return 2;
                 }
                 pad_id = ctx.currentTokenizer->getPadId();
+            }
+
+            if (text_cond_runtime) {
+                ctx.addLog("ℹ️ vae_conv: text_cond runtime actif (graphe image-only conservé). Tokenizer+ConditioningEncoder seront entraînés pour l'alignement image↔texte.");
             }
 
             // Validation config (best-effort, optional)
@@ -1622,18 +1703,77 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
 
                     Model::VAEStepStats st;
+                    std::vector<int> ids;
                     std::string prompt;
-                    if (text_cond) {
+                    if (text_pipeline_enabled) {
                         if (!item.text_file.empty() && !item.text.has_value()) item.loadText();
                         prompt = item.text.has_value() ? item.text.value() : std::string();
-                        std::vector<int> ids = ctx.currentTokenizer->tokenize(prompt);
+                        if (text_cond_runtime) {
+                            ids = ctx.currentTokenizer->tokenizeEnsure(prompt);
+                        } else {
+                            ids = ctx.currentTokenizer->tokenize(prompt);
+                        }
                         if ((int)ids.size() < seq_len) ids.resize((size_t)seq_len, pad_id);
                         else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
+                    }
+
+                    if (graph_text_cond) {
                         poll_viz_live_params();
                         st = ctx.currentModel->trainStepVAEText(x, ids, opt, step_learning_rate());
                     } else {
                         poll_viz_live_params();
                         st = ctx.currentModel->trainStepVAE(x, opt, step_learning_rate());
+
+                        // Mode runtime optionnel: apprend la corrélation image↔texte via l'ConditioningEncoder,
+                        // sans modifier le chemin de loss/convergence du graphe vae_conv existant.
+                        if (text_cond_runtime && !ids.empty() && ctx.currentModel) {
+                            try {
+                                auto& enc = ctx.currentModel->getMutableEncoder();
+                                enc.ensureVocabSize(ctx.currentTokenizer->getVocabSize());
+                                enc.ensureSpecialEmbeddings();
+
+                                // Cible image simple en espace embedding.
+                                const std::vector<float> img_emb = imageToEmbedding(item.img, image_w, image_h, enc.dim);
+
+                                // Met à jour les embeddings token_ids vers la cible image.
+                                if (text_encoder_lr > 0.0f) {
+                                    enc.trainOnTextTokens(ids, img_emb, text_encoder_lr);
+                                }
+
+                                // Lier mag_embedding à la modalité image du sample courant.
+                                std::string img_dir;
+                                try {
+                                    img_dir = std::filesystem::path(item.image_file).parent_path().string();
+                                } catch (...) {
+                                }
+                                const MagicToken mt = makeMagicToken(MOD_IMAGE, img_dir.empty() ? item.image_file : img_dir);
+                                enc.setMagicFromToken(mt);
+
+                                // Gradient d'alignement sur seq/mod: encode(ids) -> img_emb.
+                                std::vector<float> txt_emb;
+                                enc.encodeInto(txt_emb, ids);
+                                if (txt_emb.size() == img_emb.size() && !txt_emb.empty() && text_special_lr > 0.0f) {
+                                    std::vector<float> grad(txt_emb.size(), 0.0f);
+                                    for (size_t d = 0; d < txt_emb.size(); ++d) {
+                                        grad[d] = txt_emb[d] - img_emb[d];
+                                    }
+                                    enc.sgdUpdateSpecialEmbeddings(grad, text_special_lr, true, true, false);
+                                }
+
+                                // Compose mod_embedding comme pont seq <-> mag (image feature).
+                                const auto& seq = enc.getSeqEmbedding();
+                                const auto& mag = enc.getMagEmbedding();
+                                if (seq.size() == (size_t)enc.dim && mag.size() == (size_t)enc.dim) {
+                                    std::vector<float> mod((size_t)enc.dim, 0.0f);
+                                    for (int d = 0; d < enc.dim; ++d) {
+                                        mod[(size_t)d] = 0.5f * (seq[(size_t)d] + mag[(size_t)d]);
+                                    }
+                                    enc.setModEmbedding(mod);
+                                }
+                            } catch (...) {
+                                // best-effort: ne jamais casser le train principal.
+                            }
+                        }
                     }
 
                     global_step += 1;
@@ -1694,18 +1834,22 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                             const std::vector<float>* ppred = nullptr;
                             std::vector<int> ids;
                             std::string vprompt;
-                            if (text_cond) {
+                            if (text_pipeline_enabled) {
                                 if (!vitem.text_file.empty() && !vitem.text.has_value()) vitem.loadText();
                                 vprompt = vitem.text.has_value() ? vitem.text.value() : std::string();
                                 ids = ctx.currentTokenizer->tokenize(vprompt);
                                 if ((int)ids.size() < seq_len) ids.resize((size_t)seq_len, pad_id);
                                 else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
 
-                                std::unordered_map<std::string, std::vector<float>> fin;
-                                std::unordered_map<std::string, std::vector<int>> iin;
-                                fin["__input__"] = x;
-                                iin["text_ids"] = ids;
-                                ppred = &ctx.currentModel->forwardPassNamedView(fin, iin, false);
+                                if (graph_text_cond) {
+                                    std::unordered_map<std::string, std::vector<float>> fin;
+                                    std::unordered_map<std::string, std::vector<int>> iin;
+                                    fin["__input__"] = x;
+                                    iin["text_ids"] = ids;
+                                    ppred = &ctx.currentModel->forwardPassNamedView(fin, iin, false);
+                                } else {
+                                    ppred = &ctx.currentModel->forwardPassView(x, false);
+                                }
                             } else {
                                 ppred = &ctx.currentModel->forwardPassView(x, false);
                             }
@@ -1883,7 +2027,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         if (viz_force_inference) {
                             ctx.currentModel->clearVizTaps();
                             try {
-                                if (text_cond) {
+                                if (graph_text_cond) {
                                     std::vector<int> ids = ctx.currentTokenizer ? ctx.currentTokenizer->tokenize(prompt) : std::vector<int>();
                                     if ((int)ids.size() < seq_len) ids.resize((size_t)seq_len, pad_id);
                                     else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
@@ -1910,6 +2054,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                             bf.w = f.w;
                             bf.h = f.h;
                             bf.channels = f.channels;
+                            bf.pixels_real = std::move(f.pixels_real);
                             bf.label = std::move(f.label);
                             frames.push_back(std::move(bf));
                         }
@@ -1997,7 +2142,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     bf.w = f.w;
                     bf.h = f.h;
                     bf.channels = f.channels;
-                    bf.label = std::move(f.label);
+                    bf.pixels_real = std::move(f.pixels_real);
+                            bf.label = std::move(f.label);
                     frames.push_back(std::move(bf));
                 }
                 // Important UX: même si aucun tap n'est émis, vider les frames précédentes.
@@ -2389,7 +2535,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     bf.w = f.w;
                     bf.h = f.h;
                     bf.channels = f.channels;
-                    bf.label = std::move(f.label);
+                    bf.pixels_real = std::move(f.pixels_real);
+                            bf.label = std::move(f.label);
                     frames.push_back(std::move(bf));
                 }
                 ctx.asyncMonitor->setLayerBlockImages(frames);
@@ -2906,11 +3053,11 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         // -------------------------------
         // VAEText (text_ids) -> recon
         // -------------------------------
-        if (model_type == "ponyxl_ddpm") {
+        if (model_type == "ponyxl_ddpm" || model_type == "ldm_unet") {
             auto* pony = dynamic_cast<PonyXLDDPMModel*>(ctx.currentModel.get());
             if (!pony) {
                 lua_pushboolean(L, false);
-                lua_pushstring(L, "Le modèle courant n'est pas un PonyXLDDPMModel (type=ponyxl_ddpm attendu)");
+                lua_pushstring(L, "Le modèle courant n'est pas un PonyXLDDPMModel (type=ponyxl_ddpm/ldm_unet attendu)");
                 return 2;
             }
 
@@ -2938,37 +3085,57 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             if (is_viz_active() && ctx.asyncMonitor) {
                 namespace fs = std::filesystem;
-                std::string base;
+                // Partie 3 : respecter csv_file/csv_dir si fourni dans la config du modèle.
+                // NOTE: le bloc commun (au-dessus) a déjà appliqué csv_file sur htop+viz.
+                // Ce bloc spécifique gère le pattern partN_epochM.csv UNIQUEMENT si
+                // aucun csv_file explicite n'a été fourni (pour ne pas l'écraser).
+                std::string csv_override_file;
+                std::string csv_override_dir;
                 try {
-                    if (ctx.modelConfig.contains("name")) base = ctx.modelConfig["name"].get<std::string>();
-                    else if (ctx.modelConfig.contains("model_name")) base = ctx.modelConfig["model_name"].get<std::string>();
-                } catch (...) {
-                }
-                if (base.empty()) base = ctx.modelType;
-                if (base.empty()) base = "ponyxl_ddpm";
-                for (char& c : base) {
-                    const unsigned char uc = static_cast<unsigned char>(c);
-                    if (!(std::isalnum(uc) || c == '_' || c == '-')) {
-                        c = '_';
+                    if (ctx.modelConfig.contains("csv_file")) csv_override_file = ctx.modelConfig["csv_file"].get<std::string>();
+                    else if (ctx.modelConfig.contains("csv_path")) csv_override_file = ctx.modelConfig["csv_path"].get<std::string>();
+                    if (ctx.modelConfig.contains("csv_dir")) csv_override_dir = ctx.modelConfig["csv_dir"].get<std::string>();
+                } catch (...) {}
+
+                if (!csv_override_file.empty()) {
+                    // Déjà appliqué par le bloc commun — pas besoin de rappeler setLossLogFile.
+                    // (évite d'écraser le chemin avec le même chemin une seconde fois)
+                } else {
+                    std::string base;
+                    try {
+                        if (ctx.modelConfig.contains("name")) base = ctx.modelConfig["name"].get<std::string>();
+                        else if (ctx.modelConfig.contains("model_name")) base = ctx.modelConfig["model_name"].get<std::string>();
+                    } catch (...) {
                     }
-                }
+                    if (base.empty()) base = ctx.modelType;
+                    if (base.empty()) base = "ponyxl_ddpm";
+                    for (char& c : base) {
+                        const unsigned char uc = static_cast<unsigned char>(c);
+                        if (!(std::isalnum(uc) || c == '_' || c == '-')) {
+                            c = '_';
+                        }
+                    }
 
-                const fs::path out_dir = checkpoint_dir.empty() ? fs::path("checkpoints") : fs::path(checkpoint_dir);
-                std::error_code ec;
-                fs::create_directories(out_dir, ec);
+                    // Si csv_dir est fourni, l'utiliser à la place de checkpoint_dir.
+                    const fs::path out_dir = !csv_override_dir.empty()
+                        ? fs::path(csv_override_dir)
+                        : (checkpoint_dir.empty() ? fs::path("checkpoints") : fs::path(checkpoint_dir));
+                    std::error_code ec;
+                    fs::create_directories(out_dir, ec);
 
-                const int epoch_abs_start = std::max(0, epoch_offset + 1);
-                int part = 0;
-                fs::path out;
-                for (; part < 10000; ++part) {
-                    std::ostringstream name;
-                    name << base << "_part" << part << "_epoch" << epoch_abs_start << ".csv";
-                    out = out_dir / name.str();
-                    if (!fs::exists(out, ec)) break;
-                }
-                if (!out.empty()) {
-                    ctx.asyncMonitor->setLossLogFile(out.string());
-                    ctx.addLog("CSV metrics: " + out.string());
+                    const int epoch_abs_start = std::max(0, epoch_offset + 1);
+                    int part = 0;
+                    fs::path out;
+                    for (; part < 10000; ++part) {
+                        std::ostringstream name;
+                        name << base << "_part" << part << "_epoch" << epoch_abs_start << ".csv";
+                        out = out_dir / name.str();
+                        if (!fs::exists(out, ec)) break;
+                    }
+                    if (!out.empty()) {
+                        ctx.asyncMonitor->setLossLogFile(out.string());
+                        ctx.addLog("CSV metrics: " + out.string());
+                    }
                 }
             }
 
@@ -3176,7 +3343,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(train_indices.begin(), train_indices.end(), rng);
                 ctx.addLog("Epoch " + std::to_string(epoch_offset + (epoch + 1)) + "/" + std::to_string(total_epochs_display) +
-                           " (ponyxl_ddpm) items=" + std::to_string(use_n));
+                           " (" + model_type + ") items=" + std::to_string(use_n));
 
                 bool stop_requested = false;
 
@@ -3308,7 +3475,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                                     bf.w = f.w;
                                     bf.h = f.h;
                                     bf.channels = f.channels;
-                                    bf.label = std::move(f.label);
+                                    bf.pixels_real = std::move(f.pixels_real);
+                            bf.label = std::move(f.label);
                                     frames.push_back(std::move(bf));
                                 }
                                 ctx.asyncMonitor->setLayerBlockImages(frames);
@@ -3331,6 +3499,11 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                         // Calibration: récompense / punition selon l'évolution de eps_mse (DDPM).
                         if (val_ok && done > 0) apply_val_feedback(final_eps, global_step);
+
+                        // Partie 2 : écrire les métriques de validation dans le CSV htop.
+                        if (val_ok && done > 0 && ctx.asyncMonitor) {
+                            ctx.asyncMonitor->addValidationRecord(final_img, final_eps, global_step);
+                        }
 
                         if (stop_requested) {
                             break;
@@ -3361,6 +3534,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                             bf.w = f.w;
                             bf.h = f.h;
                             bf.channels = f.channels;
+                            bf.pixels_real = std::move(f.pixels_real);
                             bf.label = std::move(f.label);
                             frames.push_back(std::move(bf));
                         }
@@ -3754,7 +3928,7 @@ int LuaScripting::lua_loadModel(lua_State* L) {
         }
         
         Tokenizer tokenizer;
-        Encoder encoder;
+        ConditioningEncoder encoder;
         std::vector<MagicToken> magic_tokens;
         
         bool success = ctx.currentModel->tryLoadExistingModel(
@@ -3767,7 +3941,7 @@ int LuaScripting::lua_loadModel(lua_State* L) {
         
         if (success) {
             ctx.currentTokenizer = std::make_shared<Tokenizer>(tokenizer);
-            ctx.currentEncoder = std::make_shared<Encoder>(encoder);
+            ctx.currentEncoder = std::make_shared<ConditioningEncoder>(encoder);
 
             // Si la viz est active, activer les taps pour permettre l'affichage des blocks.
             if (ctx.asyncMonitor && ctx.asyncMonitor->getViz() != nullptr && ctx.currentModel) {
@@ -4871,7 +5045,8 @@ int LuaScripting::lua_ponyxlDdpmTrainStep(lua_State* L) {
                         bf.w = f.w;
                         bf.h = f.h;
                         bf.channels = f.channels;
-                        bf.label = std::move(f.label);
+                        bf.pixels_real = std::move(f.pixels_real);
+                            bf.label = std::move(f.label);
                         frames.push_back(std::move(bf));
                     }
                     // Important UX: si le dataset change mais que le modèle n'a pas émis de taps,
@@ -5620,6 +5795,62 @@ int LuaScripting::lua_totalParams(lua_State* L) {
     return 1;
 }
 
+// Renvoie la liste des layers du modèle courant.
+// Retourne: table[] où chaque entrée est
+//   { index, name, type, param_count, inputs={...}, output,
+//     in_features, out_features, in_channels, out_channels,
+//     kernel_size, stride, padding, seq_len, embed_dim, num_heads,
+//     vocab_size, input_height, input_width }
+int LuaScripting::lua_getModelLayers(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentModel) {
+        lua_newtable(L);
+        return 1;
+    }
+    const auto& layers = ctx.currentModel->getLayers();
+    lua_createtable(L, static_cast<int>(layers.size()), 0);
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const Layer& la = layers[i];
+        lua_newtable(L);
+
+        lua_pushinteger(L, static_cast<lua_Integer>(i + 1));
+        lua_setfield(L, -2, "index");
+        lua_pushstring(L, la.name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, la.type.c_str());
+        lua_setfield(L, -2, "type");
+        lua_pushinteger(L, static_cast<lua_Integer>(la.getWeightsSize()));
+        lua_setfield(L, -2, "param_count");
+        lua_pushstring(L, la.output.c_str());
+        lua_setfield(L, -2, "output");
+
+        // inputs array
+        lua_createtable(L, static_cast<int>(la.inputs.size()), 0);
+        for (size_t j = 0; j < la.inputs.size(); ++j) {
+            lua_pushstring(L, la.inputs[j].c_str());
+            lua_rawseti(L, -2, static_cast<int>(j + 1));
+        }
+        lua_setfield(L, -2, "inputs");
+
+        lua_pushinteger(L, la.in_features);   lua_setfield(L, -2, "in_features");
+        lua_pushinteger(L, la.out_features);  lua_setfield(L, -2, "out_features");
+        lua_pushinteger(L, la.in_channels);   lua_setfield(L, -2, "in_channels");
+        lua_pushinteger(L, la.out_channels);  lua_setfield(L, -2, "out_channels");
+        lua_pushinteger(L, la.kernel_size);   lua_setfield(L, -2, "kernel_size");
+        lua_pushinteger(L, la.stride);        lua_setfield(L, -2, "stride");
+        lua_pushinteger(L, la.padding);       lua_setfield(L, -2, "padding");
+        lua_pushinteger(L, la.seq_len);       lua_setfield(L, -2, "seq_len");
+        lua_pushinteger(L, la.embed_dim);     lua_setfield(L, -2, "embed_dim");
+        lua_pushinteger(L, la.num_heads);     lua_setfield(L, -2, "num_heads");
+        lua_pushinteger(L, la.vocab_size);    lua_setfield(L, -2, "vocab_size");
+        lua_pushinteger(L, la.input_height);  lua_setfield(L, -2, "input_height");
+        lua_pushinteger(L, la.input_width);   lua_setfield(L, -2, "input_width");
+
+        lua_rawseti(L, -2, static_cast<int>(i + 1));
+    }
+    return 1;
+}
+
 int LuaScripting::lua_pushLayer(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
@@ -5723,7 +5954,8 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
             bf.w = f.w;
             bf.h = f.h;
             bf.channels = f.channels;
-            bf.label = std::move(f.label);
+            bf.pixels_real = std::move(f.pixels_real);
+                            bf.label = std::move(f.label);
             frames.push_back(std::move(bf));
         }
         ctx.asyncMonitor->setLayerBlockImages(frames);

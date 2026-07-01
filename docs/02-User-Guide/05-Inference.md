@@ -47,7 +47,7 @@ cfg.seq_len = 64
 cfg.vocab_size = 2000
 
 assert(Mimir.Model.create("transformer", cfg))
-assert(Mimir.Model.build())
+-- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
 assert(Mimir.Model.allocate_params())
 
 -- 3) Charger les poids

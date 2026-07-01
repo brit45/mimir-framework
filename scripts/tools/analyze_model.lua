@@ -202,6 +202,25 @@ local function trunc(s, max_len)
     return utf8_sub_chars(s, max_len - 3) .. "..."
 end
 
+-- Découpe une chaîne en lignes de max_w caractères UTF-8 (sans troncature).
+local function split_lines_wrap(s, max_w)
+    s = tostring(s or "")
+    max_w = math.floor(tonumber(max_w) or 80)
+    if max_w <= 0 then return { s } end
+    if utf8_len_safe(s) <= max_w then return { s } end
+    local result = {}
+    local safety = 0
+    while utf8_len_safe(s) > max_w and safety < 10000 do
+        safety = safety + 1
+        local chunk = utf8_sub_chars(s, max_w)
+        if #chunk == 0 then break end
+        result[#result + 1] = chunk
+        s = s:sub(#chunk + 1)
+    end
+    if s ~= "" then result[#result + 1] = s end
+    return result
+end
+
 local function pad_right(s, w)
     s = tostring(s or "")
     w = tonumber(w) or utf8_len_safe(s)
@@ -233,10 +252,15 @@ local function make_table(columns, rows)
         local row = rows[ri]
         for ci = 1, #columns do
             local col = columns[ci]
-            local v = row[col.key]
-            local s = trunc(v, col.max or 120)
-            local w = utf8_len_safe(s)
-            if w > widths[ci] then widths[ci] = w end
+            if col.wrap then
+                local cap = math.floor(tonumber(col.max) or 100)
+                if cap > widths[ci] then widths[ci] = cap end
+            else
+                local v = row[col.key]
+                local s = trunc(v, col.max or 120)
+                local w = utf8_len_safe(s)
+                if w > widths[ci] then widths[ci] = w end
+            end
         end
     end
 
@@ -267,20 +291,36 @@ local function make_table(columns, rows)
 
     for ri = 1, #rows do
         local row = rows[ri]
-        local parts = { "|" }
+        local col_lines = {}
+        local max_lines = 1
         for ci = 1, #columns do
             local col = columns[ci]
-            local s = trunc(row[col.key], col.max or 120)
-            local cell
-            if (col.align or "left") == "right" then
-                cell = pad_left(s, widths[ci])
+            local v = tostring(row[col.key] or "")
+            local lines_ci
+            if col.wrap then
+                lines_ci = split_lines_wrap(v, widths[ci])
             else
-                cell = pad_right(s, widths[ci])
+                lines_ci = { trunc(v, col.max or 120) }
             end
-            parts[#parts + 1] = " " .. cell .. " "
-            parts[#parts + 1] = "|"
+            col_lines[ci] = lines_ci
+            if #lines_ci > max_lines then max_lines = #lines_ci end
         end
-        out[#out + 1] = table.concat(parts)
+        for li = 1, max_lines do
+            local parts = { "|" }
+            for ci = 1, #columns do
+                local col = columns[ci]
+                local s = col_lines[ci][li] or ""
+                local cell
+                if (col.align or "left") == "right" then
+                    cell = pad_left(s, widths[ci])
+                else
+                    cell = pad_right(s, widths[ci])
+                end
+                parts[#parts + 1] = " " .. cell .. " "
+                parts[#parts + 1] = "|"
+            end
+            out[#out + 1] = table.concat(parts)
+        end
     end
 
     out[#out + 1] = sep("-")
@@ -954,7 +994,8 @@ end
 -- Rendering
 -- ---------------------------------------------------------------------------
 
-local function render_summary(info)
+local function render_summary(info, opts)
+    opts = opts or {}
     local meta = info.metadata or info.manifest or {}
     local arch = info.arch or {}
 
@@ -1039,9 +1080,10 @@ local function render_summary(info)
         end
     end
 
+    local wrap_all = opts.all == true
     local columns = {
         { key = "k", title = "Clé", align = "left", max = 28 },
-        { key = "v", title = "Valeur", align = "left", max = 140 },
+        { key = "v", title = "Valeur", align = "left", max = 100, wrap = wrap_all },
     }
 
     return make_table(columns, rows)
@@ -1528,6 +1570,7 @@ local function render_help()
         "  --graph-in-width <n>                Largeur inputs (mode blocks)",
         "  --graph-layer-width <n>             Largeur layer (mode blocks)",
         "  --graph-out-width <n>               Largeur output (mode blocks)",
+        "  --all <bool>                        Affiche toutes les valeurs sans troncature dans l'entête (sur plusieurs lignes si besoin) (défaut: false)",
         "  --debug <bool>                      Logs de debug (défaut: false)",
         "  --script-help <bool>                Affiche cette aide (alias: --help-script, --h)",
         "",
@@ -1557,6 +1600,7 @@ opts.graph_layer_width = Args.get_num(opts, "graph-layer-width", Args.get_num(op
 opts.graph_out_width = Args.get_num(opts, "graph-out-width", Args.get_num(opts, "graph_out_width", nil))
 opts.graph_format = Args.get_str(opts, "graph-format", Args.get_str(opts, "graph_format", "table"))
 opts.debug = Args.get_bool(opts, "debug", false)
+opts.all = Args.get_bool(opts, "all", false)
 
 opts.script_help = Args.get_bool(opts, "script-help", Args.get_bool(opts, "script_help",
     Args.get_bool(opts, "help-script", Args.get_bool(opts, "help_script",
@@ -1614,7 +1658,7 @@ log("  Analyse modèle")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 log("")
 
-log(render_summary(info))
+log(render_summary(info, opts))
 
 do
     local gf = tostring(opts.graph_format or "table"):lower()

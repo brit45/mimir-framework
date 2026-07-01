@@ -4,7 +4,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <omp.h>
-json Encoder::to_json() const {
+json ConditioningEncoder::to_json() const {
     json j;
     j["dim"] = dim;
     j["vocab_size"] = vocab_size;
@@ -37,7 +37,7 @@ json Encoder::to_json() const {
     return j;
 }
 
-void Encoder::from_json(const json &j) {
+void ConditioningEncoder::from_json(const json &j) {
     if (j.contains("dim")) dim = j["dim"].get<int>();
     if (j.contains("vocab_size")) vocab_size = j["vocab_size"].get<int>();
 
@@ -59,8 +59,8 @@ void Encoder::from_json(const json &j) {
     }
 
     // Cohérence minimale
-    if (dim <= 0) throw std::runtime_error("Encoder::from_json: invalid dim");
-    if (vocab_size < 0) throw std::runtime_error("Encoder::from_json: invalid vocab_size");
+    if (dim <= 0) throw std::runtime_error("ConditioningEncoder::from_json: invalid dim");
+    if (vocab_size < 0) throw std::runtime_error("ConditioningEncoder::from_json: invalid vocab_size");
     if (magik_prefix_count < 0) magik_prefix_count = 0;
     if (!(magik_prefix_weight > 0.0f)) magik_prefix_weight = 1.0f;
     if (!token_embeddings.empty()) {
@@ -73,7 +73,7 @@ void Encoder::from_json(const json &j) {
         }
     }
 }
-Encoder::Encoder(int d, int Size_Vo)
+ConditioningEncoder::ConditioningEncoder(int d, int Size_Vo)
     : dim(d), vocab_size(0)
 {
     if (dim <= 0) dim = 64;
@@ -81,9 +81,9 @@ Encoder::Encoder(int d, int Size_Vo)
     // leave vocab_size == 0 until ensureVocabSize is called
 }
 
-Encoder::~Encoder() = default;
+ConditioningEncoder::~ConditioningEncoder() = default;
 
-void Encoder::initRandom(uint64_t seed)
+void ConditioningEncoder::initRandom(uint64_t seed)
 {
     std::mt19937 rng(static_cast<uint32_t>(seed ^ 0x9e3779b9u));
     std::uniform_real_distribution<float> dist(-0.02f, 0.02f);
@@ -94,9 +94,9 @@ void Encoder::initRandom(uint64_t seed)
     }
 }
 
-void Encoder::ensureSpecialEmbeddings(uint64_t seed)
+void ConditioningEncoder::ensureSpecialEmbeddings(uint64_t seed)
 {
-    if (dim <= 0) throw std::runtime_error("Encoder::ensureSpecialEmbeddings: invalid dim");
+    if (dim <= 0) throw std::runtime_error("ConditioningEncoder::ensureSpecialEmbeddings: invalid dim");
     std::mt19937 rng(static_cast<uint32_t>(seed ^ 0xA5A5A5A5u));
     std::uniform_real_distribution<float> dist(-0.02f, 0.02f);
 
@@ -115,7 +115,7 @@ void Encoder::ensureSpecialEmbeddings(uint64_t seed)
     init_if_empty(mag_embedding, 0x0F0F0F0Fu);
 }
 
-void Encoder::ensureDim(int required_dim, uint64_t seed)
+void ConditioningEncoder::ensureDim(int required_dim, uint64_t seed)
 {
     if (required_dim <= 0) return;
     if (dim == required_dim) {
@@ -126,7 +126,7 @@ void Encoder::ensureDim(int required_dim, uint64_t seed)
     // Ne pas détruire un encoder déjà chargé/entraîné.
     if (vocab_size > 0 || !token_embeddings.empty()) {
         throw std::runtime_error(
-            "Encoder::ensureDim: dim mismatch (have=" + std::to_string(dim) +
+            "ConditioningEncoder::ensureDim: dim mismatch (have=" + std::to_string(dim) +
             ", need=" + std::to_string(required_dim) +
             "). Refusing to resize because token embeddings are already allocated."
         );
@@ -136,7 +136,7 @@ void Encoder::ensureDim(int required_dim, uint64_t seed)
     ensureSpecialEmbeddings(seed);
 }
 
-void Encoder::sgdUpdateSpecialEmbeddings(const std::vector<float>& grad_text, float lr,
+void ConditioningEncoder::sgdUpdateSpecialEmbeddings(const std::vector<float>& grad_text, float lr,
                                         bool update_seq, bool update_mod, bool update_mag)
 {
     if (lr == 0.0f) return;
@@ -155,20 +155,35 @@ void Encoder::sgdUpdateSpecialEmbeddings(const std::vector<float>& grad_text, fl
     if (update_mag) apply(mag_embedding);
 }
 
-void Encoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
+void ConditioningEncoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
 {
     if (new_vocab_size <= static_cast<size_t>(vocab_size)) return;
-    size_t old = static_cast<size_t>(vocab_size);
-    size_t need = new_vocab_size - old;
-    token_embeddings.resize(static_cast<size_t>(new_vocab_size) * static_cast<size_t>(dim));
-    // init new embeddings randomly (séquentiel pour RNG)
-    std::mt19937 rng(static_cast<uint32_t>(seed ^ 0xC0FFEEu));
-    std::uniform_real_distribution<float> dist(-0.02f, 0.02f);
-    size_t start = old * static_cast<size_t>(dim);
-    size_t end = token_embeddings.size();
-    for (size_t i = start; i < end; ++i) {
-        token_embeddings[i] = dist(rng);
+    const size_t old   = static_cast<size_t>(vocab_size);
+    const size_t dim_t = static_cast<size_t>(dim);
+    token_embeddings.resize(new_vocab_size * dim_t);
+
+    const size_t start = old * dim_t;
+    const size_t n_new = token_embeddings.size() - start;
+
+    // Initialisation parallèle : chaque thread utilise son propre RNG
+    // pour éviter tout verrou et saturer les coeurs disponibles.
+    #pragma omp parallel if(n_new > 65536)
+    {
+        const int tid = omp_get_thread_num();
+        const int nth = omp_get_num_threads();
+        // Graine distincte par thread pour garantir la reproductibilité.
+        std::mt19937 rng(static_cast<uint32_t>(
+            (seed ^ 0xC0FFEEu) ^ (static_cast<uint64_t>(tid + 1) * 0x9e3779b97f4a7c15ULL)));
+        std::uniform_real_distribution<float> dist(-0.02f, 0.02f);
+
+        const size_t chunk = (n_new + static_cast<size_t>(nth) - 1) / static_cast<size_t>(nth);
+        const size_t lo    = start + std::min(static_cast<size_t>(tid)     * chunk, n_new);
+        const size_t hi    = start + std::min(static_cast<size_t>(tid + 1) * chunk, n_new);
+        for (size_t i = lo; i < hi; ++i) {
+            token_embeddings[i] = dist(rng);
+        }
     }
+
     vocab_size = static_cast<int>(new_vocab_size);
 }
 
@@ -182,38 +197,44 @@ static inline uint32_t mix_u32(uint32_t x) {
     return x;
 }
 
-void Encoder::setMagicFromToken(const MagicToken &mt)
+void ConditioningEncoder::setMagicFromToken(const MagicToken &mt)
 {
     ensureSpecialEmbeddings();
     mag_embedding.assign(static_cast<size_t>(dim), 0.0f);
 
     const uint32_t base_seed = mix_u32(mt.seed ^ (mt.modality_mask * 0x9e3779b1u) ^ 0xC0FFEEu);
 
-    // Project 8-d embed -> dim with small, deterministic pseudo-random weights.
-    // Goal: stable conditioning vector, not huge magnitude.
+    // Projection 8-d -> dim avec poids pseudo-aléatoires déterministes.
+    // Parallélisé : chaque dimension est indépendante.
+    #pragma omp parallel for schedule(static) if(dim > 256)
     for (int d = 0; d < dim; ++d) {
         float acc = 0.0f;
         for (int i = 0; i < 8; ++i) {
-            uint32_t h = mix_u32(base_seed ^ (static_cast<uint32_t>(d + 1) * 0xA341316Cu) ^ (static_cast<uint32_t>(i + 1) * 0xC8013EA4u));
-            // [-0.1, 0.1]
-            float w = (static_cast<int>(h % 20001u) - 10000) / 10000.0f;
-            w *= 0.1f;
+            uint32_t h = mix_u32(base_seed
+                ^ (static_cast<uint32_t>(d + 1) * 0xA341316Cu)
+                ^ (static_cast<uint32_t>(i + 1) * 0xC8013EA4u));
+            float w = (static_cast<int>(h % 20001u) - 10000) / 100000.0f; // *= 0.1 / 10000
             acc += mt.embed[i] * w;
         }
         mag_embedding[static_cast<size_t>(d)] = acc;
     }
 
-    // Normalize (best-effort) to keep scale consistent across modalities.
+    // Normalisation L2.
     double ss = 0.0;
-    for (float v : mag_embedding) ss += static_cast<double>(v) * static_cast<double>(v);
+    #pragma omp simd reduction(+:ss)
+    for (int i = 0; i < dim; ++i) {
+        const double v = static_cast<double>(mag_embedding[static_cast<size_t>(i)]);
+        ss += v * v;
+    }
     const double n = std::sqrt(ss);
     if (n > 1e-12) {
         const float inv = static_cast<float>(1.0 / n);
-        for (float &v : mag_embedding) v *= inv;
+        #pragma omp simd
+        for (int i = 0; i < dim; ++i) mag_embedding[static_cast<size_t>(i)] *= inv;
     }
 }
 
-void Encoder::setSeqEmbedding(const std::vector<float> &v)
+void ConditioningEncoder::setSeqEmbedding(const std::vector<float> &v)
 {
     if (v.empty()) {
         seq_embedding.clear();
@@ -224,7 +245,7 @@ void Encoder::setSeqEmbedding(const std::vector<float> &v)
     std::copy_n(v.data(), n, seq_embedding.data());
 }
 
-void Encoder::setModEmbedding(const std::vector<float> &v)
+void ConditioningEncoder::setModEmbedding(const std::vector<float> &v)
 {
     if (v.empty()) {
         mod_embedding.clear();
@@ -235,7 +256,7 @@ void Encoder::setModEmbedding(const std::vector<float> &v)
     std::copy_n(v.data(), n, mod_embedding.data());
 }
 
-void Encoder::setMagEmbedding(const std::vector<float> &v)
+void ConditioningEncoder::setMagEmbedding(const std::vector<float> &v)
 {
     if (v.empty()) {
         mag_embedding.clear();
@@ -246,67 +267,95 @@ void Encoder::setMagEmbedding(const std::vector<float> &v)
     std::copy_n(v.data(), n, mag_embedding.data());
 }
 
-std::vector<float> Encoder::encode(const std::vector<int> &tokens, uint32_t /*seed*/) const
+std::vector<float> ConditioningEncoder::encode(const std::vector<int> &tokens, uint32_t /*seed*/) const
 {
     std::vector<float> out(static_cast<size_t>(dim), 0.0f);
+    encodeInto(out, tokens);
+    return out;
+}
+
+void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<int>& tokens) const
+{
+    out.assign(static_cast<size_t>(dim), 0.0f);
+
+    const size_t dim_t = static_cast<size_t>(dim);
+
+    // Pré-calcul une seule fois hors boucle.
+    const bool has_seq = (seq_embedding.size() == dim_t);
+    const bool has_mod = (mod_embedding.size() == dim_t);
+    const bool has_mag = (mag_embedding.size() == dim_t);
+
+    float* __restrict__ dst = out.data();
+
     if (tokens.empty()) {
-        // add special embeddings if present
-        for (int i = 0; i < dim; ++i) {
-            if (seq_embedding.size() == static_cast<size_t>(dim)) out[i] += seq_embedding[i];
-            if (mod_embedding.size() == static_cast<size_t>(dim)) out[i] += mod_embedding[i];
-            if (mag_embedding.size() == static_cast<size_t>(dim)) out[i] += mag_embedding[i];
+        if (has_seq) {
+            const float* __restrict__ s = seq_embedding.data();
+            #pragma omp simd
+            for (int d = 0; d < dim; ++d) dst[d] += s[d];
         }
-        return out;
+        if (has_mod) {
+            const float* __restrict__ s = mod_embedding.data();
+            #pragma omp simd
+            for (int d = 0; d < dim; ++d) dst[d] += s[d];
+        }
+        if (has_mag) {
+            const float* __restrict__ s = mag_embedding.data();
+            #pragma omp simd
+            for (int d = 0; d < dim; ++d) dst[d] += s[d];
+        }
+        return;
     }
 
     float weight_sum = 0.0f;
     for (size_t pos = 0; pos < tokens.size(); ++pos) {
         const int id = tokens[pos];
-        if (id <= 0) continue; // PAD(0) + ids négatifs
-        if (static_cast<size_t>(id) >= static_cast<size_t>(vocab_size)) continue;
+        if (id <= 0) continue;
+        if (id >= vocab_size) continue;
 
-        const float w = (static_cast<int>(pos) < magik_prefix_count && magik_prefix_weight > 0.0f) ? magik_prefix_weight : 1.0f;
-        const float *row = token_embeddings.data() + (static_cast<size_t>(id) * static_cast<size_t>(dim));
+        const float w = (static_cast<int>(pos) < magik_prefix_count && magik_prefix_weight > 0.0f)
+                        ? magik_prefix_weight : 1.0f;
+        const float* __restrict__ row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
         #pragma omp simd
-        for (int d = 0; d < dim; ++d) {
-            out[static_cast<size_t>(d)] += row[static_cast<size_t>(d)] * w;
-        }
+        for (int d = 0; d < dim; ++d) dst[d] += row[d] * w;
         weight_sum += w;
     }
 
     if (weight_sum > 0.0f) {
-        float inv = 1.0f / weight_sum;
+        const float inv = 1.0f / weight_sum;
         #pragma omp simd
-        for (int i = 0; i < dim; ++i) out[i] *= inv;
+        for (int i = 0; i < dim; ++i) dst[i] *= inv;
     }
 
-    // add special embeddings (if set)
-    if (seq_embedding.size() == static_cast<size_t>(dim)) {
-        for (int d = 0; d < dim; ++d) out[static_cast<size_t>(d)] += seq_embedding[static_cast<size_t>(d)];
+    if (has_seq) {
+        const float* __restrict__ s = seq_embedding.data();
+        #pragma omp simd
+        for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
-    if (mod_embedding.size() == static_cast<size_t>(dim)) {
-        for (int d = 0; d < dim; ++d) out[static_cast<size_t>(d)] += mod_embedding[static_cast<size_t>(d)];
+    if (has_mod) {
+        const float* __restrict__ s = mod_embedding.data();
+        #pragma omp simd
+        for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
-    if (mag_embedding.size() == static_cast<size_t>(dim)) {
-        for (int d = 0; d < dim; ++d) out[static_cast<size_t>(d)] += mag_embedding[static_cast<size_t>(d)];
+    if (has_mag) {
+        const float* __restrict__ s = mag_embedding.data();
+        #pragma omp simd
+        for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
-
-    return out;
 }
 
-void Encoder::trainOnTextTokens(const std::vector<int> &token_ids, const std::vector<float> &target, float lr)
+void ConditioningEncoder::trainOnTextTokens(const std::vector<int> &token_ids, const std::vector<float> &target, float lr)
 {
-    if (token_ids.empty() || target.size() != static_cast<size_t>(dim) || lr == 0.0f) return;
+    if (token_ids.empty() || static_cast<int>(target.size()) != dim || lr == 0.0f) return;
+    const size_t dim_t = static_cast<size_t>(dim);
+    const float* __restrict__ tgt = target.data();
     for (int id : token_ids) {
-        if (id < 0) continue;
-        // assume special tokens are at low ids (0..4) — do not train them
-        if (id <= 4) continue;
-        if (static_cast<size_t>(id) >= static_cast<size_t>(vocab_size)) continue;
-        float *row = token_embeddings.data() + (static_cast<size_t>(id) * static_cast<size_t>(dim));
+        if (id <= 4) continue; // PAD(0), négatifs, tokens spéciaux (0-4)
+        if (id >= vocab_size) continue;
+        float* __restrict__ row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
+        // SGD fusé : row += lr * (target - row)  =>  row = (1-lr)*row + lr*target
         #pragma omp simd
         for (int d = 0; d < dim; ++d) {
-            float err = target[static_cast<size_t>(d)] - row[static_cast<size_t>(d)];
-            row[static_cast<size_t>(d)] += lr * err;
+            row[d] += lr * (tgt[d] - row[d]);
         }
     }
 }

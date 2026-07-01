@@ -23,7 +23,7 @@ public:
     // Configuration
     void setLimit(size_t bytes) {
         max_bytes_ = bytes;
-        std::cout << "🛡️  MemoryGuard: Limite stricte définie à " 
+        std::cerr << "🛡️  MemoryGuard: Limite stricte définie à " 
                   << (bytes / 1024 / 1024 / 1024) << " GB" << std::endl;
     }
     
@@ -37,10 +37,10 @@ public:
     void blockAllocations(bool block = true) {
         allocations_blocked_ = block;
         if (block) {
-            std::cout << "🔒 MemoryGuard: Allocations BLOQUÉES" << std::endl;
-            std::cout << "   Aucune nouvelle allocation ne sera autorisée" << std::endl;
+            std::cerr << "🔒 MemoryGuard: Allocations BLOQUÉES" << std::endl;
+            std::cerr << "   Aucune nouvelle allocation ne sera autorisée" << std::endl;
         } else {
-            std::cout << "🔓 MemoryGuard: Allocations DÉBLOQUÉES" << std::endl;
+            std::cerr << "🔓 MemoryGuard: Allocations DÉBLOQUÉES" << std::endl;
         }
     }
     
@@ -62,10 +62,10 @@ public:
     void freezeAllocations(bool freeze = true) {
         freeze_mode_ = freeze;
         if (freeze) {
-            std::cout << "❄️  MemoryGuard: Mode FREEZE activé" << std::endl;
-            std::cout << "   Nouvelles allocations bloquées, libérations autorisées" << std::endl;
+            std::cerr << "❄️  MemoryGuard: Mode FREEZE activé" << std::endl;
+            std::cerr << "   Nouvelles allocations bloquées, libérations autorisées" << std::endl;
         } else {
-            std::cout << "☀️  MemoryGuard: Mode FREEZE désactivé" << std::endl;
+            std::cerr << "☀️  MemoryGuard: Mode FREEZE désactivé" << std::endl;
         }
     }
     
@@ -120,7 +120,7 @@ public:
         allocations_count_++;
         
         if (!tag.empty() && bytes > 100 * 1024 * 1024) { // Log si > 100 MB
-            std::cout << "📊 Allocation: " << (bytes / 1024 / 1024) << " MB"
+            std::cerr << "📊 Allocation: " << (bytes / 1024 / 1024) << " MB"
                       << " (" << tag << ")"
                       << " - Total: " << (current_bytes_ / 1024 / 1024) << " MB"
                       << " / " << (max_bytes_ / 1024 / 1024) << " MB" << std::endl;
@@ -149,36 +149,36 @@ public:
     }
     
     void printStats() const {
-        std::cout << "\n╔═══════════════════════════════════════════════════════╗" << std::endl;
-        std::cout << "║           MEMORY GUARD - STATISTIQUES                ║" << std::endl;
-        std::cout << "╠═══════════════════════════════════════════════════════╣" << std::endl;
-        std::cout << "║ Limite:     " << std::setw(10) << (max_bytes_ / 1024 / 1024) 
+        std::cerr << "\n╔═══════════════════════════════════════════════════════╗" << std::endl;
+        std::cerr << "║           MEMORY GUARD - STATISTIQUES                ║" << std::endl;
+        std::cerr << "╠═══════════════════════════════════════════════════════╣" << std::endl;
+        std::cerr << "║ Limite:     " << std::setw(10) << (max_bytes_ / 1024 / 1024) 
                   << " MB                         ║" << std::endl;
-        std::cout << "║ Actuel:     " << std::setw(10) << (current_bytes_ / 1024 / 1024) 
+        std::cerr << "║ Actuel:     " << std::setw(10) << (current_bytes_ / 1024 / 1024) 
                   << " MB                         ║" << std::endl;
-        std::cout << "║ Pic:        " << std::setw(10) << (peak_bytes_ / 1024 / 1024) 
+        std::cerr << "║ Pic:        " << std::setw(10) << (peak_bytes_ / 1024 / 1024) 
                   << " MB                         ║" << std::endl;
-        std::cout << "║ Utilisation:" << std::setw(9) << std::fixed << std::setprecision(1)
+        std::cerr << "║ Utilisation:" << std::setw(9) << std::fixed << std::setprecision(1)
                   << getUsagePercent() << " %                          ║" << std::endl;
-        std::cout << "║ Allocations:" << std::setw(9) << allocations_count_ 
+        std::cerr << "║ Allocations:" << std::setw(9) << allocations_count_ 
                   << "                              ║" << std::endl;
-        std::cout << "║ Libérations:" << std::setw(9) << deallocations_count_ 
+        std::cerr << "║ Libérations:" << std::setw(9) << deallocations_count_ 
                   << "                              ║" << std::endl;
-        std::cout << "╠═══════════════════════════════════════════════════════╣" << std::endl;
-        std::cout << "║ État:       " << (allocations_blocked_ ? "🔒 BLOQUÉ  " : "🔓 ACTIF   ")
+        std::cerr << "╠═══════════════════════════════════════════════════════╣" << std::endl;
+        std::cerr << "║ État:       " << (allocations_blocked_ ? "🔒 BLOQUÉ  " : "🔓 ACTIF   ")
                   << "                          ║" << std::endl;
         if (freeze_mode_) {
-            std::cout << "║ Mode:       ❄️  FREEZE                               ║" << std::endl;
+            std::cerr << "║ Mode:       ❄️  FREEZE                               ║" << std::endl;
         }
         if (blocked_attempts_ > 0) {
-            std::cout << "║ Tentatives bloquées: " << std::setw(9) << blocked_attempts_ 
+            std::cerr << "║ Tentatives bloquées: " << std::setw(9) << blocked_attempts_ 
                       << "                       ║" << std::endl;
         }
         if (frozen_attempts_ > 0) {
-            std::cout << "║ Tentatives gelées:   " << std::setw(9) << frozen_attempts_ 
+            std::cerr << "║ Tentatives gelées:   " << std::setw(9) << frozen_attempts_ 
                       << "                       ║" << std::endl;
         }
-        std::cout << "╚═══════════════════════════════════════════════════════╝" << std::endl;
+        std::cerr << "╚═══════════════════════════════════════════════════════╝" << std::endl;
     }
     
     void reset() {

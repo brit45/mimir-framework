@@ -1,5 +1,12 @@
 {
   "unet": {
+      "lua": {
+        "scripts": [
+          "scripts/templates/template_conf_load_and_train.lua"
+        ]
+      },
+
+      "unet": {
     "input_channels": 1,
     "output_channels": 10,
     "image_size": 64,

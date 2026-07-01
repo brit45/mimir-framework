@@ -1,5 +1,9 @@
 # Contribuer
 
+Compléments développeurs :
+
+- Ajouter une architecture + registry + script Lua + outils : [docs/06-Contributing/02-New-Architecture-And-Tools.md](02-New-Architecture-And-Tools.md)
+
 ## Philosophie
 
 - Changements petits, testables.

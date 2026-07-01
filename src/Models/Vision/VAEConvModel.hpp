@@ -68,6 +68,30 @@ public:
         // [DÉPRÉCIÉ / IGNORÉ] Garde-fou SelfAttention (plus d'attention dans le graphe).
         int attn_max_tokens = 0;
 
+        // Skip connections encodeur→décodeur (style U-Net).
+        // À chaque niveau de downsampling, les feature maps de l'encodeur sont
+        // concaténées aux feature maps du décodeur à résolution correspondante,
+        // puis projetées par une Conv 1×1 (2*base → base) sans activation.
+        // Améliore la reconstruction et accélère la convergence ; incompatible
+        // avec les checkpoints entraînés sans cette option.
+        bool use_skip_connections = false;
+
+        // Prior appris dans le graphe (couche Constant).
+        // Quand true : un vecteur biais appris de taille latent_dim est
+        // ajouté additivement à z (sortie du Reparameterize) avant le décodeur.
+        // Implémenté via une couche `Constant` + `Add` dans le graphe,
+        // entraînée par backprop comme n'importe quelle couche.
+        // Compatible avec les checkpoints via le nom de layer "vae_conv/z_prior_bias".
+        bool use_encoder_prior = false;
+
+        // ConditioningEncoder externe (classe ConditioningEncoder) : dimension des embeddings mag/mod/seq.
+        // 0 = désactivé. Quand > 0, l'ConditioningEncoder est initialisé avec dim=d_model et
+        // sérialisé avec le checkpoint. Les embeddings mag/mod/seq (vecteurs appris
+        // de taille d_model) sont disponibles pour conditioning externe.
+        // NOTE: non injecté dans le graphe (pas de couche mag/mod dans buildInto)
+        // pour éviter tout conflit de dimension avec le latent spatial.
+        int d_model = 0;
+
         // [DÉPRÉCIÉ / IGNORÉ] Conditionnement texte. Un modèle purement convolutionnel
         // ne peut pas embarquer le chemin dense texte (Embedding/Pool/Linear) ; ces
         // champs sont conservés pour compatibilité mais n'affectent plus le graphe.

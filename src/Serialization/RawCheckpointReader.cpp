@@ -344,7 +344,7 @@ bool RawCheckpointReader::load_encoder(
         
     } catch (const std::exception& e) {
         if (error) {
-            *error = std::string("Encoder load error: ") + e.what();
+            *error = std::string("ConditioningEncoder load error: ") + e.what();
         }
         return false;
     }

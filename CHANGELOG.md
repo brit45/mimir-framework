@@ -7,6 +7,8 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+## [3.1.0] - 2026-07-01
+
 ### ✨ Ajouté — Nouveaux modèles HuggingFace / SDXL
 
 - **`hf_clip_text_encoder_1` / `hf_clip_text_encoder_2`** : encodeurs texte CLIP/OpenCLIP

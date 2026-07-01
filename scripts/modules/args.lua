@@ -124,6 +124,8 @@ end
 local function normalize_key(k)
   k = tostring(k or "")
   k = k:gsub("^%-%-+", "")
+  -- Normalise les underscores en tirets (--csv_path == --csv-path, etc.)
+  k = k:gsub("_", "-")
   return k
 end
 

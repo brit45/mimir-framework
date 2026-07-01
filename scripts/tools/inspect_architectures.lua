@@ -6,17 +6,14 @@
 --   ./bin/mimir --lua scripts/tools/inspect_architectures.lua -- [options]
 --
 -- Options:
---   -a, --show-archs        Liste les architectures disponibles dans le framework.
---   -l, --list <arch>       Sélectionne une architecture par son nom.
---   -p, --params            Affiche les paramètres (config par défaut) de l'archi
---                           sélectionnée via -l/--list.
---   -h, --help              Affiche cette aide.
---
--- Exemples:
---   ... -- -a
---   ... -- --show-archs
---   ... -- -l vae_conv -p
---   ... -- --list vae_conv --params
+--   -a, --show-archs        Liste les architectures disponibles (+ dtypes)
+--   -l, --list <arch>       Sélectionne une architecture par son nom
+--   -p, --params            Affiche les paramètres de l'archi sélectionnée
+--   --layers                Affiche les layers de l'archi sélectionnée
+--   --stats                 Affiche les statistiques théoriques (params/flops)
+--   -d, --dtypes            Liste les dtypes pris en charge par le framework
+--   --json                  Export JSON complet du registre (toutes archs + params)
+--   -h, --help              Affiche cette aide
 
 -- log() peut être absent hors du binaire mimir : on fournit un fallback.
 local log = rawget(_G, "log")
@@ -193,10 +190,13 @@ local function parse_flags(argv)
 
   local opts = {
     show_archs = Args.has(opts_long, "show-archs"),
-    params = Args.has(opts_long, "params"),
-    dtypes = Args.has(opts_long, "dtypes"),
-    help = Args.has(opts_long, "help"),
-    arch = Args.get_str(opts_long, "list", nil),
+    params     = Args.has(opts_long, "params"),
+    dtypes     = Args.has(opts_long, "dtypes"),
+    help       = Args.has(opts_long, "help"),
+    layers     = Args.has(opts_long, "layers"),
+    stats      = Args.has(opts_long, "stats"),
+    json_out   = Args.has(opts_long, "json"),
+    arch       = Args.get_str(opts_long, "list", nil),
   }
 
   -- Scan des formes courtes depuis les positionnels.
@@ -225,7 +225,10 @@ local function print_usage()
   log("  " .. colorize("-a, --show-archs", C.green) .. "        Liste les architectures disponibles (+ dtypes)")
   log("  " .. colorize("-l, --list <arch>", C.green) .. "       Sélectionne une architecture par son nom")
   log("  " .. colorize("-p, --params", C.green) .. "            Affiche les paramètres de l'archi sélectionnée")
+  log("  " .. colorize("    --layers", C.green) .. "            Affiche les layers de l'archi sélectionnée")
+  log("  " .. colorize("    --stats", C.green) .. "             Affiche les statistiques théoriques (params par layer)")
   log("  " .. colorize("-d, --dtypes", C.green) .. "            Liste les dtypes pris en charge par le framework")
+  log("  " .. colorize("    --json", C.green) .. "              Export JSON complet du registre")
   log("  " .. colorize("-h, --help", C.green) .. "              Affiche cette aide")
 end
 
@@ -356,10 +359,268 @@ local function show_params(arch)
   return true
 end
 
+-- Instancie l'architecture dans le contexte courant et retourne true/false.
+local function instantiate_arch(arch)
+  local ok, err = Mimir.Model.create(arch)
+  if not ok then
+    log(colorize("[ERROR] ", C.bold, C.red) .. "Impossible d'instancier '" .. arch .. "': " .. tostring(err))
+    return false
+  end
+  Mimir.Model.allocate_params()
+  return true
+end
+
+-- --layers: affiche le tableau des layers du modèle courant.
+local function show_layers(arch)
+  log("\n" .. colorize("* Layers – ", C.bold, C.blue) .. colorize(arch, C.bold, C.cyan))
+  if not instantiate_arch(arch) then return false end
+  local layers = Mimir.Model.get_layers()
+  if type(layers) ~= "table" or #layers == 0 then
+    log(colorize("\t(aucun layer)", C.dim))
+    return true
+  end
+
+  -- Construire la colonne "shape" à partir des champs disponibles.
+  local function layer_shape(la)
+    local t = la.type or ""
+    if t == "Linear" then
+      if la.seq_len > 0 then
+        return string.format("[%d, %d→%d]", la.seq_len, la.in_features, la.out_features)
+      end
+      return string.format("[%d→%d]", la.in_features, la.out_features)
+    elseif t == "Embedding" then
+      return string.format("[%d×%d]", la.vocab_size, la.in_features > 0 and la.in_features or la.embed_dim)
+    elseif t == "Conv2d" or t == "ConvTranspose2d" then
+      return string.format("[%d→%d, k%d s%d p%d]", la.in_channels, la.out_channels, la.kernel_size, la.stride, la.padding)
+    elseif t == "GroupNorm" or t == "LayerNorm" then
+      return string.format("[c%d]", la.in_channels > 0 and la.in_channels or la.in_features)
+    elseif t == "MultiHeadAttention" or t == "SelfAttention" or t == "CrossAttention" then
+      return string.format("[seq%d, d%d, h%d]", la.seq_len, la.embed_dim, la.num_heads)
+    elseif t == "Reshape" then
+      return "→reshape"
+    elseif t == "Permute" then
+      return "→permute"
+    elseif t == "Concat" then
+      return "→concat"
+    end
+    return ""
+  end
+
+  local rows = {}
+  for _, la in ipairs(layers) do
+    local inputs_str = table.concat(la.inputs or {}, ", ")
+    rows[#rows + 1] = {
+      idx    = tostring(la.index),
+      name   = tostring(la.name),
+      ltype  = tostring(la.type),
+      shape  = layer_shape(la),
+      params = la.param_count > 0 and tostring(la.param_count) or "-",
+      output = tostring(la.output),
+      inputs = inputs_str,
+    }
+  end
+  local columns = {
+    { key = "idx",    title = "#",       align = "right",  color = C.gray,    max = 5  },
+    { key = "name",   title = "Nom",     align = "left",   color = C.yellow,  max = 52 },
+    { key = "ltype",  title = "Type",    align = "left",   color = C.cyan,    max = 22 },
+    { key = "shape",  title = "Shape",   align = "left",   color = C.magenta, max = 28 },
+    { key = "params", title = "Params",  align = "right",  color = C.green,   max = 12 },
+    { key = "output", title = "Output",  align = "left",   color = C.dim,     max = 36 },
+  }
+  log(make_table(columns, rows))
+  return true
+end
+
+-- --stats: statistiques théoriques (params par layer + totaux par type).
+local function show_stats(arch)
+  log("\n" .. colorize("* Stats – ", C.bold, C.blue) .. colorize(arch, C.bold, C.cyan))
+  if not instantiate_arch(arch) then return false end
+
+  local layers = Mimir.Model.get_layers()
+  local total_params = Mimir.Model.total_params()
+  if type(layers) ~= "table" then layers = {} end
+
+  -- Agrégation par type.
+  local by_type = {}       -- type → {count, params}
+  local top_layers = {}    -- top-20 par params
+
+  for _, la in ipairs(layers) do
+    local t = la.type or "?"
+    if not by_type[t] then by_type[t] = { count = 0, params = 0 } end
+    by_type[t].count  = by_type[t].count  + 1
+    by_type[t].params = by_type[t].params + la.param_count
+    if la.param_count > 0 then
+      top_layers[#top_layers + 1] = la
+    end
+  end
+
+  -- Top-20 layers par params desc.
+  table.sort(top_layers, function(a, b) return a.param_count > b.param_count end)
+  local top_n = math.min(20, #top_layers)
+
+  log(colorize("  Total paramètres: ", C.bold) .. colorize(string.format("%d", total_params), C.green)
+    .. colorize(string.format("  (%.2f M)", total_params / 1e6), C.gray))
+  log(colorize("  Total layers: ", C.bold) .. colorize(tostring(#layers), C.yellow))
+  log("")
+
+  -- Tableau par type.
+  local type_rows = {}
+  for t, v in pairs(by_type) do
+    type_rows[#type_rows + 1] = {
+      ltype  = t,
+      count  = tostring(v.count),
+      params = string.format("%d", v.params),
+      pct    = total_params > 0
+               and string.format("%.1f%%", 100.0 * v.params / total_params)
+               or  "0%",
+    }
+  end
+  table.sort(type_rows, function(a, b)
+    return tonumber(a.params) > tonumber(b.params)
+  end)
+  log(colorize("  Répartition par type :", C.bold))
+  log(make_table(
+    {
+      { key = "ltype",  title = "Type",      align = "left",  color = C.cyan,    max = 24 },
+      { key = "count",  title = "Nb",        align = "right", color = C.yellow,  max = 6  },
+      { key = "params", title = "Paramètres",align = "right", color = C.green,   max = 14 },
+      { key = "pct",    title = "%",         align = "right", color = C.magenta, max = 7  },
+    },
+    type_rows
+  ))
+
+  -- Top N layers.
+  if top_n > 0 then
+    log(colorize(string.format("\n  Top-%d layers (params desc) :", top_n), C.bold))
+    local top_rows = {}
+    for i = 1, top_n do
+      local la = top_layers[i]
+      top_rows[#top_rows + 1] = {
+        rank   = tostring(i),
+        name   = tostring(la.name),
+        ltype  = tostring(la.type),
+        params = string.format("%d", la.param_count),
+        pct    = total_params > 0
+                 and string.format("%.1f%%", 100.0 * la.param_count / total_params)
+                 or  "0%",
+      }
+    end
+    log(make_table(
+      {
+        { key = "rank",   title = "#",          align = "right", color = C.gray,    max = 4  },
+        { key = "name",   title = "Layer",       align = "left",  color = C.yellow,  max = 52 },
+        { key = "ltype",  title = "Type",        align = "left",  color = C.cyan,    max = 22 },
+        { key = "params", title = "Paramètres",  align = "right", color = C.green,   max = 14 },
+        { key = "pct",    title = "%",           align = "right", color = C.magenta, max = 7  },
+      },
+      top_rows
+    ))
+  end
+  return true
+end
+
+-- --json: exporte tout le registre en JSON (stdout).
+local function export_json()
+  local entries, err = Mimir.Architectures.info()
+  if type(entries) ~= "table" then
+    log(colorize("[ERROR] ", C.bold, C.red) .. tostring(err))
+    return false
+  end
+
+  -- Sérialisation JSON minimale (pas de dépendance externe).
+  local function to_json(v, indent)
+    indent = indent or 0
+    local sp = string.rep("  ", indent)
+    local sp2 = string.rep("  ", indent + 1)
+    local t = type(v)
+    if t == "nil" then
+      return "null"
+    elseif t == "boolean" then
+      return tostring(v)
+    elseif t == "number" then
+      if v == math.floor(v) and math.abs(v) < 2^53 then
+        return string.format("%d", v)
+      end
+      return string.format("%.10g", v)
+    elseif t == "string" then
+      -- Échapper les caractères JSON.
+      return '"' .. v:gsub('\\', '\\\\'):gsub('"', '\\"')
+                     :gsub('\n', '\\n'):gsub('\r', '\\r')
+                     :gsub('\t', '\\t') .. '"'
+    elseif t == "table" then
+      -- Détecter si c'est un tableau.
+      local is_array = (#v > 0)
+      if is_array then
+        local parts = {}
+        for i = 1, #v do
+          parts[#parts + 1] = sp2 .. to_json(v[i], indent + 1)
+        end
+        return "[\n" .. table.concat(parts, ",\n") .. "\n" .. sp .. "]"
+      else
+        local keys = {}
+        for k in pairs(v) do keys[#keys + 1] = k end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+        local parts = {}
+        for _, k in ipairs(keys) do
+          parts[#parts + 1] = sp2 .. '"' .. tostring(k) .. '": ' .. to_json(v[k], indent + 1)
+        end
+        return "{\n" .. table.concat(parts, ",\n") .. "\n" .. sp .. "}"
+      end
+    end
+    return '"[unsupported:' .. t .. ']"'
+  end
+
+  -- Construire la structure complète.
+  local registry = {}
+  for _, entry in ipairs(entries) do
+    -- Optionnel: instancier pour obtenir le total_params réel.
+    local total = 0
+    local layer_list = {}
+    local ok_inst = pcall(function()
+      Mimir.Model.create(entry.name)
+      Mimir.Model.allocate_params()
+      total = Mimir.Model.total_params()
+      local layers = Mimir.Model.get_layers()
+      if type(layers) == "table" then
+        for _, la in ipairs(layers) do
+          layer_list[#layer_list + 1] = {
+            index       = la.index,
+            name        = la.name,
+            type        = la.type,
+            param_count = la.param_count,
+            output      = la.output,
+            inputs      = la.inputs,
+          }
+        end
+      end
+    end)
+
+    registry[#registry + 1] = {
+      name         = entry.name,
+      description  = entry.description,
+      dtype        = arch_default_dtype(entry),
+      config       = entry.config,
+      total_params = ok_inst and total or nil,
+      layers       = ok_inst and layer_list or nil,
+    }
+  end
+
+  io.write(to_json({ registry = registry }, 0))
+  io.write("\n")
+  io.flush()
+  return true
+end
+
 local opts = parse_flags(arg)
 
 if opts.help then
   print_usage()
+  return
+end
+
+-- --json : export complet, indépendant des autres flags.
+if opts.json_out then
+  export_json()
   return
 end
 
@@ -373,21 +634,25 @@ if opts.show_archs then
   list_archs()
   list_dtypes()
 elseif opts.dtypes then
-  -- `-d` seul (sans `-a`) : afficher uniquement les dtypes.
   list_dtypes()
 end
 
 if opts.arch then
-  if opts.params then
-    show_params(opts.arch)
-  else
-    -- -l sans -p : on confirme juste que l'architecture existe.
+  if not opts.params and not opts.layers and not opts.stats then
+    -- -l sans aucune sous-option : confirmer l'existence + hint.
     local entry = Mimir.Architectures.info(opts.arch)
     if type(entry) == "table" then
       log("\n" .. colorize("Architecture '" .. opts.arch .. "' disponible.", C.green)
-        .. " Ajoutez " .. colorize("-p/--params", C.bold) .. " pour voir ses paramètres.")
+        .. " Options: " .. colorize("-p", C.bold) .. " params · "
+        .. colorize("--layers", C.bold) .. " layers · "
+        .. colorize("--stats", C.bold) .. " stats")
     else
       log("\n" .. colorize("[ERROR] ", C.bold, C.red) .. "Architecture inconnue: " .. tostring(opts.arch))
     end
+    return
   end
+
+  if opts.params  then show_params(opts.arch)  end
+  if opts.layers  then show_layers(opts.arch)  end
+  if opts.stats   then show_stats(opts.arch)   end
 end

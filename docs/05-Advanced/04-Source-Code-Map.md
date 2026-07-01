@@ -135,10 +135,10 @@ Points à connaître :
 - Exposé via `Mimir.Tokenizer.*`.
 - À lire quand : vous voulez comprendre `tokenize_bpe`, `decode`, ou les IDs spéciaux.
 
-### `src/Encoder.hpp` / `src/Encoder.cpp`
+### `src/Encoder.hpp` / `src/Encoder.cpp` (ConditioningEncoder)
 
 - Rôle : embeddings / encodeur “mag/mod” et embeddings tokens.
-- Important : le `Model` maintient la compatibilité `Tokenizer` <-> `Encoder` (ex: ensure vocab size).
+- Important : le `Model` maintient la compatibilité `Tokenizer` <-> `ConditioningEncoder` (ex: ensure vocab size).
 
 ## 5) Registry d’architectures et modèles built-in
 

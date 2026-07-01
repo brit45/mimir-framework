@@ -759,7 +759,7 @@ Model::Model()
     max_ram_mb_(0)
 {
     tw = 64; th = 64;
-    // Encoder toujours présent + embeddings spéciaux (SEQ/MOD/MAG) disponibles.
+    // ConditioningEncoder toujours présent + embeddings spéciaux (SEQ/MOD/MAG) disponibles.
     encoder.ensureSpecialEmbeddings();
     // Tenter d'initialiser le compute engine
     initializeCpuComputeEngine();
@@ -832,7 +832,7 @@ bool Model::initializeCpuComputeEngine() {
         g_cpu_engine.reset();
         initialized.store(true, std::memory_order_release);
         if (cfg_from_env.verbose) {
-            std::cout << "⚠ CPU runtime disabled via MIMIR_DISABLE_CPU" << std::endl;
+            std::cerr << "⚠ CPU runtime disabled via MIMIR_DISABLE_CPU" << std::endl;
         }
         return false;
     }
@@ -846,7 +846,7 @@ bool Model::initializeCpuComputeEngine() {
         g_cpu_engine = std::make_unique<CpuRuntime>();
         g_cpu_available = g_cpu_engine->initialize(cfg);
         if (g_cpu_available && cfg.verbose) {
-            std::cout << "✓ CPU Runtime initialized" << std::endl;
+            std::cerr << "✓ CPU Runtime initialized" << std::endl;
         }
         if (!g_cpu_available) {
             g_cpu_engine.reset();
@@ -877,7 +877,7 @@ bool Model::initializeComputeEngine() {
             g_compute_available = false;
             g_compute_engine.reset();
             initialized.store(true, std::memory_order_release);
-            std::cout << "⚠ Vulkan Compute disabled via MIMIR_DISABLE_VULKAN" << std::endl;
+            std::cerr << "⚠ Vulkan Compute disabled via MIMIR_DISABLE_VULKAN" << std::endl;
             return false;
         }
     }
@@ -898,9 +898,9 @@ bool Model::initializeComputeEngine() {
         g_compute_available = g_compute_engine->initialize();
         
         if (g_compute_available) {
-            std::cout << "✓ Vulkan Compute initialized" << std::endl;
+            std::cerr << "✓ Vulkan Compute initialized" << std::endl;
         } else {
-            std::cout << "⚠ Vulkan Compute initialization failed, using CPU fallback" << std::endl;
+            std::cerr << "⚠ Vulkan Compute initialization failed, using CPU fallback" << std::endl;
             g_compute_engine.reset();
         }
     } catch (const std::exception& e) {
@@ -928,7 +928,7 @@ bool Model::initializeOpenCLComputeEngine() {
             g_opencl_available = false;
             g_opencl_engine.reset();
             initialized.store(true, std::memory_order_release);
-            std::cout << "⚠ OpenCL Compute disabled via MIMIR_DISABLE_OPENCL" << std::endl;
+            std::cerr << "⚠ OpenCL Compute disabled via MIMIR_DISABLE_OPENCL" << std::endl;
             return false;
         }
     }
@@ -946,10 +946,10 @@ bool Model::initializeOpenCLComputeEngine() {
         g_opencl_engine = std::make_unique<OpenCLCompute::ComputeEngine>();
         g_opencl_available = g_opencl_engine->initialize();
         if (g_opencl_available) {
-            std::cout << "✓ OpenCL Compute initialized" << std::endl;
+            std::cerr << "✓ OpenCL Compute initialized" << std::endl;
         } else {
             if (env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
-                std::cout << "⚠ OpenCL Compute unavailable, using CPU fallback" << std::endl;
+                std::cerr << "⚠ OpenCL Compute unavailable, using CPU fallback" << std::endl;
             }
             g_opencl_engine.reset();
         }
@@ -978,7 +978,7 @@ bool Model::initializeCudaComputeEngine() {
         g_cuda_engine.reset();
         initialized.store(true, std::memory_order_release);
         if (cfg.verbose && cfg.disabled) {
-            std::cout << "⚠ CUDA Compute disabled via MIMIR_DISABLE_CUDA" << std::endl;
+            std::cerr << "⚠ CUDA Compute disabled via MIMIR_DISABLE_CUDA" << std::endl;
         }
         return false;
     }
@@ -997,7 +997,7 @@ bool Model::initializeCudaComputeEngine() {
         g_cuda_available = g_cuda_engine->initialize(cfg);
         if (g_cuda_available) {
             if (cfg.verbose) {
-                std::cout << "✓ CUDA Compute initialized" << std::endl;
+                std::cerr << "✓ CUDA Compute initialized" << std::endl;
             }
         } else {
             g_cuda_engine.reset();
@@ -1027,7 +1027,7 @@ bool Model::initializeRocmComputeEngine() {
         g_rocm_engine.reset();
         initialized.store(true, std::memory_order_release);
         if (cfg.verbose && cfg.disabled) {
-            std::cout << "⚠ ROCm Compute disabled via MIMIR_DISABLE_ROCM" << std::endl;
+            std::cerr << "⚠ ROCm Compute disabled via MIMIR_DISABLE_ROCM" << std::endl;
         }
         return false;
     }
@@ -1046,7 +1046,7 @@ bool Model::initializeRocmComputeEngine() {
         g_rocm_available = g_rocm_engine->initialize(cfg);
         if (g_rocm_available) {
             if (cfg.verbose) {
-                std::cout << "✓ ROCm Compute initialized" << std::endl;
+                std::cerr << "✓ ROCm Compute initialized" << std::endl;
             }
         } else {
             g_rocm_engine.reset();
@@ -1296,25 +1296,28 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
         const auto& mag = encoder.getMagEmbedding();
         const auto& mod = encoder.getModEmbedding();
 
-        auto graph_uses_mag_mod = [&]() -> bool {
+        // Cache du scan O(layers*inputs) : recalculé seulement après un push().
+        if (!uses_mag_mod_cached_) {
+            uses_mag_mod_ = false;
             for (const auto& lyr : layers) {
                 for (const auto& in : lyr.inputs) {
-                    if (in == "mag" || in == "mod") return true;
+                    if (in == "mag" || in == "mod") { uses_mag_mod_ = true; break; }
                 }
+                if (uses_mag_mod_) break;
             }
-            return false;
-        };
+            uses_mag_mod_cached_ = true;
+        }
 
-        if (graph_uses_mag_mod()) {
+        if (uses_mag_mod_) {
             int expected = 0;
             if (modelConfig.contains("d_model")) expected = std::max(0, modelConfig["d_model"].get<int>());
             else if (modelConfig.contains("text_d_model")) expected = std::max(0, modelConfig["text_d_model"].get<int>());
             if (expected > 0) {
                 if (!mag.empty() && static_cast<int>(mag.size()) != expected) {
-                    throw std::runtime_error("Encoder mag dim mismatch: have=" + std::to_string(mag.size()) + ", expected=" + std::to_string(expected));
+                    throw std::runtime_error("ConditioningEncoder mag dim mismatch: have=" + std::to_string(mag.size()) + ", expected=" + std::to_string(expected));
                 }
                 if (!mod.empty() && static_cast<int>(mod.size()) != expected) {
-                    throw std::runtime_error("Encoder mod dim mismatch: have=" + std::to_string(mod.size()) + ", expected=" + std::to_string(expected));
+                    throw std::runtime_error("ConditioningEncoder mod dim mismatch: have=" + std::to_string(mod.size()) + ", expected=" + std::to_string(expected));
                 }
             }
         }
@@ -2315,6 +2318,9 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
     const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
     const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
     const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
+    // Distribution diagnostics: entropy difference (Gaussian approx) and skewness mismatch.
+    const float entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
+    const float moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
 
     // Stop-grad marker scaling (treat marker as constant for the step).
     float marker_scale = 1.0f;
@@ -2376,6 +2382,8 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
     stats.latent_dim = latent_dim;
     stats.grad_norm = grad_norm;
     stats.grad_max_abs = max_abs;
+    stats.entropy_diff = entropy_diff_v;
+    stats.moment_mismatch = moment_mismatch_v;
     return stats;
 }
 
@@ -2513,6 +2521,8 @@ Model::VAEStepStats Model::backwardStepVAE(const std::vector<float>& x, Optimize
     const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
     const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
     const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
+    const float entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
+    const float moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
 
     float marker_scale = 1.0f;
     if (marker_wass_eff > 0.0f || marker_temp_eff > 0.0f) {
@@ -2576,6 +2586,8 @@ Model::VAEStepStats Model::backwardStepVAE(const std::vector<float>& x, Optimize
     stats.latent_dim = latent_dim;
     stats.grad_norm = static_cast<float>(std::sqrt(sum_sq2));
     stats.grad_max_abs = max_abs2;
+    stats.entropy_diff = entropy_diff_v;
+    stats.moment_mismatch = moment_mismatch_v;
     return stats;
 }
 
@@ -2785,6 +2797,8 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     double recon = 0.0;
     float wass = 0.0f;
     float temp = 0.0f;
+    float entropy_diff_v = 0.0f;
+    float moment_mismatch_v = 0.0f;
     float marker_scale = 1.0f;
 
     if (recon_is_ce) {
@@ -2847,6 +2861,8 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
         wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
         temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
         const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
+        entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
+        moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
 
         if (marker_wass_eff > 0.0f || marker_temp_eff > 0.0f) {
             marker_scale = 1.0f + marker_wass_eff * wass + marker_temp_eff * temp_pen;
@@ -3000,6 +3016,8 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     stats.latent_dim = latent_dim;
     stats.grad_norm = grad_norm;
     stats.grad_max_abs = max_abs;
+    stats.entropy_diff = entropy_diff_v;
+    stats.moment_mismatch = moment_mismatch_v;
     return stats;
 }
 
@@ -3187,6 +3205,8 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
     double recon = 0.0;
     float wass = 0.0f;
     float temp = 0.0f;
+    float entropy_diff_v = 0.0f;
+    float moment_mismatch_v = 0.0f;
 
     if (recon_is_ce) {
         const int sl = std::max(1, seq_len_cfg);
@@ -3235,6 +3255,8 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
         const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
         wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
         temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
+        entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
+        moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
     }
 
     double kl = 0.0;
@@ -3368,6 +3390,8 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
     stats.latent_dim = latent_dim;
     stats.grad_norm = static_cast<float>(std::sqrt(sum_sq));
     stats.grad_max_abs = max_abs;
+    stats.entropy_diff = entropy_diff_v;
+    stats.moment_mismatch = moment_mismatch_v;
     return stats;
 }
 
@@ -3436,6 +3460,8 @@ void Model::push(const std::string &name, const std::string &type, size_t params
     layer.detectBranchType();
     
     layers.push_back(layer);
+    // Invalider le cache uses_mag_mod : un nouveau layer vient d'être ajouté.
+    uses_mag_mod_cached_ = false;
 }
 
 size_t Model::totalParamCount() const {
@@ -3449,7 +3475,7 @@ void Model::allocateParams() {
     
     auto& allocator = DynamicTensorAllocator::instance();
     
-    std::cout << "📦 Allocation de " << layers.size() << " blocs de poids (" << tot << " paramètres au total)..." << std::endl;
+    std::cerr << "📦 Allocation de " << layers.size() << " blocs de poids (" << tot << " paramètres au total)..." << std::endl;
     
     // NOUVEAU: Allouer un tensor par layer au lieu d'un tensor par paramètre
     layer_weight_blocks.clear();
@@ -3466,12 +3492,12 @@ void Model::allocateParams() {
             // Lier le tensor au layer
             layers[i].weight_block = &layer_weight_blocks[i];
             
-            std::cout << "  Layer " << i << " (" << layers[i].name << "): " 
+            std::cerr << "  Layer " << i << " (" << layers[i].name << "): " 
                       << layer_param_count << " paramètres dans 1 tensor" << std::endl;
         }
     }
     
-    std::cout << "✓ " << layers.size() << " blocs de poids créés (1 tensor par layer)" << std::endl;
+    std::cerr << "✓ " << layers.size() << " blocs de poids créés (1 tensor par layer)" << std::endl;
 }
 
 void Model::initializeWeights(const std::string &method, unsigned int seed) {
@@ -3486,9 +3512,9 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
     auto& allocator = DynamicTensorAllocator::instance();
     std::mt19937 gen(seed == 0 ? std::random_device{}() : seed);
     
-    std::cout << "🎲 Initializing weights using " << method << " method (bloc par layer)..." << std::endl;
+    std::cerr << "🎲 Initializing weights using " << method << " method (bloc par layer)..." << std::endl;
 #ifdef _OPENMP
-    std::cout << "🧵 OpenMP: initialisation des poids jusqu'à " << omp_get_max_threads() << " threads" << std::endl;
+    std::cerr << "🧵 OpenMP: initialisation des poids jusqu'à " << omp_get_max_threads() << " threads" << std::endl;
 #endif
 
     auto mix_seed = [](unsigned int base_seed, size_t layer_idx, unsigned int stream) -> unsigned int {
@@ -3531,7 +3557,7 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
         
         // Afficher progression tous les 10 layers
         if (layer_idx % 10 == 0) {
-            std::cout << "  Initializing layer " << layer_idx << "/" << layers.size() 
+            std::cerr << "  Initializing layer " << layer_idx << "/" << layers.size() 
                       << " (" << layer.name << ")..." << std::endl;
         }
         
@@ -3619,7 +3645,7 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
         }
     }
     
-    std::cout << "✓ Weights initialized (" << layers.size() << " layers, " << totalParamCount() << " parameters)" << std::endl;
+    std::cerr << "✓ Weights initialized (" << layers.size() << " layers, " << totalParamCount() << " parameters)" << std::endl;
 }
 
 void Model::updateWeightsWithNoise(float learning_rate, float noise_std) {
@@ -3642,7 +3668,7 @@ void Model::setTokenizer(const Tokenizer &t) {
     hasEncoder = true;
 }
 
-void Model::setEncoder(const Encoder &e) {
+void Model::setEncoder(const ConditioningEncoder &e) {
     encoder = e;
     encoder.ensureSpecialEmbeddings();
     hasEncoder = true;
@@ -4063,7 +4089,7 @@ bool Model::packToSafetensor(const fs::path &outpath, const std::unordered_map<s
     return true;
 }
 
-bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, Encoder &outEnc, std::vector<MagicToken> &outMagic) {
+bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, ConditioningEncoder &outEnc, std::vector<MagicToken> &outMagic) {
     bool loaded_any = false;
     try {
         fs::path sjson = safep; sjson += ".json";
@@ -4158,7 +4184,7 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                 if (fs::exists(layersp)) {
                     try {
                         if (loadLayersStructure(layersp)) {
-                            std::cout << "✓ Structure des layers chargée depuis " << layersp << std::endl;
+                            std::cerr << "✓ Structure des layers chargée depuis " << layersp << std::endl;
                             loaded_any = true;
                         }
                     } catch(...) {
@@ -4170,7 +4196,7 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                 if (fs::exists(embp)) {
                     try {
                         if (loadEmbeddings(embp)) {
-                            std::cout << "✓ Embeddings chargés depuis " << embp << std::endl;
+                            std::cerr << "✓ Embeddings chargés depuis " << embp << std::endl;
                             loaded_any = true;
                         }
                     } catch(...) {
@@ -4182,7 +4208,7 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                 if (fs::exists(paramsp)) {
                     try {
                         if (loadParamsData(paramsp)) {
-                            std::cout << "✓ Données des paramètres chargées depuis " << paramsp << std::endl;
+                            std::cerr << "✓ Données des paramètres chargées depuis " << paramsp << std::endl;
                             loaded_any = true;
                         }
                     } catch(...) {
@@ -4853,20 +4879,20 @@ void Model::detectAndSetupBranches() {
         }
     }
     
-    std::cout << "✓ Détection des branches terminée. Trouvé:" << std::endl;
+    std::cerr << "✓ Détection des branches terminée. Trouvé:" << std::endl;
     for (size_t i = 0; i < layers.size(); ++i) {
         if (layers[i].requiresBranchComputation()) {
-            std::cout << "  - Layer " << i << " (" << layers[i].name << "): ";
+            std::cerr << "  - Layer " << i << " (" << layers[i].name << "): ";
             if (layers[i].branch_type == BranchType::RESIDUAL) {
-                std::cout << "RESIDUAL";
+                std::cerr << "RESIDUAL";
             } else if (layers[i].branch_type == BranchType::SKIP_CONNECTION) {
-                std::cout << "SKIP_CONNECTION";
+                std::cerr << "SKIP_CONNECTION";
             } else if (layers[i].is_branch_point) {
-                std::cout << "BRANCH_POINT";
+                std::cerr << "BRANCH_POINT";
             } else if (layers[i].is_merge_point) {
-                std::cout << "MERGE_POINT";
+                std::cerr << "MERGE_POINT";
             }
-            std::cout << std::endl;
+            std::cerr << std::endl;
         }
     }
 }
@@ -4991,30 +5017,33 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
 
     // Convention: "mag" et "mod" = embeddings float (médias + liaison).
-    // On les injecte par défaut depuis l'Encoder si non fournis explicitement.
+    // On les injecte par défaut depuis l'ConditioningEncoder si non fournis explicitement.
     if (hasEncoder) {
         const auto& mag = encoder.getMagEmbedding();
         const auto& mod = encoder.getModEmbedding();
 
-        auto graph_uses_mag_mod = [&]() -> bool {
+        // Cache du scan O(layers*inputs) : recalculé seulement après un push().
+        if (!uses_mag_mod_cached_) {
+            uses_mag_mod_ = false;
             for (const auto& lyr : layers) {
                 for (const auto& in : lyr.inputs) {
-                    if (in == "mag" || in == "mod") return true;
+                    if (in == "mag" || in == "mod") { uses_mag_mod_ = true; break; }
                 }
+                if (uses_mag_mod_) break;
             }
-            return false;
-        };
+            uses_mag_mod_cached_ = true;
+        }
 
-        if (graph_uses_mag_mod()) {
+        if (uses_mag_mod_) {
             int expected = 0;
             if (modelConfig.contains("d_model")) expected = std::max(0, modelConfig["d_model"].get<int>());
             else if (modelConfig.contains("text_d_model")) expected = std::max(0, modelConfig["text_d_model"].get<int>());
             if (expected > 0) {
                 if (!mag.empty() && static_cast<int>(mag.size()) != expected) {
-                    throw std::runtime_error("Encoder mag dim mismatch: have=" + std::to_string(mag.size()) + ", expected=" + std::to_string(expected));
+                    throw std::runtime_error("ConditioningEncoder mag dim mismatch: have=" + std::to_string(mag.size()) + ", expected=" + std::to_string(expected));
                 }
                 if (!mod.empty() && static_cast<int>(mod.size()) != expected) {
-                    throw std::runtime_error("Encoder mod dim mismatch: have=" + std::to_string(mod.size()) + ", expected=" + std::to_string(expected));
+                    throw std::runtime_error("ConditioningEncoder mod dim mismatch: have=" + std::to_string(mod.size()) + ", expected=" + std::to_string(expected));
                 }
             }
         }
@@ -5028,7 +5057,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     pending_float_inputs_.reset();
     pending_int_inputs_.reset();
-    
+
     // VALIDATION: Vérifier que tous les layers sont supportés (une seule fois)
     static bool validated = false;
     if (!validated) {
@@ -5753,7 +5782,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         out_f
                     );
                     if (did_cuda && cuda_cfg.verbose) {
-                        std::cout << "[accel] Linear via CUDA (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
+                        std::cerr << "[accel] Linear via CUDA (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                     }
                 }
             }
@@ -5797,7 +5826,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         out_f
                     );
                     if (did_rocm && rocm_cfg.verbose) {
-                        std::cout << "[accel] Linear via ROCm (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
+                        std::cerr << "[accel] Linear via ROCm (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                     }
                 }
             }
@@ -5842,10 +5871,10 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         out_f
                     );
                     if (did_vulkan && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
-                        std::cout << "[accel] Linear via Vulkan (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
+                        std::cerr << "[accel] Linear via Vulkan (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                     }
                 } else if (env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
-                    std::cout << "[accel] Vulkan Linear skipped (shape/weights mismatch)."
+                    std::cerr << "[accel] Vulkan Linear skipped (shape/weights mismatch)."
                               << " x=" << x.size() << " expected=" << expected_in
                               << " weights=" << weights_n << " expected>=" << expected_total_w << "\n";
                 }
@@ -5955,7 +5984,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                 out_f
                             );
                             if (did_cpu && cpu_cfg.verbose) {
-                                std::cout << "[accel] Linear via CPU runtime (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
+                                std::cerr << "[accel] Linear via CPU runtime (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                             }
                         }
                     }
@@ -7543,9 +7572,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                     const float energy_norm = std::clamp(std::tanh(map[i + 1] * inv_energy), 0.0f, 1.0f);
                                     const float t = std::clamp(0.5f + 0.5f * std::tanh(signed_mean), 0.0f, 1.0f);
 
-                                    const float neg_r = 70.0f,  neg_g = 125.0f, neg_b = 215.0f;
-                                    const float mid_r = 170.0f, mid_g = 170.0f, mid_b = 170.0f;
-                                    const float pos_r = 230.0f, pos_g = 170.0f, pos_b = 80.0f;
+                                    const float neg_r = 70.0f,  neg_g = 120.0f, neg_b = 210.0f;
+                                    const float mid_r = 175.0f, mid_g = 175.0f, mid_b = 175.0f;
+                                    const float pos_r = 220.0f, pos_g = 65.0f,  pos_b = 65.0f;
 
                                     float r = 0.0f, g = 0.0f, b = 0.0f;
                                     if (t < 0.5f) {
@@ -7564,6 +7593,18 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                     px[i + 1] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(g * energy_norm)), 0, 255));
                                     px[i + 2] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(b * energy_norm)), 0, 255));
                                 }
+                            }
+
+                            // Version niveaux de gris naturels (pour le mode sans heatmap)
+                            if (!image_like_preview) {
+                                const size_t npx = static_cast<size_t>(vw) * static_cast<size_t>(vh);
+                                std::vector<uint8_t> px_real(npx);
+                                for (size_t i = 0; i < npx; ++i) {
+                                    const float s = map[i * 3 + 0] * inv;
+                                    const float t = 0.5f + 0.5f * std::tanh(s);
+                                    px_real[i] = static_cast<uint8_t>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
+                                }
+                                vf.pixels_real = std::move(px_real);
                             }
 
                             vf.pixels = std::move(px);
@@ -11288,21 +11329,21 @@ void Model::build()
     // Exemple: backbone U-Net simple
     buildBackboneUNet(4, 2, 3);  // 4 stages, 2 blocs par stage, 3 blocs bottleneck
     
-    std::cout << "Model::build() - Architecture construite" << std::endl;
-    std::cout << "  Couches: " << layers.size() << std::endl;
-    std::cout << "  Paramètres totaux: " << totalParamCount() << std::endl;
+    std::cerr << "Model::build() - Architecture construite" << std::endl;
+    std::cerr << "  Couches: " << layers.size() << std::endl;
+    std::cerr << "  Paramètres totaux: " << totalParamCount() << std::endl;
     
     // Allocation automatique des paramètres
     size_t total = totalParamCount();
     if (total > 0) {
-        std::cout << "  Allocation des paramètres..." << std::endl;
+        std::cerr << "  Allocation des paramètres..." << std::endl;
         allocateParams();
-        std::cout << "  ✓ " << layer_weight_blocks.size() << " blocs de poids alloués" << std::endl;
+        std::cerr << "  ✓ " << layer_weight_blocks.size() << " blocs de poids alloués" << std::endl;
         
         // Initialisation automatique des poids (méthode He par défaut)
-        std::cout << "  Initialisation des poids (He)..." << std::endl;
+        std::cerr << "  Initialisation des poids (He)..." << std::endl;
         initializeWeights("he", 0);
-        std::cout << "  ✓ Poids initialisés" << std::endl;
+        std::cerr << "  ✓ Poids initialisés" << std::endl;
     }
 }
 
@@ -11310,7 +11351,7 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
 {
     // Analyse automatique du dataset pour construire l'architecture appropriée
     
-    std::cout << "Model::autoBuildFromDataset(" << dataset_dir << ")" << std::endl;
+    std::cerr << "Model::autoBuildFromDataset(" << dataset_dir << ")" << std::endl;
     
     // Charger le dataset avec cache et validation flexible (min 1 modalité)
     std::vector<DatasetItem> items;
@@ -11329,7 +11370,7 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
         return;
     }
     
-    std::cout << "  Items trouvés: " << items.size() << std::endl;
+    std::cerr << "  Items trouvés: " << items.size() << std::endl;
     
     // Analyser les modalités présentes et les linkables
     bool has_text = false;
@@ -11346,12 +11387,12 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
         if (item.is_linked && item.countModalities() >= 2) linkable_count++;
     }
     
-    std::cout << "  Modalités détectées:" << std::endl;
-    std::cout << "    - Texte:  " << (has_text ? "✓" : "✗") << std::endl;
-    std::cout << "    - Image:  " << (has_image ? "✓" : "✗") << std::endl;
-    std::cout << "    - Audio:  " << (has_audio ? "✓" : "✗") << std::endl;
-    std::cout << "    - Vidéo:  " << (has_video ? "✓" : "✗") << std::endl;
-    std::cout << "    - Linkables validés: " << linkable_count << std::endl;
+    std::cerr << "  Modalités détectées:" << std::endl;
+    std::cerr << "    - Texte:  " << (has_text ? "✓" : "✗") << std::endl;
+    std::cerr << "    - Image:  " << (has_image ? "✓" : "✗") << std::endl;
+    std::cerr << "    - Audio:  " << (has_audio ? "✓" : "✗") << std::endl;
+    std::cerr << "    - Vidéo:  " << (has_video ? "✓" : "✗") << std::endl;
+    std::cerr << "    - Linkables validés: " << linkable_count << std::endl;
     
     // Construire le backbone de base
     buildBackboneUNet(4, 2, 3);
@@ -11367,7 +11408,7 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
         magic_tokens.push_back(tok);
         buildTextBranch(tok);
         injectMagicToken(tok);
-        std::cout << "  → Branche texte ajoutée" << std::endl;
+        std::cerr << "  → Branche texte ajoutée" << std::endl;
     }
     
     if (has_image) {
@@ -11378,7 +11419,7 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
         magic_tokens.push_back(tok);
         buildImageBranch(tok);
         injectMagicToken(tok);
-        std::cout << "  → Branche image ajoutée" << std::endl;
+        std::cerr << "  → Branche image ajoutée" << std::endl;
     }
     
     if (has_audio) {
@@ -11389,7 +11430,7 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
         magic_tokens.push_back(tok);
         buildAudioBranch(tok);
         injectMagicToken(tok);
-        std::cout << "  → Branche audio ajoutée" << std::endl;
+        std::cerr << "  → Branche audio ajoutée" << std::endl;
     }
     
     if (has_video) {
@@ -11400,13 +11441,13 @@ void Model::autoBuildFromDataset(const std::string &dataset_dir)
         magic_tokens.push_back(tok);
         buildVideoBranch(tok);
         injectMagicToken(tok);
-        std::cout << "  → Branche vidéo ajoutée" << std::endl;
+        std::cerr << "  → Branche vidéo ajoutée" << std::endl;
     }
     
-    std::cout << "  Architecture auto-construite:" << std::endl;
-    std::cout << "    - Couches: " << layers.size() << std::endl;
-    std::cout << "    - Paramètres: " << totalParamCount() << std::endl;
-    std::cout << "    - Magic tokens: " << magic_tokens.size() << std::endl;
+    std::cerr << "  Architecture auto-construite:" << std::endl;
+    std::cerr << "    - Couches: " << layers.size() << std::endl;
+    std::cerr << "    - Paramètres: " << totalParamCount() << std::endl;
+    std::cerr << "    - Magic tokens: " << magic_tokens.size() << std::endl;
 }
 
 // --- Fin ---

@@ -155,6 +155,8 @@ end
 
 local default_out_dir = "checkpoint/vae_conv_512_latent-64-64-32_base-64"
 local out_dir = opt_str("out-dir", default_out_dir)
+local output_model_dir = opt_str("output-model", opt_str("output_model", ""))
+local save_out_dir = ((output_model_dir ~= nil) and (output_model_dir ~= "")) and output_model_dir or out_dir
 local RESUME = opt_bool("resume", false)
 local epochs = opt_int("epochs", 100)
 local lr = opt_num("lr", 3e-5)
@@ -284,6 +286,30 @@ cfg.attn_max_tokens = opt_int(
   )
 )
 
+-- Skip connections encodeur→décodeur (style U-Net).
+-- Compatible seulement avec les nouveaux checkpoints (incompatible avec les anciens).
+cfg.use_skip_connections = opt_bool(
+  "skip-connections",
+  opt_bool("skip_connections", opt_bool("use-skip-connections", cfg.use_skip_connections or false))
+)
+
+-- Prior appris dans le graphe (couche Constant entraînée par backprop).
+-- Quand true: un vecteur biais de dim=latent_dim est ajouté additivement à z.
+-- N'utilise pas le ConditioningEncoder externe (pas de risque d'expansion d'embedding).
+cfg.use_encoder_prior = opt_bool(
+  "encoder-prior",
+  opt_bool("use-encoder-prior", opt_bool("enc-prior", cfg.use_encoder_prior or false))
+)
+
+-- ConditioningEncoder externe (classe ConditioningEncoder C++): embeddings mag/mod/seq appris, dimension d_model.
+-- 0 = désactivé. Quand > 0, le ConditioningEncoder est initialisé, sérialisé avec le checkpoint
+-- et ses vecteurs peuvent être utilisés pour conditioning externe.
+-- Rec: d_model=1024. Allocation: vocab_size*d_model*4 octets (~200 Mo pour vocab=47895).
+cfg.d_model = opt_int(
+  "d-model",
+  opt_int("d_model", cfg.d_model or 0)
+)
+
 -- Latent stochastique (réparameterisation). Important pour éviter un "AE déterministe" pénalisé au KL.
 -- NOTE: côté C++, Reparameterize utilise mu directement si training=false OU stochastic_latent=false.
 local stochastic_opt_absent =
@@ -313,23 +339,24 @@ cfg.align_weight = opt_num("align-weight", cfg.align_weight or 0.1)
 -- IMPORTANT: base tokenizer commun (si texte activé)
 local base_tok_path = opt_str("base-tokenizer", BaseTok.default_path())
 do
+  -- vae_conv est purement convolutionnel (text_cond=false hardcodé dans le graphe).
+  -- On ne requiert jamais le tokenizer pour cette architecture.
   local ok_bt, err_bt = BaseTok.load_base({
     path = base_tok_path,
     max_vocab = opt_int("max-vocab", cfg.vocab_size or 50000),
-    require = cfg.text_cond == true,
+    require = false,
   })
   assert(ok_bt == true, "Base tokenizer: " .. tostring(err_bt))
 end
 
+-- NOTE: l'architecture vae_conv reste purement convolutionnelle (graphe inchangé).
+-- Si l'utilisateur passe --text-cond true, un mode runtime optionnel est activé:
+--   - le tokenizer est utilisé sur les .txt du dataset,
+--   - les token ids servent à entraîner le ConditioningEncoder externe (corrélation image↔texte),
+--   - trainStep principal reste image-only (compat checkpoints et comportement existant).
 if cfg.text_cond then
-  cfg.vocab_size = BaseTok.vocab_size()
-  cfg.tokenizer_frozen = true
-
-  -- IMPORTANT: `Model::trainStepVAEText` exige les projections (img_proj + text_proj)
-  -- donc proj_dim doit être > 0.
-  if (cfg.proj_dim or 0) <= 0 then
-    cfg.proj_dim = 64
-  end
+  log("ℹ️  vae_conv: --text-cond true active le mode runtime tokenizer+encoder (graphe inchangé).")
+  log("   Le training principal reste image-only (trainStepVAE), avec alignement texte via ConditioningEncoder externe.")
 end
 
 -- Si latent_h/w non fournis, on dérive (downsample x8 par défaut)
@@ -397,7 +424,7 @@ cfg.epsilon = opt_num("epsilon", cfg.epsilon or 1e-8)
 -- VAEConv: le weight decay trop fort dégrade souvent la reconstruction.
 cfg.weight_decay = opt_num("weight-decay", cfg.weight_decay or 1e-8)
 
-cfg.decay_strategy = opt_str("decay-strategy", cfg.decay_strategy or "cosine")
+cfg.decay_strategy = opt_str("decay-strategy", cfg.decay_strategy or "linear")
 
 cfg.kl_beta = opt_num("kl-beta", cfg.kl_beta or 0.5)
 -- Stabilisation VAE (consommée côté C++ par Model::trainStepVAE)
@@ -419,7 +446,7 @@ end
 cfg.recon_loss = opt_str("recon-loss", cfg.recon_loss or "charbonnier")
 
 -- Losses additionnelles (optionnelles)
-cfg.ssim_weight = opt_num("ssim-weight", cfg.ssim_weight or 0.0)
+cfg.ssim_weight = opt_num("ssim-weight", cfg.ssim_weight or 0.01)
 cfg.ssim_mode = opt_str("ssim-mode", cfg.ssim_mode or "ms_ssim") -- "ssim" ou "ms_ssim"
 cfg.ssim_k1 = opt_num("ssim-k1", cfg.ssim_k1 or 0.01)
 cfg.ssim_k2 = opt_num("ssim-k2", cfg.ssim_k2 or 0.03)
@@ -491,7 +518,7 @@ cfg.logvar_clip_min = opt_num("logvar-clip-min", cfg.logvar_clip_min or -6.0)
 cfg.logvar_clip_max = opt_num("logvar-clip-max", cfg.logvar_clip_max or 0.0)
 -- Clip grad global (L2) pour éviter un emballement; 1.0 est souvent trop agressif
 -- sur des modèles/étapes avec pertes additionnelles (SSIM/perceptual).
-cfg.grad_clip_norm = opt_num("grad-clip-norm", cfg.grad_clip_norm or 1.5)
+cfg.grad_clip_norm = opt_num("grad-clip-norm", cfg.grad_clip_norm or 2.0)
 cfg.grad_accum_steps = opt_int("grad-accum-steps", cfg.grad_accum_steps or 1)
 
 cfg.max_items = opt_int("max-items", cfg.max_items or 0)
@@ -509,7 +536,16 @@ cfg.viz_taps_force_inference = opt_bool(
 )
 
 -- Checkpoints/validation (consommés côté C++ dans Mimir.Model.train)
-cfg.checkpoint_dir = out_dir
+cfg.checkpoint_dir = save_out_dir
+
+-- Chemin CSV explicite (--csv-file / --csv-path / --csv_path).
+-- Consommé par le bloc commun de lua_trainModel (tous les types de modèles).
+do
+  local csv_f = opt_str("csv-file", opt_str("csv-path", nil))
+  local csv_d = opt_str("csv-dir", nil)
+  if csv_f and csv_f ~= "" then cfg.csv_file = csv_f end
+  if csv_d and csv_d ~= "" then cfg.csv_dir  = csv_d end
+end
 
 Args.apply_validation_config(cfg, opts, {
   validate_every_steps = 50,
@@ -530,7 +566,7 @@ cfg.backbone_ready_recon_target = opt_num("backbone-ready-recon-target", cfg.bac
 cfg.backbone_ready_kl_min = opt_num("backbone-ready-kl-min", cfg.backbone_ready_kl_min or 0.01)
 cfg.backbone_ready_kl_max = opt_num("backbone-ready-kl-max", cfg.backbone_ready_kl_max or 5.0)
 cfg.backbone_ready_min_steps = opt_int("backbone-ready-min-steps", cfg.backbone_ready_min_steps or (cfg.kl_warmup_steps or 0))
-cfg.backbone_ready_file = opt_str("backbone-ready-file", cfg.backbone_ready_file or out_dir .. "/vae_backbone_ready.json")
+cfg.backbone_ready_file = opt_str("backbone-ready-file", cfg.backbone_ready_file or save_out_dir .. "/vae_backbone_ready.json")
 
 cfg.triple_fault = opt_bool("triple-fault", false)
 cfg.triple_fault_every_steps = opt_int("fault-every", opt_int("triple-fault-every", 5))
@@ -539,7 +575,8 @@ cfg.dtype = opt_str("dtype", os.getenv("MIMIR_DTYPE") or "float32")
 
 log("VAEConv train config :")
 log(string.format("  - dataset_root=%s", dataset_root))
-log(string.format("  - out_dir=%s", out_dir))
+log(string.format("  - out_dir(resume_from)=%s", out_dir))
+log(string.format("  - output_model(save_to)=%s", save_out_dir))
 log(string.format("  - image=%dx%dx%d", cfg.image_w, cfg.image_h, cfg.image_c))
 log(string.format("  - latent=%dx%dx%d", cfg.latent_h, cfg.latent_w, cfg.latent_c))
 log(string.format("  - base_channels=%d", cfg.base_channels))
@@ -549,6 +586,11 @@ log(string.format("  - enc_norm=%s enc_gn_groups=%d",
 log(string.format("  - resnet_blocks=%s max_tokens=%d",
   tostring(cfg.use_attention),
   tonumber(cfg.resnet_max_tokens or 0) or 0))
+log(string.format("  - skip_connections=%s", tostring(cfg.use_skip_connections)))
+log(string.format("  - encoder_prior=%s (couche Constant apprise)", tostring(cfg.use_encoder_prior)))
+log(string.format("  - d_model=%d (ConditioningEncoder externe%s)",
+  tonumber(cfg.d_model or 0) or 0,
+  (tonumber(cfg.d_model or 0) or 0) > 0 and " actif" or " désactivé"))
 log(string.format("  - attn=%s heads=%d max_tokens=%d",
   tostring(cfg.use_attn),
   tonumber(cfg.attn_heads or 0) or 0,
@@ -611,7 +653,18 @@ end
 -- Dataset
 local ok_ds, n_or_err = Mimir.Dataset.load(dataset_root, cfg.image_w, cfg.image_h, cfg.text_cond and 2 or 1, true, 'dataset_cache.json', 10240, true)
 assert_ok(ok_ds, n_or_err, "Dataset.load failed")
-log("✓ Dataset chargé: " .. tostring(n_or_err))
+if (tonumber(n_or_err) or 0) == 0 then
+  local min_mod = cfg.text_cond and 2 or 1
+  error(string.format(
+    "Dataset vide: 0 item chargé depuis '%s' (min_modalities=%d).\n" ..
+    "  - Vérifiez que le dossier existe et contient des images.\n" ..
+    "  - Avec --text-cond true (min_modalities=2), chaque image doit avoir un fichier .txt " ..
+    "avec le même stem dans le même répertoire.\n" ..
+    "  - Structure attendue: dataset_root/<stem>.jpg + <stem>.txt",
+    dataset_root, min_mod
+  ))
+end
+log("✓ Dataset chargé: " .. tostring(n_or_err) .. " items")
 
 
 -- Modèle
@@ -651,8 +704,8 @@ end
 -- Sauvegarde debug JSON juste avant l'entraînement (snapshot du modèle + config).
 -- NOTE: format côté C++/Lua = "debug_json" (alias: "debug", "json").
 do
-  local starttrain_path = out_dir .. "/starttrain.json"
-  os.execute("mkdir -p '" .. out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+  local starttrain_path = save_out_dir .. "/starttrain.json"
+  os.execute("mkdir -p '" .. save_out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
   local ok_dbg, err_dbg = Mimir.Serialization.save(starttrain_path, "debug_json", {
     save_tokenizer = true,
     save_encoder = true,
@@ -670,13 +723,13 @@ if ok_train == false and tostring(err_train) == "STOP_REQUESTED" then
   -- On ré-écrit dans le dernier dossier epoch_* (incluant *_stop si présent)
   local last_dir = nil
   if Ckpt and Ckpt.find_latest_epoch_dir then
-    last_dir = Ckpt.find_latest_epoch_dir(out_dir)
+    last_dir = Ckpt.find_latest_epoch_dir(save_out_dir)
   end
   if not last_dir and Ckpt and Ckpt.resolve_dir then
-    last_dir = Ckpt.resolve_dir(out_dir)
+    last_dir = Ckpt.resolve_dir(save_out_dir)
   end
   if not last_dir then
-    last_dir = out_dir
+    last_dir = save_out_dir
   end
 
   os.execute("mkdir -p '" .. tostring(last_dir):gsub("'", "'\\''") .. "' 2>/dev/null")
@@ -698,8 +751,8 @@ end
 assert_ok(ok_train, err_train, "Model.train failed")
 
 -- Sauvegarde
-os.execute("mkdir -p '" .. out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
-local ok_save, err_save = Mimir.Serialization.save(out_dir, "raw_folder", {
+os.execute("mkdir -p '" .. save_out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
   save_optimizer = true,
   save_tokenizer = true,
   save_encoder = true,
@@ -712,4 +765,4 @@ local ok_save, err_save = Mimir.Serialization.save(out_dir, "raw_folder", {
 })
 assert_ok(ok_save, err_save, "Serialization.save failed")
 
-log("✓ Checkpoint écrit: " .. out_dir)
+log("✓ Checkpoint écrit: " .. save_out_dir)

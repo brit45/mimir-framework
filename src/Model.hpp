@@ -162,7 +162,7 @@ public:
 
     std::vector<uint16_t> getWeights() const;
     void setTokenizer(const Tokenizer &t);
-    void setEncoder(const Encoder &e);
+    void setEncoder(const ConditioningEncoder &e);
 
     size_t totalParamCount() const;
     void allocateParams();
@@ -202,7 +202,8 @@ public:
     // Viz taps: capture d'images intermédiaires par bloc/layer (best-effort)
     // ========================================================================
     struct VizFrame {
-        std::vector<uint8_t> pixels; // généralement grayscale
+        std::vector<uint8_t> pixels;      // heatmap (ou naturel pour image_like)
+        std::vector<uint8_t> pixels_real; // niveaux de gris naturels (1ch), vide si image_like
         int w = 0;
         int h = 0;
         int channels = 1;
@@ -262,6 +263,11 @@ public:
         int latent_dim = 0;
         float grad_norm = 0.0f;
         float grad_max_abs = 0.0f;
+        // Distribution diagnostics (compare recon vs input distributions).
+        // entropy_diff  = 0.5*(log σ²_recon − log σ²_input)  >0 = recon plus lisse/floue
+        // moment_mismatch = |skewness_recon − skewness_input|  near-0 = bon alignement
+        float entropy_diff = 0.0f;
+        float moment_mismatch = 0.0f;
     };
     VAEStepStats trainStepVAE(const std::vector<float>& x, Optimizer& opt, float learning_rate);
 
@@ -327,8 +333,8 @@ public:
     int height() const { return th; }
     const Tokenizer &getTokenizer() const { return tokenizer; }
     Tokenizer &getMutableTokenizer() { return tokenizer; }
-    const Encoder &getEncoder() const { return encoder; }
-    Encoder &getMutableEncoder() { return encoder; }
+    const ConditioningEncoder &getEncoder() const { return encoder; }
+    ConditioningEncoder &getMutableEncoder() { return encoder; }
     
     // Serialization-friendly accessors
     const std::vector<Layer>& getLayers() const { return layers; }
@@ -343,7 +349,7 @@ public:
     // static helpers for saving/loading
     bool saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch);
     bool packToSafetensor(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors) const;
-    bool tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, Encoder &outEnc, std::vector<MagicToken> &outMagic);
+    bool tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, ConditioningEncoder &outEnc, std::vector<MagicToken> &outMagic);
     bool hasOpenCLCompute() const;
     bool initializeOpenCLComputeEngine();
     void shutdownOpenCLComputeEngine();
@@ -680,7 +686,7 @@ protected:
     std::vector<Layer> layers;
     int tw = 64, th = 64;
     Tokenizer tokenizer;
-    Encoder encoder;
+    ConditioningEncoder encoder;
     bool hasTokenizer = false;
     bool hasEncoder = false;
     std::vector<float> lastEncoding;
@@ -708,4 +714,9 @@ protected:
         Mimir::Planning::ExecutionPlan execution;
     };
     StaticPlanCache static_plan_;
+
+    // Cache du résultat de graph_uses_mag_mod() — recalculé à chaque push().
+    // Évite le scan O(layers*inputs) à chaque forward pass.
+    mutable bool uses_mag_mod_cached_ = false;
+    mutable bool uses_mag_mod_         = false;
 };

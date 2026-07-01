@@ -783,4 +783,12 @@
     }
   },
   "version": 1
+,
+  "showgraph": {
+    "n_dataset": "4634",
+    "validate_every_steps": "100",
+    "validate_items": "32"
+  }
+,
+  "browser": "x-www-browser"
 }

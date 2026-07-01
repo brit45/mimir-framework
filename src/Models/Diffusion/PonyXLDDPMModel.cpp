@@ -516,6 +516,35 @@ static inline std::string normalize_timestep_cond(std::string s) {
     return s;
 }
 
+// Compute alpha_bar schedule (linear or cosine).
+// Returns a vector of size T where ab[t] = product_{i=0}^{t} (1 - beta_i).
+static std::vector<float> compute_alpha_bar_schedule(
+    int T, float beta0, float beta1, const std::string& schedule
+) {
+    std::vector<float> ab(static_cast<size_t>(T), 1.0f);
+    if (schedule == "cosine") {
+        // Nichol & Dhariwal (2021): cosine schedule.
+        const double s = 0.008;
+        const double pi_half = std::acos(-1.0) * 0.5;
+        const double base_val = std::cos(pi_half * s / (1.0 + s));
+        const double base_val2 = base_val * base_val;
+        for (int i = 0; i < T; ++i) {
+            const double t_frac = static_cast<double>(i) / static_cast<double>(std::max(1, T));
+            const double v = std::cos(pi_half * (t_frac + s) / (1.0 + s));
+            ab[static_cast<size_t>(i)] = std::clamp(static_cast<float>(v * v / base_val2), 1e-6f, 1.0f);
+        }
+    } else {
+        float cur = 1.0f;
+        for (int i = 0; i < T; ++i) {
+            const float frac = (T > 1) ? (static_cast<float>(i) / static_cast<float>(T - 1)) : 0.0f;
+            const float beta = std::clamp(beta0 + (beta1 - beta0) * frac, 0.0f, 0.999f);
+            cur *= (1.0f - beta);
+            ab[static_cast<size_t>(i)] = std::clamp(cur, 1e-6f, 1.0f);
+        }
+    }
+    return ab;
+}
+
 static inline float compute_time_cond_value(const PonyXLDDPMModel::Config& cfg, float t_norm, float alpha_bar) {
     const std::string mode = normalize_timestep_cond(cfg.timestep_cond);
     if (mode == "t_norm") {
@@ -1025,7 +1054,7 @@ static void apply_vae_autodims_from_arch(PonyXLDDPMModel::Config& cfg, const nlo
 
     if (has_image) {
         if (cfg.image_w != img_w || cfg.image_h != img_h || cfg.image_c != img_c) {
-            std::cout << "✓ PonyXL: VAE auto-dims (image) "
+            std::cerr << "✓ PonyXL: VAE auto-dims (image) "
                       << cfg.image_w << "x" << cfg.image_h << "x" << cfg.image_c
                       << " -> " << img_w << "x" << img_h << "x" << img_c << std::endl;
         }
@@ -1039,7 +1068,7 @@ static void apply_vae_autodims_from_arch(PonyXLDDPMModel::Config& cfg, const nlo
         const int prev_lw = cfg.latent_w;
         const int prev_lc = cfg.latent_in_dim;
         if (prev_lh != lh || prev_lw != lw || prev_lc != lc) {
-            std::cout << "✓ PonyXL: VAE auto-dims (latent) "
+            std::cerr << "✓ PonyXL: VAE auto-dims (latent) "
                       << "lh=" << prev_lh << " lw=" << prev_lw << " lc=" << prev_lc
                       << " -> lh=" << lh << " lw=" << lw << " lc=" << lc << std::endl;
         }
@@ -1055,9 +1084,31 @@ static void apply_vae_autodims_from_arch(PonyXLDDPMModel::Config& cfg, const nlo
 }
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Helper : construit la config JSON de base pour instancier le VAE.
+// Si vae_ckpt_cfg est non-vide, il est utilisé comme base (tous les flags
+// architecturaux du checkpoint sont ainsi préservés).
+// Sinon, on replie sur defaultConfig(arch_name).
+// Les surcharges image/latent/stochastic sont appliquées par l'appelant.
+// ---------------------------------------------------------------------------
+static nlohmann::json make_vae_base_cfg(const std::string& arch_name,
+                                        const nlohmann::json& vae_ckpt_cfg) {
+    nlohmann::json cfg;
+    if (!vae_ckpt_cfg.is_null() && vae_ckpt_cfg.is_object() && !vae_ckpt_cfg.empty()) {
+        cfg = vae_ckpt_cfg;
+    } else {
+        cfg = ModelArchitectures::defaultConfig(arch_name);
+    }
+    // Le champ "dtype" stocké dans model_config peut contenir un format safetensors
+    // uppercase ("F32", "F16"…) non reconnu par parse_dtype/setDefaultDType.
+    // On le retire ici : la dtype est gérée par apply_dtype côté Lua, pas par ce chemin.
+    cfg.erase("dtype");
+    return cfg;
+}
+
 PonyXLDDPMModel::PonyXLDDPMModel() {
     setModelName("PonyXLSDXL");
-    // SDXL-like: l'encoder est dans le graphe (tok_emb + blocks), pas l'Encoder externe.
+    // SDXL-like: l'encoder est dans le graphe (tok_emb + blocks), pas l'ConditioningEncoder externe.
     setHasEncoder(true);
 }
 
@@ -1103,14 +1154,14 @@ void PonyXLDDPMModel::buildFromConfig(const Config& cfg) {
     if (cfg_.recon_loss != "mse" && cfg_.recon_loss != "mae" && cfg_.recon_loss != "bce" &&
         cfg_.recon_loss != "huber" && cfg_.recon_loss != "smoothl1" && cfg_.recon_loss != "charbonnier" &&
         cfg_.recon_loss != "gaussian_nll" && cfg_.recon_loss != "nll_gaussian") {
-        std::cout << "⚠️  PonyXLDDPM: recon_loss='" << cfg_.recon_loss << "' unsupported; falling back to mse" << std::endl;
+        std::cerr << "⚠️  PonyXLDDPM: recon_loss='" << cfg_.recon_loss << "' unsupported; falling back to mse" << std::endl;
         cfg_.recon_loss = "mse";
     }
 
     // Normaliser la pondération de loss en fonction du timestep.
     cfg_.loss_weighting = normalize_loss_weighting(cfg_.loss_weighting);
     if (cfg_.loss_weighting != "none" && cfg_.loss_weighting != "min_snr") {
-        std::cout << "⚠️  PonyXLDDPM: loss_weighting='" << cfg_.loss_weighting << "' unsupported; falling back to none" << std::endl;
+        std::cerr << "⚠️  PonyXLDDPM: loss_weighting='" << cfg_.loss_weighting << "' unsupported; falling back to none" << std::endl;
         cfg_.loss_weighting = "none";
     }
     if (!(cfg_.min_snr_gamma > 0.0f) || !std::isfinite(cfg_.min_snr_gamma)) {
@@ -1119,7 +1170,7 @@ void PonyXLDDPMModel::buildFromConfig(const Config& cfg) {
 
     cfg_.output_activation = normalize_output_activation(cfg_.output_activation);
     if (cfg_.output_activation != "linear" && cfg_.output_activation != "tanh") {
-        std::cout << "⚠️  PonyXLDDPM: output_activation='" << cfg_.output_activation << "' unsupported; falling back to linear" << std::endl;
+        std::cerr << "⚠️  PonyXLDDPM: output_activation='" << cfg_.output_activation << "' unsupported; falling back to linear" << std::endl;
         cfg_.output_activation = "linear";
     }
 
@@ -1130,19 +1181,49 @@ void PonyXLDDPMModel::buildFromConfig(const Config& cfg) {
         nlohmann::json arch;
         if (load_vae_architecture_json(vae_ckpt_resolved, &arch)) {
             apply_vae_autodims_from_arch(cfg_, arch);
+            // Stocker le model_config complet du VAE pour les lazy-loads : garantit que
+            // use_attention, use_skip_connections, use_encoder_prior, decoder_upsample,
+            // resnet_max_tokens, etc. correspondent exactement au checkpoint pré-entraîné.
+            const nlohmann::json* mc = nullptr;
+            if (arch.contains("model_config") && arch["model_config"].is_object()) mc = &arch["model_config"];
+            if (!mc && arch.contains("modelConfig") && arch["modelConfig"].is_object()) mc = &arch["modelConfig"];
+            if (mc && !mc->empty()) {
+                vae_ckpt_cfg_ = *mc;
+            }
         }
     }
 
-    // Encoder externe: utilisé pour fournir mag/mod (broadcast add sur d_model).
+    // ConditioningEncoder externe: utilisé pour fournir mag/mod (broadcast add sur d_model).
     // Doit être aligné AVANT setTokenizer (qui peut allouer des embeddings encoder).
     getMutableEncoder().ensureDim(std::max(1, cfg_.d_model));
 
-    // Garder tokenizer/embeddings cohérents avec la config.
-    // Important quand on compose le vocab depuis le dataset.
+    // Composition du tokenizer: partir du tokenizer de base si le chemin est configuré,
+    // puis étendre avec les tokens du dataset via tokenizeEnsure().
     const int mv = std::max(8, cfg_.max_vocab);
-    setTokenizer(Tokenizer(static_cast<size_t>(mv)));
-    // Pour permettre des prompts longs (ex: 512 tokens), garder un max sequence length cohérent.
-    getMutableTokenizer().setMaxSequenceLength(std::max(1, cfg_.text_ctx_len));
+    {
+        Tokenizer base_tok(static_cast<size_t>(mv));
+        if (!cfg_.base_tokenizer_path.empty()) {
+            try {
+                std::ifstream btf(cfg_.base_tokenizer_path);
+                if (btf.is_open()) {
+                    json btj;
+                    btf >> btj;
+                    base_tok.from_json(btj);
+                    std::cerr << "\u2713 PonyXL: base tokenizer charg\u00e9 depuis: " << cfg_.base_tokenizer_path
+                              << " (vocab_size=" << base_tok.getVocabSize() << ")" << std::endl;
+                } else {
+                    std::cerr << "\u26a0\ufe0f  PonyXL: base_tokenizer_path configur\u00e9 mais fichier introuvable: "
+                              << cfg_.base_tokenizer_path << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "\u26a0\ufe0f  PonyXL: \u00e9chec chargement base tokenizer: " << e.what() << std::endl;
+            }
+        }
+        // Aligner max_vocab et max_sequence_length (surcharge ce que le fichier base aurait pu mettre).
+        base_tok.setMaxVocab(static_cast<size_t>(std::max(1, cfg_.max_vocab)));
+        base_tok.setMaxSequenceLength(std::max(1, cfg_.text_ctx_len));
+        setTokenizer(base_tok);
+    }
 
     // IMPORTANT: aligner la capacité du tokenizer sur la taille de l'embedding texte.
     // Sinon, tokenizeEnsure() peut produire des IDs >= max_vocab, et on perd la correspondance.
@@ -1178,7 +1259,9 @@ void PonyXLDDPMModel::accumulateVaeMuMoments(
     // Lazy-load VAE (same path as training)
     if (!vae_) {
         using json = nlohmann::json;
-        json vae_cfg = ModelArchitectures::defaultConfig(cfg_.vae_arch);
+        // Utilise la config complète du checkpoint comme base pour préserver tous les
+        // flags architecturaux (use_attention, decoder_upsample, use_skip_connections, etc.).
+        json vae_cfg = make_vae_base_cfg(cfg_.vae_arch, vae_ckpt_cfg_);
         vae_cfg["image_w"] = W;
         vae_cfg["image_h"] = H;
         vae_cfg["image_c"] = 3;
@@ -1206,7 +1289,7 @@ void PonyXLDDPMModel::accumulateVaeMuMoments(
         vae_cfg["latent_w"] = lw;
         vae_cfg["latent_c"] = latent_in_dim;
 
-        if (cfg_.vae_base_channels > 0) {
+        if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
             vae_cfg["base_channels"] = cfg_.vae_base_channels;
         }
 
@@ -1543,8 +1626,8 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
         if (id >= max_vocab) id = (unk_id >= 0) ? unk_id : pad_id;
     }
 
-    // VAE (pré-entraîné) requis
-    if (cfg_.vae_checkpoint.empty()) {
+    // VAE requis pour ponyxl_ddpm; optionnel pour ldm_unet (train conjoint depuis zéro)
+    if (cfg_.vae_checkpoint.empty() && !cfg_.use_ldm_unet_arch) {
         throw std::runtime_error(
             "PonyXLDDPMModel: vae_checkpoint is required for ponyxl_sdxl training. "
             "Train a VAE (ex: arch=vae_conv) and pass cfg.vae_checkpoint."
@@ -1553,10 +1636,20 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
 
     if (!vae_) {
         using json = nlohmann::json;
-        json vae_cfg = ModelArchitectures::defaultConfig(cfg_.vae_arch);
+
+        // Pour ldm_unet, la config VAE provient du checkpoint si disponible; sinon on utilise
+        // les paramètres du config ldm_unet (base_channels=256, latent_c=latent_in_dim).
+        json vae_cfg = cfg_.use_ldm_unet_arch
+            ? json{}   // on part de zéro; base_channels/latent_c seront forcés ci-dessous
+            : make_vae_base_cfg(cfg_.vae_arch, vae_ckpt_cfg_);
+
         vae_cfg["image_w"] = W;
         vae_cfg["image_h"] = H;
         vae_cfg["image_c"] = 3;
+        // Forcer encodeur déterministe (mu uniquement) quel que soit le flag du checkpoint.
+        if (cfg_.vae_arch == "vae_conv") {
+            vae_cfg["stochastic_latent"] = false;
+        }
 
         int lh = cfg_.latent_h;
         int lw = cfg_.latent_w;
@@ -1574,7 +1667,7 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
         vae_cfg["latent_w"] = lw;
         vae_cfg["latent_c"] = latent_in_dim;
 
-        if (cfg_.vae_base_channels > 0) {
+        if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
             vae_cfg["base_channels"] = cfg_.vae_base_channels;
         }
 
@@ -1584,24 +1677,45 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
         }
         m->allocateParams();
 
-        Mimir::Serialization::LoadOptions opts;
-        const std::string vae_ckpt = resolve_checkpoint_dir_for_loading(cfg_.vae_checkpoint);
-        opts.format = Mimir::Serialization::detect_format(vae_ckpt);
-        opts.load_tokenizer = false;
-        opts.load_encoder = false;
-        opts.load_optimizer = false;
-        opts.strict_mode = false;
-        opts.validate_checksums = false;
+        bool vae_ckpt_loaded = false;
+        if (!cfg_.vae_checkpoint.empty()) {
+            Mimir::Serialization::LoadOptions opts;
+            const std::string vae_ckpt = resolve_checkpoint_dir_for_loading(cfg_.vae_checkpoint);
+            opts.format = Mimir::Serialization::detect_format(vae_ckpt);
+            opts.load_tokenizer = false;
+            opts.load_encoder = false;
+            opts.load_optimizer = false;
+            opts.strict_mode = false;
+            opts.validate_checksums = false;
 
-        std::string err;
-        if (!Mimir::Serialization::load_checkpoint(*m, vae_ckpt, opts, &err)) {
-            throw std::runtime_error("Failed to load VAE checkpoint: " + cfg_.vae_checkpoint + " (resolved=" + vae_ckpt + ") | " + err);
+            std::string err;
+            if (!Mimir::Serialization::load_checkpoint(*m, vae_ckpt, opts, &err)) {
+                if (cfg_.use_ldm_unet_arch) {
+                    // Checkpoint incompatible avec ldm_unet (ex: base_channels différent).
+                    // On continue avec un VAE initialisé à zéro (entraînement conjoint).
+                    std::fprintf(stderr,
+                        "[ldm_unet] WARN: VAE checkpoint incompatible, training VAE from scratch: %s\n",
+                        err.c_str());
+                } else {
+                    throw std::runtime_error("Failed to load VAE checkpoint: " + cfg_.vae_checkpoint +
+                                             " (resolved=" + vae_ckpt + ") | " + err);
+                }
+            } else {
+                vae_ckpt_loaded = true;
+            }
         }
 
-        // IMPORTANT: le VAE est pré-entraîné et ne doit jamais être modifié dans PonyXLDDPMModel.
-        m->freezeParameters(true);
+        // Geler uniquement si le checkpoint a été chargé avec succès.
+        // Pour ldm_unet sans checkpoint compatible: VAE entraîné conjointement (non gelé).
+        if (vae_ckpt_loaded) {
+            m->freezeParameters(true);
+        }
         vae_ = std::move(m);
     }
+
+    // Note: le lazy-load VAE NE DOIT PAS utiliser cfg_.vae_base_channels pour créer le modèle VAE.
+    // Les canaux du VAE viennent de vae_ckpt_cfg_ (via make_vae_base_cfg) ou des defaults.
+    // cfg_.vae_base_channels contrôle la progression du U-Net (pas celle du VAE externe).
 
     // Encode image -> mu/logvar; use mu as deterministic x0
     const std::vector<float> img_f = imageBytesToFloatRGB(rgb, W, H);
@@ -1695,20 +1809,15 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
     static thread_local int cache_T = 0;
     static thread_local float cache_b0 = -1.0f;
     static thread_local float cache_b1 = -1.0f;
+    static thread_local std::string cache_sched;
     static thread_local std::vector<float> cache_ab;
-    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 || static_cast<int>(cache_ab.size()) != T) {
+    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 ||
+        cache_sched != cfg_.ddpm_schedule || static_cast<int>(cache_ab.size()) != T) {
         cache_T = T;
         cache_b0 = beta0;
         cache_b1 = beta1;
-        cache_ab.assign(static_cast<size_t>(T), 1.0f);
-        float ab = 1.0f;
-        for (int i = 0; i < T; ++i) {
-            const float frac = (T > 1) ? (static_cast<float>(i) / static_cast<float>(T - 1)) : 0.0f;
-            const float beta = std::clamp(beta0 + (beta1 - beta0) * frac, 0.0f, 0.999f);
-            const float alpha = 1.0f - beta;
-            ab *= alpha;
-            cache_ab[static_cast<size_t>(i)] = std::clamp(ab, 1e-6f, 1.0f);
-        }
+        cache_sched = cfg_.ddpm_schedule;
+        cache_ab = compute_alpha_bar_schedule(T, beta0, beta1, cfg_.ddpm_schedule);
     }
 
     const int steps_per_image = std::max(1, cfg_.ddpm_steps_per_image);
@@ -1855,14 +1964,14 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
             try {
                 if (!vae_decode_) {
                     using json = nlohmann::json;
-                    json dec_cfg = ModelArchitectures::defaultConfig("vae_conv_decode");
+                    json dec_cfg = make_vae_base_cfg("vae_conv_decode", vae_ckpt_cfg_);
                     dec_cfg["image_w"] = W;
                     dec_cfg["image_h"] = H;
                     dec_cfg["image_c"] = 3;
                     dec_cfg["latent_h"] = lat_h;
                     dec_cfg["latent_w"] = lat_w;
                     dec_cfg["latent_c"] = latent_in_dim;
-                    if (cfg_.vae_base_channels > 0) {
+                    if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
                         dec_cfg["base_channels"] = cfg_.vae_base_channels;
                     }
 
@@ -2056,14 +2165,14 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
             try {
                 if (!vae_decode_) {
                     using json = nlohmann::json;
-                    json dec_cfg = ModelArchitectures::defaultConfig("vae_conv_decode");
+                    json dec_cfg = make_vae_base_cfg("vae_conv_decode", vae_ckpt_cfg_);
                     dec_cfg["image_w"] = W;
                     dec_cfg["image_h"] = H;
                     dec_cfg["image_c"] = 3;
                     dec_cfg["latent_h"] = lat_h;
                     dec_cfg["latent_w"] = lat_w;
                     dec_cfg["latent_c"] = latent_in_dim;
-                    if (cfg_.vae_base_channels > 0) {
+                    if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
                         dec_cfg["base_channels"] = cfg_.vae_base_channels;
                     }
 
@@ -2358,7 +2467,7 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
     // Ensure VAE is loaded (same as training)
     if (!vae_) {
         using json = nlohmann::json;
-        json vae_cfg = ModelArchitectures::defaultConfig(cfg_.vae_arch);
+        json vae_cfg = make_vae_base_cfg(cfg_.vae_arch, vae_ckpt_cfg_);
         vae_cfg["image_w"] = W;
         vae_cfg["image_h"] = H;
         vae_cfg["image_c"] = 3;
@@ -2378,7 +2487,7 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
         vae_cfg["latent_h"] = lh;
         vae_cfg["latent_w"] = lw;
         vae_cfg["latent_c"] = latent_in_dim;
-        if (cfg_.vae_base_channels > 0) {
+        if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
             vae_cfg["base_channels"] = cfg_.vae_base_channels;
         }
 
@@ -2482,20 +2591,15 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
     static thread_local int cache_T = 0;
     static thread_local float cache_b0 = -1.0f;
     static thread_local float cache_b1 = -1.0f;
+    static thread_local std::string cache_sched;
     static thread_local std::vector<float> cache_ab;
-    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 || static_cast<int>(cache_ab.size()) != T) {
+    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 ||
+        cache_sched != cfg_.ddpm_schedule || static_cast<int>(cache_ab.size()) != T) {
         cache_T = T;
         cache_b0 = beta0;
         cache_b1 = beta1;
-        cache_ab.assign(static_cast<size_t>(T), 1.0f);
-        float ab = 1.0f;
-        for (int i = 0; i < T; ++i) {
-            const float frac = (T > 1) ? (static_cast<float>(i) / static_cast<float>(T - 1)) : 0.0f;
-            const float beta = std::clamp(beta0 + (beta1 - beta0) * frac, 0.0f, 0.999f);
-            const float alpha = 1.0f - beta;
-            ab *= alpha;
-            cache_ab[static_cast<size_t>(i)] = std::clamp(ab, 1e-6f, 1.0f);
-        }
+        cache_sched = cfg_.ddpm_schedule;
+        cache_ab = compute_alpha_bar_schedule(T, beta0, beta1, cfg_.ddpm_schedule);
     }
 
     const float alpha_bar = cache_ab[static_cast<size_t>(t)];
@@ -2580,14 +2684,14 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
         try {
             if (!vae_decode_) {
                 using json = nlohmann::json;
-                json dec_cfg = ModelArchitectures::defaultConfig("vae_conv_decode");
+                json dec_cfg = make_vae_base_cfg("vae_conv_decode", vae_ckpt_cfg_);
                 dec_cfg["image_w"] = W;
                 dec_cfg["image_h"] = H;
                 dec_cfg["image_c"] = 3;
                 dec_cfg["latent_h"] = vae_lh;
                 dec_cfg["latent_w"] = vae_lw;
                 dec_cfg["latent_c"] = latent_in_dim;
-                if (cfg_.vae_base_channels > 0) {
+                if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
                     dec_cfg["base_channels"] = cfg_.vae_base_channels;
                 }
 
@@ -2935,7 +3039,7 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::reconstructPreviewSdxlLatentDiffu
     // Ensure VAE encoder is loaded (same as validation)
     if (!vae_) {
         using json = nlohmann::json;
-        json vae_cfg = ModelArchitectures::defaultConfig(cfg_.vae_arch);
+        json vae_cfg = make_vae_base_cfg(cfg_.vae_arch, vae_ckpt_cfg_);
         vae_cfg["image_w"] = W;
         vae_cfg["image_h"] = H;
         vae_cfg["image_c"] = 3;
@@ -2955,7 +3059,7 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::reconstructPreviewSdxlLatentDiffu
         vae_cfg["latent_h"] = lh;
         vae_cfg["latent_w"] = lw;
         vae_cfg["latent_c"] = latent_in_dim;
-        if (cfg_.vae_base_channels > 0) {
+        if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
             vae_cfg["base_channels"] = cfg_.vae_base_channels;
         }
 
@@ -2984,7 +3088,7 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::reconstructPreviewSdxlLatentDiffu
     // Ensure VAE decoder is loaded (same as viz taps)
     if (!vae_decode_) {
         using json = nlohmann::json;
-        json dec_cfg = ModelArchitectures::defaultConfig("vae_conv_decode");
+        json dec_cfg = make_vae_base_cfg("vae_conv_decode", vae_ckpt_cfg_);
         dec_cfg["image_w"] = W;
         dec_cfg["image_h"] = H;
         dec_cfg["image_c"] = 3;
@@ -3011,7 +3115,7 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::reconstructPreviewSdxlLatentDiffu
         dec_cfg["latent_h"] = lat_h;
         dec_cfg["latent_w"] = lat_w;
         dec_cfg["latent_c"] = latent_in_dim;
-        if (cfg_.vae_base_channels > 0) {
+        if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
             dec_cfg["base_channels"] = cfg_.vae_base_channels;
         }
 
@@ -3098,20 +3202,15 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::reconstructPreviewSdxlLatentDiffu
     static thread_local int cache_T = 0;
     static thread_local float cache_b0 = -1.0f;
     static thread_local float cache_b1 = -1.0f;
+    static thread_local std::string cache_sched;
     static thread_local std::vector<float> cache_ab;
-    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 || static_cast<int>(cache_ab.size()) != T) {
+    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 ||
+        cache_sched != cfg_.ddpm_schedule || static_cast<int>(cache_ab.size()) != T) {
         cache_T = T;
         cache_b0 = beta0;
         cache_b1 = beta1;
-        cache_ab.assign(static_cast<size_t>(T), 1.0f);
-        float ab = 1.0f;
-        for (int i = 0; i < T; ++i) {
-            const float frac = (T > 1) ? (static_cast<float>(i) / static_cast<float>(T - 1)) : 0.0f;
-            const float beta = std::clamp(beta0 + (beta1 - beta0) * frac, 0.0f, 0.999f);
-            const float alpha = 1.0f - beta;
-            ab *= alpha;
-            cache_ab[static_cast<size_t>(i)] = std::clamp(ab, 1e-6f, 1.0f);
-        }
+        cache_sched = cfg_.ddpm_schedule;
+        cache_ab = compute_alpha_bar_schedule(T, beta0, beta1, cfg_.ddpm_schedule);
     }
     const float alpha_bar = cache_ab[static_cast<size_t>(t)];
     const float sqrt_ab = std::sqrt(alpha_bar);
@@ -3281,7 +3380,7 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::text2imgSdxlLatentDiffusion(
     // Ensure VAE decoder is loaded only when a decoded preview is requested.
     if (decode_preview && !vae_decode_) {
         using json = nlohmann::json;
-        json dec_cfg = ModelArchitectures::defaultConfig("vae_conv_decode");
+        json dec_cfg = make_vae_base_cfg("vae_conv_decode", vae_ckpt_cfg_);
         dec_cfg["image_w"] = W;
         dec_cfg["image_h"] = H;
         dec_cfg["image_c"] = 3;
@@ -3308,7 +3407,7 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::text2imgSdxlLatentDiffusion(
         dec_cfg["latent_h"] = lat_h;
         dec_cfg["latent_w"] = lat_w;
         dec_cfg["latent_c"] = latent_in_dim;
-        if (cfg_.vae_base_channels > 0) {
+        if (cfg_.vae_base_channels > 0 && !vae_ckpt_cfg_.contains("base_channels")) {
             dec_cfg["base_channels"] = cfg_.vae_base_channels;
         }
 
@@ -3341,20 +3440,15 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::text2imgSdxlLatentDiffusion(
     static thread_local int cache_T = 0;
     static thread_local float cache_b0 = -1.0f;
     static thread_local float cache_b1 = -1.0f;
+    static thread_local std::string cache_sched;
     static thread_local std::vector<float> cache_ab;
-    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 || static_cast<int>(cache_ab.size()) != T) {
+    if (cache_T != T || cache_b0 != beta0 || cache_b1 != beta1 ||
+        cache_sched != cfg_.ddpm_schedule || static_cast<int>(cache_ab.size()) != T) {
         cache_T = T;
         cache_b0 = beta0;
         cache_b1 = beta1;
-        cache_ab.assign(static_cast<size_t>(T), 1.0f);
-        float ab = 1.0f;
-        for (int i = 0; i < T; ++i) {
-            const float frac = (T > 1) ? (static_cast<float>(i) / static_cast<float>(T - 1)) : 0.0f;
-            const float beta = std::clamp(beta0 + (beta1 - beta0) * frac, 0.0f, 0.999f);
-            const float alpha = 1.0f - beta;
-            ab *= alpha;
-            cache_ab[static_cast<size_t>(i)] = std::clamp(ab, 1e-6f, 1.0f);
-        }
+        cache_sched = cfg_.ddpm_schedule;
+        cache_ab = compute_alpha_bar_schedule(T, beta0, beta1, cfg_.ddpm_schedule);
     }
 
     int steps = sample_steps;
@@ -3647,13 +3741,19 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
                               int channels,
                               int in_h,
                               int in_w) {
+            const int out_h = std::max(1, in_h * 2);
+            const int out_w = std::max(1, in_w * 2);
             m.push(name, "UpsampleNearest", 0);
             if (auto* U = m.getLayerByName(name)) {
                 U->inputs = {in};
                 U->output = out;
                 U->in_channels = channels;
-                U->out_h = in_h;
-                U->out_w = in_w;
+                U->input_height = in_h;
+                U->input_width = in_w;
+                U->output_height = out_h;
+                U->output_width = out_w;
+                U->out_h = out_h;
+                U->out_w = out_w;
                 U->scale_h = 2.0f;
                 U->scale_w = 2.0f;
             }
@@ -3862,30 +3962,9 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
             E->seq_len = text_len;
         }
 
+        // Encodeur texte: part directement de l'embedding sans injection mag/mod externe.
+        // Le conditionnement est fourni exclusivement par text_ids + timestep (DDPM pur).
         std::string text = "ponyxl_sdxl/text_encoder/tok_emb_out";
-        m.push("ponyxl_sdxl/text_encoder/mag_in", "Identity", 0);
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/mag_in")) {
-            L->inputs = {"mag"};
-            L->output = "ponyxl_sdxl/text_encoder/mag_vec";
-        }
-        m.push("ponyxl_sdxl/text_encoder/add_mag", "Add", 0);
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/add_mag")) {
-            L->inputs = {text, "ponyxl_sdxl/text_encoder/mag_vec"};
-            L->output = "ponyxl_sdxl/text_encoder/tok_plus_mag";
-        }
-        text = "ponyxl_sdxl/text_encoder/tok_plus_mag";
-
-        m.push("ponyxl_sdxl/text_encoder/mod_in", "Identity", 0);
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/mod_in")) {
-            L->inputs = {"mod"};
-            L->output = "ponyxl_sdxl/text_encoder/mod_vec";
-        }
-        m.push("ponyxl_sdxl/text_encoder/add_mod", "Add", 0);
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/add_mod")) {
-            L->inputs = {text, "ponyxl_sdxl/text_encoder/mod_vec"};
-            L->output = "ponyxl_sdxl/text_encoder/tok_plus_mag_mod";
-        }
-        text = "ponyxl_sdxl/text_encoder/tok_plus_mag_mod";
 
         const size_t text_attn_params = sat_mul(static_cast<size_t>(4), sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(d_model)));
         for (int i = 0; i < text_layers; ++i) {
@@ -4053,57 +4132,26 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
             cond_vec = "ponyxl_sdxl/cond_vec";
         }
 
-        // Projection des latents VAEConv (tokens HWC) vers un backbone convolutionnel latent.
-        m.push("ponyxl_sdxl/vae/latent_proj", "Linear",
-               sat_mul(static_cast<size_t>(latent_in_dim), static_cast<size_t>(d_model)) + static_cast<size_t>(d_model));
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/vae/latent_proj")) {
+        // Entrée latente: tokens HWC plats issus du VAEConv → (lat_h, lat_w, latent_in_dim) → CHW.
+        // On ne projette PAS vers d_model ici: le conv stem se charge d'adapter les canaux.
+        // Cela aligne l'entrée avec le format natif du VAEConv (latent_c canaux).
+        m.push("ponyxl_sdxl/latent_reshape", "Reshape", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/latent_reshape")) {
             L->inputs = {"ponyxl_sdxl/latent_raw"};
-            L->output = "ponyxl_sdxl/vae/latent_tokens";
-            L->seq_len = latent_len;
-            L->in_features = latent_in_dim;
-            L->out_features = d_model;
-            L->use_bias = true;
+            L->output = "ponyxl_sdxl/latent_hwc";
+            L->target_shape = {lat_h, lat_w, latent_in_dim};
         }
-        m.push("ponyxl_sdxl/vae/latent_ln", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/vae/latent_ln")) {
-            L->inputs = {"ponyxl_sdxl/vae/latent_tokens"};
-            L->output = "ponyxl_sdxl/vae/latent_norm";
-            L->affine = true;
-            L->use_bias = true;
-            L->eps = 1e-5f;
-            L->in_features = d_model;
-        }
-        m.push("ponyxl_sdxl/vae/add_cond", "Add", 0);
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/vae/add_cond")) {
-            L->inputs = {"ponyxl_sdxl/vae/latent_norm", cond_vec};
-            L->output = "ponyxl_sdxl/vae/latent_cond";
-        }
-        m.push("ponyxl_sdxl/vae/latent_cond_ln", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/vae/latent_cond_ln")) {
-            L->inputs = {"ponyxl_sdxl/vae/latent_cond"};
-            L->output = "ponyxl_sdxl/vae/latent_cond_norm";
-            L->affine = true;
-            L->use_bias = true;
-            L->eps = 1e-5f;
-            L->in_features = d_model;
-        }
-
-        m.push("ponyxl_sdxl/vae/latent_reshape", "Reshape", 0);
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/vae/latent_reshape")) {
-            L->inputs = {"ponyxl_sdxl/vae/latent_cond_norm"};
-            L->output = "ponyxl_sdxl/vae/latent_hwc";
-            L->target_shape = {lat_h, lat_w, d_model};
-        }
-        m.push("ponyxl_sdxl/vae/latent_to_chw", "Permute", 0);
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/vae/latent_to_chw")) {
-            L->inputs = {"ponyxl_sdxl/vae/latent_hwc"};
+        m.push("ponyxl_sdxl/latent_to_chw", "Permute", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/latent_to_chw")) {
+            L->inputs = {"ponyxl_sdxl/latent_hwc"};
             L->output = "ponyxl_sdxl/unet/in_chw";
-            L->shape = {lat_h, lat_w, d_model};
+            L->shape = {lat_h, lat_w, latent_in_dim};
             L->permute_dims = {2, 0, 1};
         }
 
+        // Conv stem: latent_in_dim → base_ch (adapte les canaux latents vers le backbone U-Net).
         std::string x = conv2d("ponyxl_sdxl/unet/stem", "ponyxl_sdxl/unet/in_chw", "ponyxl_sdxl/unet/stem_y",
-                       d_model, level_channels(0), lat_h, lat_w, 3, 1, 1, true);
+                       latent_in_dim, level_channels(0), lat_h, lat_w, 3, 1, 1, true);
         int cur_c = level_channels(0);
         int cur_h = lat_h;
         int cur_w = lat_w;
@@ -4194,7 +4242,477 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
         }
     };
 
-    build_latent_ddpm(model);
+    if (cfg.use_ldm_unet_arch) {
+        buildIntoLdmUNet(model, cfg);
+    } else {
+        build_latent_ddpm(model);
+    }
+    return;
+}
+
+// ── LdmUNet architecture (build_ldm_unet is defined below and called if use_ldm_unet_arch)
+void PonyXLDDPMModel::buildIntoLdmUNet(Model& model, const Config& cfg) {
+    auto sat_mul = [](size_t a, size_t b) -> size_t {
+        if (a == 0 || b == 0) return 0;
+        if (a > (static_cast<size_t>(-1) / b)) return static_cast<size_t>(-1);
+        return a * b;
+    };
+
+    model.getMutableLayers().clear();
+    model.setModelName("LdmUNet");
+    model.setHasEncoder(true);
+    model.modelConfig["type"]             = "ldm_unet";
+    model.modelConfig["task"]             = "latent_diffusion_eps_predictor";
+    model.modelConfig["latent_backbone"]  = "vae_conv";
+    model.modelConfig["ddpm_schedule"]    = cfg.ddpm_schedule;
+    model.modelConfig["use_ldm_unet_arch"] = true;
+    model.modelConfig["sdxl_time_cond"]   = true;  // always pass "timestep" input
+
+    Model& m = model;
+
+    const int d_model        = std::max(1, cfg.d_model);
+    const int text_len       = std::max(1, cfg.text_ctx_len);
+    const int latent_len     = std::max(1, cfg.latent_seq_len);
+    const int latent_in_dim  = std::max(1, cfg.latent_in_dim);
+    const int vocab          = std::max(1, cfg.max_vocab);
+    const int pad_id         = 0;
+    const int text_layers    = std::max(1, cfg.text_layers);
+    const int mlp_hidden     = std::max(4, cfg.mlp_hidden);
+    const int blocks_per_level    = std::max(1, cfg.unet_blocks_per_level);
+    const int bottleneck_blocks   = std::max(1, cfg.unet_bottleneck_blocks);
+    int text_heads = std::max(1, cfg.num_heads);
+    while (text_heads > 1 && (d_model % text_heads) != 0) --text_heads;
+
+    // Channel progression: base = vae_base_channels (default 256 for ldm_unet)
+    const int base = std::max(16, (cfg.vae_base_channels > 0) ? cfg.vae_base_channels : 256);
+    auto level_ch = [&](int level) -> int {
+        int ch = base;
+        for (int i = 0; i < level; ++i) ch = std::min(ch * 2, std::max(base, d_model));
+        return std::min(ch, std::max(base, d_model));
+    };
+
+    // Infer latent spatial dims
+    int lat_h = std::max(0, cfg.latent_h);
+    int lat_w = std::max(0, cfg.latent_w);
+    if (lat_h <= 0 || lat_w <= 0 || lat_h * lat_w != latent_len) {
+        int s = static_cast<int>(std::sqrt(static_cast<double>(std::max(1, latent_len))));
+        s = std::max(1, s);
+        while (s > 1 && (latent_len % s) != 0) --s;
+        lat_h = s;
+        lat_w = std::max(1, latent_len / std::max(1, s));
+    }
+
+    // Adjust depth to be compatible with spatial dims
+    int depth = std::max(1, cfg.unet_depth);
+    while (depth > 1) {
+        const int pow2 = 1 << (depth - 1);
+        if ((lat_h % pow2) == 0 && (lat_w % pow2) == 0) break;
+        --depth;
+    }
+
+    auto conv_out_fn = [](int in, int k, int s, int p) {
+        return std::max(1, (in + 2 * p - k) / std::max(1, s) + 1);
+    };
+
+    // ── GroupNorm32 ──────────────────────────────────────────────────────────
+    auto norm32 = [&](const std::string& prefix, const std::string& in, int ch, int H, int W) {
+        int groups = 32;
+        while (groups > 1 && (ch % groups) != 0) --groups;
+        groups = std::max(1, groups);
+        m.push(prefix, "GroupNorm", static_cast<size_t>(ch) * 2);
+        if (auto* L = m.getLayerByName(prefix)) {
+            L->inputs = {in};
+            L->output = prefix + "/out";
+            L->in_channels = ch;
+            L->num_groups = groups;
+            L->input_height = H;
+            L->input_width = W;
+        }
+        return prefix + "/out";
+    };
+
+    // ── Conv2d ──────────────────────────────────────────────────────────────
+    auto conv2d = [&](const std::string& name, const std::string& in, const std::string& out,
+                      int in_c, int out_c, int H, int W, int k, int s, int p) {
+        m.push(name, "Conv2d",
+               sat_mul(static_cast<size_t>(out_c), sat_mul(static_cast<size_t>(in_c),
+               sat_mul(static_cast<size_t>(k), static_cast<size_t>(k)))));
+        if (auto* L = m.getLayerByName(name)) {
+            L->inputs = {in}; L->output = out;
+            L->in_channels = in_c; L->out_channels = out_c;
+            L->input_height = H; L->input_width = W;
+            L->kernel_size = k; L->stride = s; L->padding = p;
+            L->use_bias = false;
+            L->output_height = conv_out_fn(H, k, s, p);
+            L->output_width  = conv_out_fn(W, k, s, p);
+            L->out_h = L->output_height; L->out_w = L->output_width;
+        }
+        return out;
+    };
+
+    // ── ConvTranspose2d: upsample ×2 (kernel=4, stride=2, pad=1) ────────────
+    auto deconv2x = [&](const std::string& name, const std::string& in, const std::string& out,
+                        int in_c, int out_c, int H, int W) {
+        const int oh = H * 2, ow = W * 2;
+        m.push(name, "ConvTranspose2d",
+               sat_mul(static_cast<size_t>(out_c), sat_mul(static_cast<size_t>(in_c), 16ULL)));
+        if (auto* L = m.getLayerByName(name)) {
+            L->inputs = {in}; L->output = out;
+            L->in_channels = in_c; L->out_channels = out_c;
+            L->input_height = H; L->input_width = W;
+            L->output_height = oh; L->output_width = ow;
+            L->out_h = oh; L->out_w = ow;
+            L->kernel_size = 4; L->stride = 2; L->padding = 1;
+        }
+        return out;
+    };
+
+    // ── Add ──────────────────────────────────────────────────────────────────
+    auto add2 = [&](const std::string& name, const std::string& a, const std::string& b) {
+        m.push(name, "Add", 0);
+        if (auto* L = m.getLayerByName(name)) { L->inputs = {a, b}; L->output = name + "/out"; }
+        return name + "/out";
+    };
+
+    // ── Time shift injection (broadcast add, Permute CHW↔HWC) ───────────────
+    auto inject_time = [&](const std::string& prefix, const std::string& in_chw,
+                           const std::string& t_src, int ch, int H, int W) {
+        std::string cond_vec = t_src;
+        if (ch != d_model) {
+            m.push(prefix + "/t_proj", "Linear",
+                   sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(ch)) + static_cast<size_t>(ch));
+            if (auto* L = m.getLayerByName(prefix + "/t_proj")) {
+                L->inputs = {t_src}; L->output = prefix + "/t_cond";
+                L->seq_len = 1; L->in_features = d_model; L->out_features = ch; L->use_bias = true;
+            }
+            cond_vec = prefix + "/t_cond";
+        }
+        m.push(prefix + "/to_hwc", "Permute", 0);
+        if (auto* P = m.getLayerByName(prefix + "/to_hwc")) {
+            P->inputs = {in_chw}; P->output = prefix + "/hwc";
+            P->shape = {ch, H, W}; P->permute_dims = {1, 2, 0};
+        }
+        m.push(prefix + "/add", "Add", 0);
+        if (auto* A = m.getLayerByName(prefix + "/add")) {
+            A->inputs = {prefix + "/hwc", cond_vec}; A->output = prefix + "/hwc_t";
+        }
+        m.push(prefix + "/to_chw", "Permute", 0);
+        if (auto* P = m.getLayerByName(prefix + "/to_chw")) {
+            P->inputs = {prefix + "/hwc_t"}; P->output = prefix + "/out";
+            P->shape = {H, W, ch}; P->permute_dims = {2, 0, 1};
+        }
+        return prefix + "/out";
+    };
+
+    // ── ResBlock with per-block time injection ───────────────────────────────
+    // Norm32→SiLU→Conv1 → t_inject → Norm32→SiLU→Conv2 → Add(skip)
+    auto resblock = [&](const std::string& prefix, const std::string& in,
+                        const std::string& t_emb_name, int in_ch, int out_ch, int H, int W) {
+        std::string h = norm32(prefix + "/norm1", in, in_ch, H, W);
+        m.push(prefix + "/act1", "SiLU", 0);
+        if (auto* L = m.getLayerByName(prefix + "/act1")) { L->inputs = {h}; L->output = prefix + "/act1_y"; }
+        h = prefix + "/act1_y";
+        h = conv2d(prefix + "/conv1", h, prefix + "/h1", in_ch, out_ch, H, W, 3, 1, 1);
+        h = inject_time(prefix + "/t", h, t_emb_name, out_ch, H, W);
+        h = norm32(prefix + "/norm2", h, out_ch, H, W);
+        m.push(prefix + "/act2", "SiLU", 0);
+        if (auto* L = m.getLayerByName(prefix + "/act2")) { L->inputs = {h}; L->output = prefix + "/act2_y"; }
+        h = prefix + "/act2_y";
+        h = conv2d(prefix + "/conv2", h, prefix + "/h2", out_ch, out_ch, H, W, 3, 1, 1);
+        std::string skip = in;
+        if (in_ch != out_ch) {
+            skip = conv2d(prefix + "/skip_proj", in, prefix + "/skip", in_ch, out_ch, H, W, 1, 1, 0);
+        }
+        return add2(prefix + "/add", skip, h);
+    };
+
+    // ── Text cross-attention ─────────────────────────────────────────────────
+    auto cross_attn = [&](const std::string& prefix, const std::string& in, int ch, int H, int W) {
+        int heads = text_heads;
+        while (heads > 1 && (d_model % heads) != 0) --heads;
+        heads = std::max(1, heads);
+        const size_t attn_params = sat_mul(static_cast<size_t>(d_model),
+                                           sat_mul(static_cast<size_t>(d_model), 4ULL));
+        m.push(prefix + "/to_hwc", "Permute", 0);
+        if (auto* P = m.getLayerByName(prefix + "/to_hwc")) {
+            P->inputs = {in}; P->output = prefix + "/hwc";
+            P->shape = {ch, H, W}; P->permute_dims = {1, 2, 0};
+        }
+        std::string query = prefix + "/hwc";
+        if (ch != d_model) {
+            m.push(prefix + "/q_proj", "Linear",
+                   sat_mul(static_cast<size_t>(ch), static_cast<size_t>(d_model)) + static_cast<size_t>(d_model));
+            if (auto* L = m.getLayerByName(prefix + "/q_proj")) {
+                L->inputs = {query}; L->output = prefix + "/q";
+                L->seq_len = H * W; L->in_features = ch; L->out_features = d_model; L->use_bias = true;
+            }
+            query = prefix + "/q";
+        }
+        m.push(prefix + "/xattn", "CrossAttention", attn_params);
+        if (auto* A = m.getLayerByName(prefix + "/xattn")) {
+            A->inputs = {query, "ldm_unet/text_ctx"};
+            A->output = prefix + "/xattn_out";
+            A->embed_dim = d_model; A->num_heads = heads; A->causal = false;
+        }
+        std::string attn_out = prefix + "/xattn_out";
+        if (ch != d_model) {
+            m.push(prefix + "/out_proj", "Linear",
+                   sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(ch)) + static_cast<size_t>(ch));
+            if (auto* L = m.getLayerByName(prefix + "/out_proj")) {
+                L->inputs = {attn_out}; L->output = prefix + "/attn_hwc";
+                L->seq_len = H * W; L->in_features = d_model; L->out_features = ch; L->use_bias = true;
+            }
+            attn_out = prefix + "/attn_hwc";
+        }
+        m.push(prefix + "/xadd", "Add", 0);
+        if (auto* A = m.getLayerByName(prefix + "/xadd")) {
+            A->inputs = {prefix + "/hwc", attn_out}; A->output = prefix + "/hwc_res";
+        }
+        m.push(prefix + "/to_chw", "Permute", 0);
+        if (auto* P = m.getLayerByName(prefix + "/to_chw")) {
+            P->inputs = {prefix + "/hwc_res"}; P->output = prefix + "/out";
+            P->shape = {H, W, ch}; P->permute_dims = {2, 0, 1};
+        }
+        return prefix + "/out";
+    };
+
+    // ── Self-attention (spatial, bottleneck) ─────────────────────────────────
+    auto self_attn = [&](const std::string& prefix, const std::string& in, int ch, int H, int W) {
+        int heads = text_heads;
+        while (heads > 1 && (ch % heads) != 0) --heads;
+        heads = std::max(1, heads);
+        const size_t attn_params = sat_mul(static_cast<size_t>(ch),
+                                           sat_mul(static_cast<size_t>(ch), 4ULL));
+        m.push(prefix + "/to_hwc", "Permute", 0);
+        if (auto* P = m.getLayerByName(prefix + "/to_hwc")) {
+            P->inputs = {in}; P->output = prefix + "/hwc";
+            P->shape = {ch, H, W}; P->permute_dims = {1, 2, 0};
+        }
+        m.push(prefix + "/sattn", "SelfAttention", attn_params);
+        if (auto* A = m.getLayerByName(prefix + "/sattn")) {
+            A->inputs = {prefix + "/hwc"}; A->output = prefix + "/sattn_out";
+            A->seq_len = H * W; A->embed_dim = ch; A->num_heads = heads; A->causal = false;
+        }
+        m.push(prefix + "/sadd", "Add", 0);
+        if (auto* A = m.getLayerByName(prefix + "/sadd")) {
+            A->inputs = {prefix + "/hwc", prefix + "/sattn_out"}; A->output = prefix + "/hwc_res";
+        }
+        m.push(prefix + "/to_chw", "Permute", 0);
+        if (auto* P = m.getLayerByName(prefix + "/to_chw")) {
+            P->inputs = {prefix + "/hwc_res"}; P->output = prefix + "/out";
+            P->shape = {H, W, ch}; P->permute_dims = {2, 0, 1};
+        }
+        return prefix + "/out";
+    };
+
+    // ── Text encoder (Transformer) ───────────────────────────────────────────
+    m.push("ldm_unet/text_enc/tok_emb", "Embedding",
+           sat_mul(static_cast<size_t>(vocab), static_cast<size_t>(d_model)));
+    if (auto* E = m.getLayerByName("ldm_unet/text_enc/tok_emb")) {
+        E->inputs = {"text_ids"}; E->output = "ldm_unet/text_enc/emb0";
+        E->vocab_size = vocab; E->embed_dim = d_model;
+        E->padding_idx = pad_id; E->seq_len = text_len;
+    }
+    std::string text = "ldm_unet/text_enc/emb0";
+    const size_t ta_params = sat_mul(4ULL, sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(d_model)));
+    for (int i = 0; i < text_layers; ++i) {
+        const std::string p = "ldm_unet/text_enc/blk" + std::to_string(i + 1);
+        // LN1 + SA + res
+        m.push(p + "/ln1", "LayerNorm", static_cast<size_t>(d_model) * 2);
+        if (auto* L = m.getLayerByName(p + "/ln1")) {
+            L->inputs = {text}; L->output = p + "/ln1_out";
+            L->affine = true; L->use_bias = true; L->eps = 1e-5f; L->in_features = d_model;
+        }
+        m.push(p + "/sa", "MultiHeadAttention", ta_params);
+        if (auto* L = m.getLayerByName(p + "/sa")) {
+            L->inputs = {p + "/ln1_out"}; L->output = p + "/sa_out";
+            L->seq_len = text_len; L->embed_dim = d_model; L->num_heads = text_heads; L->causal = false;
+        }
+        m.push(p + "/add1", "Add", 0);
+        if (auto* L = m.getLayerByName(p + "/add1")) { L->inputs = {text, p + "/sa_out"}; L->output = p + "/res1"; }
+        // LN2 + MLP + res
+        m.push(p + "/ln2", "LayerNorm", static_cast<size_t>(d_model) * 2);
+        if (auto* L = m.getLayerByName(p + "/ln2")) {
+            L->inputs = {p + "/res1"}; L->output = p + "/ln2_out";
+            L->affine = true; L->use_bias = true; L->eps = 1e-5f; L->in_features = d_model;
+        }
+        m.push(p + "/fc1", "Linear",
+               sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(mlp_hidden)) + static_cast<size_t>(mlp_hidden));
+        if (auto* L = m.getLayerByName(p + "/fc1")) {
+            L->inputs = {p + "/ln2_out"}; L->output = p + "/mlp_h";
+            L->seq_len = text_len; L->in_features = d_model; L->out_features = mlp_hidden; L->use_bias = true;
+        }
+        m.push(p + "/act", "GELU", 0);
+        if (auto* L = m.getLayerByName(p + "/act")) { L->inputs = {p + "/mlp_h"}; L->output = p + "/mlp_ha"; }
+        m.push(p + "/fc2", "Linear",
+               sat_mul(static_cast<size_t>(mlp_hidden), static_cast<size_t>(d_model)) + static_cast<size_t>(d_model));
+        if (auto* L = m.getLayerByName(p + "/fc2")) {
+            L->inputs = {p + "/mlp_ha"}; L->output = p + "/mlp_out";
+            L->seq_len = text_len; L->in_features = mlp_hidden; L->out_features = d_model; L->use_bias = true;
+        }
+        m.push(p + "/add2", "Add", 0);
+        if (auto* L = m.getLayerByName(p + "/add2")) {
+            L->inputs = {p + "/res1", p + "/mlp_out"}; L->output = p + "/out";
+        }
+        text = p + "/out";
+    }
+    m.push("ldm_unet/text_enc/final_ln", "LayerNorm", static_cast<size_t>(d_model) * 2);
+    if (auto* L = m.getLayerByName("ldm_unet/text_enc/final_ln")) {
+        L->inputs = {text}; L->output = "ldm_unet/text_ctx";
+        L->affine = true; L->use_bias = true; L->eps = 1e-5f; L->in_features = d_model;
+    }
+
+    // ── Time embedding MLP: Linear(1→d)→SiLU→Linear(d→4d)→GELU→Linear(4d→d)
+    const int t_wide = std::max(d_model, 4096);
+    m.push("ldm_unet/t_emb/fc1", "Linear",
+           static_cast<size_t>(d_model) + static_cast<size_t>(d_model));  // 1→d_model
+    if (auto* L = m.getLayerByName("ldm_unet/t_emb/fc1")) {
+        L->inputs = {"timestep"}; L->output = "ldm_unet/t_emb/h1";
+        L->seq_len = 1; L->in_features = 1; L->out_features = d_model; L->use_bias = true;
+    }
+    m.push("ldm_unet/t_emb/act1", "SiLU", 0);
+    if (auto* L = m.getLayerByName("ldm_unet/t_emb/act1")) {
+        L->inputs = {"ldm_unet/t_emb/h1"}; L->output = "ldm_unet/t_emb/h1a";
+    }
+    m.push("ldm_unet/t_emb/fc2", "Linear",
+           sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(t_wide)) + static_cast<size_t>(t_wide));
+    if (auto* L = m.getLayerByName("ldm_unet/t_emb/fc2")) {
+        L->inputs = {"ldm_unet/t_emb/h1a"}; L->output = "ldm_unet/t_emb/h2";
+        L->seq_len = 1; L->in_features = d_model; L->out_features = t_wide; L->use_bias = true;
+    }
+    m.push("ldm_unet/t_emb/act2", "GELU", 0);
+    if (auto* L = m.getLayerByName("ldm_unet/t_emb/act2")) {
+        L->inputs = {"ldm_unet/t_emb/h2"}; L->output = "ldm_unet/t_emb/h2a";
+    }
+    m.push("ldm_unet/t_emb/fc3", "Linear",
+           sat_mul(static_cast<size_t>(t_wide), static_cast<size_t>(d_model)) + static_cast<size_t>(d_model));
+    if (auto* L = m.getLayerByName("ldm_unet/t_emb/fc3")) {
+        L->inputs = {"ldm_unet/t_emb/h2a"}; L->output = "ldm_unet/t_emb";
+        L->seq_len = 1; L->in_features = t_wide; L->out_features = d_model; L->use_bias = true;
+    }
+    const std::string t_emb = "ldm_unet/t_emb";
+
+    // ── Latent input: flat → CHW ─────────────────────────────────────────────
+    m.push("ldm_unet/lat_id", "Identity", 0);
+    if (auto* L = m.getLayerByName("ldm_unet/lat_id")) {
+        L->inputs = {"latent"}; L->output = "ldm_unet/lat_raw";
+    }
+    m.push("ldm_unet/lat_reshape", "Reshape", 0);
+    if (auto* L = m.getLayerByName("ldm_unet/lat_reshape")) {
+        L->inputs = {"ldm_unet/lat_raw"}; L->output = "ldm_unet/lat_hwc";
+        L->target_shape = {lat_h, lat_w, latent_in_dim};
+    }
+    m.push("ldm_unet/lat_to_chw", "Permute", 0);
+    if (auto* L = m.getLayerByName("ldm_unet/lat_to_chw")) {
+        L->inputs = {"ldm_unet/lat_hwc"}; L->output = "ldm_unet/unet/x0";
+        L->shape = {lat_h, lat_w, latent_in_dim}; L->permute_dims = {2, 0, 1};
+    }
+
+    // ── U-Net ────────────────────────────────────────────────────────────────
+    // Stem: latent_in_dim → ch0
+    const int ch0 = level_ch(0);
+    std::string x = conv2d("ldm_unet/unet/stem", "ldm_unet/unet/x0", "ldm_unet/unet/stem_y",
+                           latent_in_dim, ch0, lat_h, lat_w, 3, 1, 1);
+    int cur_c = ch0, cur_h = lat_h, cur_w = lat_w;
+
+    // ConditioningEncoder
+    std::vector<std::string> skips;
+    std::vector<int> skip_c;
+    skips.reserve(static_cast<size_t>(depth));
+    skip_c.reserve(static_cast<size_t>(depth));
+
+    for (int d = 0; d < depth; ++d) {
+        const std::string p = "ldm_unet/unet/down" + std::to_string(d + 1);
+        for (int bi = 0; bi < blocks_per_level; ++bi) {
+            x = resblock(p + "/res" + std::to_string(bi + 1), x, t_emb, cur_c, cur_c, cur_h, cur_w);
+        }
+        x = cross_attn(p + "/xattn", x, cur_c, cur_h, cur_w);
+        skips.push_back(x);
+        skip_c.push_back(cur_c);
+        if (d + 1 < depth) {
+            const int nc = level_ch(d + 1);
+            x = conv2d(p + "/down", x, p + "/down_y", cur_c, nc, cur_h, cur_w, 3, 2, 1);
+            cur_h = conv_out_fn(cur_h, 3, 2, 1);
+            cur_w = conv_out_fn(cur_w, 3, 2, 1);
+            cur_c = nc;
+        }
+    }
+
+    // Bottleneck
+    {
+        const std::string p = "ldm_unet/unet/bn";
+        for (int bi = 0; bi < bottleneck_blocks; ++bi) {
+            x = resblock(p + "/res" + std::to_string(bi + 1), x, t_emb, cur_c, cur_c, cur_h, cur_w);
+        }
+        if (cur_h * cur_w <= 4096) {
+            x = self_attn(p + "/sattn", x, cur_c, cur_h, cur_w);
+        }
+        x = cross_attn(p + "/xattn", x, cur_c, cur_h, cur_w);
+        for (int bi = 0; bi < bottleneck_blocks; ++bi) {
+            x = resblock(p + "/res_up" + std::to_string(bi + 1), x, t_emb, cur_c, cur_c, cur_h, cur_w);
+        }
+    }
+
+    // Decoder
+    for (int d = depth - 2; d >= 0; --d) {
+        const std::string p = "ldm_unet/unet/up" + std::to_string(d + 1);
+        const int sc = skip_c[static_cast<size_t>(d)];
+        // Upsample: cur_c → sc via ConvTranspose2d
+        x = deconv2x(p + "/up", x, p + "/up_y", cur_c, sc, cur_h, cur_w);
+        cur_h *= 2; cur_w *= 2;
+        // Concat(up, skip)
+        m.push(p + "/concat", "Concat", 0);
+        if (auto* L = m.getLayerByName(p + "/concat")) {
+            L->inputs = {x, skips[static_cast<size_t>(d)]};
+            L->output = p + "/cat"; L->concat_axis = 0;
+        }
+        // Reduce: (sc + sc) → sc
+        x = conv2d(p + "/reduce", p + "/cat", p + "/reduce_y",
+                   sc + sc, sc, cur_h, cur_w, 3, 1, 1);
+        cur_c = sc;
+        for (int bi = 0; bi < blocks_per_level; ++bi) {
+            x = resblock(p + "/res" + std::to_string(bi + 1), x, t_emb, cur_c, cur_c, cur_h, cur_w);
+        }
+        x = cross_attn(p + "/xattn", x, cur_c, cur_h, cur_w);
+    }
+
+    // Output: Norm32 + SiLU + Conv(cur_c → latent_in_dim)
+    x = norm32("ldm_unet/unet/out_norm", x, cur_c, cur_h, cur_w);
+    m.push("ldm_unet/unet/out_act", "SiLU", 0);
+    if (auto* L = m.getLayerByName("ldm_unet/unet/out_act")) {
+        L->inputs = {x}; L->output = "ldm_unet/unet/out_act_y";
+    }
+    conv2d("ldm_unet/unet/out_conv", "ldm_unet/unet/out_act_y", "ldm_unet/unet/eps_chw",
+           cur_c, latent_in_dim, cur_h, cur_w, 3, 1, 1);
+    // CHW → HWC → flat "x"
+    m.push("ldm_unet/unet/eps_to_hwc", "Permute", 0);
+    if (auto* P = m.getLayerByName("ldm_unet/unet/eps_to_hwc")) {
+        P->inputs = {"ldm_unet/unet/eps_chw"}; P->output = "ldm_unet/unet/eps_hwc";
+        P->shape = {latent_in_dim, cur_h, cur_w}; P->permute_dims = {1, 2, 0};
+    }
+    m.push("ldm_unet/out", "Identity", 0);
+    if (auto* L = m.getLayerByName("ldm_unet/out")) {
+        L->inputs = {"ldm_unet/unet/eps_hwc"}; L->output = "x";
+    }
+
+    // Store metadata
+    m.modelConfig["d_model"] = d_model;
+    m.modelConfig["text_ctx_len"] = text_len;
+    m.modelConfig["latent_seq_len"] = latent_len;
+    m.modelConfig["latent_in_dim"] = latent_in_dim;
+    m.modelConfig["latent_h"] = lat_h;
+    m.modelConfig["latent_w"] = lat_w;
+    m.modelConfig["max_vocab"] = vocab;
+    m.modelConfig["num_heads"] = text_heads;
+    m.modelConfig["unet_depth"] = depth;
+    m.modelConfig["unet_blocks_per_level"] = blocks_per_level;
+    m.modelConfig["unet_bottleneck_blocks"] = bottleneck_blocks;
+    m.modelConfig["base_channels"] = base;
+    m.modelConfig["output_dim"] = latent_len * latent_in_dim;
+    m.modelConfig["recon_loss"] = cfg.recon_loss;
+    m.modelConfig["kl_beta"] = cfg.kl_beta;
+    m.modelConfig["kl_warmup_steps"] = cfg.kl_warmup_steps;
+    m.modelConfig["prompt_conditioning"] = "cross_attention";
 }
 
 std::vector<float> PonyXLDDPMModel::imageBytesToFloatRGB(const std::vector<uint8_t>& rgb, int w, int h) {

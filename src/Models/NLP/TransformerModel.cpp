@@ -45,7 +45,7 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["output_dim"] = out_dim;
     model.modelConfig["causal"] = cfg.causal;
 
-    // Encoder externe: utilisé pour fournir mag/mod (broadcast add).
+    // ConditioningEncoder externe: utilisé pour fournir mag/mod (broadcast add).
     // Il doit avoir exactement d_model dimensions.
     model.getMutableEncoder().ensureDim(d_model);
 
@@ -60,7 +60,7 @@ void TransformerModel::buildInto(Model& model, const Config& cfg) {
         L->padding_idx = cfg.padding_idx;
     }
 
-    // Injecter mag/mod (embeddings spéciaux Encoder) dans le flux token embeddings.
+    // Injecter mag/mod (embeddings spéciaux ConditioningEncoder) dans le flux token embeddings.
     // Add supporte le broadcast: (seq_len*d_model) + (d_model).
     model.push("transformer/mag_in", "Identity", 0);
     if (auto* L = model.getLayerByName("transformer/mag_in")) {

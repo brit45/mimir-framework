@@ -14,12 +14,10 @@ Avant tout appel à `forward()` ou `train()`, le modèle doit passer par ces ét
 
 | Étape | Appel | Rôle |
 | ---: | --- | --- |
-| 1 | `Mimir.Model.create(type, cfg)` | Enregistre le type et fusionne la config avec les défauts |
-| 2 | `Mimir.Model.build()` | Instancie le graphe de layers |
-| 3 | `Mimir.Model.allocate_params()` | Alloue les blocs de poids en mémoire |
-| 4a | `Mimir.Model.init_weights(method, seed)` | Initialise les poids (nouveau modèle) |
-| 4b | `Mimir.Serialization.load(path)` | Charge les poids depuis un checkpoint |
-| 5 | `Mimir.Model.forward(input, training)` | Exécute le forward pass |
+| 1 | `Mimir.Model.create(type, cfg)` | Enregistre le type et fusionne la config ; **construit aussi le réseau automatiquement (v3.0+)** |
+| 2 | `Mimir.Model.allocate_params()` | Alloue les blocs de poids en mémoire |
+| 3 | `Mimir.Model.init_weights(method, seed)` OU `Mimir.Serialization.load(path)` | Initialise/charge les poids |
+| 4 | `Mimir.Model.forward(input, training)` | Exécute le forward pass |
 
 > **Avertissement :** appeler `forward()` avant `allocate_params()` produit un comportement indéfini. Les étapes 1 à 3 sont obligatoires.
 
@@ -61,22 +59,25 @@ assert(ok, err)
 
 ---
 
-### `Mimir.Model.build()`
+### `Mimir.Model.build()` (legacy — no-op en v3.0+)
 
 ```
 Mimir.Model.build() -> (true, nb_params: int) | (false, string)
 ```
 
-Instancie le graphe de layers à partir du type et de la config enregistrés par `create()`. Cette étape détermine la topologie du modèle (quelles couches, dans quel ordre, avec quels paramètres de forme).
+**Depuis v3.0:** cette fonction est un **no-op** — le modèle est déjà construit lors de `create()`. Cette fonction existe uniquement pour compatibilité avec les scripts legacy.
 
-**Retour :** `(true, nombre_total_de_paramètres)` ou `(false, message_erreur)`.
+Historiquement, elle instanciait le graphe de layers à partir du type et de la config enregistrés par `create()`. Maintenant, cette construction se fait **automatiquement dans `create()`**.
 
-> **Note :** `build()` ne fait **pas** `allocate_params()`. Le modèle est construit mais les poids ne sont pas encore alloués ni initialisés.
+**Retour :** `(true, nombre_total_de_paramètres)` ou `(false, message_erreur)` (invariant; nombre toujours disponible après `create()`).
 
 ```lua
+-- Mode ancien (ne pas utiliser pour nouveaux scripts)
 local ok, nb = Mimir.Model.build()
 assert(ok, nb)
-print(string.format("Modèle construit : %d paramètres", nb))
+
+-- Mode moderne (recommandé)
+-- Le réseau est déjà prêt après create() ci-dessus
 ```
 
 ---

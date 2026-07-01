@@ -722,7 +722,7 @@ bool Visualizer::initialize() {
             }
         }
 
-        std::cout << "✓ Fenêtre de visualisation SFML initialisée (" 
+        std::cerr << "✓ Fenêtre de visualisation SFML initialisée (" 
                   << window_width << "x" << window_height << ")" << std::endl;
 
         // Initialiser et tenter de restaurer le dernier layout sauvegardé.
@@ -772,7 +772,7 @@ bool Visualizer::initialize() {
 
                     const bool ok = applyUILayout(*chosen);
                     if (ok && chosen_name) {
-                        std::cout << "✓ Layout appliqué par défaut (" << chosen_name << ")" << std::endl;
+                        std::cerr << "✓ Layout appliqué par défaut (" << chosen_name << ")" << std::endl;
                     }
                 }
             }
@@ -898,7 +898,7 @@ void Visualizer::saveUILayoutToLast() {
     settings["version"] = 1;
     settings["last"] = serializeUILayout();
     saveUISettings(settings);
-    std::cout << "✓ Layout sauvegardé (last) -> " << kVizUISettingsFile << std::endl;
+    std::cerr << "✓ Layout sauvegardé (last) -> " << kVizUISettingsFile << std::endl;
 }
 
 void Visualizer::saveUILayoutToSlot(int slot) {
@@ -912,24 +912,24 @@ void Visualizer::saveUILayoutToSlot(int slot) {
     }
     settings["slots"][std::to_string(slot)] = serializeUILayout();
     saveUISettings(settings);
-    std::cout << "✓ Layout sauvegardé (slot " << slot << ") -> " << kVizUISettingsFile << std::endl;
+    std::cerr << "✓ Layout sauvegardé (slot " << slot << ") -> " << kVizUISettingsFile << std::endl;
 }
 
 void Visualizer::loadUILayoutFromSlot(int slot) {
     slot = std::clamp(slot, 0, 9);
     json settings;
     if (!loadUISettings(settings)) {
-        std::cout << "⚠️  Aucun settings UI trouvé: " << kVizUISettingsFile << std::endl;
+        std::cerr << "⚠️  Aucun settings UI trouvé: " << kVizUISettingsFile << std::endl;
         return;
     }
     try {
         if (!settings.contains("slots") || !settings["slots"].is_object()) {
-            std::cout << "⚠️  Aucun slot dans settings UI" << std::endl;
+            std::cerr << "⚠️  Aucun slot dans settings UI" << std::endl;
             return;
         }
         const std::string key = std::to_string(slot);
         if (!settings["slots"].contains(key)) {
-            std::cout << "⚠️  Slot UI inexistant: " << slot << std::endl;
+            std::cerr << "⚠️  Slot UI inexistant: " << slot << std::endl;
             return;
         }
 
@@ -962,12 +962,12 @@ void Visualizer::loadUILayoutFromSlot(int slot) {
 
         const bool ok = applyUILayout(layout);
         if (ok) {
-            std::cout << "✓ Layout chargé (slot " << slot << ")" << std::endl;
+            std::cerr << "✓ Layout chargé (slot " << slot << ")" << std::endl;
         } else {
-            std::cout << "⚠️  Échec application layout (slot " << slot << ")" << std::endl;
+            std::cerr << "⚠️  Échec application layout (slot " << slot << ")" << std::endl;
         }
     } catch (...) {
-        std::cout << "⚠️  Settings UI invalides" << std::endl;
+        std::cerr << "⚠️  Settings UI invalides" << std::endl;
     }
 }
 
@@ -1618,6 +1618,19 @@ void Visualizer::processEvents() {
                 rebuildAllTextures();
             }
 
+            // Toggle heatmap / couleurs naturelles pour Blocks/Layers
+            if (event.key.code == sf::Keyboard::M) {
+                heatmap_mode_ = !heatmap_mode_;
+                // Swap pixels actifs / alternatifs pour chaque block
+                for (auto& img : layer_block_images) {
+                    if (!img.pixels_alt.empty()) {
+                        std::swap(img.pixels, img.pixels_alt);
+                        std::swap(img.channels, img.channels_alt);
+                    }
+                }
+                rebuildLayerBlockTextures();
+            }
+
             // Zoom overlay
             if (event.key.code == sf::Keyboard::Z || event.key.code == sf::Keyboard::Enter) {
                 zoom_active_ = !zoom_active_;
@@ -1960,6 +1973,7 @@ void Visualizer::renderHelpOverlay() {
     line("←/→ : naviguer dans les blocks (si focus=blocks)");
     line("G : afficher/masquer le graph");
     line("A : activer/masquer le lissage des previews de blocks");
+    line("M : basculer heatmap color\u00e9e / niveaux de gris naturels (Blocks/Layers)");
     line("P : afficher/masquer le texte du prompt");
     line("R : actualiser (rebuild textures + reload architecture)");
     line("S : sauvegarder la structure UI (layout last)");
@@ -2100,7 +2114,7 @@ void Visualizer::maybeLoadArchitecture() {
 
         architecture_loaded = !arch_layer_names.empty();
         if (architecture_loaded) {
-            std::cout << "✓ Visualizer: architecture chargée: " << arch_layer_names.size()
+            std::cerr << "✓ Visualizer: architecture chargée: " << arch_layer_names.size()
                       << " layers (" << arch_tensor_sinks.size() << " sinks)" << std::endl;
         }
     } catch (...) {
@@ -2279,18 +2293,38 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
         }
 
         ImageData img;
-        img.pixels = f.pixels;
         img.prompt = f.label;
         img.w = f.w;
         img.h = f.h;
-        img.channels = f.channels;
         img.display_size = 120;
+
+        if (!heatmap_mode_ && !f.pixels_real.empty()) {
+            // Mode naturel actif : pixels actifs = niveaux de gris, heatmap en alt
+            img.pixels      = f.pixels_real;
+            img.channels    = 1;
+            img.pixels_alt  = f.pixels;
+            img.channels_alt = f.channels;
+        } else {
+            // Mode heatmap (par défaut) ou pas de version naturelle
+            img.pixels      = f.pixels;
+            img.channels    = f.channels;
+            img.pixels_alt  = f.pixels_real;
+            img.channels_alt = 1;
+        }
+
         createLayerBlockTexture(img, f.label);
         layer_block_images.push_back(std::move(img));
         layer_block_labels.push_back(f.label);
     }
 
     has_layer_blocks = !layer_block_images.empty();
+}
+
+void Visualizer::rebuildLayerBlockTextures() {
+    for (size_t i = 0; i < layer_block_images.size(); ++i) {
+        const std::string label = (i < layer_block_labels.size()) ? layer_block_labels[i] : std::string();
+        createLayerBlockTexture(layer_block_images[i], label);
+    }
 }
 
 void Visualizer::createLayerBlockTexture(ImageData& img, const std::string& label) {
@@ -2412,6 +2446,13 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     record.opt_beta2 = opt_beta2;
     record.opt_eps = opt_eps;
     record.opt_weight_decay = opt_weight_decay;
+    // Métriques de validation : renseignées uniquement quand val_ok=true.
+    // val_recon = loss primaire (img-space MSE pour DDPM, recon loss pour VAE).
+    // val_kl    = second indicateur (eps-space MSE pour DDPM, KL pour VAE).
+    record.is_val      = val_ok;
+    record.val_loss    = val_ok ? val_recon : 0.f;
+    record.val_mse     = val_ok ? val_kl    : 0.f;
+    record.val_step_id = val_ok ? val_step  : -1;
     full_loss_history.push_back(record);
     
     // Sauvegarder automatiquement l'historique après chaque ajout
@@ -2717,7 +2758,7 @@ void Visualizer::renderLayerBlocks() {
     auto section_color = [&](const std::string& section) -> sf::Color {
         if (section == "Inputs") return sf::Color(110, 145, 205, 210);
         if (section == "Text / Cond") return sf::Color(122, 188, 142, 210);
-        if (section == "Encoder") return sf::Color(96, 168, 214, 210);
+        if (section == "ConditioningEncoder") return sf::Color(96, 168, 214, 210);
         if (section == "Down Blocks") return sf::Color(88, 176, 198, 210);
         if (section == "Bottleneck") return sf::Color(160, 118, 220, 210);
         if (section == "Backbone") return sf::Color(132, 132, 218, 210);
@@ -2808,7 +2849,7 @@ void Visualizer::renderLayerBlocks() {
             return "Bottleneck";
         }
         if (is_output) return "Outputs";
-        if (is_encoder) return is_down ? "Down Blocks" : "Encoder";
+        if (is_encoder) return is_down ? "Down Blocks" : "ConditioningEncoder";
         if (is_down) return "Down Blocks";
         if (is_backbone && !is_up) return "Backbone";
         if (is_up) return "Up Blocks";
@@ -3752,7 +3793,7 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
     }
     
     // En-tête CSV (métriques complètes)
-    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay" << std::endl;
+    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step" << std::endl;
     
     // Écrire tout l'historique complet (toutes les epochs et tous les steps)
     for (const auto& record : full_loss_history) {
@@ -3785,8 +3826,17 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
              // opt_eps est souvent ~1e-8 : en fixed(6) ça apparaît comme 0.000000.
              // On l'encode en scientifique pour préserver l'information.
              << std::scientific << std::setprecision(8) << record.opt_eps << ","
-             << std::fixed << std::setprecision(6) << record.opt_weight_decay << std::endl;
+             << std::fixed << std::setprecision(6) << record.opt_weight_decay;
+        // Colonnes de validation : vides si ce step n'est pas un step de validation.
+        if (record.is_val) {
+            file << "," << record.val_loss
+                 << "," << record.val_mse
+                 << "," << record.val_step_id;
+        } else {
+            file << ",,,";
+        }
+        file << std::endl;
     }
-    
+
     file.close();
 }

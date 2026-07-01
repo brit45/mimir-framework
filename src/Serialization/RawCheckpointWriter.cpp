@@ -465,7 +465,7 @@ bool RawCheckpointWriter::save_encoder(
         
     } catch (const std::exception& e) {
         if (error) {
-            *error = std::string("Encoder save error: ") + e.what();
+            *error = std::string("ConditioningEncoder save error: ") + e.what();
         }
         return false;
     }
