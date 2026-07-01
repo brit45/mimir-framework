@@ -1,6 +1,6 @@
 #include "Model.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
-#include "LuaScripting.hpp"
+#include "scriptings/Lua/luaScripting/LuaScripting.hpp"
 #include "AsyncMonitor.hpp"
 #include "Helpers.hpp"
 #include "HtopDisplay.hpp"

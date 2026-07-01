@@ -1,6 +1,6 @@
 #include "test_utils.hpp"
 
-#include "LuaScripting.hpp"
+#include "scriptings/Lua/luaScripting/LuaScripting.hpp"
 
 int main() {
     LuaScripting lua;

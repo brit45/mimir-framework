@@ -336,7 +336,6 @@ set(MIMIR_HEADERS
     src/Visualizer.hpp
     src/tensors.hpp
     src/Sha256.hpp
-    src/LuaScripting.hpp
     src/scriptings/ScriptingRuntime.hpp
     src/scriptings/ScriptingContext.hpp
     src/scriptings/Lua/luaScripting/LuaScripting.hpp
