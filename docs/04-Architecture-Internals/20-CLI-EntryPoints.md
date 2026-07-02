@@ -1,5 +1,3 @@
-```markdown
-
 ## Pour qui
 
 Développeur avancé qui modifie le moteur C/C++.
@@ -33,7 +31,8 @@ Source de vérité :
 Dans `src/main.cpp`, la CLI expose :
 
 - `--lua <script.lua>` : exécute un script Lua.
-- `--config <config.json>` : crée un modèle depuis un JSON (via le registre) puis init (training “à implémenter”).
+- `--config <config.json>` : crée un modèle depuis un JSON (via le registre) puis init (chemin starter/legacy).
+- `--conf <config.json>` : charge la config et exécute les scripts `lua.scripts` (chemin recommandé pour workflows).
 - `--help` : usage.
 
 Les arguments après `--lua script.lua` sont passés au script (injectés comme `arg`).
@@ -61,4 +60,9 @@ Au démarrage :
   - section `config[arch_type]` si présente,
 - `ModelArchitectures::create`, puis `allocateParams` + `initializeWeights("he")`.
 
-```
+## 5) Path `--conf`
+
+- lit JSON,
+- résout `lua.scripts` (ou `run.lua.scripts`),
+- injecte `CONF`, `CONF_PATH`, `CONF_DIR`,
+- exécute chaque script Lua dans l'ordre, avec ses `args` éventuels.

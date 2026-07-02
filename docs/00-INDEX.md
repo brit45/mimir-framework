@@ -16,6 +16,7 @@ Philosophie du projet : [docs/00-Framework-Philosophy.md](00-Framework-Philosoph
 **👉 Si tu débutes, commence ICI :**
 
 → **[🚀 GET STARTED](01-Getting-Started/00-GET-STARTED.md)** — Démarrage rapide en 5 étapes
+
 - Vérifier les prérequis
 - Compiler le framework
 - Exécuter un test rapide
@@ -23,6 +24,7 @@ Philosophie du projet : [docs/00-Framework-Philosophy.md](00-Framework-Philosoph
 - Sauvegarder un checkpoint
 
 Puis lis dans cet ordre :
+
 1. [Compilation & dépendances détaillées](01-Getting-Started/02-Installation.md) (si problèmes de build)
 2. [Cycle de vie d'un modèle](02-User-Guide/02-Model-Lifecycle.md) (comprendre create/allocate/init/forward)
 3. [API Lua de base](03-API-Reference/19-Globals.md) (ce que le runtime injecte)
@@ -160,6 +162,7 @@ Parcours conseillé si tu reviens sur le projet après plusieurs semaines :
 - `Mimir.NeuroPulse` : [docs/03-API-Reference/17-NeuroPulse.md](03-API-Reference/17-NeuroPulse.md)
 - `Mimir.Layers` (ops) : [docs/03-API-Reference/18-Layers-Module.md](03-API-Reference/18-Layers-Module.md)
 - `Mimir.IO` (I/O images) : [docs/03-API-Reference/21-IO.md](03-API-Reference/21-IO.md)
+- Variables d'environnement (`MIMIR_*`) : [docs/03-API-Reference/22-Environment-Variables.md](03-API-Reference/22-Environment-Variables.md)
 - Globals & aliases : [docs/03-API-Reference/19-Globals.md](03-API-Reference/19-Globals.md)
 - Mapping Lua ↔ C++ (sommaire) : [docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md](03-API-Reference/20-Lua-API-Cpp-Mapping.md)
 
@@ -176,7 +179,7 @@ Parcours conseillé si tu reviens sur le projet après plusieurs semaines :
 | pipeline_api.lua : dtype robuste (Mimir.model / Mimir.Model) | [scripts/README.md](../scripts/README.md) |
 | Détection hardware au démarrage (AVX2/FMA/F16C/BMI2 + CUDA/ROCm) | `bin/mimir --help` |
 
-Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent encore de fonctionnalités “nouvelles en v3.0”. Lis cela comme “introduit dans la branche 3.0, toujours valable en 3.0.1”, et non comme une indication que la version courante serait restée sur la première release de cette branche.
+Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent encore de fonctionnalités “nouvelles en v3.0”. Lis cela comme “introduit dans la branche 3.x, toujours valable sur la version courante”, et non comme une indication que la version courante serait restée sur la première release de cette branche.
 
 ## 4) Internals (comment ça marche)
 
@@ -221,6 +224,11 @@ Pour éviter les confusions avec l’ancienne doc : certains paragraphes parlent
 - Config + registre d'architectures : [docs/07-Devs/03-Config-And-Registry.md](07-Devs/03-Config-And-Registry.md)
 - Modifier / ajouter un runtime : [docs/07-Devs/04-Runtime-Development.md](07-Devs/04-Runtime-Development.md)
 - Contrat API scripting inter-langages : [docs/07-Devs/05-Scripting-System-Contract.md](07-Devs/05-Scripting-System-Contract.md)
+
+## 8) Tuto
+
+- Index tuto : [docs/08-Tuto/00-INDEX.md](08-Tuto/00-INDEX.md)
+- Cours framework en 3 etapes (debutant -> etudiant -> avance) : [docs/08-Tuto/01-Cours-Framework-3-Etapes.md](08-Tuto/01-Cours-Framework-3-Etapes.md)
 
 ## Convention de noms
 

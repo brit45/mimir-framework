@@ -1,5 +1,3 @@
-```markdown
-
 ## Pour qui
 
 Développeur avancé qui modifie le moteur C/C++.
@@ -55,7 +53,5 @@ Sous le capot :
 
 ## 4) Où le registre est utilisé
 
-- CLI : `src/main.cpp` (`--config`)
+- CLI : `src/main.cpp` (`--config` et `--conf`)
 - Lua : `LuaScripting` (`Mimir.Architectures.*` et `Mimir.Model.create`)
-
-```

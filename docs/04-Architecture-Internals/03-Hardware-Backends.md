@@ -57,21 +57,27 @@ public:
 };
 ```
 
-`forwardLayer()` retourne `false` pour signaler "je ne peux pas gérer ce layer" — ce n'est pas une erreur, c'est le mécanisme de fallback. Le runtime suivant dans la pile sera alors consulté.
+`forwardLayer()` retourne `false` pour signaler "je ne peux pas gérer ce layer" — ce n'est pas une erreur, c'est le mécanisme de fallback.
 
-### Ordre de dispatch
+> **Statut actuel (important) :** dans le chemin de forward réellement exécuté (`Model.cpp`), ce dispatch générique via `forwardLayer()` n'est **pas branché** pour CUDA/ROCm. Le forward actif utilise un dispatch inline dédié à `LayerType::Linear`.
 
-`Model.cpp` interroge les runtimes dans cet ordre de priorité :
+### Ordre de dispatch réellement exécuté
+
+Dans `Model.cpp`, le dispatch GPU actif est implémenté **dans le `case LayerType::Linear`** avec des appels directs `linearForward(...)` :
 
 ```
-1. CUDA Runtime   — si compilé (ENABLE_CUDA) et MIMIR_CUDA ≠ 0
-2. ROCm  Runtime  — si compilé (ENABLE_ROCM) et MIMIR_ROCM ≠ 0
-3. CPU   Runtime  — toujours disponible, jamais désactivable
+1. CUDA `linearForward` — si compilé/initialisé et `!training`
+2. ROCm `linearForward` — si compilé/initialisé et `!training`
+3. Vulkan `linearForward` (legacy)
+4. OpenCL `linearForward` (legacy)
+5. CPU runtime `linearForward`, puis fallback `LayerOps::linear_forward`
+
+Pour les autres types de layers (`Conv2d`, norms, attention, etc.), le chemin actif reste CPU dans le switch de `Model.cpp`.
 ```
 
-### Le pattern "do-while-false" pour les fast-paths
+### Le pattern "do-while-false" dans les runtimes GPU
 
-Chaque fast-path GPU est encapsulé dans un bloc `do { ... } while(false)`. En cas d'échec (buffer device insuffisant, opération non supportée, etc.), le code fait `break` pour sortir proprement du bloc, puis retourne `false` pour déclencher le fallback CPU :
+Chaque fast-path GPU dans `CudaRuntime::forwardLayer` / `RocmRuntime::forwardLayer` est encapsulé dans un bloc `do { ... } while(false)`. En cas d'échec (buffer device insuffisant, opération non supportée, etc.), le code fait `break` pour sortir proprement du bloc, puis retourne `false` :
 
 ```cpp
 // Exemple simplifié du fast-path Linear
@@ -94,7 +100,7 @@ bool CudaRuntime::forwardLayer(...) {
 }
 ```
 
-> **Note :** ce pattern garantit qu'un échec partiel (ex: allocation device échouée) ne laisse jamais le modèle dans un état incohérent. Si le GPU n'a plus de VRAM, le layer est silencieusement traité par le CPU.
+> **Note :** ce pattern est correct côté implémentation runtime, mais ces chemins ne sont pas actuellement appelés par le dispatch principal de `Model.cpp` (sauf `linearForward` direct pour `Linear`).
 
 ---
 
@@ -141,6 +147,8 @@ struct RuntimeConfig {
 | `MIMIR_CUDA_ATTENTION` | `1` | Active le fast-path `Attention` |
 | `MIMIR_CUDA_ATTENTION_MIN_OPS` | entier | Seuil MACs pour Attention (défaut : `262144`) |
 
+> **Portée effective aujourd'hui :** dans le forward actif, seuls `MIMIR_*_LINEAR` et `MIMIR_*_LINEAR_MIN_OPS` ont un impact direct sur l'accélération GPU/ROCm. Les flags `CONV`/`NORM`/`ATTENTION` correspondent à des chemins implémentés dans `forwardLayer()` mais non branchés dans le dispatch principal.
+
 ---
 
 ## Backend CUDA (cuBLAS)
@@ -155,7 +163,9 @@ Calcule `output[M,N] = input[M,K] × W[K,N]` via `cublasSgemm`, puis ajoute le b
 
 ### Fast-path Conv2d (im2col + SGEMM)
 
-Les convolutions ne sont pas directement supportées par cuBLAS, mais peuvent être réduites à une multiplication matricielle via la transformation **im2col** :
+Les convolutions ne sont pas directement supportées par cuBLAS, mais peuvent être réduites à une multiplication matricielle via la transformation **im2col**.
+
+**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer`, mais non appelé dans le forward principal actuel.
 
 1. **im2col sur CPU** — le tenseur d'entrée `[C, H, W]` est réorganisé en matrice `col[C·kH·kW, H_out·W_out]` qui "aplatit" chaque fenêtre de convolution en une colonne.
 2. **Transfert vers GPU** — `col` et les filtres `W` sont copiés en VRAM.
@@ -174,6 +184,8 @@ La normalisation elle-même est conservée sur CPU (calcul de la moyenne et vari
 
 Ce découpage hybride donne un bon rapport perf/complexité sans avoir à porter le calcul de variance sur CUDA.
 
+**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer`, mais non appelé dans le forward principal actuel.
+
 `GroupNorm` et `BatchNorm2d` restent entièrement sur CPU (layout de mémoire incompatible avec cette stratégie).
 
 ### Fast-path Attention (multi-SGEMM)
@@ -190,6 +202,8 @@ Pour `SelfAttention`, `MultiHeadAttention` et `CrossAttention` :
 4. **Projection de sortie sur GPU** — SGEMM final.
 
 Pour `CrossAttention`, `Q` et `KV` proviennent de deux sources différentes (`qlen ≠ kvlen` est supporté).
+
+**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer`, mais non appelé dans le forward principal actuel.
 
 ### `DeviceBuf` — helper de buffer device
 
@@ -229,6 +243,8 @@ L'implémentation est **fonctionnellement identique** au backend CUDA. Les corre
 
 Le code est conditionnel via `#ifdef ENABLE_ROCM` / `#endif`. Les variables d'environnement utilisent le préfixe `MIMIR_ROCM_*`.
 
+**Statut de dispatch :** même situation que CUDA (`forwardLayer()` implémenté mais non branché dans le dispatch principal actuel).
+
 ---
 
 ## Backend CPU
@@ -265,16 +281,18 @@ Ces backends précèdent l'architecture à base de runtimes et ne supportent que
 
 | Layer | CPU | CUDA | ROCm | Vulkan |
 |---|---|---|---|---|
-| `Linear` | ✓ ref | ✓ cuBLAS | ✓ rocBLAS | ✓ shader |
-| `Conv2d` | ✓ ref | ✓ im2col+SGEMM (inférence) | ✓ im2col+SGEMM (inférence) | ✗ |
-| `LayerNorm` | ✓ ref | ✓ hybride | ✓ hybride | ✗ |
-| `RMSNorm` | ✓ ref | ✓ hybride | ✓ hybride | ✗ |
+| `Linear` | ✓ ref | ✓ actif (inférence, dispatch inline `Model.cpp`) | ✓ actif (inférence, dispatch inline `Model.cpp`) | ✓ actif (legacy) |
+| `Conv2d` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
+| `LayerNorm` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
+| `RMSNorm` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
 | `GroupNorm` | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
 | `BatchNorm2d` | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
-| `SelfAttention` | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
-| `MultiHeadAttention` | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
-| `CrossAttention` | ✓ ref | ✓ multi-SGEMM | ✓ multi-SGEMM | ✗ |
+| `SelfAttention` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
+| `MultiHeadAttention` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
+| `CrossAttention` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
 | Tous les autres | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
+
+> **Note explicite :** `CudaRuntime::forwardLayer()` et `RocmRuntime::forwardLayer()` existent et contiennent les chemins Conv/Norm/Attention, mais ne sont actuellement pas invoqués depuis le `switch` de forward dans `Model.cpp`.
 
 ---
 

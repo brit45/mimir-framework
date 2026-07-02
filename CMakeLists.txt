@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
-project(Mimir VERSION 3.0.1 LANGUAGES CXX)
+
+# Source de verite: fichier VERSION a la racine du repo.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" MIMIR_VERSION_RAW)
+string(STRIP "${MIMIR_VERSION_RAW}" MIMIR_VERSION)
+project(Mimir VERSION ${MIMIR_VERSION} LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet
@@ -435,6 +439,8 @@ target_include_directories(mimir_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/include
 )
 
+target_compile_definitions(mimir_core PUBLIC MIMIR_PROJECT_VERSION="${PROJECT_VERSION}")
+
 # 🛡️ Appliquer la macro MIMIR_ENABLE_LEGACY_PARAMS si activée
 if(MIMIR_ENABLE_LEGACY_PARAMS)
     target_compile_definitions(mimir_core PRIVATE MIMIR_ENABLE_LEGACY_PARAMS)
@@ -551,6 +557,8 @@ if(BUILD_MIMIR_STATIC)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/runtimes/cpu
         ${CMAKE_CURRENT_SOURCE_DIR}/src/include
     )
+
+    target_compile_definitions(mimir_core_static PUBLIC MIMIR_PROJECT_VERSION="${PROJECT_VERSION}")
 
     if(MIMIR_ENABLE_LEGACY_PARAMS)
         target_compile_definitions(mimir_core_static PRIVATE MIMIR_ENABLE_LEGACY_PARAMS)

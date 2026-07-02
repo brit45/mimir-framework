@@ -16,7 +16,6 @@ Avoir déjà exécuté au moins un pipeline complet.
 
 Tu peux investiguer les problèmes de perf et de stabilité.
 
-
 Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles — PonyXL, VAEConv 512 px, Transformers profonds — le CPU devient rapidement le goulot d'étranglement.
 
 Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécution spécialisés qui délèguent les opérations lourdes (multiplications matricielles, convolutions, attention) à cuBLAS (NVIDIA) ou rocBLAS (AMD). Le reste des layers continue de s'exécuter sur CPU, sans aucun changement dans vos scripts Lua.
@@ -29,9 +28,9 @@ Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécut
 
 Mímir maintient une **pile de runtimes** ordonnée par priorité :
 
-```
-1. CUDA Runtime   (si ENABLE_CUDA compilé et MIMIR_CUDA=1)
-2. ROCm  Runtime  (si ENABLE_ROCM compilé et MIMIR_ROCM=1)
+```text
+1. CUDA Runtime   (si ENABLE_CUDA compilé et fast-paths `MIMIR_CUDA_*` activés)
+2. ROCm  Runtime  (si ENABLE_ROCM compilé et fast-paths `MIMIR_ROCM_*` activés)
 3. CPU   Runtime  (toujours actif, fallback universel)
 ```
 
@@ -44,7 +43,7 @@ Si l'une des deux conditions échoue, le runtime passe la main au suivant. Ce **
 
 **Exemple :**
 
-```
+```text
 [Layer Linear 4096×4096] → CUDA actif ? Seuil atteint ? → oui → cuBLAS SGEMM ✓
 [Layer GroupNorm]         → CUDA actif ? Fast-path dispo ? → non → CPU       ✓
 [Layer Linear 16×16]      → CUDA actif ? Seuil atteint ?  → non → CPU        ✓
@@ -87,7 +86,7 @@ cmake --build . -j$(nproc)
 
 ### Pour Vulkan (legacy)
 
-Vulkan est un backend **hérité** qui ne supporte que les layers `Linear` en inférence. À moins d'avoir une raison spécifique, préférez CUDA ou ROCm.
+Vulkan est un backend **hérité** orienté `Linear`. À moins d'avoir une raison spécifique, préférez CUDA ou ROCm.
 
 - Vulkan SDK installé, `glslangValidator` disponible
 - Compilé avec `-DENABLE_VULKAN=ON`
@@ -101,7 +100,6 @@ Tous les fast-paths sont **désactivés par défaut**, même si le build les inc
 ### Activer tous les fast-paths sur CUDA
 
 ```bash
-export MIMIR_CUDA=1            # Activer le runtime CUDA
 export MIMIR_CUDA_LINEAR=1     # Linear → cuBLAS SGEMM
 export MIMIR_CUDA_CONV=1       # Conv2d → im2col + SGEMM
 export MIMIR_CUDA_NORM=1       # LayerNorm/RMSNorm → hybride GPU
@@ -113,7 +111,6 @@ export MIMIR_CUDA_ATTENTION=1  # Attention → multi-SGEMM
 ### Activer tous les fast-paths sur ROCm
 
 ```bash
-export MIMIR_ROCM=1
 export MIMIR_ROCM_LINEAR=1
 export MIMIR_ROCM_CONV=1
 export MIMIR_ROCM_NORM=1
@@ -131,7 +128,7 @@ export MIMIR_ROCM_ATTENTION=1
 Chaque fast-path possède un **seuil minimal de MACs** (Multiply-Accumulate operations). En dessous de ce seuil, Mímir préfère le CPU, car transférer de petits tenseurs entre la RAM et la VRAM prendrait plus de temps que le calcul lui-même.
 
 | Fast-path | Variable de seuil | Valeur par défaut |
-|---|---|---|
+| --- | --- | --- |
 | `Linear` | `MIMIR_CUDA_LINEAR_MIN_OPS` | `1 048 576` (~1 M MACs) |
 | `Conv2d` | `MIMIR_CUDA_CONV_MIN_OPS` | `262 144` (~256 K MACs) |
 | `LayerNorm` / `RMSNorm` | `MIMIR_CUDA_NORM_MIN_ELEMS` | `4 096` (éléments) |
@@ -155,9 +152,9 @@ export MIMIR_CUDA_CONV_MIN_OPS=16384     # 16 K au lieu de 256 K
 Ce tableau récapitule ce qui est délégué au GPU et ce qui reste toujours sur CPU.
 
 | Type de layer | CUDA / ROCm | Remarques |
-|---|---|---|
+| --- | --- | --- |
 | `Linear` | ✓ SGEMM | Disponible en training et en inférence |
-| `Conv2d` | ✓ im2col + SGEMM | **Inférence uniquement** (`training=false`) |
+| `Conv2d` | ✓ im2col + SGEMM | Disponible en training et en inférence |
 | `LayerNorm` | ✓ Hybride | Normalisation sur CPU, affine (gamma/beta) sur GPU |
 | `RMSNorm` | ✓ Hybride | Même stratégie que LayerNorm |
 | `GroupNorm` | ✗ CPU | Layout de mémoire incompatible avec cuBLAS |
@@ -166,9 +163,6 @@ Ce tableau récapitule ce qui est délégué au GPU et ce qui reste toujours sur
 | `MultiHeadAttention` | ✓ Multi-SGEMM | Exécuté tête par tête en boucle sur GPU |
 | `CrossAttention` | ✓ Multi-SGEMM | Supporte `qlen ≠ kvlen` |
 | Tous les autres | ✗ CPU | Fallback silencieux automatique |
-
-> **Pourquoi Conv2d est-il désactivé en training ?**
-> Le fast-path Conv2d actuel implémente uniquement le forward pass via im2col+SGEMM. La passe backward (calcul des gradients des filtres et de l'entrée) n'est pas encore implémentée en GPU. En mode training, Mímir retombe donc sur l'implémentation CPU qui, elle, supporte le backward.
 
 ---
 
@@ -179,30 +173,27 @@ Ce tableau récapitule ce qui est délégué au GPU et ce qui reste toujours sur
 PonyXL est le modèle qui bénéficie le plus de l'accélération GPU : il contient de nombreux blocs `SelfAttention`, `CrossAttention` et des couches `Linear` larges dans les blocs UNet.
 
 ```bash
-export MIMIR_CUDA=1
 export MIMIR_CUDA_LINEAR=1
 export MIMIR_CUDA_ATTENTION=1
 export MIMIR_CUDA_NORM=1
-# Conv2d non activé car le DDPM entraîne en mode training=true
+export MIMIR_CUDA_CONV=1
 ```
 
 ### VAEConv (encodeur/décodeur convolutionnel)
 
-VAEConv est dominé par des blocs Conv2d. Le fast-path Conv2d est utile **lors de la génération d'images** (`training=false`), pas pendant l'entraînement.
+VAEConv est dominé par des blocs Conv2d. Le fast-path Conv2d est utile en entraînement comme en génération.
 
 ```bash
-export MIMIR_CUDA=1
-export MIMIR_CUDA_CONV=1       # Utile pour la validation/génération
+export MIMIR_CUDA_CONV=1
 export MIMIR_CUDA_NORM=1
 export MIMIR_CUDA_LINEAR=1
 ```
 
 ### VGG16 / Classification par tags
 
-Ce modèle mélange Conv2d (feature extraction) et Linear (classifier). Même restriction sur Conv2d en training.
+Ce modèle mélange Conv2d (feature extraction) et Linear (classifier).
 
 ```bash
-export MIMIR_CUDA=1
 export MIMIR_CUDA_CONV=1
 export MIMIR_CUDA_LINEAR=1
 ```
@@ -227,14 +218,14 @@ export MIMIR_ROCM_DEVICE=0   # Utiliser le 1er GPU AMD
 Activez le mode verbeux pour savoir exactement ce qui passe par GPU :
 
 ```bash
-export MIMIR_CUDA_VERBOSE=1
+export MIMIR_ACCEL_VERBOSE=1
 ```
 
 Exemple de sortie :
 
-```
+```text
 [CUDA] Linear 4096x4096: SGEMM (ops=16777216 >= 1048576) ✓
-[CUDA] Conv2d 64x3x3: training=true → fallback CPU
+[CUDA] Conv2d 64x3x3: SGEMM fast-path ✓
 [CUDA] LayerNorm 512: hybride (512 >= 4096 ? non) → fallback CPU
 ```
 
@@ -244,19 +235,23 @@ Chaque ligne indique le type de layer, sa taille, la décision prise et la raiso
 
 ## Problèmes courants
 
-**"Mon fast-path Conv2d n'est jamais utilisé pendant l'entraînement"**
+### "Mon fast-path Conv2d n'est jamais utilisé pendant l'entraînement"
 
-C'est normal. Le fast-path Conv2d est uniquement disponible en inférence (`training=false`). Pendant la passe forward en training, Mímir utilise l'implémentation CPU qui supporte le backward. Voir le tableau [ci-dessus](#fast-paths-disponibles-par-type-de-layer).
+Ce n'est plus le comportement attendu. Vérifiez:
 
-**"Les performances sont pires qu'en CPU-only"**
+1. `MIMIR_CUDA_CONV=1` (ou `MIMIR_ROCM_CONV=1`).
+2. Le seuil (`MIMIR_CUDA_CONV_MIN_OPS` / `MIMIR_ROCM_CONV_MIN_OPS`) n'est pas trop haut.
+3. Le backend est bien compilé (`ENABLE_CUDA` / `ENABLE_ROCM`) et initialisé.
+
+### "Les performances sont pires qu'en CPU-only"
 
 Les layers trop petits génèrent de nombreux aller-retours host↔device. Essayez d'augmenter les seuils ou de n'activer que les fast-paths pour les layers vraiment lourds (typiquement `Linear` et `Attention`).
 
-**"J'obtiens des résultats numériquement différents avec GPU"**
+### "J'obtiens des résultats numériquement différents avec GPU"
 
 Les opérations en virgule flottante ne sont pas strictement associatives — l'ordre des additions change légèrement les résultats. C'est normal et attendu. Si les différences sont supérieures à ~1e-4 en float32, activez le mode verbeux et vérifiez qu'aucun layer ne produit des NaN.
 
-**"Le build ne détecte pas CUDA alors que le Toolkit est installé"**
+### "Le build ne détecte pas CUDA alors que le Toolkit est installé"
 
 Vérifiez que `nvcc` est dans votre `PATH` et que `CUDA_TOOLKIT_ROOT_DIR` est défini si CMake ne le trouve pas automatiquement :
 

@@ -198,6 +198,12 @@ public:
                                                    const std::unordered_map<std::string, std::vector<int>>& int_inputs,
                                                    bool training = true);
 
+    // KV cache pour décodage auto-régressif (SelfAttention en inférence).
+    void setKVCacheEnabled(bool enabled);
+    bool isKVCacheEnabled() const { return kv_cache_enabled_; }
+    void clearKVCache();
+    size_t getKVCacheTokenCount() const;
+
     // ========================================================================
     // Viz taps: capture d'images intermédiaires par bloc/layer (best-effort)
     // ========================================================================
@@ -719,4 +725,25 @@ protected:
     // Évite le scan O(layers*inputs) à chaque forward pass.
     mutable bool uses_mag_mod_cached_ = false;
     mutable bool uses_mag_mod_         = false;
+
+    struct KVCacheEntry {
+        int embed_dim = 0;
+        int num_heads = 0;
+        int head_dim = 0;
+        int seq_len = 0;
+        std::vector<float> key;
+        std::vector<float> value;
+
+        void clear() {
+            embed_dim = 0;
+            num_heads = 0;
+            head_dim = 0;
+            seq_len = 0;
+            key.clear();
+            value.clear();
+        }
+    };
+
+    bool kv_cache_enabled_ = false;
+    std::unordered_map<size_t, KVCacheEntry> kv_cache_by_layer_;
 };

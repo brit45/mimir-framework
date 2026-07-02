@@ -196,8 +196,6 @@ assert(Mimir.Model.init_weights("xavier", 42))
 ```lua
 local ok, err = Mimir.Serialization.load("checkpoint/my_model.safetensors")
 assert(ok ~= false, err)
-
-Note dtype : si le checkpoint embarque `model_config.dtype`, il est réappliqué automatiquement au modèle au load (utile pour garder des saves cohérents en reprise).
 ```
 
 Note dtype : si le checkpoint embarque `model_config.dtype`, il est réappliqué automatiquement au modèle au load. C’est utile si tu veux reprendre un run puis réécrire un checkpoint sans changer la politique de stockage des tenseurs float.

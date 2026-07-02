@@ -153,7 +153,7 @@ inline bool is_fusible_unary_shape_layer(const Layer& layer) {
     }
 }
 
-inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layers, bool training) {
+inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layers, bool training, bool allow_training_fusion = false) {
     ExecutionPlan plan;
     plan.ops.reserve(layers.size());
     plan.skip_layer.assign(layers.size(), 0);
@@ -187,13 +187,16 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
             continue;
         }
 
-        // Conservative: do not fuse in training (backward/masks/precision considerations).
-        if (!training && layer.type_enum == LayerType::Conv2d && layer.activation == ActivationType::RELU) {
+        const bool can_fuse_conv_relu = (!training) || allow_training_fusion;
+        const bool can_fuse_generic = !training;
+
+        // Conservative by default: in training, fusions are disabled unless explicitly enabled.
+        if (can_fuse_conv_relu && layer.type_enum == LayerType::Conv2d && layer.activation == ActivationType::RELU) {
             op.fusion = FusionKind::CONV2D_RELU;
             plan.fuse_relu_for_conv2d[i] = 1;
         }
 
-        if (!training) {
+        if (can_fuse_generic) {
             const std::string producer_out = planner_output_name_for(layer);
             const bool producer_has_single_consumer = tensor_use_count[producer_out] == 1;
 

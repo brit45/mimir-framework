@@ -827,9 +827,9 @@ bool Model::initializeCpuComputeEngine() {
     }
 
     const RuntimeConfig cfg_from_env = RuntimeConfig::fromEnv("CPU");
-    if (cfg_from_env.disabled) {
-        g_cpu_available = false;
-        g_cpu_engine.reset();
+        if (cfg_from_env.disabled) {
+            g_cpu_available = false;
+            g_cpu_engine.reset();
         initialized.store(true, std::memory_order_release);
         if (cfg_from_env.verbose) {
             std::cerr << "⚠ CPU runtime disabled via MIMIR_DISABLE_CPU" << std::endl;
@@ -934,7 +934,7 @@ bool Model::initializeOpenCLComputeEngine() {
     }
 
     if (initialized.load(std::memory_order_acquire)) {
-        return g_opencl_available;
+            return g_opencl_available; 
     }
 
     std::lock_guard<std::mutex> lock(init_mutex);
@@ -1264,6 +1264,25 @@ void Model::clearTensorStoreInt() {
     tensor_store_int.clear();
 }
 
+void Model::setKVCacheEnabled(bool enabled) {
+    kv_cache_enabled_ = enabled;
+    if (!enabled) {
+        clearKVCache();
+    }
+}
+
+void Model::clearKVCache() {
+    kv_cache_by_layer_.clear();
+}
+
+size_t Model::getKVCacheTokenCount() const {
+    size_t total = 0;
+    for (const auto& kv : kv_cache_by_layer_) {
+        total += static_cast<size_t>(std::max(0, kv.second.seq_len));
+    }
+    return total;
+}
+
 // === Forward pass (tokens int) ===
 
 std::vector<float> Model::forwardPass(const std::vector<int> &input_ids, bool training) {
@@ -1284,6 +1303,16 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
         std::cerr << "    Call allocate_params() and init_weights() first" << std::endl;
         static const std::vector<float> empty;
         return empty;
+    }
+
+    if (modelConfig.contains("use_kv_cache")) {
+        try {
+            setKVCacheEnabled(modelConfig["use_kv_cache"].get<bool>());
+        } catch (...) {
+        }
+    }
+    if (training) {
+        clearKVCache();
     }
 
     clearTensorStore();
@@ -1599,7 +1628,167 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
                         }
 
                         if (layer.type_enum == LayerType::SelfAttention) {
-                            layer_output = LayerOps::self_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
+                            const bool can_use_kv_cache =
+                                (!training) &&
+                                kv_cache_enabled_ &&
+                                embed_dim > 0 &&
+                                num_heads > 0 &&
+                                (embed_dim % num_heads == 0) &&
+                                !x.empty() &&
+                                ((x.size() % static_cast<size_t>(embed_dim)) == 0);
+
+                            if (!can_use_kv_cache) {
+                                layer_output = LayerOps::self_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
+                                break;
+                            }
+
+                            const int query_len = static_cast<int>(x.size() / static_cast<size_t>(embed_dim));
+                            const int head_dim = embed_dim / num_heads;
+                            const int qkv_dim = embed_dim * 3;
+
+                            std::vector<float> qkv(static_cast<size_t>(query_len) * static_cast<size_t>(qkv_dim), 0.0f);
+                            #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * qkv_dim * embed_dim > 262144)
+                            for (int m = 0; m < query_len; ++m) {
+                                const float* xrow = &x[static_cast<size_t>(m) * static_cast<size_t>(embed_dim)];
+                                float* qkv_row = &qkv[static_cast<size_t>(m) * static_cast<size_t>(qkv_dim)];
+                                for (int n = 0; n < qkv_dim; ++n) {
+                                    const float* w_row = &qkv_weight[static_cast<size_t>(n) * static_cast<size_t>(embed_dim)];
+                                    float sum = qkv_bias.empty() ? 0.0f : qkv_bias[static_cast<size_t>(n)];
+                                    for (int k = 0; k < embed_dim; ++k) {
+                                        sum += xrow[k] * w_row[k];
+                                    }
+                                    qkv_row[n] = sum;
+                                }
+                            }
+
+                            std::vector<float> Q(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+                            std::vector<float> K_new(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+                            std::vector<float> V_new(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+                            for (int m = 0; m < query_len; ++m) {
+                                const int base = m * qkv_dim;
+                                const int out = m * embed_dim;
+                                std::memcpy(&Q[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base)], static_cast<size_t>(embed_dim) * sizeof(float));
+                                std::memcpy(&K_new[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base + embed_dim)], static_cast<size_t>(embed_dim) * sizeof(float));
+                                std::memcpy(&V_new[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base + 2 * embed_dim)], static_cast<size_t>(embed_dim) * sizeof(float));
+                            }
+
+                            auto& cache = kv_cache_by_layer_[layer_idx];
+                            const bool cache_compatible =
+                                cache.embed_dim == embed_dim &&
+                                cache.num_heads == num_heads &&
+                                cache.head_dim == head_dim &&
+                                static_cast<int>(cache.key.size()) == cache.seq_len * embed_dim &&
+                                static_cast<int>(cache.value.size()) == cache.seq_len * embed_dim;
+                            if (!cache_compatible) {
+                                cache.clear();
+                                cache.embed_dim = embed_dim;
+                                cache.num_heads = num_heads;
+                                cache.head_dim = head_dim;
+                            }
+
+                            const int prev_len = cache.seq_len;
+                            const int key_len = prev_len + query_len;
+                            cache.key.insert(cache.key.end(), K_new.begin(), K_new.end());
+                            cache.value.insert(cache.value.end(), V_new.begin(), V_new.end());
+                            cache.seq_len = key_len;
+
+                            std::vector<float> attended(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
+                            const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+                            std::vector<float> Qh(static_cast<size_t>(query_len) * static_cast<size_t>(head_dim));
+                            std::vector<float> Vh(static_cast<size_t>(key_len) * static_cast<size_t>(head_dim));
+                            std::vector<float> KhT(static_cast<size_t>(head_dim) * static_cast<size_t>(key_len));
+                            std::vector<float> scores(static_cast<size_t>(query_len) * static_cast<size_t>(key_len));
+                            std::vector<float> context(static_cast<size_t>(query_len) * static_cast<size_t>(head_dim));
+
+                            for (int h = 0; h < num_heads; ++h) {
+                                const int head_off = h * head_dim;
+
+                                for (int i = 0; i < query_len; ++i) {
+                                    const float* qsrc = &Q[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                                    float* qdst = &Qh[static_cast<size_t>(i) * static_cast<size_t>(head_dim)];
+                                    std::memcpy(qdst, qsrc, static_cast<size_t>(head_dim) * sizeof(float));
+                                }
+
+                                for (int j = 0; j < key_len; ++j) {
+                                    const float* ksrc = &cache.key[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                                    const float* vsrc = &cache.value[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                                    float* vdst = &Vh[static_cast<size_t>(j) * static_cast<size_t>(head_dim)];
+                                    for (int k = 0; k < head_dim; ++k) {
+                                        KhT[static_cast<size_t>(k) * static_cast<size_t>(key_len) + static_cast<size_t>(j)] = ksrc[k];
+                                        vdst[k] = vsrc[k];
+                                    }
+                                }
+
+                                HardwareOpt::matmul_fma_saturated(scores.data(), Qh.data(), KhT.data(),
+                                                                  static_cast<size_t>(query_len),
+                                                                  static_cast<size_t>(key_len),
+                                                                  static_cast<size_t>(head_dim));
+
+                                const size_t scores_n = static_cast<size_t>(query_len) * static_cast<size_t>(key_len);
+                                #pragma omp simd
+                                for (size_t idx = 0; idx < scores_n; ++idx) {
+                                    scores[idx] *= scale;
+                                }
+
+                                if (causal) {
+                                    for (int qi = 0; qi < query_len; ++qi) {
+                                        const int abs_q = prev_len + qi;
+                                        float* row = &scores[static_cast<size_t>(qi) * static_cast<size_t>(key_len)];
+                                        for (int kj = abs_q + 1; kj < key_len; ++kj) {
+                                            row[kj] = -1e9f;
+                                        }
+                                    }
+                                }
+
+                                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * key_len > 262144)
+                                for (int qi = 0; qi < query_len; ++qi) {
+                                    float* row = &scores[static_cast<size_t>(qi) * static_cast<size_t>(key_len)];
+                                    float max_val = row[0];
+                                    for (int kj = 1; kj < key_len; ++kj) {
+                                        if (row[kj] > max_val) max_val = row[kj];
+                                    }
+
+                                    float sum = 0.0f;
+                                    for (int kj = 0; kj < key_len; ++kj) {
+                                        const float e = std::exp(row[kj] - max_val);
+                                        row[kj] = e;
+                                        sum += e;
+                                    }
+                                    const float inv_sum = 1.0f / (sum + 1e-9f);
+                                    #pragma omp simd
+                                    for (int kj = 0; kj < key_len; ++kj) {
+                                        row[kj] *= inv_sum;
+                                    }
+                                }
+
+                                HardwareOpt::matmul_fma_saturated(context.data(), scores.data(), Vh.data(),
+                                                                  static_cast<size_t>(query_len),
+                                                                  static_cast<size_t>(head_dim),
+                                                                  static_cast<size_t>(key_len));
+
+                                for (int i = 0; i < query_len; ++i) {
+                                    float* dst = &attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                                    const float* src = &context[static_cast<size_t>(i) * static_cast<size_t>(head_dim)];
+                                    std::memcpy(dst, src, static_cast<size_t>(head_dim) * sizeof(float));
+                                }
+                            }
+
+                            layer_output.resize(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
+                            HardwareOpt::matmul_fma_saturated(layer_output.data(), attended.data(), out_weight.data(),
+                                                              static_cast<size_t>(query_len),
+                                                              static_cast<size_t>(embed_dim),
+                                                              static_cast<size_t>(embed_dim));
+                            if (!out_bias.empty()) {
+                                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * embed_dim > 262144)
+                                for (int i = 0; i < query_len; ++i) {
+                                    float* row = &layer_output[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                                    #pragma omp simd
+                                    for (int j = 0; j < embed_dim; ++j) {
+                                        row[j] += out_bias[static_cast<size_t>(j)];
+                                    }
+                                }
+                            }
                         } else {
                             layer_output = LayerOps::multihead_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
                         }
@@ -4980,6 +5169,16 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         std::cerr << "    Call allocate_params() and init_weights() first" << std::endl;
         return input;
     }
+
+    if (modelConfig.contains("use_kv_cache")) {
+        try {
+            setKVCacheEnabled(modelConfig["use_kv_cache"].get<bool>());
+        } catch (...) {
+        }
+    }
+    if (training) {
+        clearKVCache();
+    }
     
     // ========================================================================
     // INITIALIZATION: TensorStore + Validation
@@ -5078,11 +5277,12 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // ========================================================================
     const bool planner_enabled = env_flag_true("MIMIR_ENABLE_PLANNER", true);
     const bool fusion_enabled = env_flag_true("MIMIR_ENABLE_FUSION", true);
+    const bool fusion_in_training = env_flag_true("MIMIR_ENABLE_FUSION_TRAIN", false);
     if (planner_enabled) {
         if (!static_plan_.built ||
             static_plan_.built_for_training != training ||
             static_plan_.execution.ops.size() != layers.size()) {
-            static_plan_.execution = Mimir::Planning::build_execution_plan_static(layers, training);
+            static_plan_.execution = Mimir::Planning::build_execution_plan_static(layers, training, fusion_in_training);
             static_plan_.built = true;
             static_plan_.built_for_training = training;
         }
@@ -5399,6 +5599,38 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         const std::vector<float>& x = (!inputs.empty() && inputs[0] != nullptr) ? *inputs[0] : kEmptyInput;
         
         std::vector<float> layer_output;
+
+        // Dispatch runtime générique (CUDA/ROCm) pour les layers supportés via forwardLayer().
+        // Retourne true si un runtime a produit une sortie valide (outputs[0]).
+        auto try_runtime_forward_layer = [&](std::vector<float>& out) -> bool {
+            std::vector<std::vector<float>> runtime_outputs;
+
+#ifdef ENABLE_CUDA
+            if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
+                runtime_outputs.clear();
+                if (g_cuda_engine->forwardLayer(inputs, runtime_outputs, layer, training)) {
+                    if (!runtime_outputs.empty()) {
+                        out = std::move(runtime_outputs[0]);
+                        return true;
+                    }
+                }
+            }
+#endif
+
+#ifdef ENABLE_ROCM
+            if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
+                runtime_outputs.clear();
+                if (g_rocm_engine->forwardLayer(inputs, runtime_outputs, layer, training)) {
+                    if (!runtime_outputs.empty()) {
+                        out = std::move(runtime_outputs[0]);
+                        return true;
+                    }
+                }
+            }
+#endif
+
+            return false;
+        };
         
         // ====================================================================
         // DISPATCH PRINCIPAL VIA SWITCH/CASE SUR LayerType (MODE STRICT)
@@ -5414,6 +5646,16 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     case LayerType::Conv2d:
     case LayerType::ConvTranspose2d: {
         static bool accel_logged_conv2d = false;
+
+        if (layer.type_enum == LayerType::Conv2d && try_runtime_forward_layer(layer_output)) {
+            // Le runtime renvoie la sortie conv; on conserve l'activation côté Model pour
+            // rester cohérent avec le chemin CPU.
+            if (layer.activation != ActivationType::NONE) {
+                Activation::apply_inplace(layer_output, layer.activation, layer.activation_param);
+            }
+            break;
+        }
+
         RUNTIME_CHECK(
             layer.in_channels > 0 && layer.out_channels > 0,
             "Conv2d: in_channels and out_channels must be set"
@@ -5481,7 +5723,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         const float* layer_weights = layer.getWeights();
 
         // Fusion: Conv2d + ReLU (inference only)
-        const bool fuse_relu = fusion_enabled && !training &&
+        const bool fuse_relu = fusion_enabled && ((!training) || fusion_in_training) &&
                        static_plan_.built &&
                        layer_idx < static_plan_.execution.fuse_relu_for_conv2d.size() &&
                        static_plan_.execution.fuse_relu_for_conv2d[layer_idx] != 0 &&
@@ -5746,7 +5988,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         bool did_cpu = false;
 
 #ifdef ENABLE_CUDA
-        if (!training && g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
+    if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
             const RuntimeConfig& cuda_cfg = g_cuda_engine->config();
             const bool cuda_linear = cuda_cfg.linear_enabled;
             const int cuda_min_ops = cuda_cfg.linear_min_ops;
@@ -5790,7 +6032,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 #endif
 
 #ifdef ENABLE_ROCM
-        if (!did_cuda && !training && g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
+    if (!did_cuda && g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
             const RuntimeConfig& rocm_cfg = g_rocm_engine->config();
             const bool rocm_linear = rocm_cfg.linear_enabled;
             const int rocm_min_ops = rocm_cfg.linear_min_ops;
@@ -5837,7 +6079,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Politique: par défaut off. Activer avec MIMIR_VULKAN_LINEAR=1.
         const bool vulkan_linear = env_flag_true("MIMIR_VULKAN_LINEAR", false);
         const int vk_min_ops = env_int("MIMIR_VULKAN_LINEAR_MIN_OPS", 1 << 20);
-        if (!did_cuda && !did_rocm && !training && vulkan_linear && g_compute_available && g_compute_engine) {
+        if (!did_cuda && !did_rocm && vulkan_linear && g_compute_available && g_compute_engine) {
             const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
             const int out_f = layer.out_features;
             int batch = 1;
@@ -5886,7 +6128,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Permet d'utiliser OpenCL et Vulkan simultanément (backends indépendants).
         const bool opencl_linear = env_flag_true("MIMIR_OPENCL_LINEAR", false);
         const int min_ops = env_int("MIMIR_OPENCL_LINEAR_MIN_OPS", 1 << 20);
-    if (!did_cuda && !did_rocm && !did_vulkan && !training && opencl_linear && g_opencl_available && g_opencl_engine) {
+    if (!did_cuda && !did_rocm && !did_vulkan && opencl_linear && g_opencl_available && g_opencl_engine) {
             const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
             const int out_f = layer.out_features;
             int batch = 1;
@@ -6198,6 +6440,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::LayerNorm: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOps::layernorm_forward(x, layer, training);
         break;
     }
@@ -6213,6 +6458,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::RMSNorm: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOpsExt::rms_norm_forward(x, layer);
         break;
     }
@@ -6654,6 +6902,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::MatMul: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         RUNTIME_CHECK(
             inputs.size() >= 2,
             "MatMul requires 2 matrix inputs, got " + std::to_string(inputs.size())
@@ -6672,6 +6923,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::BatchMatMul: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         RUNTIME_CHECK(inputs.size() >= 2, "BatchMatMul requires 2 inputs");
         RUNTIME_CHECK(layer.seq_len > 0 && layer.in_features > 0 && layer.out_features > 0 && layer.embed_dim > 0,
                       "BatchMatMul: configure seq_len (batch), in_features (M), out_features (K), embed_dim (N)");
@@ -6713,6 +6967,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     case LayerType::SelfAttention:
     case LayerType::MultiHeadAttention: {
         static bool accel_logged_attention = false;
+
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
+
         if (!accel_logged_attention && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
             accel_logged_attention = true;
             #if defined(__AVX2__)
@@ -6769,9 +7028,170 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
         
         if (layer.type_enum == LayerType::SelfAttention) {
-            layer_output = LayerOps::self_attention_forward(
-                x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal
-            );
+            const bool can_use_kv_cache =
+                (!training) &&
+                kv_cache_enabled_ &&
+                embed_dim > 0 &&
+                num_heads > 0 &&
+                (embed_dim % num_heads == 0) &&
+                !x.empty() &&
+                ((x.size() % static_cast<size_t>(embed_dim)) == 0);
+
+            if (!can_use_kv_cache) {
+                layer_output = LayerOps::self_attention_forward(
+                    x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal
+                );
+                break;
+            }
+
+            const int query_len = static_cast<int>(x.size() / static_cast<size_t>(embed_dim));
+            const int head_dim = embed_dim / num_heads;
+            const int qkv_dim = embed_dim * 3;
+
+            // Projection locale QKV sur les nouveaux tokens de la requête.
+            std::vector<float> qkv(static_cast<size_t>(query_len) * static_cast<size_t>(qkv_dim), 0.0f);
+            #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * qkv_dim * embed_dim > 262144)
+            for (int m = 0; m < query_len; ++m) {
+                const float* xrow = &x[static_cast<size_t>(m) * static_cast<size_t>(embed_dim)];
+                float* qkv_row = &qkv[static_cast<size_t>(m) * static_cast<size_t>(qkv_dim)];
+                for (int n = 0; n < qkv_dim; ++n) {
+                    const float* w_row = &qkv_weight[static_cast<size_t>(n) * static_cast<size_t>(embed_dim)];
+                    float sum = qkv_bias.empty() ? 0.0f : qkv_bias[static_cast<size_t>(n)];
+                    for (int k = 0; k < embed_dim; ++k) {
+                        sum += xrow[k] * w_row[k];
+                    }
+                    qkv_row[n] = sum;
+                }
+            }
+
+            std::vector<float> Q(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+            std::vector<float> K_new(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+            std::vector<float> V_new(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+            for (int m = 0; m < query_len; ++m) {
+                const int base = m * qkv_dim;
+                const int out = m * embed_dim;
+                std::memcpy(&Q[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base)], static_cast<size_t>(embed_dim) * sizeof(float));
+                std::memcpy(&K_new[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base + embed_dim)], static_cast<size_t>(embed_dim) * sizeof(float));
+                std::memcpy(&V_new[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base + 2 * embed_dim)], static_cast<size_t>(embed_dim) * sizeof(float));
+            }
+
+            auto& cache = kv_cache_by_layer_[layer_idx];
+            const bool cache_compatible =
+                cache.embed_dim == embed_dim &&
+                cache.num_heads == num_heads &&
+                cache.head_dim == head_dim &&
+                static_cast<int>(cache.key.size()) == cache.seq_len * embed_dim &&
+                static_cast<int>(cache.value.size()) == cache.seq_len * embed_dim;
+            if (!cache_compatible) {
+                cache.clear();
+                cache.embed_dim = embed_dim;
+                cache.num_heads = num_heads;
+                cache.head_dim = head_dim;
+            }
+
+            const int prev_len = cache.seq_len;
+            const int key_len = prev_len + query_len;
+            cache.key.insert(cache.key.end(), K_new.begin(), K_new.end());
+            cache.value.insert(cache.value.end(), V_new.begin(), V_new.end());
+            cache.seq_len = key_len;
+
+            std::vector<float> attended(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
+            const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+            std::vector<float> Qh(static_cast<size_t>(query_len) * static_cast<size_t>(head_dim));
+            std::vector<float> Vh(static_cast<size_t>(key_len) * static_cast<size_t>(head_dim));
+            std::vector<float> KhT(static_cast<size_t>(head_dim) * static_cast<size_t>(key_len));
+            std::vector<float> scores(static_cast<size_t>(query_len) * static_cast<size_t>(key_len));
+            std::vector<float> context(static_cast<size_t>(query_len) * static_cast<size_t>(head_dim));
+
+            for (int h = 0; h < num_heads; ++h) {
+                const int head_off = h * head_dim;
+
+                for (int i = 0; i < query_len; ++i) {
+                    const float* qsrc = &Q[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                    float* qdst = &Qh[static_cast<size_t>(i) * static_cast<size_t>(head_dim)];
+                    std::memcpy(qdst, qsrc, static_cast<size_t>(head_dim) * sizeof(float));
+                }
+
+                for (int j = 0; j < key_len; ++j) {
+                    const float* ksrc = &cache.key[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                    const float* vsrc = &cache.value[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                    float* vdst = &Vh[static_cast<size_t>(j) * static_cast<size_t>(head_dim)];
+                    for (int k = 0; k < head_dim; ++k) {
+                        KhT[static_cast<size_t>(k) * static_cast<size_t>(key_len) + static_cast<size_t>(j)] = ksrc[k];
+                        vdst[k] = vsrc[k];
+                    }
+                }
+
+                HardwareOpt::matmul_fma_saturated(scores.data(), Qh.data(), KhT.data(),
+                                                  static_cast<size_t>(query_len),
+                                                  static_cast<size_t>(key_len),
+                                                  static_cast<size_t>(head_dim));
+
+                const size_t scores_n = static_cast<size_t>(query_len) * static_cast<size_t>(key_len);
+                #pragma omp simd
+                for (size_t idx = 0; idx < scores_n; ++idx) {
+                    scores[idx] *= scale;
+                }
+
+                if (causal) {
+                    for (int qi = 0; qi < query_len; ++qi) {
+                        const int abs_q = prev_len + qi;
+                        float* row = &scores[static_cast<size_t>(qi) * static_cast<size_t>(key_len)];
+                        for (int kj = abs_q + 1; kj < key_len; ++kj) {
+                            row[kj] = -1e9f;
+                        }
+                    }
+                }
+
+                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * key_len > 262144)
+                for (int qi = 0; qi < query_len; ++qi) {
+                    float* row = &scores[static_cast<size_t>(qi) * static_cast<size_t>(key_len)];
+                    float max_val = row[0];
+                    for (int kj = 1; kj < key_len; ++kj) {
+                        if (row[kj] > max_val) max_val = row[kj];
+                    }
+
+                    float sum = 0.0f;
+                    for (int kj = 0; kj < key_len; ++kj) {
+                        const float e = std::exp(row[kj] - max_val);
+                        row[kj] = e;
+                        sum += e;
+                    }
+                    const float inv_sum = 1.0f / (sum + 1e-9f);
+                    #pragma omp simd
+                    for (int kj = 0; kj < key_len; ++kj) {
+                        row[kj] *= inv_sum;
+                    }
+                }
+
+                HardwareOpt::matmul_fma_saturated(context.data(), scores.data(), Vh.data(),
+                                                  static_cast<size_t>(query_len),
+                                                  static_cast<size_t>(head_dim),
+                                                  static_cast<size_t>(key_len));
+
+                for (int i = 0; i < query_len; ++i) {
+                    float* dst = &attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
+                    const float* src = &context[static_cast<size_t>(i) * static_cast<size_t>(head_dim)];
+                    std::memcpy(dst, src, static_cast<size_t>(head_dim) * sizeof(float));
+                }
+            }
+
+            layer_output.resize(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
+            HardwareOpt::matmul_fma_saturated(layer_output.data(), attended.data(), out_weight.data(),
+                                              static_cast<size_t>(query_len),
+                                              static_cast<size_t>(embed_dim),
+                                              static_cast<size_t>(embed_dim));
+            if (!out_bias.empty()) {
+                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * embed_dim > 262144)
+                for (int i = 0; i < query_len; ++i) {
+                    float* row = &layer_output[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                    #pragma omp simd
+                    for (int j = 0; j < embed_dim; ++j) {
+                        row[j] += out_bias[static_cast<size_t>(j)];
+                    }
+                }
+            }
         } else {
             layer_output = LayerOps::multihead_attention_forward(
                 x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal
@@ -6782,6 +7202,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     
     case LayerType::CrossAttention: {
         static bool accel_logged_cross_attention = false;
+
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
+
         if (!accel_logged_cross_attention && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
             accel_logged_cross_attention = true;
             #if defined(__AVX2__)
@@ -7735,7 +8160,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         
         std::string output_name = layer.output.empty() ? "x" : layer.output;
 
-        if (fusion_enabled && !training && static_plan_.built) {
+        if (fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
             const auto& plan = static_plan_.execution;
             if (layer_idx < plan.fuse_activation_consumer.size()) {
                 const int activation_idx = plan.fuse_activation_consumer[layer_idx];

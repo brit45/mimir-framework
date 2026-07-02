@@ -290,7 +290,7 @@ bool RocmRuntime::forwardLayer(
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
 
-    if (layer.type_enum == LayerType::Linear && config_.linear_enabled && !training) {
+    if (layer.type_enum == LayerType::Linear && config_.linear_enabled) {
         if (!inputs.empty() && inputs[0]) {
             const std::vector<float>& x = *inputs[0];
             const int in_f = layer.in_features;
@@ -319,11 +319,89 @@ bool RocmRuntime::forwardLayer(
         }
     }
 
+    // Fast-path: MatMul / BatchMatMul sur GPU (piloté par le flag linear).
+    if ((layer.type_enum == LayerType::MatMul || layer.type_enum == LayerType::BatchMatMul) &&
+        config_.linear_enabled) {
+        do {
+            if (inputs.size() < 2 || !inputs[0] || !inputs[1]) break;
+            const std::vector<float>& A = *inputs[0];
+            const std::vector<float>& B = *inputs[1];
+
+            const int M = layer.in_features;
+            const int K = layer.out_features;
+            const int N = layer.embed_dim;
+            if (M <= 0 || K <= 0 || N <= 0) break;
+
+            int batches = 1;
+            if (layer.type_enum == LayerType::BatchMatMul) {
+                batches = layer.seq_len;
+                if (batches <= 0) break;
+            }
+
+            const size_t a_batch_elems = static_cast<size_t>(M) * static_cast<size_t>(K);
+            const size_t b_batch_elems = static_cast<size_t>(K) * static_cast<size_t>(N);
+            const size_t c_batch_elems = static_cast<size_t>(M) * static_cast<size_t>(N);
+
+            if (A.size() != static_cast<size_t>(batches) * a_batch_elems) break;
+            if (B.size() != static_cast<size_t>(batches) * b_batch_elems) break;
+
+            const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) *
+                                  static_cast<long long>(K) * static_cast<long long>(N);
+            if (ops < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+
+#ifdef ENABLE_ROCM
+            Impl::DeviceBuf d_a, d_b, d_c;
+            if (!d_a.alloc(static_cast<size_t>(batches) * a_batch_elems * sizeof(float))) break;
+            if (!d_b.alloc(static_cast<size_t>(batches) * b_batch_elems * sizeof(float))) break;
+            if (!d_c.alloc(static_cast<size_t>(batches) * c_batch_elems * sizeof(float))) break;
+            if (!d_a.copyFromHost(A.data(), static_cast<size_t>(batches) * a_batch_elems * sizeof(float))) break;
+            if (!d_b.copyFromHost(B.data(), static_cast<size_t>(batches) * b_batch_elems * sizeof(float))) break;
+
+            // Row-major mapping via column-major GEMM:
+            // C[M,N] = A[M,K] * B[K,N]  <=>  C_cm[N,M] = B_cm[N,K] * A_cm[K,M]
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            bool ok = true;
+            for (int bi = 0; bi < batches; ++bi) {
+                const float* a_ptr = reinterpret_cast<const float*>(d_a.ptr) + static_cast<size_t>(bi) * a_batch_elems;
+                const float* b_ptr = reinterpret_cast<const float*>(d_b.ptr) + static_cast<size_t>(bi) * b_batch_elems;
+                float* c_ptr = reinterpret_cast<float*>(d_c.ptr) + static_cast<size_t>(bi) * c_batch_elems;
+                if (rocblas_sgemm(
+                        impl_->handle,
+                        rocblas_operation_none,
+                        rocblas_operation_none,
+                        N,
+                        M,
+                        K,
+                        &alpha,
+                        b_ptr,
+                        N,
+                        a_ptr,
+                        K,
+                        &beta,
+                        c_ptr,
+                        N
+                    ) != rocblas_status_success) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) break;
+            if (hipDeviceSynchronize() != hipSuccess) break;
+
+            outputs.resize(1);
+            outputs[0].resize(static_cast<size_t>(batches) * c_batch_elems);
+            if (!d_c.copyToHost(outputs[0].data(), static_cast<size_t>(batches) * c_batch_elems * sizeof(float))) break;
+            return true;
+#endif
+        } while (false);
+    }
+
 #ifdef ENABLE_ROCM
     // ─────────────────────────────────────────────────────────────────────────
     // Fast-path: Conv2d  (im2col + rocBLAS SGEMM)
     // ─────────────────────────────────────────────────────────────────────────
-    if (layer.type_enum == LayerType::Conv2d && config_.conv_enabled && !training) {
+    if (layer.type_enum == LayerType::Conv2d && config_.conv_enabled) {
         do {
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& xc = *inputs[0];
@@ -481,7 +559,7 @@ bool RocmRuntime::forwardLayer(
     // ─────────────────────────────────────────────────────────────────────────
     if ((layer.type_enum == LayerType::SelfAttention ||
          layer.type_enum == LayerType::MultiHeadAttention) &&
-        config_.attention_enabled && !training)
+        config_.attention_enabled)
     {
         do {
             if (inputs.empty() || !inputs[0]) break;
@@ -618,7 +696,7 @@ bool RocmRuntime::forwardLayer(
     // Fast-path: CrossAttention
     // ─────────────────────────────────────────────────────────────────────────
     if (layer.type_enum == LayerType::CrossAttention &&
-        config_.attention_enabled && !training &&
+        config_.attention_enabled &&
         inputs.size() >= 2 && inputs[1] != nullptr)
     {
         do {

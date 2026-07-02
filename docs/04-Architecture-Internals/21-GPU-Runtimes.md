@@ -16,7 +16,6 @@ Connaître les bases C++ et la structure du dépôt.
 
 Tu peux modifier le code interne en limitant les régressions.
 
-
 Cette page documente l'implémentation interne des backends GPU de Mímir : architecture, fast-paths, conventions de code.
 
 Sources de vérité :
@@ -57,20 +56,20 @@ public:
 ### Patron de dispatch (Model.cpp)
 
 ```cpp
-// Dans Model::forward pour chaque layer :
-if (cuda_runtime_ && cuda_runtime_->isInitialized()) {
-    if (cuda_runtime_->forwardLayer(inputs, outputs, layer, training))
-        continue; // fast-path OK, on passe au layer suivant
+// Dans le forward actuel, le dispatch GPU est inline dans case LayerType::Linear.
+// Exemple simplifié :
+if (g_cuda_engine && g_cuda_engine->isInitialized()) {
+    did_cuda = g_cuda_engine->linearForward(...);
 }
-if (rocm_runtime_ && rocm_runtime_->isInitialized()) {
-    if (rocm_runtime_->forwardLayer(inputs, outputs, layer, training))
-        continue;
+if (!did_cuda && g_rocm_engine && g_rocm_engine->isInitialized()) {
+    did_rocm = g_rocm_engine->linearForward(...);
 }
-// Fallback CPU
-cpu_forward_layer(inputs, outputs, layer, training);
+if (!did_cuda && !did_rocm) {
+    // fallback CPU runtime puis LayerOps::linear_forward
+}
 ```
 
-`forwardLayer` retourne `true` si le fast-path a réussi, `false` pour fallback.
+Le dispatch `forwardLayer(...)` est utilisé dans le forward principal pour plusieurs types de layers (Convolution, Normes, Attention, etc.).
 
 ---
 
@@ -174,6 +173,8 @@ bool CudaRuntime::initialize(const RuntimeConfig& cfg) {
 
 ## 4) Fast-paths détaillés
 
+> **Important :** la section ci-dessous décrit l'implémentation de `CudaRuntime::forwardLayer` / `RocmRuntime::forwardLayer`, qui est effectivement sollicitée par le dispatch principal selon le type de layer et les flags runtime.
+
 ### 4.1 Pattern commun
 
 Chaque fast-path dans `CudaRuntime::forwardLayer` suit ce squelette :
@@ -222,7 +223,7 @@ return false;
 
 ### 4.2 Conv2d : im2col détail
 
-```
+```text
 input[B, C_in, H, W]  →  col[B, C_in·kH·kW, H_out·W_out]
                           (im2col, CPU, avec stride/padding/dilation)
 
@@ -233,20 +234,24 @@ output[B, C_out, H_out·W_out]
 
 Im2col implémenté avec des boucles C++ standard. Pas de CUDA pour im2col (coût faible, évite les kernels supplémentaires).
 
+**Statut d'exécution actuel :** actif dans le dispatch principal lorsque le fast-path est activé et que les seuils sont atteints.
+
 ### 4.3 LayerNorm / RMSNorm : hybride
 
 **Pourquoi hybride ?** La normalisation implique une réduction (mean/variance) qui est efficace sur CPU avec peu de code. Seule la partie affine (multiplication + addition par vecteur) est déportée sur GPU car c'est un SGEMM/AXPY.
 
-```
+```text
 x_hat = (x - mean) / sqrt(var + eps)    ← sur host (O(N))
 y     = gamma ⊙ x_hat + beta            ← sur device (cublasSdgmm + cublasSaxpy)
 ```
 
 `cublasSdgmm(LEFT, N, M, x_hat, N, gamma, 1, y, N)` = mise à l'échelle par `gamma`.
 
+**Statut d'exécution actuel :** actif dans le dispatch principal lorsque le fast-path est activé et que les seuils sont atteints.
+
 ### 4.4 Attention : boucle par tête
 
-```
+```text
 Pour chaque tête h (0..num_heads-1) :
   Q_h, K_h, V_h = split(QKV_projected)      ← sur host
 
@@ -262,6 +267,8 @@ output = concat × W_out                       ← SGEMM sur device
 
 **Note** : le calcul de softmax reste sur host pour simplifier (pas de kernel softmax GPU custom). Cela implique un aller-retour host↔device pour les scores, ce qui est un overhead mesurable sur de longues séquences.
 
+**Statut d'exécution actuel :** actif dans le dispatch principal lorsque le fast-path est activé et que les seuils sont atteints.
+
 ---
 
 ## 5) ROCm Runtime — différences avec CUDA
@@ -269,7 +276,7 @@ output = concat × W_out                       ← SGEMM sur device
 L'implémentation ROCm est un miroir de CUDA, avec substitution d'API :
 
 | CUDA | ROCm |
-|---|---|
+| --- | --- |
 | `cudaMalloc` | `hipMalloc` |
 | `cudaFree` | `hipFree` |
 | `cudaMemcpy` | `hipMemcpy` |
@@ -290,29 +297,33 @@ Les fast-paths activés, seuils, et logique de fallback sont strictement identiq
 
 ## 6) Invariants et gotchas
 
-**Aucun état persistent entre les couches**
+### Aucun état persistent entre les couches
 
 Les `DeviceBuf` sont alloués/libérés à chaque appel de fast-path. Il n'y a pas de pool de buffers GPU. C'est délibéré : simplicité d'implémentation. L'overhead d'allocation est limité car `cudaMalloc` est relativement rapide pour des buffers de même taille (le driver CUDA met en cache).
 
-**`training=true` désactive Conv2d**
+**`training=true` et dispatch réel**
 
-Le backward de Conv2d n'est pas implémenté côté GPU. Si le fast-path Conv2d était utilisé en training, le gradient serait incorrect. Le check `if (training) break;` est donc critique.
+Le dispatch runtime est disponible en entraînement comme en inférence pour les fast-paths activés (`Linear`, `MatMul/BatchMatMul`, `Conv2d`, normes, attentions) côté CUDA/ROCm.
 
-**Pas de mixed precision**
+Le backward n'est pas déporté vers ces runtimes dans ces fast-paths : l'accélération concerne la passe forward des layers.
+
+### Pas de mixed precision
 
 Tous les fast-paths travaillent en `float32`. Les types `F16`/`BF16` du modèle ne sont pas utilisés ici (la conversion est faite ailleurs, si applicable).
 
-**Masque causal sur host**
+### Masque causal sur host
 
 Le masque causal de l'attention (upper triangle → -∞) est appliqué sur le CPU après download des scores. Pour de très longues séquences (>1K tokens), cela représente un overhead notable. À optimiser si besoin.
 
-**Ordre des builds**
+### Ordre des builds
 
 CUDA et ROCm sont mutuellement exclusifs (liés par `#ifdef`). On ne peut pas compiler les deux ensemble dans le même binaire.
 
 ---
 
 ## 7) Ajouter un nouveau fast-path GPU
+
+Pré-requis pratique : vérifier que le nouveau case est intégré au dispatch du forward principal (direct ou via `forwardLayer()`) pour être effectivement utilisé au runtime.
 
 1. Ajouter les flags dans `RuntimeConfig` (`src/runtimes/AbstractRuntime.hpp`)
 2. Ajouter le parsing `fromEnv` correspondant

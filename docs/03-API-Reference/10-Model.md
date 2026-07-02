@@ -50,7 +50,7 @@ Détails du cycle de vie : [docs/02-User-Guide/02-Model-Lifecycle.md](../02-User
 Mimir.Model.create(name: string, cfg?: table) -> true | (false, string)
 ```
 
-Enregistre l'architecture `name` comme modèle courant et fusionne `cfg` avec la configuration par défaut de cette architecture. Ne construit pas encore le graphe (c'est le rôle de `build()`).
+Enregistre l'architecture `name` comme modèle courant et fusionne `cfg` avec la configuration par défaut de cette architecture. **Construit automatiquement le graphe en v3.0+** (l'appel à `build()` est legacy/no-op).
 
 **Paramètres :**
 
@@ -331,9 +331,7 @@ local cfg = {
 
 -- 2. Cycle de vie
 assert(Mimir.Model.create("transformer", cfg))
-
-local ok, nb_params = Mimir.Model.build()
-assert(ok, nb_params)
+local nb_params = Mimir.Model.total_params()
 print(string.format("%.2f M paramètres", nb_params / 1e6))
 
 assert(Mimir.Model.allocate_params())
@@ -411,4 +409,4 @@ local cfg = {
 - [Cycle de vie d'un modèle](../02-User-Guide/02-Model-Lifecycle.md)
 - [Entraînement](../02-User-Guide/04-Training.md)
 - [Architectures disponibles](./11-Architectures.md)
-- [Sérialisation](./12-Serialization.md)
+- [Sérialisation](./16-Serialization.md)

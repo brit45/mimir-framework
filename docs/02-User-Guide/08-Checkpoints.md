@@ -33,9 +33,9 @@ local ok, err = Mimir.Serialization.save("checkpoint/run1", "raw_folder", {
   include_git_info = true,
 })
 assert(ok, err)
+```
 
 Note dtype : le dtype de stockage (f16/bf16/f32/f64) est contrôlé par `cfg.dtype` (recommandé) ou par `Mimir.Model.dtype("...")`. Lors d’un `load()`, si le checkpoint contient `model_config.dtype`, il est réappliqué au runtime.
-```
 
 Formats disponibles :
 

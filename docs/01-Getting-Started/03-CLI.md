@@ -28,7 +28,7 @@ Le binaire principal est `bin/mimir`.
 Options :
 
 - `--lua <script.lua>` : exécute un script Lua.
-- `--config <config.json>` : charge une config JSON et crée un modèle via le registre (chemin “starter”).
+- `--conf <config.json>` : charge une config JSON et exécute les scripts Lua déclarés dans `lua.scripts`.
 ### Options principales
 
 | Option | Description |

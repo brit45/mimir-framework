@@ -1,0 +1,173 @@
+# Référence : variables d'environnement
+
+## Objectif
+
+Cette page centralise les variables d'environnement réellement lues/écrites par Mímir côté runtime C++ et bridges de scripting.
+
+Conventions:
+
+- Pour les booléens, utilise préférentiellement `0` ou `1`.
+- Dans les parsers principaux (`RuntimeConfig::fromEnv`), les valeurs `0`, `false`, `no`, `off` désactivent; toute autre valeur non vide active.
+- Les variables marquées "injectée" sont posées par Mímir pour les bridges, pas destinées à être fixées manuellement dans un usage standard.
+
+## 1) Runtime global et dispatch
+
+| Variable | Type | Défaut | Effet |
+| --- | --- | --- | --- |
+| `MIMIR_ACCEL_VERBOSE` | bool | `0` | Active des logs de décision d'accélération (CPU/GPU/offload). |
+| `MIMIR_DISABLE_CPU` | bool | `0` | Désactive explicitement le runtime CPU. |
+| `MIMIR_DISABLE_CUDA` | bool | `0` | Désactive explicitement le runtime CUDA. |
+| `MIMIR_DISABLE_ROCM` | bool | `0` | Désactive explicitement le runtime ROCm. |
+| `MIMIR_DISABLE_VULKAN` | bool | `0` | Désactive le backend Vulkan Compute. |
+| `MIMIR_DISABLE_OPENCL` | bool | `0` | Désactive le backend OpenCL Compute. |
+
+## 2) Configuration par backend (CPU/CUDA/ROCM)
+
+Ces variables sont lues via `RuntimeConfig::fromEnv("CPU"|"CUDA"|"ROCM")`.
+
+### Suffixes supportés
+
+| Suffixe | Type | Défaut | Effet |
+| --- | --- | --- | --- |
+| `_LINEAR` | bool | `0` (sauf CPU) | Active fast-path `Linear` sur le backend. |
+| `_LINEAR_MIN_OPS` | int | `1048576` (sauf CPU) | Seuil minimal d'opérations pour offload `Linear`. |
+| `_CONV` | bool | `0` | Active fast-path `Conv2d`. |
+| `_CONV_MIN_OPS` | int | `262144` | Seuil minimal d'opérations pour `Conv2d`. |
+| `_NORM` | bool | `0` | Active fast-path normalisations (`LayerNorm`/`RMSNorm`). |
+| `_NORM_MIN_ELEMS` | int | `4096` | Seuil minimal en nombre d'éléments pour normalisations. |
+| `_ATTENTION` | bool | `0` | Active fast-path attention (`Self`/`MultiHead`/`Cross`). |
+| `_ATTENTION_MIN_OPS` | int | `262144` | Seuil minimal d'opérations pour attention. |
+| `_DEVICE` | int | `0` | Index de device à utiliser pour le backend. |
+
+### Exemples concrets
+
+- CUDA: `MIMIR_CUDA_LINEAR`, `MIMIR_CUDA_CONV`, `MIMIR_CUDA_DEVICE`.
+- ROCm: `MIMIR_ROCM_LINEAR`, `MIMIR_ROCM_ATTENTION_MIN_OPS`.
+- CPU: `MIMIR_CPU_LINEAR`, `MIMIR_CPU_LINEAR_MIN_OPS`.
+
+Notes CPU:
+
+- Le runtime CPU est le fallback de référence.
+- Le code force un comportement spécifique CPU: `MIMIR_CPU_LINEAR` est actif par défaut et `MIMIR_CPU_LINEAR_MIN_OPS` vaut `0` si non défini.
+
+Important:
+
+- Il n'existe pas de variable globale `MIMIR_CUDA=1` ou `MIMIR_ROCM=1` dans le code actuel. L'activation se fait par les flags de fast-path (`MIMIR_CUDA_*`, `MIMIR_ROCM_*`) et les kill-switch `MIMIR_DISABLE_*`.
+
+## 3) Vulkan/OpenCL (offload Linear)
+
+| Variable | Type | Défaut | Effet |
+| --- | --- | --- | --- |
+| `MIMIR_VULKAN_LINEAR` | bool | `0` | Active offload `Linear` vers Vulkan. |
+| `MIMIR_VULKAN_LINEAR_MIN_OPS` | int | `1048576` | Seuil minimal d'opérations pour Vulkan `Linear`. |
+| `MIMIR_VULKAN_LINEAR_SPV` | path | auto | Chemin explicite du shader SPIR-V `linear_forward.comp.spv`. |
+| `MIMIR_OPENCL_LINEAR` | bool | `0` | Active offload `Linear` vers OpenCL. |
+| `MIMIR_OPENCL_LINEAR_MIN_OPS` | int | `1048576` | Seuil minimal d'opérations pour OpenCL `Linear`. |
+
+## 4) Planner et fusion
+
+| Variable | Type | Défaut | Effet |
+| --- | --- | --- | --- |
+| `MIMIR_ENABLE_PLANNER` | bool | `1` | Active la planification statique d'exécution. |
+| `MIMIR_ENABLE_FUSION` | bool | `1` | Active les chemins de fusion lorsqu'un plan est utilisé. |
+| `MIMIR_ENABLE_FUSION_TRAIN` | bool | `0` | Autorise la fusion `Conv2d+ReLU` en mode `training=true` (opt-in). Les fusions génériques restent inférence-only. |
+| `MIMIR_PLANNER_DUMP` | bool | `0` | Émet un dump de stats planner au premier forward. |
+
+## 5) Bridge scripting (injectées par Mímir)
+
+### Contrôle bridge + metadata
+
+| Variable | Type | Portée | Description |
+| --- | --- | --- | --- |
+| `MIMIR_BRIDGE_CMD_FILE` | path | injectée | Fichier de commandes bridge (retour script -> hôte). |
+| `MIMIR_BRIDGE_ARCH_INFO_JSON` | json | injectée | Metadata des architectures (nom, description, config). |
+| `MIMIR_BRIDGE_DTYPES_JSON` | json | injectée | Liste des dtypes exposés au bridge. |
+| `MIMIR_BRIDGE_ARCH_AVAILABLE_JSON` | json | injectée | Liste des architectures disponibles. |
+| `MIMIR_BRIDGE_ARCH_CACHE_JSON` | json | injectée | Cache architecture/params côté bridge. |
+| `MIMIR_BRIDGE_DTYPES_COUNT` | int | injectée | Nombre de dtypes exposés. |
+| `MIMIR_BRIDGE_ARCH_AVAIL_COUNT` | int | injectée | Nombre d'architectures disponibles. |
+
+### Contexte script
+
+| Variable | Type | Portée | Description |
+| --- | --- | --- | --- |
+| `MIMIR_ARG_JSON` | json | injectée | Arguments script sérialisés (tableau JSON). |
+| `MIMIR_CONF_JSON` | json | injectée | Configuration active sérialisée. |
+| `MIMIR_CONF_PATH` | string | injectée | Chemin de conf courant (si applicable). |
+| `MIMIR_CONF_DIR` | string | injectée | Dossier de conf courant (si applicable). |
+| `MIMIR_GLOBAL_NAMESPACE` | string | injectée | Namespace racine exposé au script (ex: `Mimir`). |
+
+### Aliases injectés
+
+| Variable | Type | Portée | Description |
+| --- | --- | --- | --- |
+| `MIMIR_ALIAS_MODEL` | string | injectée | Alias objet modèle. |
+| `MIMIR_ALIAS_ARCHITECTURES` | string | injectée | Alias registre architectures. |
+| `MIMIR_ALIAS_TOKENIZER` | string | injectée | Alias tokenizer. |
+| `MIMIR_ALIAS_DATASET` | string | injectée | Alias dataset. |
+| `MIMIR_ALIAS_MEMORY` | string | injectée | Alias module mémoire. |
+| `MIMIR_ALIAS_MEMORY_GUARD` | string | injectée | Alias guard mémoire. |
+| `MIMIR_ALIAS_ALLOCATOR` | string | injectée | Alias allocator. |
+| `MIMIR_ALIAS_HTOP` | string | injectée | Alias monitoring terminal. |
+| `MIMIR_ALIAS_VIZ` | string | injectée | Alias visualisation. |
+
+## 6) Variables système utilisées
+
+| Variable | Type | Défaut | Utilisation |
+| --- | --- | --- | --- |
+| `TMPDIR` | path | `/tmp` | Emplacement des fichiers temporaires bridge (dont cache `mimir_bridge_arch_cache.json`). |
+
+## 7) Variables utilisées côté scripts Lua (`scripts/`)
+
+Ces variables ne pilotent pas le runtime C++ directement; elles servent de paramètres d'exécution pour les scripts Lua (training, benchmark, templates, tooling).
+
+### Variables fréquentes (templates/training)
+
+- `MIMIR_ARCH`
+- `MIMIR_DATASET`
+- `MIMIR_DTYPE`
+- `MIMIR_EPOCHS`
+- `MIMIR_LR`
+- `MIMIR_SEED`
+- `MIMIR_INIT`
+- `MIMIR_SAVE`
+- `MIMIR_RUN`
+
+### Variables benchmark
+
+- `MIMIR_BENCH_MODE`
+- `MIMIR_BENCH_ITERS`
+- `MIMIR_BENCH_SEQ`
+- `MIMIR_BENCH_VOCAB`
+- `MIMIR_BENCH_RAM_GB`
+- `MIMIR_BENCH_COMPRESS`
+
+### Variables tokenizer / PonyXL tooling
+
+- `MIMIR_BASE_TOKENIZER`
+- `MIMIR_BASE_TOKENIZER_MAX_VOCAB`
+- `MIMIR_REQUIRE_BASE_TOKENIZER`
+- `MIMIR_PONYXL_INCLUDE`
+- `MIMIR_PONYXL_SAFETENSORS`
+- `MIMIR_MAX_TENSORS`
+
+### Variables système lues par scripts
+
+- `OMP_NUM_THREADS`
+- `NO_COLOR`
+- `BROWSER`
+
+## 8) Non-env (souvent confondu)
+
+- `MIMIR_STRICT_MODE` n'est pas une variable d'environnement: c'est un macro de compilation (préprocesseur) utilisé par `RuntimeAllocator`.
+
+## 9) Références code
+
+- `src/runtimes/AbstractRuntime.cpp`
+- `src/Model.cpp`
+- `src/VulkanCompute.hpp`
+- `src/scriptings/ScriptingBridgeCommon.hpp`
+- `src/scriptings/ScriptingBridgeCommon.cpp`
+- `src/scriptings/JavaScript/jsScripting/JSScripting.cpp`
+- `src/scriptings/CSharp/csharpScripting/CSharpScripting.cpp`
+- `src/scriptings/Rust/rustScripting/RustScripting.cpp`

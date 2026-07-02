@@ -47,6 +47,16 @@ int main() {
         TASSERT_TRUE(plan.ops.size() == 1);
         TASSERT_TRUE(plan.fuse_relu_for_conv2d.size() == 1);
         TASSERT_TRUE(plan.fuse_relu_for_conv2d[0] == 0);
+
+        // Training opt-in: only Conv2d+ReLU fusion should be enabled.
+        auto train_fused = Mimir::Planning::build_execution_plan_static(
+            layers,
+            /*training=*/true,
+            /*allow_training_fusion=*/true
+        );
+        TASSERT_TRUE(train_fused.ops.size() == 1);
+        TASSERT_TRUE(train_fused.fuse_relu_for_conv2d.size() == 1);
+        TASSERT_TRUE(train_fused.fuse_relu_for_conv2d[0] == 1);
     }
 
     // Generic producer -> activation -> chunk should be fused in inference.
@@ -77,6 +87,18 @@ int main() {
         TASSERT_TRUE(plan.skip_layer[1] == 1);
         TASSERT_TRUE(plan.skip_layer[2] == 1);
         TASSERT_TRUE(plan.ops[0].fusion == Mimir::Planning::FusionKind::GENERIC_ACTIVATION_CHUNK);
+
+        // Training even with opt-in must keep generic fusions disabled
+        // to preserve intermediate tensors required by backward paths.
+        auto train_plan = Mimir::Planning::build_execution_plan_static(
+            generic_layers,
+            /*training=*/true,
+            /*allow_training_fusion=*/true
+        );
+        TASSERT_TRUE(train_plan.fuse_activation_consumer[0] == -1);
+        TASSERT_TRUE(train_plan.fuse_split_consumer[0] == -1);
+        TASSERT_TRUE(train_plan.skip_layer[1] == 0);
+        TASSERT_TRUE(train_plan.skip_layer[2] == 0);
     }
 
     // Generic producer -> unary shape/no-op should also be fused in inference.
@@ -100,6 +122,14 @@ int main() {
         auto train_plan = Mimir::Planning::build_execution_plan_static(unary_layers, /*training=*/true);
         TASSERT_TRUE(train_plan.fuse_unary_consumer[0] == -1);
         TASSERT_TRUE(train_plan.skip_layer[1] == 0);
+
+        auto train_plan_opt_in = Mimir::Planning::build_execution_plan_static(
+            unary_layers,
+            /*training=*/true,
+            /*allow_training_fusion=*/true
+        );
+        TASSERT_TRUE(train_plan_opt_in.fuse_unary_consumer[0] == -1);
+        TASSERT_TRUE(train_plan_opt_in.skip_layer[1] == 0);
     }
 
     // Scratch planner: should request non-zero buffers

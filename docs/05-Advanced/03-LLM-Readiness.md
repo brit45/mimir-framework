@@ -16,7 +16,6 @@ Avoir déjà exécuté au moins un pipeline complet.
 
 Tu peux investiguer les problèmes de perf et de stabilité.
 
-
 Cette page décrit ce qui est **effectivement** en place dans le codebase pour un LLM, et ce qui manque pour une génération utile au quotidien.
 
 Point d’entrée conseillé : [04-Source-Code-Map.md](04-Source-Code-Map.md).
@@ -66,5 +65,6 @@ Pour passer de “Transformer entraînable” à “LLM utilisable” :
 
 Et côté scripts (utile pour comprendre l’intention et l’usage actuel) :
 
-- `scripts/examples/example_gpt.lua` : montre la création d’un Transformer causal via registry, l’allocation des params et un appel à `Mimir.Model.infer(...)`.
-- `scripts/training/train_llm.lua` : exemple d’entraînement “LLM-like” (mais sans API de génération autoregressive côté runtime).
+- `scripts/examples/example_conf_inference.lua` : inférence config-driven sur architecture transformer.
+- `scripts/benchmarks/benchmark_attention.lua` : cas transformer/attention en benchmark (dont mode causal).
+- `scripts/templates/template_pipeline_only.lua` et `scripts/templates/template_pipeline_args.lua` : pipelines template pour workflows autoregressifs.

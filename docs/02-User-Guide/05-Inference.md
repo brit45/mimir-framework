@@ -16,7 +16,6 @@ Avoir un checkpoint ou une config d'architecture.
 
 Tu obtiens une sortie de modèle reproductible.
 
-
 Cette page se concentre sur l’inférence **via l’API Lua**.
 
 Voir aussi:
@@ -42,7 +41,7 @@ Dans la plupart des scripts, on configure d’abord:
 - `Mimir.Allocator.configure({ max_ram_gb=..., enable_compression=true, swap_strategy="lru" })`
 - `Mimir.Model.set_hardware(true)` (si dispo)
 
-Exemples: `scripts/examples/example_simple.lua`, `scripts/examples/example_gpt.lua`.
+Exemples: `scripts/examples/example_conf_inference.lua`, `scripts/inferences/ponyxl_ddpm_text2img.lua`.
 
 ### Exemple: charger un checkpoint puis faire un forward
 
@@ -105,7 +104,7 @@ Pour des Transformers causaux (GPT-style):
 
 Dans l’état actuel, les scripts de démo montrent surtout:
 
-- la construction et l’entraînement (ex: `scripts/examples/example_gpt.lua`)
+- la construction/inférence via config (`scripts/examples/example_conf_inference.lua`)
 - un chemin legacy `Mimir.Model.infer(prompt)`
 
 ### `Mimir.Model.infer(prompt)` (legacy)

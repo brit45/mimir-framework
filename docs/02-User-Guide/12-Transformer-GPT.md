@@ -16,7 +16,6 @@ Tokenizer et config Transformer prêts.
 
 Tu peux entraîner un transformer causal et lancer une génération contrôlée.
 
-
 Mímir expose une architecture `transformer` configurable, incluant un mode `causal=true`.
 
 Voir aussi:
@@ -27,15 +26,14 @@ Voir aussi:
 
 ## Exemple
 
-Voir : `scripts/examples/example_gpt.lua`
+Voir : `scripts/examples/example_conf_inference.lua`
 
 Ce script :
 
-- configure l’allocateur et MemoryGuard
-- crée un tokenizer
-- crée un `transformer` causal via `Mimir.Model.create("transformer", cfg)`
+- charge une config JSON puis crée un modèle via registry
+- alloue/initialise le modèle puis lance un forward en inférence
 
-À noter: dans le script, la config est explicitement “GPT-2 style” (vocab/seq_len/d_model/num_layers/num_heads/MLP).
+Pour un workflow GPT-style complet, partir des templates pipeline (`scripts/templates/template_pipeline_only.lua`, `scripts/templates/template_pipeline_args.lua`) et forcer `causal=true` dans la config.
 
 ## Pipeline typique (ce que fait la démo)
 
@@ -59,7 +57,7 @@ Autre point:
 
 ## Dataset texte
 
-La démo GPT charge un dataset via:
+Un exemple de workflow texte peut charger un dataset via:
 
 ```lua
 local dataset_path = os.getenv("MIMIR_TEXT_DATASET") or "datasets.old/text"
@@ -83,7 +81,7 @@ Pour un premier smoke test, commence petit:
 - `num_layers`: 2–6
 - `num_heads`: 2–8
 
-La démo `scripts/examples/example_gpt.lua` contient déjà des messages d’erreur indiquant quoi réduire si `allocate_params()` échoue.
+Les templates pipeline restent le meilleur point de départ pour ajouter des garde-fous de sizing (réduction `seq_len`, `d_model`, `num_layers`) et valider `allocate_params()`.
 
 ## Recommandation
 

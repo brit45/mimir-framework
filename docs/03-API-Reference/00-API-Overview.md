@@ -16,7 +16,6 @@ Connaître les commandes de base de Mímir.
 
 Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
 
-
 La source de vérité de l’API exposée est `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
 
 Le contrat système commun (noms globaux + aliases, partagé entre langages de scripting) est défini dans `src/scriptings/ScriptingContext.hpp`.
@@ -31,6 +30,7 @@ La specification officielle du contrat de scripting est ici: [docs/03-API-Refere
 - `Mimir.Tokenizer` : tokenize/detokenize, BPE
 - `Mimir.Dataset` : chargement et itération (selon scripts)
 - `Mimir.IO` : lecture d'images (RGB u8)
+- Environnement : variables `MIMIR_*` runtime/bridge
 
 Pages de référence associées :
 
@@ -46,6 +46,7 @@ Pages de référence associées :
 - Globals/aliases : `docs/03-API-Reference/19-Globals.md`
 - Mapping Lua ↔ C++ (sommaire) : `docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md`
 - `Mimir.IO` (I/O images) : `docs/03-API-Reference/21-IO.md`
+- Variables d'environnement : `docs/03-API-Reference/22-Environment-Variables.md`
 
 ## Convention d’arguments
 

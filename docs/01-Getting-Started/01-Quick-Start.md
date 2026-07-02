@@ -88,8 +88,7 @@ print("out_len=", #out)
 Pourquoi cet exemple est structuré comme ça :
 
 - `default_config()` évite d’oublier des champs attendus par le builder.
-- `create()` fixe le type et la config dans le contexte runtime.
-- `build()` matérialise la structure des layers.
+- `create()` fixe le type et la config dans le contexte runtime, puis construit le réseau automatiquement (v3.0+).
 - `allocate_params()` réserve les poids.
 - `init_weights()` met le modèle dans un état exploitable avant le premier `forward()`.
 

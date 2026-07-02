@@ -16,7 +16,6 @@ Connaître les bases C++ et la structure du dépôt.
 
 Tu peux modifier le code interne en limitant les régressions.
 
-
 Cette page documente le gestionnaire mémoire runtime utilisé dans les hot-path (forward/backward) pour éviter les allocations sauvages et respecter les limites `MemoryGuard`.
 
 Source de vérité :
@@ -71,5 +70,7 @@ Le header définit :
 - `MIMIR_STRICT_MODE` (par défaut `1`).
 - `RUNTIME_ERROR_STRICT(msg)` : throw en strict, sinon log en permissif.
 - `RUNTIME_CHECK(cond, msg)`.
+
+Important : `MIMIR_STRICT_MODE` est une macro de compilation (`#define`), pas une variable d'environnement lue via `getenv`.
 
 Ce mécanisme est utilisé dans le runtime forward/backward pour éviter des corruptions silencieuses.

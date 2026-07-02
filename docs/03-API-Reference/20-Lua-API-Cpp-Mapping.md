@@ -79,7 +79,7 @@ end
 |Appel Lua|Effet (ce que ça fait)|Binding C++|Référence interne|Notes|
 |---|---|---|---|---|
 |`Mimir.Model.create(name, cfg?)`|Crée un modèle via le registre (config défaut si absente)|`LuaScripting::lua_createModel`|`ModelArchitectures::defaultConfig/create`, `LuaContext`, `sync_model_tokenizer_encoder_from_context`||
-|`Mimir.Model.build()`|Reconstruit le modèle depuis `ctx.modelType/modelConfig`|`LuaScripting::lua_buildModel`|`ModelArchitectures::create`, `sync_model_tokenizer_encoder_from_context`|Compat/legacy : préférez `create(name, cfg)` direct.|
+|`Mimir.Model.build()`|No-op de compatibilité (v3.0+: le modèle est déjà construit par `create`) |`LuaScripting::lua_buildModel`|Compat legacy uniquement; ne pas utiliser dans les nouveaux scripts|Préférez `create(name, cfg)` puis `allocate_params()`/`init_weights()` ou `Serialization.load()`.|
 |`Mimir.Model.train(epochs, lr)`|Entraîne (selon le type de modèle) + gère optimizer/scheduler/interruption|`LuaScripting::lua_trainModel`|`Optimizer`, `Model::getSerializedOptimizer/setSerializedOptimizer`, `DatasetItem`, `Mimir::Serialization::save_checkpoint`|Chemin “legacy” peut être non supporté selon modèle.|
 |`Mimir.Model.infer(input)`|Inférence texte (tokenize→encode→forward→decode)|`LuaScripting::lua_inferModel`|`Tokenizer`, `ConditioningEncoder`, `Model::forward/eval`|Historique : contient un fallback si tokenizer absent.|
 |`Mimir.Model.save(path)`|Sauvegarde modèle (ancien format checkpoint)|`LuaScripting::lua_saveModel`|`Model::saveCheckpoint`, `Tokenizer`, `MagicToken`|**Legacy** : préférez `Mimir.Serialization.save`.|

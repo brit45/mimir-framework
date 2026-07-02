@@ -16,7 +16,6 @@ Checkpoints/config adaptés au modèle choisi.
 
 Tu sais lancer un pipeline diffusion sans ambiguïté de setup.
 
-
 Ce dépôt contient des architectures diffusion/autoencoder exposées via le registre.
 
 Voir aussi:
@@ -28,15 +27,15 @@ Voir aussi:
 ## PonyXL (SDXL-like)
 
 - Architecture canonique : `ponyxl_sdxl` (anciens alias: `ponyxl_ddpm`, `t2i_autoencoder`, etc.)
-- Scripts : `scripts/examples/ponyxl_generate.lua`, `scripts/training/train_ponyxl_ddpm.lua`
+- Scripts : `scripts/training/ponyxl_ddpm_train.lua`, `scripts/inferences/ponyxl_ddpm_text2img.lua`
 
 ### Entraîner (PonyXL DDPM)
 
-Script: `scripts/training/train_ponyxl_ddpm.lua`
+Script: `scripts/training/ponyxl_ddpm_train.lua`
 
 Pré-requis:
 
-- dataset chargé via `MIMIR_DATASET_ROOT` (sinon fallback `../dataset`)
+- dataset passé via option `--dataset` (ex: `--dataset dataset_2`)
 - un dataset multi-modal “image+texte” est généralement attendu
 
 Important (format dataset):
@@ -57,13 +56,12 @@ L’organisation en sous-dossiers est possible, mais évite les collisions de ba
 Lancement:
 
 ```bash
-export MIMIR_DATASET_ROOT="/chemin/vers/dataset"
-./bin/mimir --lua scripts/training/train_ponyxl_ddpm.lua
+./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua --dataset "/chemin/vers/dataset"
 ```
 
 Resume:
 
-- le script supporte un mode auto-resume (variable `MIMIR_RESUME`)
+- le script supporte un mode resume via option CLI (`--resume`)
 - il charge un checkpoint existant dans `checkpoint_dir` si trouvé
 
 Le script écrit généralement:
@@ -87,21 +85,20 @@ Astuce: commence par un VAE conv petit et valide le save/load avant d’attaquer
 
 ## Générer (PonyXL)
 
-Script: `scripts/examples/ponyxl_generate.lua`
+Script: `scripts/inferences/ponyxl_ddpm_text2img.lua`
 
 Ce script:
 
-- crée/build/alloue un modèle `ponyxl` avec une config qui doit matcher le checkpoint
-- charge un checkpoint (par défaut `checkpoint/PonyXL` en `raw_folder`)
-- charge un tokenizer (priorité au “base tokenizer”, sinon tokenizer du checkpoint)
-- calcule 2 forwards (cond/uncond) et applique une guidance simple
-- écrit une image PGM (grayscale) sur disque
+- crée/build/alloue un modèle PonyXL/DDPM avec une config alignée au checkpoint
+- charge les composants nécessaires (checkpoint, tokenizer/encodeur, VAE selon script)
+- exécute une chaîne texte -> latent -> image
+- écrit le résultat image sur disque
 
 Lancement:
 
 ```bash
 export MIMIR_BASE_TOKENIZER="checkpoint/PonyXL/tokenizer/tokenizer.json"
-./bin/mimir --lua scripts/examples/ponyxl_generate.lua
+./bin/mimir --lua scripts/inferences/ponyxl_ddpm_text2img.lua
 ```
 
 ## Statut

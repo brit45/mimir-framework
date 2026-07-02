@@ -12,6 +12,10 @@
 namespace Mimir {
 namespace Serialization {
 
+#ifndef MIMIR_PROJECT_VERSION
+#define MIMIR_PROJECT_VERSION "0.0.0"
+#endif
+
 // ============================================================================
 // High-Level API Implementation
 // ============================================================================
@@ -178,10 +182,14 @@ std::string get_mimir_version() {
         std::ifstream ifs(version_file);
         std::string version;
         if (std::getline(ifs, version)) {
-            return version;
+            const auto first = version.find_first_not_of(" \t\r\n");
+            if (first != std::string::npos) {
+                const auto last = version.find_last_not_of(" \t\r\n");
+                return version.substr(first, last - first + 1);
+            }
         }
     }
-    return "3.0.0";  // Default version
+    return MIMIR_PROJECT_VERSION;
 }
 
 std::string get_git_commit() {
