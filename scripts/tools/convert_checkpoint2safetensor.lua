@@ -66,6 +66,40 @@ local function file_exists(path)
     return false
 end
 
+local function merge_into(dst, src)
+    if type(dst) ~= "table" or type(src) ~= "table" then return end
+    for k, v in pairs(src) do
+        dst[k] = v
+    end
+end
+
+local function canonicalize_dtype_name(dtype)
+    if type(dtype) ~= "string" or dtype == "" then return dtype end
+    local map = {
+        F16 = "float16",
+        F32 = "float32",
+        F64 = "float64",
+        BF16 = "bfloat16",
+        I8 = "int8",
+        U8 = "uint8",
+        I16 = "int16",
+        U16 = "uint16",
+        I32 = "int32",
+        U32 = "uint32",
+        I64 = "int64",
+        U64 = "uint64",
+        BOOL = "bool",
+    }
+    return map[dtype] or dtype
+end
+
+local function normalize_config_dtype(cfg)
+    if type(cfg) ~= "table" then return end
+    if type(cfg.dtype) == "string" then
+        cfg.dtype = canonicalize_dtype_name(cfg.dtype)
+    end
+end
+
 -- ---------------------------------------------------------------------------
 -- JSON utils (fallback)
 -- ---------------------------------------------------------------------------
@@ -243,11 +277,25 @@ end
 
 local function infer_model_type_from_arch(arch)
     if type(arch) ~= "table" then return nil end
+    if type(arch.architecture) == "string" and arch.architecture ~= "" then
+        return arch.architecture
+    end
+    if type(arch.type) == "string" and arch.type ~= "" then
+        return arch.type
+    end
     if type(arch.model_name) == "string" and arch.model_name ~= "" then
         return arch.model_name
     end
     if type(arch.model) == "string" and arch.model ~= "" then
         return arch.model
+    end
+    if type(arch.model) == "table" then
+        if type(arch.model.architecture) == "string" and arch.model.architecture ~= "" then
+            return arch.model.architecture
+        end
+        if type(arch.model.type) == "string" and arch.model.type ~= "" then
+            return arch.model.type
+        end
     end
     if type(arch.layers) == "table" then
         for _, layer in ipairs(arch.layers) do
@@ -369,6 +417,58 @@ local function infer_cfg_vae_conv_from_arch(arch)
     }, nil
 end
 
+local function build_model_config_from_arch(model_type, arch)
+    if not (Mimir and Mimir.Architectures and Mimir.Architectures.default_config) then
+        return nil, "Mimir.Architectures.default_config indisponible"
+    end
+
+    local cfg = Mimir.Architectures.default_config(model_type)
+    if type(cfg) ~= "table" then
+        return nil, "default_config(" .. tostring(model_type) .. ") a échoué"
+    end
+
+    local merged_any = false
+    if type(arch) == "table" then
+        if type(arch.model_config) == "table" then
+            merge_into(cfg, arch.model_config)
+            merged_any = true
+        end
+        if type(arch.model) == "table" then
+            merge_into(cfg, arch.model)
+            merged_any = true
+        end
+        if type(arch[model_type]) == "table" then
+            merge_into(cfg, arch[model_type])
+            merged_any = true
+        end
+    end
+
+    normalize_config_dtype(cfg)
+
+    if model_type == "vae_conv" and not merged_any then
+        local inferred, inf_err = infer_cfg_vae_conv_from_arch(arch)
+        if not inferred then
+            return nil, "infer_cfg_vae_conv_from_arch failed: " .. tostring(inf_err)
+        end
+        cfg.image_w = math.floor(inferred.image_w)
+        cfg.image_h = math.floor(inferred.image_h)
+        cfg.image_c = math.floor(inferred.image_c)
+        cfg.latent_h = math.floor(inferred.latent_h)
+        cfg.latent_w = math.floor(inferred.latent_w)
+        cfg.latent_c = math.floor(inferred.latent_c)
+        cfg.base_channels = math.floor(inferred.base_channels)
+        if inferred.use_attention     ~= nil then cfg.use_attention     = inferred.use_attention     end
+        if inferred.use_attn          ~= nil then cfg.use_attn          = inferred.use_attn          end
+        if inferred.enc_norm          ~= nil then cfg.enc_norm          = inferred.enc_norm          end
+        if inferred.enc_gn_groups     ~= nil then cfg.enc_gn_groups     = math.floor(inferred.enc_gn_groups)     end
+        if inferred.attn_heads        ~= nil then cfg.attn_heads        = math.floor(inferred.attn_heads)        end
+        if inferred.resnet_max_tokens ~= nil then cfg.resnet_max_tokens = math.floor(inferred.resnet_max_tokens) end
+        if inferred.attn_max_tokens   ~= nil then cfg.attn_max_tokens   = math.floor(inferred.attn_max_tokens)   end
+    end
+
+    return cfg
+end
+
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 log("  1. Configuration Système")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
@@ -442,36 +542,9 @@ if model_type == "" then
     die("impossible d'inférer le type de modèle. Passe `--model-type <...>` (ex: vae_conv)")
 end
 
-if not (Mimir and Mimir.Architectures and Mimir.Architectures.default_config) then
-    die("Mimir.Architectures.default_config indisponible")
-end
-
-local cfg = Mimir.Architectures.default_config(model_type)
+local cfg, cfg_err = build_model_config_from_arch(model_type, arch)
 if type(cfg) ~= "table" then
-    die("default_config(" .. tostring(model_type) .. ") a échoué")
-end
-
-if model_type == "vae_conv" then
-    local inferred, inf_err = infer_cfg_vae_conv_from_arch(arch)
-    if not inferred then
-        die("infer_cfg_vae_conv_from_arch failed: " .. tostring(inf_err))
-    end
-    cfg.image_w = inferred.image_w
-    cfg.image_h = inferred.image_h
-    cfg.image_c = inferred.image_c
-    cfg.latent_h = inferred.latent_h
-    cfg.latent_w = inferred.latent_w
-    cfg.latent_c = inferred.latent_c
-    cfg.base_channels = inferred.base_channels
-
-    -- Blocs optionnels VAEConv (si présents dans le checkpoint)
-    if inferred.use_attention     ~= nil then cfg.use_attention     = inferred.use_attention     end
-    if inferred.use_attn          ~= nil then cfg.use_attn          = inferred.use_attn          end
-    if inferred.enc_norm          ~= nil then cfg.enc_norm          = inferred.enc_norm          end
-    if inferred.enc_gn_groups     ~= nil then cfg.enc_gn_groups     = inferred.enc_gn_groups     end
-    if inferred.attn_heads        ~= nil then cfg.attn_heads        = inferred.attn_heads        end
-    if inferred.resnet_max_tokens ~= nil then cfg.resnet_max_tokens = inferred.resnet_max_tokens end
-    if inferred.attn_max_tokens   ~= nil then cfg.attn_max_tokens   = inferred.attn_max_tokens   end
+    die(tostring(cfg_err or "build_model_config_from_arch failed"))
 end
 
 log("[convert] create model: type=" .. tostring(model_type))

@@ -45,6 +45,64 @@ if OUT_DIR == "" then
     die("missing arg: --out <checkpoint_dir/>")
 end
 
+local function merge_into(dst, src)
+    if type(dst) ~= "table" or type(src) ~= "table" then return end
+    for k, v in pairs(src) do
+        dst[k] = v
+    end
+end
+
+local function canonicalize_dtype_name(dtype)
+    if type(dtype) ~= "string" or dtype == "" then return dtype end
+    local map = {
+        F16 = "float16",
+        F32 = "float32",
+        F64 = "float64",
+        BF16 = "bfloat16",
+        I8 = "int8",
+        U8 = "uint8",
+        I16 = "int16",
+        U16 = "uint16",
+        I32 = "int32",
+        U32 = "uint32",
+        I64 = "int64",
+        U64 = "uint64",
+        BOOL = "bool",
+    }
+    return map[dtype] or dtype
+end
+
+local function normalize_config_dtype(cfg)
+    if type(cfg) ~= "table" then return end
+    if type(cfg.dtype) == "string" then
+        cfg.dtype = canonicalize_dtype_name(cfg.dtype)
+    end
+end
+
+local function infer_model_type_from_arch(arch)
+    if type(arch) ~= "table" then return nil end
+    if type(arch.model_name) == "string" and arch.model_name ~= "" then
+        return arch.model_name
+    end
+    if type(arch.architecture) == "string" and arch.architecture ~= "" then
+        return arch.architecture
+    end
+    if type(arch.type) == "string" and arch.type ~= "" then
+        return arch.type
+    end
+    if type(arch.model) == "table" then
+        if type(arch.model.architecture) == "string" and arch.model.architecture ~= "" then
+            return arch.model.architecture
+        end
+        if type(arch.model.type) == "string" and arch.model.type ~= "" then
+            return arch.model.type
+        end
+    elseif type(arch.model) == "string" and arch.model ~= "" then
+        return arch.model
+    end
+    return nil
+end
+
 -- ---------------------------------------------------------------------------
 -- JSON fallback decoder (identique au convertisseur aller)
 -- ---------------------------------------------------------------------------
@@ -298,13 +356,6 @@ local function load_arch_from_safetensors(path)
     return arch, nil
 end
 
-local function merge_into(dst, src)
-    if type(dst) ~= "table" or type(src) ~= "table" then return end
-    for k, v in pairs(src) do
-        dst[k] = v
-    end
-end
-
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 log("  1. Configuration Système")
 log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
@@ -346,9 +397,9 @@ if not arch then
     die("impossible de lire model/architecture_json depuis safetensors: " .. tostring(arch_err))
 end
 
-local model_type = (type(arch.model_name) == "string" and arch.model_name) or ""
+local model_type = infer_model_type_from_arch(arch) or ""
 if model_type == "" then
-    die("model_name absent dans model/architecture_json")
+    die("type de modèle absent dans model/architecture_json")
 end
 
 if not (Mimir and Mimir.Architectures and Mimir.Architectures.default_config) then
@@ -363,6 +414,13 @@ end
 if type(arch.model_config) == "table" then
     merge_into(cfg, arch.model_config)
 end
+if type(arch.model) == "table" then
+    merge_into(cfg, arch.model)
+end
+if type(arch[model_type]) == "table" then
+    merge_into(cfg, arch[model_type])
+end
+normalize_config_dtype(cfg)
 
 log("[convert] create model: type=" .. tostring(model_type))
 local ok_create, err_create = Mimir.Model.create(model_type, cfg)

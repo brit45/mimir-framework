@@ -488,6 +488,8 @@ public:
     // Configuration globale hardware
     static inline bool global_use_hardware = true;
     static void setHardwareAcceleration(bool enable) { global_use_hardware = enable; }
+    static void setFrameworkLogsSuppressed(bool enable);
+    static bool frameworkLogsSuppressed();
 
     // Configuration du modèle (pour dimensionnement dynamique des layers)
     json modelConfig;

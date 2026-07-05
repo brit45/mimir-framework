@@ -2,11 +2,45 @@
 #include "../Model.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
+#include "../LayerTypes.hpp"
+#include "../MemoryGuard.hpp"
+#include "../runtimes/cpu/DynamicTensorAllocator.hpp"
+#include "../AdvancedRAMManager.hpp"
+#include "../runtimes/AbstractRuntime.hpp"
 #include <fstream>
 #include <cmath>
 #include <iomanip>
 #include <ctime>
 #include <algorithm>
+#include <cstdlib>
+
+namespace {
+
+static nlohmann::json runtime_config_to_json(const RuntimeConfig& cfg) {
+    nlohmann::json out;
+    out["backend"] = cfg.backend;
+    out["disabled"] = cfg.disabled;
+    out["verbose"] = cfg.verbose;
+    out["device_index"] = cfg.device_index;
+    out["linear_enabled"] = cfg.linear_enabled;
+    out["linear_min_ops"] = cfg.linear_min_ops;
+    out["conv_enabled"] = cfg.conv_enabled;
+    out["conv_min_ops"] = cfg.conv_min_ops;
+    out["norm_enabled"] = cfg.norm_enabled;
+    out["norm_min_elements"] = cfg.norm_min_elements;
+    out["attention_enabled"] = cfg.attention_enabled;
+    out["attention_min_ops"] = cfg.attention_min_ops;
+    return out;
+}
+
+static void set_env_if_present(nlohmann::json& env, const char* key) {
+    if (!key) return;
+    if (const char* value = std::getenv(key)) {
+        env[key] = value;
+    }
+}
+
+} // namespace
 
 namespace Mimir {
 namespace Serialization {
@@ -294,14 +328,30 @@ json DebugJsonDump::build_json(
 
 json DebugJsonDump::extract_layer_config(const Layer& layer) {
     json config;
+
+    auto set_if_positive = [&](const char* key, int value) {
+        if (value > 0) config[key] = value;
+    };
+    auto set_vec_if_not_empty = [&](const char* key, const std::vector<int>& values) {
+        if (!values.empty()) config[key] = values;
+    };
     
     // Common fields
     if (layer.in_channels > 0) config["in_channels"] = layer.in_channels;
     if (layer.out_channels > 0) config["out_channels"] = layer.out_channels;
+    set_if_positive("in_features", layer.in_features);
+    set_if_positive("out_features", layer.out_features);
+    set_if_positive("input_height", layer.input_height);
+    set_if_positive("input_width", layer.input_width);
+    set_if_positive("output_height", layer.output_height);
+    set_if_positive("output_width", layer.output_width);
     
     // Type-specific configurations
     switch (layer.type_enum) {
         case LayerType::Conv2d:
+        case LayerType::ConvTranspose2d:
+        case LayerType::Conv1d:
+        case LayerType::DepthwiseConv2d:
             config["kernel_h"] = layer.get_kernel_h();
             config["kernel_w"] = layer.get_kernel_w();
             config["stride_h"] = layer.get_stride_h();
@@ -314,17 +364,28 @@ json DebugJsonDump::extract_layer_config(const Layer& layer) {
             break;
             
         case LayerType::Linear:
+        case LayerType::Bilinear:
             config["in_features"] = layer.in_features;
             config["out_features"] = layer.out_features;
             config["has_bias"] = !layer.bias.empty();
             break;
+
+        case LayerType::Embedding:
+        case LayerType::EmbeddingBag:
+            set_if_positive("vocab_size", layer.vocab_size);
+            set_if_positive("embed_dim", layer.embed_dim);
+            if (layer.padding_idx >= 0) config["padding_idx"] = layer.padding_idx;
+            break;
             
         case LayerType::BatchNorm2d:
+        case LayerType::BatchNorm1d:
         case LayerType::LayerNorm:
         case LayerType::InstanceNorm2d:
         case LayerType::GroupNorm:
         case LayerType::RMSNorm:
             if (layer.in_channels > 0) config["num_features"] = layer.in_channels;
+            else if (layer.in_features > 0) config["num_features"] = layer.in_features;
+            else if (layer.embed_dim > 0) config["num_features"] = layer.embed_dim;
             config["eps"] = layer.eps;
             if (layer.momentum > 0) config["momentum"] = layer.momentum;
             if (layer.num_groups > 0) config["num_groups"] = layer.num_groups;
@@ -332,6 +393,10 @@ json DebugJsonDump::extract_layer_config(const Layer& layer) {
             
         case LayerType::MaxPool2d:
         case LayerType::AvgPool2d:
+        case LayerType::AdaptiveAvgPool2d:
+        case LayerType::GlobalAvgPool2d:
+        case LayerType::MaxPool1d:
+        case LayerType::AvgPool1d:
             config["kernel_size"] = layer.kernel_size;
             config["stride"] = layer.stride;
             config["padding"] = layer.padding;
@@ -339,10 +404,18 @@ json DebugJsonDump::extract_layer_config(const Layer& layer) {
             
         case LayerType::SelfAttention:
         case LayerType::MultiHeadAttention:
+        case LayerType::CrossAttention:
             config["num_heads"] = layer.num_heads;
             config["head_dim"] = layer.head_dim;
             if (layer.seq_len > 0) config["seq_len"] = layer.seq_len;
+            if (layer.embed_dim > 0) config["embed_dim"] = layer.embed_dim;
             config["causal"] = layer.causal;
+            config["use_mask"] = layer.use_mask;
+            break;
+
+        case LayerType::Softmax:
+        case LayerType::LogSoftmax:
+            config["axis"] = layer.axis;
             break;
             
         case LayerType::LeakyReLU:
@@ -350,7 +423,68 @@ json DebugJsonDump::extract_layer_config(const Layer& layer) {
             break;
             
         case LayerType::Dropout:
+        case LayerType::Dropout2d:
+        case LayerType::AlphaDropout:
             config["dropout_p"] = layer.dropout_p;
+            break;
+
+        case LayerType::Reshape:
+        case LayerType::View:
+            set_vec_if_not_empty("target_shape", layer.target_shape);
+            set_vec_if_not_empty("shape", layer.shape);
+            break;
+
+        case LayerType::Transpose:
+        case LayerType::Permute:
+            set_vec_if_not_empty("shape", layer.shape);
+            set_vec_if_not_empty("permute_dims", layer.permute_dims);
+            break;
+
+        case LayerType::Squeeze:
+            if (layer.squeeze_dim >= 0) config["squeeze_dim"] = layer.squeeze_dim;
+            break;
+
+        case LayerType::Unsqueeze:
+            if (layer.unsqueeze_dim >= 0) config["unsqueeze_dim"] = layer.unsqueeze_dim;
+            break;
+
+        case LayerType::Concat:
+            config["concat_axis"] = layer.concat_axis;
+            break;
+
+        case LayerType::Split:
+            config["split_axis"] = layer.split_axis;
+            config["num_splits"] = layer.num_splits;
+            set_vec_if_not_empty("split_sizes", layer.split_sizes);
+            break;
+
+        case LayerType::Chunk:
+            config["axis"] = layer.axis;
+            config["num_chunks"] = layer.num_chunks;
+            break;
+
+        case LayerType::Stack:
+            config["stack_axis"] = layer.stack_axis;
+            break;
+
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+            if (layer.embed_dim > 0) config["embed_dim"] = layer.embed_dim;
+            break;
+
+        case LayerType::UpsampleNearest:
+        case LayerType::UpsampleBilinear:
+        case LayerType::UpsampleBicubic:
+            config["scale_h"] = layer.scale_h;
+            config["scale_w"] = layer.scale_w;
+            if (layer.out_h > 0) config["out_h"] = layer.out_h;
+            if (layer.out_w > 0) config["out_w"] = layer.out_w;
+            break;
+
+        case LayerType::PatchEmbed:
+            set_if_positive("patch_dim", layer.patch_dim);
+            set_if_positive("num_patches", layer.num_patches);
+            set_if_positive("seq_text", layer.seq_text);
             break;
             
         default:
@@ -375,6 +509,7 @@ std::vector<size_t> DebugJsonDump::get_tensor_shape(const Layer& layer, bool is_
     // Weight shapes depend on layer type
     switch (layer.type_enum) {
         case LayerType::Conv2d:
+        case LayerType::ConvTranspose2d:
             // [out_channels, in_channels, kernel_h, kernel_w]
             if (layer.out_channels > 0) shape.push_back(static_cast<size_t>(layer.out_channels));
             if (layer.in_channels > 0) {
@@ -384,8 +519,22 @@ std::vector<size_t> DebugJsonDump::get_tensor_shape(const Layer& layer, bool is_
             shape.push_back(static_cast<size_t>(layer.get_kernel_h()));
             shape.push_back(static_cast<size_t>(layer.get_kernel_w()));
             break;
+
+        case LayerType::Conv1d:
+            if (layer.out_channels > 0) shape.push_back(static_cast<size_t>(layer.out_channels));
+            if (layer.in_channels > 0) shape.push_back(static_cast<size_t>(layer.in_channels));
+            shape.push_back(static_cast<size_t>(std::max(1, layer.kernel_size)));
+            break;
+
+        case LayerType::DepthwiseConv2d:
+            if (layer.out_channels > 0) shape.push_back(static_cast<size_t>(layer.out_channels));
+            shape.push_back(1);
+            shape.push_back(static_cast<size_t>(layer.get_kernel_h()));
+            shape.push_back(static_cast<size_t>(layer.get_kernel_w()));
+            break;
             
         case LayerType::Linear:
+        case LayerType::Bilinear:
             // [out_features, in_features] or [in_features, out_features]
             // Using [out, in] convention
             shape.push_back(layer.out_features);
@@ -404,9 +553,15 @@ std::vector<size_t> DebugJsonDump::get_tensor_shape(const Layer& layer, bool is_
             break;
             
         case LayerType::Embedding:
+        case LayerType::EmbeddingBag:
             // [vocab_size, embedding_dim]
             shape.push_back(layer.vocab_size);
             shape.push_back(layer.embed_dim);
+            break;
+
+        case LayerType::PatchEmbed:
+            if (layer.out_features > 0) shape.push_back(static_cast<size_t>(layer.out_features));
+            if (layer.patch_dim > 0) shape.push_back(static_cast<size_t>(layer.patch_dim));
             break;
             
         default:
@@ -530,12 +685,166 @@ void DebugJsonDump::add_tensor_info(
     parent.push_back(tensor_obj);
 }
 
+    json DebugJsonDump::build_framework_state_snapshot(const Model& model) {
+        json framework;
+
+        framework["snapshot_version"] = "1.0.0";
+        framework["snapshot_timestamp"] = std::time(nullptr);
+
+        // Build/runtime section.
+        json runtime;
+        runtime["framework_logs_suppressed"] = Model::frameworkLogsSuppressed();
+
+        json backends;
+        {
+        json cpu;
+        cpu["compiled"] = true;
+        cpu["available"] = model.hasCpuCompute();
+        cpu["config"] = runtime_config_to_json(RuntimeConfig::fromEnv("CPU"));
+        backends["cpu"] = cpu;
+        }
+        {
+        json cuda;
+    #ifdef ENABLE_CUDA
+        cuda["compiled"] = true;
+    #else
+        cuda["compiled"] = false;
+    #endif
+        cuda["available"] = model.hasCudaCompute();
+        cuda["config"] = runtime_config_to_json(RuntimeConfig::fromEnv("CUDA"));
+        backends["cuda"] = cuda;
+        }
+        {
+        json rocm;
+    #ifdef ENABLE_ROCM
+        rocm["compiled"] = true;
+    #else
+        rocm["compiled"] = false;
+    #endif
+        rocm["available"] = model.hasRocmCompute();
+        rocm["config"] = runtime_config_to_json(RuntimeConfig::fromEnv("ROCM"));
+        backends["rocm"] = rocm;
+        }
+        {
+        json opencl;
+    #ifdef ENABLE_OPENCL
+        opencl["compiled"] = true;
+    #else
+        opencl["compiled"] = false;
+    #endif
+        opencl["available"] = model.hasOpenCLCompute();
+        backends["opencl"] = opencl;
+        }
+        {
+        json vulkan;
+    #ifdef ENABLE_VULKAN
+        vulkan["compiled"] = true;
+    #else
+        vulkan["compiled"] = false;
+    #endif
+        vulkan["available"] = model.hasVulkanCompute();
+        backends["vulkan"] = vulkan;
+        }
+        runtime["backends"] = backends;
+
+        json cpu_features;
+        cpu_features["avx2"] = Model::hasAVX2();
+        cpu_features["fma"] = Model::hasFMA();
+        cpu_features["f16c"] = Model::hasF16C();
+        cpu_features["bmi2"] = Model::hasBMI2();
+        runtime["cpu_features"] = cpu_features;
+
+        json env = json::object();
+        set_env_if_present(env, "MIMIR_ACCEL_VERBOSE");
+        set_env_if_present(env, "MIMIR_DISABLE_CPU");
+        set_env_if_present(env, "MIMIR_DISABLE_CUDA");
+        set_env_if_present(env, "MIMIR_DISABLE_ROCM");
+        set_env_if_present(env, "MIMIR_DISABLE_OPENCL");
+        set_env_if_present(env, "MIMIR_DISABLE_VULKAN");
+        set_env_if_present(env, "MIMIR_CPU_LINEAR");
+        set_env_if_present(env, "MIMIR_CPU_LINEAR_MIN_OPS");
+        set_env_if_present(env, "MIMIR_CUDA_LINEAR");
+        set_env_if_present(env, "MIMIR_CUDA_LINEAR_MIN_OPS");
+        set_env_if_present(env, "MIMIR_CUDA_DEVICE");
+        set_env_if_present(env, "MIMIR_ROCM_LINEAR");
+        set_env_if_present(env, "MIMIR_ROCM_LINEAR_MIN_OPS");
+        set_env_if_present(env, "MIMIR_ROCM_DEVICE");
+        runtime["environment_overrides"] = env;
+
+        framework["runtime"] = runtime;
+
+        // Memory section.
+        json memory;
+        {
+        auto& guard = MemoryGuard::instance();
+        json mg;
+        const size_t current_bytes = guard.getCurrentBytes();
+        const size_t peak_bytes = guard.getPeakBytes();
+        const size_t limit_bytes = guard.getLimit();
+        mg["current_bytes"] = current_bytes;
+        mg["peak_bytes"] = peak_bytes;
+        mg["limit_bytes"] = limit_bytes;
+        mg["usage_percent"] = guard.getUsagePercent();
+        mg["current_mb"] = static_cast<double>(current_bytes) / (1024.0 * 1024.0);
+        mg["peak_mb"] = static_cast<double>(peak_bytes) / (1024.0 * 1024.0);
+        mg["limit_mb"] = static_cast<double>(limit_bytes) / (1024.0 * 1024.0);
+        mg["allocations_blocked"] = guard.isBlocked();
+        mg["freeze_mode"] = guard.isFrozen();
+        memory["memory_guard"] = mg;
+        }
+        {
+        auto& allocator = DynamicTensorAllocator::instance();
+        json da;
+        da["tensor_count"] = allocator.getTensorCount();
+        da["loaded_count"] = allocator.getLoadedCount();
+        memory["dynamic_tensor_allocator"] = da;
+        }
+        {
+        auto& ram = AdvancedRAMManager::instance();
+        json rm;
+        const size_t current_bytes = ram.getCurrentRAM();
+        const size_t peak_bytes = ram.getPeakRAM();
+        rm["current_bytes"] = current_bytes;
+        rm["peak_bytes"] = peak_bytes;
+        rm["usage_percent"] = ram.getUsagePercent();
+        rm["current_mb"] = static_cast<double>(current_bytes) / (1024.0 * 1024.0);
+        rm["peak_mb"] = static_cast<double>(peak_bytes) / (1024.0 * 1024.0);
+        rm["allocations_blocked"] = ram.isBlocked();
+        rm["freeze_mode"] = ram.isFrozen();
+        memory["advanced_ram_manager"] = rm;
+        }
+        framework["memory"] = memory;
+
+        // Registry section.
+        json registry;
+        const auto supported_layers = LayerRegistry::get_all_supported_types();
+        registry["supported_layer_types"] = supported_layers;
+        registry["supported_layer_count"] = supported_layers.size();
+        framework["registry"] = registry;
+
+        // Model-local state.
+        json model_state;
+        model_state["model_name"] = model.getModelName();
+        model_state["default_dtype"] = model.getDefaultDType();
+        model_state["total_params"] = model.totalParamCount();
+        model_state["num_layers"] = model.getLayers().size();
+        model_state["has_encoder"] = model.getHasEncoder();
+        model_state["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
+        model_state["image_width"] = model.width();
+        model_state["image_height"] = model.height();
+        model_state["parameters_frozen"] = model.parametersFrozen();
+        model_state["model_config"] = model.modelConfig.is_object() ? model.modelConfig : json::object();
+        framework["model"] = model_state;
+
+        return framework;
+    }
+
 json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptions& options) {
     json root;
     
     // Version and format
     root["format"] = "mimir_debug_dump";
-    root["format_version"] = "1.1.0";
+    root["format_version"] = "1.3.0";
     root["timestamp"] = std::time(nullptr);
     root["model_name"] = model.getModelName();
     
@@ -543,6 +852,9 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     json features = json::array();
     features.push_back("layer_config");
     features.push_back("real_shapes");
+    features.push_back("layer_io");
+    features.push_back("extended_layer_types");
+    features.push_back("framework_state");
     if (options.include_gradients) features.push_back("gradients");
     if (options.include_weight_deltas) features.push_back("weight_deltas");
     if (options.include_optimizer_state) features.push_back("optimizer_state");
@@ -645,6 +957,10 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
         layer_obj["name"] = layer.name;
         layer_obj["type"] = layer.type;
         layer_obj["params_count"] = layer.params_count;
+        layer_obj["output"] = layer.output;
+        if (!layer.inputs.empty()) {
+            layer_obj["inputs"] = layer.inputs;
+        }
         
         // Extract layer-specific configuration
         json config = extract_layer_config(layer);
@@ -803,6 +1119,9 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
         git["branch"] = "unknown";
         root["git"] = git;
     }
+
+    // Full framework snapshot at dump time.
+    root["framework_state"] = build_framework_state_snapshot(model);
     
     return root;
 }

@@ -292,6 +292,22 @@ void LuaScripting::registerAPI() {
     
     // ========== Sous-table "Mimir.Layers" ==========
     lua_newtable(L);
+
+    lua_pushcfunction(L, lua_layersAvailable);
+    lua_setfield(L, -2, "available");
+
+    lua_pushcfunction(L, lua_layersByType);
+    lua_setfield(L, -2, "by_type");
+
+    auto registerLayerType = [this](const std::string& field_name, const std::string& layer_type) {
+        lua_pushstring(L, layer_type.c_str());
+        lua_pushcclosure(L, lua_layersByType, 1);
+        lua_setfield(L, -2, field_name.c_str());
+    };
+
+    for (const auto& layer_type : LayerRegistry::get_all_supported_types()) {
+        registerLayerType(layer_type, layer_type);
+    }
     
     lua_pushcfunction(L, lua_computeConv2D);
     lua_setfield(L, -2, "conv2d");
@@ -447,6 +463,10 @@ void LuaScripting::registerAPI() {
     lua_setfield(L, -2, "read_image_rgb_u8");
     lua_pushcfunction(L, lua_readImageRGBU8);
     lua_setfield(L, -2, "readImageRGBU8");  // alias
+    lua_pushcfunction(L, lua_setStdoutLogSuppressed);
+    lua_setfield(L, -2, "suppress_stdout_logs");
+    lua_pushcfunction(L, lua_setStdoutLogSuppressed);
+    lua_setfield(L, -2, "suppressStdoutLogs");  // alias
 
     lua_setfield(L, -2, "IO");  // Mimir.IO
     

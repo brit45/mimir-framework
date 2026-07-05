@@ -14,7 +14,7 @@ namespace Serialization {
 using json = nlohmann::json;
 
 /**
- * Enhanced DebugJson options (v1.1.0)
+ * Enhanced DebugJson options (v1.3.0)
  */
 struct DebugJsonOptions {
     bool include_gradients = false;
@@ -31,7 +31,8 @@ struct DebugJsonOptions {
 /**
  * DebugJsonDump - Create debug JSON dumps of models
  * 
- * v1.1.0: Enhanced with layer configs, real shapes, gradients, weight deltas.
+ * v1.3.0: Enhanced with layer configs, real shapes, gradients, weight deltas,
+ *         and framework state snapshot.
  * For development and debugging only. NOT for production use.
  * Saves model structure + truncated tensor data + statistics.
  */
@@ -101,12 +102,17 @@ private:
     );
     
     /**
-     * Build enhanced JSON representation (v1.1.0).
+     * Build enhanced JSON representation (v1.3.0).
      */
     json build_json_enhanced(
         const Model& model,
         const DebugJsonOptions& options
     );
+
+    /**
+     * Build framework/runtime snapshot at dump time.
+     */
+    json build_framework_state_snapshot(const Model& model);
     
     /**
      * Extract layer config as JSON.

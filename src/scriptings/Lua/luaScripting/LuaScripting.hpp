@@ -107,6 +107,8 @@ private:
     static int lua_archDtypes(lua_State* L);
     
     // === Layer Operations API ===
+    static int lua_layersAvailable(lua_State* L);
+    static int lua_layersByType(lua_State* L);
     static int lua_computeConv2D(lua_State* L);
     static int lua_computeLinear(lua_State* L);
     static int lua_computeMaxPool2D(lua_State* L);
@@ -163,6 +165,9 @@ private:
     static int lua_allocatorConfigure(lua_State* L);
     static int lua_allocatorPrintStats(lua_State* L);
     static int lua_allocatorGetStats(lua_State* L);
+
+    // === Scripting output control ===
+    static int lua_setStdoutLogSuppressed(lua_State* L);
     
     // === Memory Guard API (strict enforcement) ===
     static int lua_guardSetLimit(lua_State* L);

@@ -485,56 +485,187 @@ int LuaScripting::lua_getHardwareCaps(lua_State* L) {
     return 1;
 }
 
+int LuaScripting::lua_setStdoutLogSuppressed(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+
+    const int nargs = lua_gettop(L);
+    if (nargs == 0) {
+        lua_pushboolean(L, ctx.suppress_stdout_logs);
+        return 1;
+    }
+
+    const bool enabled = lua_toboolean(L, 1);
+    const bool previous = ctx.suppress_stdout_logs;
+    ctx.suppress_stdout_logs = enabled;
+    Model::setFrameworkLogsSuppressed(enabled);
+
+    lua_pushboolean(L, previous);
+    lua_pushboolean(L, enabled);
+    return 2;
+}
+
 // ============================================================================
-// Layer Operations API (stubs - implémentation complète optionnelle)
+// Layer inspection API (read-only filters on the current model)
 // ============================================================================
 
+namespace {
+
+static void pushLuaLayerInfo(lua_State* L, const Layer& la, size_t index) {
+    lua_newtable(L);
+
+    lua_pushinteger(L, static_cast<lua_Integer>(index + 1));
+    lua_setfield(L, -2, "index");
+    lua_pushstring(L, la.name.c_str());
+    lua_setfield(L, -2, "name");
+    lua_pushstring(L, la.type.c_str());
+    lua_setfield(L, -2, "type");
+    lua_pushinteger(L, static_cast<lua_Integer>(la.getWeightsSize()));
+    lua_setfield(L, -2, "param_count");
+    lua_pushstring(L, la.output.c_str());
+    lua_setfield(L, -2, "output");
+
+    lua_createtable(L, static_cast<int>(la.inputs.size()), 0);
+    for (size_t j = 0; j < la.inputs.size(); ++j) {
+        lua_pushstring(L, la.inputs[j].c_str());
+        lua_rawseti(L, -2, static_cast<int>(j + 1));
+    }
+    lua_setfield(L, -2, "inputs");
+
+    lua_pushinteger(L, la.in_features);   lua_setfield(L, -2, "in_features");
+    lua_pushinteger(L, la.out_features);  lua_setfield(L, -2, "out_features");
+    lua_pushinteger(L, la.in_channels);   lua_setfield(L, -2, "in_channels");
+    lua_pushinteger(L, la.out_channels);  lua_setfield(L, -2, "out_channels");
+    lua_pushinteger(L, la.kernel_size);   lua_setfield(L, -2, "kernel_size");
+    lua_pushinteger(L, la.stride);        lua_setfield(L, -2, "stride");
+    lua_pushinteger(L, la.padding);       lua_setfield(L, -2, "padding");
+    lua_pushinteger(L, la.seq_len);       lua_setfield(L, -2, "seq_len");
+    lua_pushinteger(L, la.embed_dim);     lua_setfield(L, -2, "embed_dim");
+    lua_pushinteger(L, la.num_heads);     lua_setfield(L, -2, "num_heads");
+    lua_pushinteger(L, la.vocab_size);    lua_setfield(L, -2, "vocab_size");
+    lua_pushinteger(L, la.input_height);  lua_setfield(L, -2, "input_height");
+    lua_pushinteger(L, la.input_width);   lua_setfield(L, -2, "input_width");
+}
+
+template <typename Predicate>
+static int pushFilteredLayers(lua_State* L, Predicate predicate) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentModel) {
+        lua_newtable(L);
+        return 1;
+    }
+
+    const auto& layers = ctx.currentModel->getLayers();
+    int out_index = 1;
+    lua_newtable(L);
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const Layer& la = layers[i];
+        if (!predicate(la)) continue;
+        pushLuaLayerInfo(L, la, i);
+        lua_rawseti(L, -2, out_index++);
+    }
+    return 1;
+}
+
+static int pushLayersByExactType(lua_State* L, const std::string& requested_type) {
+    const std::string normalized = LayerRegistry::normalize_type(requested_type);
+    return pushFilteredLayers(L, [&](const Layer& la) {
+        return LayerRegistry::normalize_type(la.type) == normalized;
+    });
+}
+
+static bool isConv2dLike(const Layer& la) {
+    return la.type == "Conv2d" || la.type == "ConvTranspose2d" || la.type == "DepthwiseConv2d";
+}
+
+static bool isLinearLike(const Layer& la) {
+    return la.type == "Linear" || la.type == "MatMul" || la.type == "BatchMatMul" || la.type == "Bilinear";
+}
+
+static bool isMaxPoolLike(const Layer& la) {
+    return la.type == "MaxPool2d" || la.type == "GlobalMaxPool2d" || la.type == "Pool1d";
+}
+
+static bool isAvgPoolLike(const Layer& la) {
+    return la.type == "AvgPool2d" || la.type == "GlobalAvgPool2d";
+}
+
+static bool isActivationLike(const Layer& la) {
+    static const std::unordered_set<std::string> kActivationTypes = {
+        "ReLU", "GELU", "GEGLU", "SiLU", "LeakyReLU", "Tanh", "Sigmoid",
+        "Softmax", "LogSoftmax", "Swish", "Mish", "Softplus", "HardSigmoid", "HardSwish"
+    };
+    return kActivationTypes.find(la.type) != kActivationTypes.end();
+}
+
+static bool isBatchNormLike(const Layer& la) {
+    return la.type == "BatchNorm2d" || la.type == "InstanceNorm2d";
+}
+
+static bool isLayerNormLike(const Layer& la) {
+    return la.type == "LayerNorm" || la.type == "GroupNorm" || la.type == "RMSNorm";
+}
+
+static bool isAttentionLike(const Layer& la) {
+    return la.type == "Attention" || la.type == "MultiHeadAttention" || la.type == "SelfAttention" || la.type == "CrossAttention";
+}
+
+} // namespace
+
+int LuaScripting::lua_layersAvailable(lua_State* L) {
+    const auto types = LayerRegistry::get_all_supported_types();
+    lua_createtable(L, static_cast<int>(types.size()), 0);
+    for (size_t i = 0; i < types.size(); ++i) {
+        lua_pushstring(L, types[i].c_str());
+        lua_rawseti(L, -2, static_cast<int>(i + 1));
+    }
+    return 1;
+}
+
+int LuaScripting::lua_layersByType(lua_State* L) {
+    std::string requested_type;
+    if (lua_gettop(L) >= 1 && lua_isstring(L, 1)) {
+        requested_type = lua_tostring(L, 1);
+    } else if (lua_type(L, lua_upvalueindex(1)) == LUA_TSTRING) {
+        requested_type = lua_tostring(L, lua_upvalueindex(1));
+    }
+
+    if (requested_type.empty()) {
+        lua_newtable(L);
+        return 1;
+    }
+    return pushLayersByExactType(L, requested_type);
+}
+
 int LuaScripting::lua_computeConv2D(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isConv2dLike);
 }
 
 int LuaScripting::lua_computeLinear(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isLinearLike);
 }
 
 int LuaScripting::lua_computeMaxPool2D(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isMaxPoolLike);
 }
 
 int LuaScripting::lua_computeAvgPool2D(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isAvgPoolLike);
 }
 
 int LuaScripting::lua_computeActivation(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isActivationLike);
 }
 
 int LuaScripting::lua_computeBatchNorm(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isBatchNormLike);
 }
 
 int LuaScripting::lua_computeLayerNorm(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isLayerNormLike);
 }
 
 int LuaScripting::lua_computeAttention(lua_State* L) {
-    lua_pushboolean(L, false);
-    lua_pushstring(L, "Non implémenté - utilisez model.forward() à la place");
-    return 2;
+    return pushFilteredLayers(L, isAttentionLike);
 }
 
 // ============================================================================

@@ -705,6 +705,7 @@ bool Model::hasBMI2() {
 static std::unique_ptr<VulkanCompute::ComputeEngine> g_compute_engine = nullptr;
 #endif
 static bool g_compute_available = false;
+static bool g_suppress_framework_logs = false;
 
 // OpenCL compute engine (initialized on demand)
 #ifdef ENABLE_OPENCL
@@ -796,6 +797,14 @@ bool Model::hasVulkanCompute() const {
     return g_compute_available;
 }
 
+void Model::setFrameworkLogsSuppressed(bool enable) {
+    g_suppress_framework_logs = enable;
+}
+
+bool Model::frameworkLogsSuppressed() {
+    return g_suppress_framework_logs;
+}
+
 bool Model::hasOpenCLCompute() const {
     return g_opencl_available;
 }
@@ -831,7 +840,7 @@ bool Model::initializeCpuComputeEngine() {
             g_cpu_available = false;
             g_cpu_engine.reset();
         initialized.store(true, std::memory_order_release);
-        if (cfg_from_env.verbose) {
+        if (cfg_from_env.verbose && !Model::frameworkLogsSuppressed()) {
             std::cerr << "⚠ CPU runtime disabled via MIMIR_DISABLE_CPU" << std::endl;
         }
         return false;
@@ -845,14 +854,16 @@ bool Model::initializeCpuComputeEngine() {
     try {
         g_cpu_engine = std::make_unique<CpuRuntime>();
         g_cpu_available = g_cpu_engine->initialize(cfg);
-        if (g_cpu_available && cfg.verbose) {
+        if (g_cpu_available && cfg.verbose && !Model::frameworkLogsSuppressed()) {
             std::cerr << "✓ CPU Runtime initialized" << std::endl;
         }
         if (!g_cpu_available) {
             g_cpu_engine.reset();
         }
     } catch (const std::exception& e) {
-        std::cerr << "⚠ CPU Runtime unavailable: " << e.what() << std::endl;
+        if (!Model::frameworkLogsSuppressed()) {
+            std::cerr << "⚠ CPU Runtime unavailable: " << e.what() << std::endl;
+        }
         g_cpu_available = false;
         g_cpu_engine.reset();
     }
@@ -877,7 +888,9 @@ bool Model::initializeComputeEngine() {
             g_compute_available = false;
             g_compute_engine.reset();
             initialized.store(true, std::memory_order_release);
-            std::cerr << "⚠ Vulkan Compute disabled via MIMIR_DISABLE_VULKAN" << std::endl;
+            if (!Model::frameworkLogsSuppressed()) {
+                std::cerr << "⚠ Vulkan Compute disabled via MIMIR_DISABLE_VULKAN" << std::endl;
+            }
             return false;
         }
     }
@@ -898,13 +911,19 @@ bool Model::initializeComputeEngine() {
         g_compute_available = g_compute_engine->initialize();
         
         if (g_compute_available) {
+            if (!Model::frameworkLogsSuppressed()) {
             std::cerr << "✓ Vulkan Compute initialized" << std::endl;
+            }
         } else {
-            std::cerr << "⚠ Vulkan Compute initialization failed, using CPU fallback" << std::endl;
+            if (!Model::frameworkLogsSuppressed()) {
+                std::cerr << "⚠ Vulkan Compute initialization failed, using CPU fallback" << std::endl;
+            }
             g_compute_engine.reset();
         }
     } catch (const std::exception& e) {
-        std::cerr << "⚠ Vulkan Compute unavailable: " << e.what() << std::endl;
+        if (!Model::frameworkLogsSuppressed()) {
+            std::cerr << "⚠ Vulkan Compute unavailable: " << e.what() << std::endl;
+        }
         g_compute_available = false;
         g_compute_engine.reset();
     }
@@ -3664,7 +3683,9 @@ void Model::allocateParams() {
     
     auto& allocator = DynamicTensorAllocator::instance();
     
-    std::cerr << "📦 Allocation de " << layers.size() << " blocs de poids (" << tot << " paramètres au total)..." << std::endl;
+    if (!Model::frameworkLogsSuppressed()) {
+        std::cerr << "📦 Allocation de " << layers.size() << " blocs de poids (" << tot << " paramètres au total)..." << std::endl;
+    }
     
     // NOUVEAU: Allouer un tensor par layer au lieu d'un tensor par paramètre
     layer_weight_blocks.clear();
@@ -3681,12 +3702,16 @@ void Model::allocateParams() {
             // Lier le tensor au layer
             layers[i].weight_block = &layer_weight_blocks[i];
             
-            std::cerr << "  Layer " << i << " (" << layers[i].name << "): " 
-                      << layer_param_count << " paramètres dans 1 tensor" << std::endl;
+            if (!Model::frameworkLogsSuppressed()) {
+                std::cerr << "  Layer " << i << " (" << layers[i].name << "): " 
+                          << layer_param_count << " paramètres dans 1 tensor" << std::endl;
+            }
         }
     }
     
-    std::cerr << "✓ " << layers.size() << " blocs de poids créés (1 tensor par layer)" << std::endl;
+    if (!Model::frameworkLogsSuppressed()) {
+        std::cerr << "✓ " << layers.size() << " blocs de poids créés (1 tensor par layer)" << std::endl;
+    }
 }
 
 void Model::initializeWeights(const std::string &method, unsigned int seed) {

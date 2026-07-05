@@ -11,16 +11,20 @@
 --   -p, --params            Affiche les paramètres de l'archi sélectionnée
 --   --layers                Affiche les layers de l'archi sélectionnée
 --   --stats                 Affiche les statistiques théoriques (params/flops)
+--   --ops                   Inventorie les layer types / ops observés dans les graphes du framework
+--   --runtime               Affiche les capacités runtime exposées au Lua API
 --   -d, --dtypes            Liste les dtypes pris en charge par le framework
 --   --json                  Export JSON complet du registre (toutes archs + params)
 --   -h, --help              Affiche cette aide
 
--- log() peut être absent hors du binaire mimir : on fournit un fallback.
-local log = rawget(_G, "log")
-if type(log) ~= "function" then
-  log = function(...)
-    print(...)
+-- Les rapports doivent rester propres et sans préfixes runtime.
+-- On écrit donc directement sur stdout au lieu d'utiliser le logger Mimir.
+local function log(...)
+  local out = {}
+  for i = 1, select("#", ...) do
+    out[#out + 1] = tostring(select(i, ...))
   end
+  io.stdout:write(table.concat(out, " ") .. "\n")
 end
 
 local Args = dofile("scripts/modules/args.lua")
@@ -195,6 +199,9 @@ local function parse_flags(argv)
     help       = Args.has(opts_long, "help"),
     layers     = Args.has(opts_long, "layers"),
     stats      = Args.has(opts_long, "stats"),
+    ops        = Args.has(opts_long, "ops"),
+    ops_compact= Args.has(opts_long, "ops-compact") or Args.has(opts_long, "compact"),
+    runtime    = Args.has(opts_long, "runtime"),
     json_out   = Args.has(opts_long, "json"),
     arch       = Args.get_str(opts_long, "list", nil),
   }
@@ -227,9 +234,65 @@ local function print_usage()
   log("  " .. colorize("-p, --params", C.green) .. "            Affiche les paramètres de l'archi sélectionnée")
   log("  " .. colorize("    --layers", C.green) .. "            Affiche les layers de l'archi sélectionnée")
   log("  " .. colorize("    --stats", C.green) .. "             Affiche les statistiques théoriques (params par layer)")
+  log("  " .. colorize("    --ops", C.green) .. "               Inventorie les layer types / ops présents dans les graphes")
+  log("  " .. colorize("    --ops-compact", C.green) .. "       Vue compacte de --ops, regroupée par famille")
+  log("  " .. colorize("    --runtime", C.green) .. "           Affiche les capacités runtime exposées au Lua API")
   log("  " .. colorize("-d, --dtypes", C.green) .. "            Liste les dtypes pris en charge par le framework")
   log("  " .. colorize("    --json", C.green) .. "              Export JSON complet du registre")
   log("  " .. colorize("-h, --help", C.green) .. "              Affiche cette aide")
+end
+
+local function bool_text(v)
+  return v and "oui" or "non"
+end
+
+local function sorted_keys(map)
+  local keys = {}
+  for k in pairs(map or {}) do
+    keys[#keys + 1] = k
+  end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  return keys
+end
+
+local function join_sorted_set(map)
+  local keys = sorted_keys(map)
+  if #keys == 0 then return "-" end
+  return table.concat(keys, ", ")
+end
+
+local function create_arch(arch, allocate_params)
+  local ok, err = Mimir.Model.create(arch)
+  if not ok then
+    log(colorize("[ERROR] ", C.bold, C.red) .. "Impossible d'instancier '" .. arch .. "': " .. tostring(err))
+    return false
+  end
+  if allocate_params then
+    Mimir.Model.allocate_params()
+  end
+  return true
+end
+
+local function framework_log_suppression_available()
+  return type(Mimir) == "table"
+    and type(Mimir.IO) == "table"
+    and type(Mimir.IO.suppress_stdout_logs) == "function"
+end
+
+local function with_suppressed_framework_logs(fn)
+  if type(fn) ~= "function" then return nil, "fn must be a function" end
+  if not framework_log_suppression_available() then
+    return pcall(fn)
+  end
+
+  local previous = false
+  local ok_get, current = pcall(Mimir.IO.suppress_stdout_logs)
+  if ok_get then previous = current and true or false end
+
+  pcall(Mimir.IO.suppress_stdout_logs, true)
+  local ok, a, b, c, d = pcall(fn)
+  pcall(Mimir.IO.suppress_stdout_logs, previous)
+  return ok, a, b, c, d
 end
 
 -- Aplatit récursivement une config en lignes { key=<chemin>, value=<scalaire> }.
@@ -361,13 +424,14 @@ end
 
 -- Instancie l'architecture dans le contexte courant et retourne true/false.
 local function instantiate_arch(arch)
-  local ok, err = Mimir.Model.create(arch)
+  local ok, result = with_suppressed_framework_logs(function()
+    return create_arch(arch, true)
+  end)
   if not ok then
-    log(colorize("[ERROR] ", C.bold, C.red) .. "Impossible d'instancier '" .. arch .. "': " .. tostring(err))
+    log(colorize("[ERROR] ", C.bold, C.red) .. "Échec interne pendant l'analyse de '" .. arch .. "': " .. tostring(result))
     return false
   end
-  Mimir.Model.allocate_params()
-  return true
+  return result and true or false
 end
 
 -- --layers: affiche le tableau des layers du modèle courant.
@@ -396,12 +460,28 @@ local function show_layers(arch)
       return string.format("[c%d]", la.in_channels > 0 and la.in_channels or la.in_features)
     elseif t == "MultiHeadAttention" or t == "SelfAttention" or t == "CrossAttention" then
       return string.format("[seq%d, d%d, h%d]", la.seq_len, la.embed_dim, la.num_heads)
+    elseif t == "Add" or t == "Multiply" or t == "Subtract" then
+      return string.format("[%d entrées]", #(la.inputs or {}))
+    elseif t == "MatMul" then
+      return string.format("[%d entrées→matmul]", #(la.inputs or {}))
+    elseif t == "Split" then
+      return string.format("[%d entrée→split]", #(la.inputs or {}))
     elseif t == "Reshape" then
       return "→reshape"
     elseif t == "Permute" then
       return "→permute"
     elseif t == "Concat" then
-      return "→concat"
+      return string.format("[%d entrées→concat]", #(la.inputs or {}))
+    elseif t == "Chunk" then
+      return string.format("[%d entrée→chunk]", #(la.inputs or {}))
+    elseif t == "Stack" then
+      return string.format("[%d entrées→stack]", #(la.inputs or {}))
+    elseif t == "UpsampleNearest" or t == "UpsampleBilinear" or t == "Upsample" then
+      return "→upsample"
+    elseif t == "Softmax" or t == "LogSoftmax" then
+      return "→softmax"
+    elseif t == "Identity" then
+      return "→identity"
     end
     return ""
   end
@@ -428,6 +508,355 @@ local function show_layers(arch)
     { key = "output", title = "Output",  align = "left",   color = C.dim,     max = 36 },
   }
   log(make_table(columns, rows))
+  return true
+end
+
+local function collect_runtime_info()
+  local caps = {}
+  local ok_caps, caps_or_err = pcall(Mimir.Model.hardware_caps)
+  if ok_caps and type(caps_or_err) == "table" then
+    caps = caps_or_err
+  end
+
+  local guard = {}
+  local ok_guard, guard_or_err = pcall(Mimir.MemoryGuard.getStats)
+  if ok_guard and type(guard_or_err) == "table" then
+    guard = guard_or_err
+  end
+
+  local allocator = {}
+  local ok_allocator, allocator_or_err = pcall(Mimir.Allocator.getStats)
+  if ok_allocator and type(allocator_or_err) == "table" then
+    allocator = allocator_or_err
+  end
+
+  return {
+    hardware_caps = caps,
+    memory_guard = guard,
+    allocator = allocator,
+    apis = {
+      allocator = type(Mimir.Allocator) == "table",
+      hardware_caps = type(Mimir.Model.hardware_caps) == "function",
+      memory_guard = type(Mimir.MemoryGuard) == "table",
+      model_dtype = type(Mimir.Model.dtype) == "function",
+      serialization_detect_format = type(Mimir.Serialization) == "table" and type(Mimir.Serialization.detect_format) == "function",
+      serialization_load = type(Mimir.Serialization) == "table" and type(Mimir.Serialization.load) == "function",
+      serialization_save = type(Mimir.Serialization) == "table" and type(Mimir.Serialization.save) == "function",
+    },
+  }
+end
+
+local function show_runtime()
+  local info = collect_runtime_info()
+  log("\n" .. colorize("* Runtime – capacités exposées au Lua API", C.bold, C.blue))
+
+  log(colorize("  Hardware caps:", C.bold))
+  log(make_table({
+    { key = "feature", title = "Feature", align = "left", color = C.cyan, max = 12 },
+    { key = "enabled", title = "Disponible", align = "left", color = C.green, max = 10 },
+  }, {
+    { feature = "AVX2", enabled = bool_text(info.hardware_caps.avx2) },
+    { feature = "FMA", enabled = bool_text(info.hardware_caps.fma) },
+    { feature = "F16C", enabled = bool_text(info.hardware_caps.f16c) },
+    { feature = "BMI2", enabled = bool_text(info.hardware_caps.bmi2) },
+  }))
+
+  log(colorize("  MemoryGuard:", C.bold))
+  log(make_table({
+    { key = "metric", title = "Métrique", align = "left", color = C.cyan, max = 18 },
+    { key = "value", title = "Valeur", align = "right", color = C.green, max = 14 },
+  }, {
+    { metric = "current_mb", value = string.format("%.2f", tonumber(info.memory_guard.current_mb) or 0) },
+    { metric = "peak_mb", value = string.format("%.2f", tonumber(info.memory_guard.peak_mb) or 0) },
+    { metric = "limit_mb", value = string.format("%.2f", tonumber(info.memory_guard.limit_mb) or 0) },
+    { metric = "usage_percent", value = string.format("%.2f", tonumber(info.memory_guard.usage_percent) or 0) },
+  }))
+
+  log(colorize("  Allocator:", C.bold))
+  log(make_table({
+    { key = "metric", title = "Métrique", align = "left", color = C.cyan, max = 18 },
+    { key = "value", title = "Valeur", align = "right", color = C.green, max = 14 },
+  }, {
+    { metric = "tensor_count", value = tostring(info.allocator.tensor_count or 0) },
+    { metric = "loaded_count", value = tostring(info.allocator.loaded_count or 0) },
+  }))
+
+  local api_rows = {}
+  for _, key in ipairs(sorted_keys(info.apis)) do
+    api_rows[#api_rows + 1] = { api = key, present = bool_text(info.apis[key]) }
+  end
+  log(colorize("  APIs runtime disponibles:", C.bold))
+  log(make_table({
+    { key = "api", title = "API", align = "left", color = C.yellow, max = 30 },
+    { key = "present", title = "Présente", align = "left", color = C.green, max = 10 },
+  }, api_rows))
+
+  return info
+end
+
+local function collect_layer_bindings()
+  local ops = {
+    { name = "conv2d", label = "Conv2D" },
+    { name = "linear", label = "Linear" },
+    { name = "maxpool2d", label = "MaxPool2D" },
+    { name = "avgpool2d", label = "AvgPool2D" },
+    { name = "activation", label = "Activation" },
+    { name = "batchnorm", label = "BatchNorm" },
+    { name = "layernorm", label = "LayerNorm" },
+    { name = "attention", label = "Attention" },
+  }
+  local rows = {}
+  for _, op in ipairs(ops) do
+    local fn = type(Mimir.Layers) == "table" and Mimir.Layers[op.name] or nil
+    local status = "absente"
+    local detail = ""
+    if type(fn) == "function" then
+      local ok, a, b = pcall(fn)
+      if not ok then
+        status = "erreur"
+        detail = tostring(a)
+      elseif a == false then
+        status = "placeholder"
+        detail = tostring(b or "")
+      else
+        status = "active"
+        detail = tostring(b or "")
+      end
+    end
+    rows[#rows + 1] = {
+      op = op.label,
+      binding = "Mimir.Layers." .. op.name,
+      status = status,
+      detail = detail,
+    }
+  end
+  return rows
+end
+
+local function collect_graph_ops_summary()
+  local entries, err = Mimir.Architectures.info()
+  if type(entries) ~= "table" then
+    return nil, tostring(err)
+  end
+
+  local graph_ops = {}
+  local failures = {}
+  local ok_collect, collect_err = with_suppressed_framework_logs(function()
+    for _, entry in ipairs(entries) do
+      local arch = tostring(entry.name)
+      local cfg = type(entry.config) == "table" and entry.config or {}
+      if arch == "external_safetensors_base"
+        and (type(cfg.source_safetensors) ~= "string" or cfg.source_safetensors == "") then
+        failures[#failures + 1] = arch
+      elseif create_arch(arch, false) then
+        local layers = Mimir.Model.get_layers()
+        if type(layers) == "table" then
+          for _, la in ipairs(layers) do
+            local ltype = tostring(la.type or "?")
+            local info = graph_ops[ltype]
+            if not info then
+              info = {
+                type = ltype,
+                count = 0,
+                archs = {},
+                sample = tostring(la.name or ""),
+                lua_binding = "-",
+              }
+              if type(Mimir.Layers) == "table" then
+                local key = string.lower(ltype)
+                if type(Mimir.Layers[key]) == "function" then
+                  info.lua_binding = "Mimir.Layers." .. key
+                end
+              end
+              graph_ops[ltype] = info
+            end
+            info.count = info.count + 1
+            info.archs[arch] = true
+          end
+        end
+      else
+        failures[#failures + 1] = arch
+      end
+    end
+  end)
+  if not ok_collect then
+    return nil, tostring(collect_err)
+  end
+
+  local rows = {}
+  for _, ltype in ipairs(sorted_keys(graph_ops)) do
+    local info = graph_ops[ltype]
+    rows[#rows + 1] = {
+      type = ltype,
+      count = tostring(info.count),
+      arch_count = tostring(#sorted_keys(info.archs)),
+      archs = join_sorted_set(info.archs),
+      binding = info.lua_binding,
+      sample = info.sample,
+    }
+  end
+  table.sort(rows, function(a, b)
+    local ca = tonumber(a.arch_count) or 0
+    local cb = tonumber(b.arch_count) or 0
+    if ca ~= cb then return ca > cb end
+    return a.type < b.type
+  end)
+
+  return {
+    rows = rows,
+    failures = failures,
+    bindings = collect_layer_bindings(),
+  }
+end
+
+local function classify_op_family(ltype)
+  local t = tostring(ltype or "")
+  if t == "Conv2d" or t == "ConvTranspose2d" or t == "DepthwiseConv2d"
+    or t == "GlobalAvgPool2d" or t == "MaxPool2d" or t == "AvgPool2d"
+    or t == "UpsampleNearest" or t == "UpsampleBilinear" or t == "Upsample" then
+    return "vision_spatial"
+  end
+  if t == "LayerNorm" or t == "GroupNorm" or t == "BatchNorm2d"
+    or t == "RMSNorm" or t == "InstanceNorm2d" then
+    return "normalization"
+  end
+  if t == "MultiHeadAttention" or t == "SelfAttention" or t == "CrossAttention" then
+    return "attention"
+  end
+  if t == "Linear" or t == "MatMul" or t == "BatchMatMul" then
+    return "linear_algebra"
+  end
+  if t == "Embedding" or t == "TokenMeanPool" then
+    return "token_embedding"
+  end
+  if t == "Add" or t == "Multiply" or t == "Subtract" or t == "Concat"
+    or t == "Split" or t == "Chunk" or t == "Stack" or t == "Reshape"
+    or t == "Permute" or t == "Transpose" or t == "Flatten" or t == "Identity"
+    or t == "Constant" or t == "View" then
+    return "routing_shape"
+  end
+  if t == "ReLU" or t == "GELU" or t == "GEGLU" or t == "SiLU"
+    or t == "LeakyReLU" or t == "Tanh" or t == "Softmax" or t == "LogSoftmax"
+    or t == "Sigmoid" or t == "Swish" then
+    return "activations"
+  end
+  if t == "Reparameterize" then
+    return "latent_sampling"
+  end
+  return "other"
+end
+
+local function family_label(family)
+  local labels = {
+    activations = "Activations",
+    attention = "Attention",
+    latent_sampling = "Latent / sampling",
+    linear_algebra = "Linear / algebra",
+    normalization = "Normalisation",
+    other = "Autres",
+    routing_shape = "Routing / shape",
+    token_embedding = "Tokens / embeddings",
+    vision_spatial = "Vision / spatial",
+  }
+  return labels[family] or family
+end
+
+local function summarize_op_families(summary)
+  local families = {}
+  for _, row in ipairs(summary.rows or {}) do
+    local family = classify_op_family(row.type)
+    local item = families[family]
+    if not item then
+      item = {
+        family = family,
+        types = 0,
+        occ = 0,
+        archs = {},
+        bound = 0,
+        samples = {},
+      }
+      families[family] = item
+    end
+    item.types = item.types + 1
+    item.occ = item.occ + (tonumber(row.count) or 0)
+    if row.binding and row.binding ~= "-" then
+      item.bound = item.bound + 1
+    end
+    if row.sample and row.sample ~= "" and #item.samples < 3 then
+      item.samples[#item.samples + 1] = row.sample
+    end
+    local archs = tostring(row.archs or "")
+    if archs ~= "" and archs ~= "-" then
+      for arch in archs:gmatch("[^,]+") do
+        item.archs[(arch:gsub("^%s+", ""):gsub("%s+$", ""))] = true
+      end
+    end
+  end
+
+  local rows = {}
+  for _, family in ipairs(sorted_keys(families)) do
+    local item = families[family]
+    rows[#rows + 1] = {
+      family = family_label(family),
+      types = tostring(item.types),
+      occ = tostring(item.occ),
+      arch_count = tostring(#sorted_keys(item.archs)),
+      bound = string.format("%d/%d", item.bound, item.types),
+      samples = (#item.samples > 0) and table.concat(item.samples, ", ") or "-",
+    }
+  end
+
+  table.sort(rows, function(a, b)
+    local oa = tonumber(a.occ) or 0
+    local ob = tonumber(b.occ) or 0
+    if oa ~= ob then return oa > ob end
+    return a.family < b.family
+  end)
+  return rows
+end
+
+local function show_ops(opts)
+  log("\n" .. colorize("* Ops / Layers – inventaire du framework", C.bold, C.blue))
+  local summary, err = collect_graph_ops_summary()
+  if not summary then
+    log(colorize("[ERROR] ", C.bold, C.red) .. tostring(err))
+    return false
+  end
+
+  if opts and opts.ops_compact then
+    local family_rows = summarize_op_families(summary)
+    log(colorize("  Vue compacte par famille:", C.bold))
+    log(make_table({
+      { key = "family", title = "Famille", align = "left", color = C.cyan, max = 22 },
+      { key = "types", title = "Types", align = "right", color = C.yellow, max = 7 },
+      { key = "occ", title = "Occ.", align = "right", color = C.green, max = 8 },
+      { key = "arch_count", title = "Archs", align = "right", color = C.magenta, max = 7 },
+      { key = "bound", title = "Bindings", align = "right", color = C.blue, max = 10 },
+      { key = "samples", title = "Exemples", align = "left", color = nil, max = 46 },
+    }, family_rows))
+  else
+    log(colorize("  Layer types observés dans les graphes d'architectures:", C.bold))
+    log(make_table({
+      { key = "type", title = "Type", align = "left", color = C.cyan, max = 24 },
+      { key = "count", title = "Occ.", align = "right", color = C.green, max = 8 },
+      { key = "arch_count", title = "Archs", align = "right", color = C.yellow, max = 8 },
+      { key = "binding", title = "Binding Lua", align = "left", color = C.magenta, max = 22 },
+      { key = "sample", title = "Exemple", align = "left", color = nil, max = 46 },
+    }, summary.rows))
+  end
+
+  log(colorize("  Bindings low-level Mimir.Layers:", C.bold))
+  log(make_table({
+    { key = "op", title = "Op", align = "left", color = C.cyan, max = 14 },
+    { key = "binding", title = "Binding", align = "left", color = C.yellow, max = 28 },
+    { key = "status", title = "État", align = "left", color = C.green, max = 14 },
+    { key = "detail", title = "Détail", align = "left", color = nil, max = 60 },
+  }, summary.bindings))
+
+  if #summary.failures > 0 then
+    log(colorize("  Architectures non instanciées pour l'inventaire: ", C.bold, C.yellow)
+      .. table.concat(summary.failures, ", "))
+  end
   return true
 end
 
@@ -576,7 +1005,7 @@ local function export_json()
     -- Optionnel: instancier pour obtenir le total_params réel.
     local total = 0
     local layer_list = {}
-    local ok_inst = pcall(function()
+    local ok_inst = with_suppressed_framework_logs(function()
       Mimir.Model.create(entry.name)
       Mimir.Model.allocate_params()
       total = Mimir.Model.total_params()
@@ -605,7 +1034,17 @@ local function export_json()
     }
   end
 
-  io.write(to_json({ registry = registry }, 0))
+  local ops_summary = collect_graph_ops_summary()
+  local ops_compact = nil
+  if type(ops_summary) == "table" then
+    ops_compact = summarize_op_families(ops_summary)
+  end
+  io.write(to_json({
+    registry = registry,
+    runtime = collect_runtime_info(),
+    ops = ops_summary,
+    ops_compact = ops_compact,
+  }, 0))
   io.write("\n")
   io.flush()
   return true
@@ -625,7 +1064,7 @@ if opts.json_out then
 end
 
 -- Aucun flag utile : on affiche l'aide.
-if not opts.show_archs and not opts.arch and not opts.dtypes then
+if not opts.show_archs and not opts.arch and not opts.dtypes and not opts.ops and not opts.runtime then
   print_usage()
   return
 end
@@ -635,6 +1074,14 @@ if opts.show_archs then
   list_dtypes()
 elseif opts.dtypes then
   list_dtypes()
+end
+
+if opts.runtime then
+  show_runtime()
+end
+
+if opts.ops then
+  show_ops(opts)
 end
 
 if opts.arch then
