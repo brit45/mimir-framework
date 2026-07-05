@@ -13,6 +13,38 @@
 local Args = dofile("scripts/modules/args.lua")
 
 -- ---------------------------------------------------------------------------
+-- Couleurs ANSI (désactivées si NO_COLOR)
+-- ---------------------------------------------------------------------------
+
+local COLOR_ENABLED = true
+do
+    if os.getenv("NO_COLOR") ~= nil then
+        COLOR_ENABLED = false
+    end
+end
+
+local C = {
+    reset = "\27[0m",
+    bold = "\27[1m",
+    dim = "\27[2m",
+    red = "\27[31m",
+    green = "\27[32m",
+    yellow = "\27[33m",
+    blue = "\27[34m",
+    magenta = "\27[35m",
+    cyan = "\27[36m",
+    gray = "\27[90m",
+}
+
+local function colorize(s, ...)
+    s = tostring(s)
+    if not COLOR_ENABLED then return s end
+    local codes = { ... }
+    if #codes == 0 then return s end
+    return table.concat(codes) .. s .. C.reset
+end
+
+-- ---------------------------------------------------------------------------
 -- Utils
 -- ---------------------------------------------------------------------------
 
@@ -270,19 +302,20 @@ local function make_table(columns, rows)
             parts[#parts + 1] = string.rep(ch, widths[ci] + 2)
             parts[#parts + 1] = "+"
         end
-        return table.concat(parts)
+        return colorize(table.concat(parts), C.gray)
     end
 
+    local bar = colorize("|", C.gray)
     local out = {}
     out[#out + 1] = sep("-")
 
     do
-        local parts = { "|" }
+        local parts = { bar }
         for ci = 1, #columns do
             local col = columns[ci]
             local title = tostring(col.title or col.key or "")
-            parts[#parts + 1] = " " .. pad_right(title, widths[ci]) .. " "
-            parts[#parts + 1] = "|"
+            parts[#parts + 1] = " " .. colorize(pad_right(title, widths[ci]), C.bold, C.cyan) .. " "
+            parts[#parts + 1] = bar
         end
         out[#out + 1] = table.concat(parts)
     end
@@ -306,7 +339,7 @@ local function make_table(columns, rows)
             if #lines_ci > max_lines then max_lines = #lines_ci end
         end
         for li = 1, max_lines do
-            local parts = { "|" }
+            local parts = { bar }
             for ci = 1, #columns do
                 local col = columns[ci]
                 local s = col_lines[ci][li] or ""
@@ -316,8 +349,11 @@ local function make_table(columns, rows)
                 else
                     cell = pad_right(s, widths[ci])
                 end
+                if col.color then
+                    cell = colorize(cell, col.color)
+                end
                 parts[#parts + 1] = " " .. cell .. " "
-                parts[#parts + 1] = "|"
+                parts[#parts + 1] = bar
             end
             out[#out + 1] = table.concat(parts)
         end
@@ -573,13 +609,31 @@ end
 local function layer_dims(layer)
     if type(layer) ~= "table" then return "" end
 
-    -- DebugJson v1.1.0 met souvent les infos de dimensions sous `layer.config`.
+    -- DebugJson enhanced (v1.3+) met souvent les infos de dimensions sous `layer.config`.
     local cfg = (type(layer.config) == "table") and layer.config or layer
+    local ltype = tostring(layer.type or cfg.type or "")
 
     local function n(x)
         x = tonumber(x)
         if not x or x <= 0 then return nil end
         return math.floor(x)
+    end
+
+    local function vec_to_string(v)
+        if type(v) ~= "table" or #v == 0 then return nil end
+        local out = {}
+        for i = 1, #v do
+            out[#out + 1] = tostring(v[i])
+        end
+        return table.concat(out, "x")
+    end
+
+    local function first_present(...)
+        for i = 1, select("#", ...) do
+            local v = select(i, ...)
+            if v ~= nil then return v end
+        end
+        return nil
     end
 
     local in_f = n(cfg.in_features)
@@ -640,6 +694,108 @@ local function layer_dims(layer)
             return string.format("embed=%d heads=%d seq=%d", embed, heads, seq)
         end
         return string.format("embed=%d heads=%d", embed, heads)
+    end
+
+    local vocab = n(cfg.vocab_size)
+    if ltype == "Embedding" and vocab and embed then
+        return string.format("%d×%d", vocab, embed)
+    end
+
+    if ltype == "Concat" then
+        local axis = first_present(n(cfg.concat_axis), n(cfg.axis))
+        local n_inputs = (type(layer.inputs) == "table") and #layer.inputs or nil
+        local parts = {}
+        if axis ~= nil then parts[#parts + 1] = "axis=" .. axis end
+        if n_inputs and n_inputs > 0 then parts[#parts + 1] = "in=" .. n_inputs end
+        return (#parts > 0) and table.concat(parts, " ") or "concat"
+    end
+
+    if ltype == "Split" then
+        local axis = first_present(n(cfg.split_axis), n(cfg.axis))
+        local sizes = vec_to_string(cfg.split_sizes)
+        local num_splits = n(cfg.num_splits)
+        local parts = {}
+        if axis ~= nil then parts[#parts + 1] = "axis=" .. axis end
+        if sizes then parts[#parts + 1] = "sizes=" .. sizes
+        elseif num_splits then parts[#parts + 1] = "n=" .. num_splits end
+        return (#parts > 0) and table.concat(parts, " ") or "split"
+    end
+
+    if ltype == "Add" or ltype == "Multiply" or ltype == "Subtract" then
+        local n_inputs = (type(layer.inputs) == "table") and #layer.inputs or nil
+        if n_inputs and n_inputs > 0 then
+            return string.format("inputs=%d", n_inputs)
+        end
+        return string.lower(ltype)
+    end
+
+    if ltype == "MatMul" or ltype == "BatchMatMul" then
+        if in_f and out_f then
+            return string.format("%d×%d", in_f, out_f)
+        end
+        local seq = n(cfg.seq_len)
+        if embed and seq then
+            return string.format("seq=%d d=%d", seq, embed)
+        end
+        return string.lower(ltype)
+    end
+
+    if ltype == "Reshape" or ltype == "View" then
+        local shape = vec_to_string(cfg.target_shape) or vec_to_string(cfg.shape)
+        if shape then return "[" .. shape .. "]" end
+        return string.lower(ltype)
+    end
+
+    if ltype == "Permute" or ltype == "Transpose" then
+        local dims = vec_to_string(cfg.permute_dims) or vec_to_string(cfg.shape)
+        if dims then return dims end
+        return string.lower(ltype)
+    end
+
+    if ltype == "Upsample" or ltype == "UpsampleNearest" or ltype == "UpsampleBilinear" then
+        local out_h = n(cfg.out_h)
+        local out_w = n(cfg.out_w)
+        if out_h and out_w then
+            return string.format("out=%dx%d", out_h, out_w)
+        end
+        local scale_h = tonumber(cfg.scale_h)
+        local scale_w = tonumber(cfg.scale_w)
+        if scale_h or scale_w then
+            return string.format("scale=%sx%s", tostring(scale_h or "?"), tostring(scale_w or "?"))
+        end
+        return "upsample"
+    end
+
+    if ltype == "Chunk" then
+        local axis = first_present(n(cfg.axis), n(cfg.split_axis))
+        local num_chunks = n(cfg.num_chunks)
+        if axis ~= nil and num_chunks then
+            return string.format("axis=%d n=%d", axis, num_chunks)
+        elseif num_chunks then
+            return string.format("n=%d", num_chunks)
+        end
+        return "chunk"
+    end
+
+    if ltype == "Stack" then
+        local axis = first_present(n(cfg.stack_axis), n(cfg.axis))
+        if axis ~= nil then return "axis=" .. axis end
+        return "stack"
+    end
+
+    if ltype == "Softmax" or ltype == "LogSoftmax" then
+        local axis = n(cfg.axis)
+        if axis ~= nil then return "axis=" .. axis end
+        return string.lower(ltype)
+    end
+
+    if ltype == "LayerNorm" or ltype == "RMSNorm" then
+        if embed then return "d=" .. embed end
+        if in_f then return tostring(in_f) end
+    end
+
+    if ltype == "Identity" then
+        return "identity"
     end
 
     return ""
@@ -976,11 +1132,17 @@ local function analyze_debug_json(path, opts)
         debug_only = root.debug_only,
     }
 
+    local framework_state = nil
+    if type(root.framework_state) == "table" then
+        framework_state = root.framework_state
+    end
+
     return {
         format = "debug_json",
         path = path,
         metadata = meta,
         arch = arch,
+        framework_state = framework_state,
         tensors = tensors,
         totals = {
             tensors = #tensors,
@@ -1027,6 +1189,17 @@ local function render_summary(info, opts)
 
     if meta.debug_only ~= nil then
         rows[#rows + 1] = { k = "Debug only", v = tostring(meta.debug_only) }
+    end
+
+    if type(info.framework_state) == "table" then
+        local fs = info.framework_state
+        local snap_ver = tostring(fs.snapshot_version or "?")
+        local snap_ts = fs.snapshot_timestamp
+        local snap_txt = "v" .. snap_ver
+        if snap_ts ~= nil then
+            snap_txt = snap_txt .. " @ " .. format_epoch(snap_ts)
+        end
+        rows[#rows + 1] = { k = "Framework snapshot", v = snap_txt }
     end
 
     if type(meta.warning) == "string" and meta.warning ~= "" then
@@ -1082,11 +1255,138 @@ local function render_summary(info, opts)
 
     local wrap_all = opts.all == true
     local columns = {
-        { key = "k", title = "Clé", align = "left", max = 28 },
-        { key = "v", title = "Valeur", align = "left", max = 100, wrap = wrap_all },
+        { key = "k", title = "Clé", align = "left", max = 28, color = C.yellow },
+        { key = "v", title = "Valeur", align = "left", max = 100, wrap = wrap_all, color = C.green },
     }
 
     return make_table(columns, rows)
+end
+
+local function render_framework_state(info, opts)
+    local fs = info.framework_state
+    if type(fs) ~= "table" then return nil end
+
+    local chunks = {}
+
+    do
+        local runtime = (type(fs.runtime) == "table") and fs.runtime or {}
+        local rows = {
+            { k = "snapshot_version", v = tostring(fs.snapshot_version or "?") },
+            { k = "snapshot_time", v = format_epoch(fs.snapshot_timestamp) },
+            { k = "framework_logs_suppressed", v = tostring(runtime.framework_logs_suppressed) },
+        }
+
+        if type(runtime.cpu_features) == "table" then
+            local cf = runtime.cpu_features
+            rows[#rows + 1] = {
+                k = "cpu_features",
+                v = string.format("avx2=%s fma=%s f16c=%s bmi2=%s", tostring(cf.avx2), tostring(cf.fma), tostring(cf.f16c), tostring(cf.bmi2))
+            }
+        end
+
+        local columns = {
+            { key = "k", title = "Runtime", align = "left", max = 28, color = C.yellow },
+            { key = "v", title = "Valeur", align = "left", max = 100, wrap = true, color = C.green },
+        }
+        chunks[#chunks + 1] = make_table(columns, rows)
+    end
+
+    do
+        local runtime = (type(fs.runtime) == "table") and fs.runtime or {}
+        local backends = (type(runtime.backends) == "table") and runtime.backends or {}
+        local order = { "cpu", "cuda", "rocm", "opencl", "vulkan" }
+        local rows = {}
+        for _, k in ipairs(order) do
+            local b = backends[k]
+            if type(b) == "table" then
+                rows[#rows + 1] = {
+                    backend = k,
+                    compiled = tostring(b.compiled),
+                    available = tostring(b.available),
+                    disabled = (type(b.config) == "table") and tostring(b.config.disabled) or "",
+                    verbose = (type(b.config) == "table") and tostring(b.config.verbose) or "",
+                    device = (type(b.config) == "table" and b.config.device_index ~= nil) and tostring(b.config.device_index) or "",
+                }
+            end
+        end
+        if #rows > 0 then
+            local columns = {
+                { key = "backend", title = "Backend", align = "left", max = 10, color = C.cyan },
+                { key = "compiled", title = "Built", align = "left", max = 8, color = C.magenta },
+                { key = "available", title = "Avail", align = "left", max = 8, color = C.green },
+                { key = "disabled", title = "Disabled", align = "left", max = 9, color = C.yellow },
+                { key = "verbose", title = "Verbose", align = "left", max = 8, color = C.blue },
+                { key = "device", title = "Device", align = "right", max = 7, color = C.gray },
+            }
+            chunks[#chunks + 1] = make_table(columns, rows)
+        end
+    end
+
+    do
+        local mem = (type(fs.memory) == "table") and fs.memory or {}
+        local mg = (type(mem.memory_guard) == "table") and mem.memory_guard or {}
+        local da = (type(mem.dynamic_tensor_allocator) == "table") and mem.dynamic_tensor_allocator or {}
+        local ram = (type(mem.advanced_ram_manager) == "table") and mem.advanced_ram_manager or {}
+
+        local rows = {
+            { k = "memory_guard", v = string.format("current=%s peak=%s limit=%s usage=%.2f%% blocked=%s freeze=%s",
+                format_bytes(tonumber(mg.current_bytes) or 0),
+                format_bytes(tonumber(mg.peak_bytes) or 0),
+                format_bytes(tonumber(mg.limit_bytes) or 0),
+                tonumber(mg.usage_percent) or 0,
+                tostring(mg.allocations_blocked),
+                tostring(mg.freeze_mode)
+            ) },
+            { k = "allocator", v = string.format("tensors=%s loaded=%s",
+                format_int(tonumber(da.tensor_count) or 0),
+                format_int(tonumber(da.loaded_count) or 0)
+            ) },
+            { k = "advanced_ram", v = string.format("current=%s peak=%s usage=%.2f%% blocked=%s freeze=%s",
+                format_bytes(tonumber(ram.current_bytes) or 0),
+                format_bytes(tonumber(ram.peak_bytes) or 0),
+                tonumber(ram.usage_percent) or 0,
+                tostring(ram.allocations_blocked),
+                tostring(ram.freeze_mode)
+            ) },
+        }
+
+        local columns = {
+            { key = "k", title = "Mémoire", align = "left", max = 18, color = C.yellow },
+            { key = "v", title = "État", align = "left", max = 110, wrap = true, color = C.green },
+        }
+        chunks[#chunks + 1] = make_table(columns, rows)
+    end
+
+    do
+        local reg = (type(fs.registry) == "table") and fs.registry or {}
+        local mt = (type(fs.model) == "table") and fs.model or {}
+        local env = (type(fs.runtime) == "table" and type(fs.runtime.environment_overrides) == "table") and fs.runtime.environment_overrides or {}
+
+        local env_parts = {}
+        for k, v in pairs(env) do
+            env_parts[#env_parts + 1] = tostring(k) .. "=" .. tostring(v)
+        end
+        table.sort(env_parts)
+
+        local rows = {
+            { k = "supported_layers", v = format_int(tonumber(reg.supported_layer_count) or 0) },
+            { k = "model_state", v = string.format("dtype=%s params=%s layers=%s frozen=%s",
+                tostring(mt.default_dtype or "?"),
+                format_int(tonumber(mt.total_params) or 0),
+                format_int(tonumber(mt.num_layers) or 0),
+                tostring(mt.parameters_frozen)
+            ) },
+            { k = "env_overrides", v = (#env_parts > 0) and table.concat(env_parts, "  ") or "(none)" },
+        }
+
+        local columns = {
+            { key = "k", title = "Registry/Model", align = "left", max = 18, color = C.yellow },
+            { key = "v", title = "Valeur", align = "left", max = 110, wrap = true, color = C.green },
+        }
+        chunks[#chunks + 1] = make_table(columns, rows)
+    end
+
+    return table.concat(chunks, "\n\n")
 end
 
 local function render_layers(info, opts)
@@ -1115,12 +1415,12 @@ local function render_layers(info, opts)
     end
 
     local columns = {
-        { key = "idx", title = "#", align = "right", max = 6 },
-        { key = "name", title = "Layer", align = "left", max = 72 },
-        { key = "type", title = "Type", align = "left", max = 20 },
-        { key = "params", title = "Params", align = "right", max = 14 },
-        { key = "weights", title = "Weights", align = "right", max = 14 },
-        { key = "dims", title = "Dims", align = "left", max = 46 },
+        { key = "idx", title = "#", align = "right", max = 6, color = C.gray },
+        { key = "name", title = "Layer", align = "left", max = 72, color = C.yellow },
+        { key = "type", title = "Type", align = "left", max = 20, color = C.cyan },
+        { key = "params", title = "Params", align = "right", max = 14, color = C.green },
+        { key = "weights", title = "Weights", align = "right", max = 14, color = C.magenta },
+        { key = "dims", title = "Dims", align = "left", max = 46, color = C.blue },
     }
 
     local table_str = make_table(columns, rows)
@@ -1218,11 +1518,11 @@ local function render_graph(info, opts)
     }
 
     local columns = {
-        { key = "idx", title = "#", align = "right", max = 6 },
-        { key = "name", title = "Layer", align = "left", max = 72 },
-        { key = "type", title = "Type", align = "left", max = 20 },
-        { key = "ins", title = "Inputs", align = "left", max = 46 },
-        { key = "out", title = "Output", align = "left", max = 18 },
+        { key = "idx", title = "#", align = "right", max = 6, color = C.gray },
+        { key = "name", title = "Layer", align = "left", max = 72, color = C.yellow },
+        { key = "type", title = "Type", align = "left", max = 20, color = C.cyan },
+        { key = "ins", title = "Inputs", align = "left", max = 46, color = C.magenta },
+        { key = "out", title = "Output", align = "left", max = 18, color = C.green },
     }
 
     local table_str = make_table(columns, rows)
@@ -1534,12 +1834,12 @@ local function render_top_tensors(info, opts)
     end
 
     local columns = {
-        { key = "idx", title = "#", align = "right", max = 6 },
-        { key = "name", title = "Tensor", align = "left", max = 78 },
-        { key = "dtype", title = "DType", align = "left", max = 8 },
-        { key = "shape", title = "Shape", align = "left", max = 36 },
-        { key = "elems", title = "Elems", align = "right", max = 16 },
-        { key = "bytes", title = "Taille", align = "right", max = 12 },
+        { key = "idx", title = "#", align = "right", max = 6, color = C.gray },
+        { key = "name", title = "Tensor", align = "left", max = 78, color = C.yellow },
+        { key = "dtype", title = "DType", align = "left", max = 8, color = C.cyan },
+        { key = "shape", title = "Shape", align = "left", max = 36, color = C.blue },
+        { key = "elems", title = "Elems", align = "right", max = 16, color = C.magenta },
+        { key = "bytes", title = "Taille", align = "right", max = 12, color = C.green },
     }
 
     return make_table(columns, rows)
@@ -1547,19 +1847,19 @@ end
 
 local function render_help()
     local lines = {
-        "Analyseur de modèles/checkpoints Mimir (SafeTensors / RawFolder / DebugJson)",
+        colorize("Analyseur de modèles/checkpoints Mimir (SafeTensors / RawFolder / DebugJson)", C.bold, C.blue),
         "",
-        "Usage:",
+        colorize("Usage:", C.bold, C.cyan),
         "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in model.safetensors",
         "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in checkpoint_dir/",
         "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in debug.json",
         "",
-        "Formats supportés:",
+        colorize("Formats supportés:", C.bold, C.cyan),
         "  - SafeTensors: *.safetensors (ou *.st)",
         "  - RawFolder  : dossier contenant manifest.json",
-        "  - DebugJson  : dump JSON (format=mimir_debug_dump ou JSON enhanced v1.1)",
+        "  - DebugJson  : dump JSON (format=mimir_debug_dump ou JSON enhanced v1.3)",
         "",
-        "Options:",
+        colorize("Options:", C.bold, C.cyan),
         "  --in <path>                         Chemin du modèle (requis)",
         "  --max-layers <n>                    Limite l'affichage des couches / graphe",
         "  --top-tensors <n>                   Nb de tensors listés (par taille)",
@@ -1574,7 +1874,7 @@ local function render_help()
         "  --debug <bool>                      Logs de debug (défaut: false)",
         "  --script-help <bool>                Affiche cette aide (alias: --help-script, --h)",
         "",
-        "Notes:",
+        colorize("Notes:", C.bold, C.cyan),
         "  - Le graphe Mermaid est émis en Markdown via un bloc ```mermaid```.",
         "  - Les dumps DebugJson n'embarquent pas forcément inputs/output; dans ce cas le graphe Mermaid",
         "    utilise un fallback linéaire (layer1 -> layer2 -> ...).",
@@ -1653,12 +1953,19 @@ if not info then
     die(err or "analyse échouée")
 end
 
-log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-log("  Analyse modèle")
-log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log(colorize("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", C.blue, C.bold))
+log(colorize("  Analyse modèle", C.bold, C.cyan))
+log(colorize("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", C.blue, C.bold))
 log("")
 
 log(render_summary(info, opts))
+
+local fw_state = render_framework_state(info, opts)
+if fw_state then
+    log("")
+    log(colorize("État framework (snapshot)", C.bold, C.blue))
+    log(fw_state)
+end
 
 do
     local gf = tostring(opts.graph_format or "table"):lower()
@@ -1666,21 +1973,21 @@ do
         local md = render_graph_mermaid_markdown(info, opts)
         if md then
             log("")
-            log("Graphe (Mermaid/Markdown)")
+            log(colorize("Graphe (Mermaid/Markdown)", C.bold, C.blue))
             log(md)
         end
     elseif gf == "blocks" then
         local blocks = render_graph_blocks(info, opts)
         if blocks then
             log("")
-            log("Graphe (blocks)")
+            log(colorize("Graphe (blocks)", C.bold, C.blue))
             log(blocks)
         end
     else
         local graph = render_graph(info, opts)
         if graph then
             log("")
-            log("Résumé (graphe)")
+            log(colorize("Résumé (graphe)", C.bold, C.blue))
             log(graph)
         end
 
@@ -1688,7 +1995,7 @@ do
             local blocks = render_graph_blocks(info, opts)
             if blocks then
                 log("")
-                log("Graphe (blocks)")
+                log(colorize("Graphe (blocks)", C.bold, C.blue))
                 log(blocks)
             end
         end
@@ -1698,16 +2005,16 @@ end
 local layers = render_layers(info, opts)
 if layers then
     log("")
-    log("Couches")
+    log(colorize("Couches", C.bold, C.blue))
     log(layers)
 end
 
 local top_t = render_top_tensors(info, opts)
 if top_t then
     log("")
-    log("Top tensors (par taille)")
+    log(colorize("Top tensors (par taille)", C.bold, C.blue))
     log(top_t)
 end
 
 log("")
-log("✓ Analyse terminée")
+log(colorize("✓ Analyse terminée", C.bold, C.green))

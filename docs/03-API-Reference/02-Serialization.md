@@ -27,7 +27,7 @@ Pour la référence complète (formats, options, comportements), voir :
 
 - SafeTensors : format “production” (interop avec écosystème HF)
 - RawFolder : debug (dossiers + checksums)
-- DebugJson : inspection (statistiques)
+- DebugJson : inspection (statistiques + snapshot framework_state en v1.3)
 
 ## API Lua (résumé)
 
@@ -38,7 +38,7 @@ Les fonctions sont exposées sous `Mimir.Serialization`.
 | `Mimir.Serialization.save(path)` | sauvegarde checkpoint (poids + artefacts associés) | `Mimir.Serialization.save("checkpoint/run1.safetensors")` |
 | `Mimir.Serialization.load(path)` | charge un checkpoint | `Mimir.Serialization.load("checkpoint/run1.safetensors")` |
 | `Mimir.Serialization.detect_format(path)` | détecte le format | `Mimir.Serialization.detect_format("...")` |
-| `Mimir.Serialization.save_enhanced_debug(path)` | écrit un debug JSON enrichi | `Mimir.Serialization.save_enhanced_debug("debug.json")` |
+| `Mimir.Serialization.save_enhanced_debug(path)` | écrit un debug JSON enrichi (v1.3: inclut `framework_state`) | `Mimir.Serialization.save_enhanced_debug("debug.json")` |
 
 ## Bonnes pratiques
 

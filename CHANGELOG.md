@@ -7,6 +7,18 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+### 🧾 Documentation
+
+- Mise à jour de la documentation `DebugJson` vers **enhanced v1.3**.
+- Ajout de la documentation du bloc `framework_state` (runtime/backends, mémoire, registre layers, état modèle) dans :
+  - `docs/03-API-Reference/16-Serialization.md`
+  - `docs/03-API-Reference/02-Serialization.md`
+  - `docs/05-Advanced/02-Debugging.md`
+  - `docs/04-Architecture-Internals/15-Serialization-Internals.md`
+  - `docs/05-Advanced/04-Source-Code-Map.md`
+  - `docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md`
+- Stub API Lua (`mimir-api.lua`) aligné sur `DebugJson v1.3`.
+
 ## [3.1.0] - 2026-07-01
 
 ### ✨ Ajouté — Nouveaux modèles HuggingFace / SDXL

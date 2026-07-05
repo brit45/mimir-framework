@@ -896,50 +896,182 @@ function Mimir.Architectures.info(name) end
 function Mimir.Architectures.dtypes() end
 
 --=============================================================================
--- Module: Mimir.Layers (placeholder / low-level)
+-- Module: Mimir.Layers (inspection read-only du modèle courant)
 --=============================================================================
 
 ---@class MimirLayersAPI
 Mimir.Layers = {}
 
----Conv2D low-level (placeholder). Utiliser `Mimir.Model.forward()` à la place.
----@return boolean ok
----@return string err
+---Lister tous les types de layers supportés par le framework, basés sur `LayerType`.
+---@return string[] layer_types
+function Mimir.Layers.available() end
+
+---Lister les layers du modèle courant pour un type canonique donné.
+---Exemple: `Mimir.Layers.by_type("Conv2d")`.
+---@param layer_type string
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.by_type(layer_type) end
+
+---@class MimirLayerInfo
+---@field index integer
+---@field name string
+---@field type string
+---@field param_count integer
+---@field output string
+---@field inputs string[]
+---@field in_features integer
+---@field out_features integer
+---@field in_channels integer
+---@field out_channels integer
+---@field kernel_size integer
+---@field stride integer
+---@field padding integer
+---@field seq_len integer
+---@field embed_dim integer
+---@field num_heads integer
+---@field vocab_size integer
+---@field input_height integer
+---@field input_width integer
+
+---Liste les layers de type convolution présents dans le modèle courant.
+---API en lecture seule: ne modifie jamais le modèle.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.conv2d(...) end
 
----Linear low-level (placeholder). Utiliser `Mimir.Model.forward()` à la place.
----@return boolean ok
----@return string err
+---Liste les layers `Conv2d` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Conv2d() end
+
+---Liste les layers `ConvTranspose2d` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ConvTranspose2d() end
+
+---Liste les layers `Conv1d` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Conv1d() end
+
+---Liste les layers `DepthwiseConv2d` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.DepthwiseConv2d() end
+
+---Liste les layers linéaires du modèle courant.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.linear(...) end
 
----MaxPool2D low-level (placeholder).
----@return boolean ok
----@return string err
+---Liste les layers `Linear` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Linear() end
+
+---Liste les layers `Bilinear` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Bilinear() end
+
+---Liste les layers `Embedding` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Embedding() end
+
+---Liste les layers `EmbeddingBag` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.EmbeddingBag() end
+
+---Liste les layers `BatchNorm2d` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.BatchNorm2d() end
+
+---Liste les layers `BatchNorm1d` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.BatchNorm1d() end
+
+---Liste les layers `LayerNorm` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.LayerNorm() end
+
+---Liste les layers `GroupNorm` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.GroupNorm() end
+
+---Liste les layers `InstanceNorm2d` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.InstanceNorm2d() end
+
+---Liste les layers `RMSNorm` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.RMSNorm() end
+
+---Liste les layers `ReLU` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ReLU() end
+
+---Liste les layers `LeakyReLU` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.LeakyReLU() end
+
+---Liste les layers `GELU` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.GELU() end
+
+---Liste les layers `GEGLU` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.GEGLU() end
+
+---Liste les layers `SiLU` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.SiLU() end
+
+---Liste les layers `Tanh` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Tanh() end
+
+---Liste les layers `Sigmoid` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Sigmoid() end
+
+---Liste les layers `Softmax` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Softmax() end
+
+---Liste les layers `LogSoftmax` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.LogSoftmax() end
+
+---Liste les layers `Softplus` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Softplus() end
+
+---Liste les layers `Mish` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Mish() end
+
+---Liste les layers `HardSigmoid` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.HardSigmoid() end
+
+---Liste les layers `HardSwish` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.HardSwish() end
+
+---Liste les layers de pooling max du modèle courant.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.maxpool2d(...) end
 
----AvgPool2D low-level (placeholder).
----@return boolean ok
----@return string err
+---Liste les layers de pooling moyen du modèle courant.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.avgpool2d(...) end
 
----Activation low-level (placeholder).
----@return boolean ok
----@return string err
+---Liste les layers d'activation du modèle courant.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.activation(...) end
 
----BatchNorm low-level (placeholder).
----@return boolean ok
----@return string err
+---Liste les layers de normalisation de type batch/instance du modèle courant.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.batchnorm(...) end
 
----LayerNorm low-level (placeholder).
----@return boolean ok
----@return string err
+---Liste les layers de normalisation de type layer/group/rms du modèle courant.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.layernorm(...) end
 
----Attention low-level (placeholder).
----@return boolean ok
----@return string err
+---Liste les layers d'attention du modèle courant.
+---@return MimirLayerInfo[] layers
 function Mimir.Layers.attention(...) end
 
 --=============================================================================
@@ -1591,6 +1723,18 @@ function Mimir.IO.read_image_rgb_u8(path, target_w, target_h) end
 ---@return integer? c
 function Mimir.IO.readImageRGBU8(path, target_w, target_h) end
 
+---Lire ou définir la suppression des logs framework vers stdout/stderr pendant l'exécution Lua.
+---Getter: `Mimir.IO.suppress_stdout_logs()` -> boolean
+---Setter: `Mimir.IO.suppress_stdout_logs(true)` -> (previous, current)
+---@overload fun(): boolean
+---@overload fun(enabled: boolean): (boolean, boolean)
+function Mimir.IO.suppress_stdout_logs(enabled) end
+
+---Alias camelCase de `suppress_stdout_logs`.
+---@overload fun(): boolean
+---@overload fun(enabled: boolean): (boolean, boolean)
+function Mimir.IO.suppressStdoutLogs(enabled) end
+
 ---[COMPAT] Ancien helper global (préférez `Mimir.IO.read_image_rgb_u8`).
 ---@deprecated
 function read_image_rgb_u8(path, target_w, target_h) end
@@ -1622,12 +1766,12 @@ Mimir.Serialization = {}
 ---@field save_optimizer? boolean @Sauvegarder l'état optimizer (défaut: false)
 ---@field debug_max_values? integer @Nombre max de valeurs debug (legacy, défaut: 100)
 ---@field include_git_info? boolean @Inclure info git (défaut: true)
----@field include_gradients? boolean @[DebugJson v1.1] Inclure gradients (défaut: false)
----@field include_optimizer_state? boolean @[DebugJson v1.1] Inclure optimizer state (défaut: false)
----@field max_values_per_tensor? integer @[DebugJson v1.1] Nb valeurs par tensor (défaut: 20)
----@field include_activations? boolean @[DebugJson v1.1] Inclure activations (défaut: false)
----@field include_checksums? boolean @[DebugJson v1.1] Inclure checksums (défaut: false)
----@field include_weight_deltas? boolean @[DebugJson v1.1] Inclure weight deltas (défaut: false)
+---@field include_gradients? boolean @[DebugJson v1.3] Inclure gradients (défaut: false)
+---@field include_optimizer_state? boolean @[DebugJson v1.3] Inclure optimizer state (défaut: false)
+---@field max_values_per_tensor? integer @[DebugJson v1.3] Nb valeurs par tensor (défaut: 20)
+---@field include_activations? boolean @[DebugJson v1.3] Inclure activations (défaut: false)
+---@field include_checksums? boolean @[DebugJson v1.3] Inclure checksums (défaut: false)
+---@field include_weight_deltas? boolean @[DebugJson v1.3] Inclure weight deltas (défaut: false)
 
 ---@class LoadOptions
 ---@field load_tokenizer? boolean @Charger le tokenizer (défaut: true)
@@ -1659,7 +1803,7 @@ Mimir.Serialization = {}
 --- -- DebugJson (inspection)
 --- Mimir.Serialization.save("debug.json", "debug_json", {debug_max_values = 20})
 --- 
---- -- DebugJson Enhanced v1.1 (diagnostic entraînement)
+--- -- DebugJson Enhanced v1.3 (diagnostic entraînement + snapshot framework_state)
 --- Mimir.Serialization.save("debug.json", "debug_json", {
 ---     include_gradients = true,
 ---     include_optimizer_state = true,
@@ -1710,10 +1854,10 @@ function Mimir.Serialization.load(path, format, options) end
 ---@return string? err @Message d'erreur si échec
 function Mimir.Serialization.detect_format(path) end
 
----Sauvegarder un checkpoint avec Enhanced Debug JSON v1.1.0.
----Fonction spécialisée pour le diagnostic d'entraînement avec toutes les options v1.1.
+---Sauvegarder un checkpoint avec Enhanced Debug JSON v1.3.0.
+---Fonction spécialisée pour le diagnostic d'entraînement avec snapshot `framework_state`.
 ---@param path string @Chemin du fichier JSON
----@param options? SaveOptions @Options Enhanced Debug JSON v1.1
+---@param options? SaveOptions @Options Enhanced Debug JSON v1.3
 ---@return boolean ok @true si succès
 ---@return string? err @Message d'erreur si échec
 function Mimir.Serialization.save_enhanced_debug(path, options) end

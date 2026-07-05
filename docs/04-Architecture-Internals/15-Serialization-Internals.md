@@ -79,13 +79,21 @@ Ce point dépend du writer choisi, mais le contrat général est :
 
 **Note pratique** : côté runtime, les poids peuvent être stockés dans des blocs unifiés `Layer::weight_block` (voir `docs/04-Architecture-Internals/12-Tensor-Storage.md`). Le writer doit donc lire via les accesseurs “compatibles sérialisation”.
 
-## 5) DebugJson “enhanced”
+## 5) DebugJson “enhanced” (v1.3)
 
 Le format debug est conçu pour :
 
 - inspecter rapidement des poids / gradients,
 - produire des dumps de compat tests,
 - comparer des runs (checksums / deltas).
+
+Depuis v1.3, il embarque aussi `framework_state` (snapshot au moment du dump) :
+
+- runtime/backends + configs,
+- capacités CPU,
+- état mémoire global (guard/allocator/RAM manager),
+- registre des layers supportés,
+- état modèle (`default_dtype`, `model_config`, dimensions, etc.).
 
 Le code convertit `SaveOptions` → `DebugJsonOptions` (voir `Serialization.cpp`).
 

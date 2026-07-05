@@ -187,7 +187,7 @@ assert(Mimir.Serialization.load("./checkpoint_out", "auto"))
 |`Mimir.Serialization.save(path, format?, opts?)`|Sauvegarde un checkpoint (formats multiples)|`LuaScripting::lua_saveCheckpoint`|`Mimir::Serialization::save_checkpoint` (`src/Serialization/Serialization.*`)|`format`: `safetensors`, `raw_folder`, `debug_json`, `auto`, …|
 |`Mimir.Serialization.load(path, format?, opts?)`|Charge un checkpoint + resync tokenizer/encoder en contexte|`LuaScripting::lua_loadCheckpoint`|`Mimir::Serialization::load_checkpoint` + `sync_context_tokenizer_encoder_from_model`||
 |`Mimir.Serialization.detect_format(path)`|Détecte le format d’un checkpoint|`LuaScripting::lua_detectFormat`|`Mimir::Serialization::detect_format`|Typiquement avant un `load(..., "auto")`.|
-|`Mimir.Serialization.save_enhanced_debug(path, opts?)`|Dump debug enrichi (inspection)|`LuaScripting::lua_saveEnhancedDebugJson`|debug JSON||
+|`Mimir.Serialization.save_enhanced_debug(path, opts?)`|Dump debug enrichi (inspection, v1.3 avec `framework_state`)|`LuaScripting::lua_saveEnhancedDebugJson`|debug JSON||
 
 ### `Mimir.Checkpoint` (déprécié)
 

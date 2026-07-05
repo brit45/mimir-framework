@@ -50,7 +50,7 @@ Objectif : quand une fonctionnalité est mentionnée dans la doc (mémoire stric
   - Mémoire :
     - `Mimir.MemoryGuard.setLimit(...)`, `getCurrentUsage()`, `getPeakUsage()`, `getLimit()`, `printStats()`, etc.
     - `Mimir.Allocator.configure({max_ram_gb, enable_compression})` configure le `DynamicTensorAllocator`
-  - Debug JSON : `Mimir.Serialization.save_enhanced_debug(path, options)` (voir aussi `src/Serialization/DebugJsonDump.*`).
+  - Debug JSON : `Mimir.Serialization.save_enhanced_debug(path, options)` (v1.3 inclut `framework_state`) (voir aussi `src/Serialization/DebugJsonDump.*`).
 
 À lire quand :
 
@@ -204,6 +204,7 @@ Chaque modèle “builder” sait pousser une séquence de layers cohérente (no
 ### `src/Serialization/DebugJsonDump.hpp` / `.cpp`
 
 - Rôle : export debug JSON “amélioré” (statistiques, gradients, checksums, infos git, tokenizer/encoder… selon options).
+- Depuis v1.3 : ajoute `framework_state` (runtime, mémoire, registre layers, état modèle) au moment du dump.
 - Exposé via `Mimir.Serialization.save_enhanced_debug(path, options)`.
 
 ## 7) Hardware, SIMD et backends compute

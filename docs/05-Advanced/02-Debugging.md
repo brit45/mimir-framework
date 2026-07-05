@@ -103,6 +103,14 @@ Options “enhanced” réellement supportées côté C++ (voir `src/Serializati
 - `save_tokenizer` (bool)
 - `save_encoder` (bool)
 
+Depuis la v1.3, le dump inclut aussi un bloc `framework_state` avec :
+
+- l’état runtime/backends et les overrides d’environnement MIMIR,
+- les capacités CPU détectées,
+- les métriques mémoire (`MemoryGuard`, `DynamicTensorAllocator`, `AdvancedRAMManager`),
+- la liste des layer types supportés,
+- un snapshot d’état modèle (`default_dtype`, `model_config`, etc.).
+
 Usage conseillé :
 
 - faire un dump juste avant le step qui casse

@@ -35,7 +35,7 @@ Options (principales) :
 - `include_git_info` (bool)
 - `include_checksums` (bool)
 
-Options DebugJson “enhanced” :
+Options DebugJson “enhanced” (v1.3) :
 
 - `include_gradients` (bool)
 - `include_optimizer_state` (bool)
@@ -77,3 +77,11 @@ Retourne : `SAFETENSORS`, `RAWFOLDER`, `DEBUGJSON`.
 ## `save_enhanced_debug(path: string, opts?: table) -> bool | (false, err)`
 
 Écrit un JSON d’inspection (stats + options avancées).
+
+Depuis v1.3, le dump contient aussi `framework_state` avec un snapshot au moment du dump :
+
+- runtime/backends (`cpu`, `cuda`, `rocm`, `opencl`, `vulkan`) + flags de config,
+- capacités CPU (`avx2`, `fma`, `f16c`, `bmi2`),
+- état mémoire (`MemoryGuard`, `DynamicTensorAllocator`, `AdvancedRAMManager`),
+- registre de layers supportés,
+- état modèle (dtype par défaut, params, layers, model_config, etc.).
