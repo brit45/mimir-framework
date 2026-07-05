@@ -55,7 +55,12 @@ int main() {
     TASSERT_TRUE(j["format"].get<std::string>() == "mimir_debug_dump");
 
     TASSERT_TRUE(j.contains("format_version"));
-    TASSERT_TRUE(j["format_version"].get<std::string>() == "1.1.0");
+    TASSERT_TRUE(j["format_version"].get<std::string>() == "1.3.0");
+
+    TASSERT_TRUE(j.contains("framework_state"));
+    TASSERT_TRUE(j["framework_state"].is_object());
+    TASSERT_TRUE(j["framework_state"].contains("runtime"));
+    TASSERT_TRUE(j["framework_state"].contains("memory"));
 
     TASSERT_TRUE(j.contains("default_dtype"));
     TASSERT_TRUE(j["default_dtype"].get<std::string>() == "bfloat16");
