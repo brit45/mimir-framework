@@ -94,3 +94,81 @@ RuntimeConfig RuntimeConfig::fromEnv(const char* backend_upper) {
 
     return cfg;
 }
+
+bool AbstractRuntime::backwardLayer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer,
+    bool training
+) {
+    (void)inputs;
+    (void)grad_outputs;
+    (void)grad_inputs;
+    (void)layer;
+    (void)training;
+    return false;
+}
+
+bool AbstractRuntime::dispatchForwardLayer(
+    const std::vector<AbstractRuntime*>& runtime_priority,
+    const std::vector<const std::vector<float>*>& inputs,
+    std::vector<std::vector<float>>& outputs,
+    const Layer& layer,
+    bool training,
+    AbstractRuntime** selected_runtime
+) {
+    if (selected_runtime) *selected_runtime = nullptr;
+    outputs.clear();
+
+    for (AbstractRuntime* rt : runtime_priority) {
+        if (!rt) continue;
+        if (!rt->isInitialized()) continue;
+
+        std::vector<std::vector<float>> local_outputs;
+        if (!rt->forwardLayer(inputs, local_outputs, layer, training)) {
+            continue;
+        }
+        if (local_outputs.empty()) {
+            continue;
+        }
+
+        outputs = std::move(local_outputs);
+        if (selected_runtime) *selected_runtime = rt;
+        return true;
+    }
+
+    return false;
+}
+
+bool AbstractRuntime::dispatchBackwardLayer(
+    const std::vector<AbstractRuntime*>& runtime_priority,
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer,
+    bool training,
+    AbstractRuntime** selected_runtime
+) {
+    if (selected_runtime) *selected_runtime = nullptr;
+    grad_inputs.clear();
+
+    for (AbstractRuntime* rt : runtime_priority) {
+        if (!rt) continue;
+        if (!rt->isInitialized()) continue;
+
+        std::vector<std::vector<float>> local_grad_inputs;
+        if (!rt->backwardLayer(inputs, grad_outputs, local_grad_inputs, layer, training)) {
+            continue;
+        }
+        if (local_grad_inputs.empty()) {
+            continue;
+        }
+
+        grad_inputs = std::move(local_grad_inputs);
+        if (selected_runtime) *selected_runtime = rt;
+        return true;
+    }
+
+    return false;
+}

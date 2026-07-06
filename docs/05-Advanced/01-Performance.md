@@ -80,6 +80,7 @@ Variables d’environnement (voir `src/Model.cpp`) :
 - `MIMIR_OPENCL_LINEAR=1` active OpenCL pour `Linear`.
 - `MIMIR_OPENCL_LINEAR_MIN_OPS` (défaut `1<<20`) fixe le seuil minimal d’opérations.
 - `MIMIR_ACCEL_VERBOSE=1` logge quand un offload est réellement utilisé.
+- `MIMIR_RUNTIME_TRACE=1` logge, pour chaque layer exécuté, le backend réellement utilisé et le chemin d’appel runtime.
 - `MIMIR_DISABLE_VULKAN=1` / `MIMIR_DISABLE_OPENCL=1` désactive le backend correspondant.
 
 Notes :
@@ -94,3 +95,12 @@ Pour éviter les faux gains :
 - Mesurez séparément “forward seul” vs “train step” (backward + optimizer).
 - Isolez le coût tokenization/IO (Lua/dataset) du coût compute (layers).
 - Activez `MIMIR_ACCEL_VERBOSE` quand vous testez Vulkan/OpenCL, sinon vous ne savez pas si c’est réellement pris.
+- Activez `MIMIR_RUNTIME_TRACE` pour valider le backend effectif layer-par-layer (et détecter les fallbacks CPU silencieux).
+
+Exemple de diagnostic complet:
+
+```bash
+export MIMIR_ACCEL_VERBOSE=1
+export MIMIR_RUNTIME_TRACE=1
+./bin/mimir --lua scripts/benchmarks/benchmark.lua
+```

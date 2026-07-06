@@ -219,6 +219,7 @@ Activez le mode verbeux pour savoir exactement ce qui passe par GPU :
 
 ```bash
 export MIMIR_ACCEL_VERBOSE=1
+export MIMIR_RUNTIME_TRACE=1
 ```
 
 Exemple de sortie :
@@ -230,6 +231,16 @@ Exemple de sortie :
 ```
 
 Chaque ligne indique le type de layer, sa taille, la décision prise et la raison.
+
+Avec `MIMIR_RUNTIME_TRACE=1`, vous obtenez en plus la trace d'execution reelle layer-par-layer:
+
+```text
+[runtime-trace] layer#12 name='unet/down1/conv' type='Conv2d' backend=CUDA call=runtime_router.dispatchForwardLayer output_size=262144
+[runtime-trace] layer#13 name='unet/down1/relu' type='ReLU' backend=CPU call=cpu_switch_kernel output_size=262144
+[runtime-trace] layer#14 name='unet/down1/proj' type='Linear' backend=CUDA call=linear_accel_chain output_size=65536
+```
+
+Cette vue permet de distinguer facilement les layers effectivement offloades de ceux qui restent en fallback CPU.
 
 ---
 

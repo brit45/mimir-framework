@@ -19,6 +19,9 @@ Tu peux produire un checkpoint VAEText exploitable.
 
 VAEText est un VAE “texte” qui reconstruit des tokens via logits, entraîné avec reconstruction (Cross-Entropy) + KL.
 
+Version actuelle: VAEText peut aussi exposer un encodeur conditionnel de corrélation textuelle,
+et des têtes de contexte internes (sémantique, thématique, dialogue) pour améliorer la régénération de dialogue.
+
 ## Entraîner
 
 Script : `scripts/training/train_vae_texte.lua`
@@ -31,13 +34,24 @@ Exemple :
   --out-dir checkpoint/vae_text_trained \
   --epochs 5 --lr 1e-4 \
   --seq-len 256 --d-model 256 --latent-tokens 32 \
-  --kl-beta 0.01
+  --kl-beta 0.01 \
+  --decoder-causal true \
+  --enable-conditional-encoder true \
+  --enable-context-heads true \
+  --context-semantic-dim 64 \
+  --context-thematic-dim 32 \
+  --context-dialog-dim 64 \
+  --context-semantic-weight 0.08 \
+  --context-thematic-weight 0.05 \
+  --context-dialog-weight 0.10
 ```
 
 Points importants :
 
 - Utilise un “base tokenizer” commun (`scripts/modules/base_tokenizer.lua`) et `tokenizer_frozen=true`.
 - Met `cfg.checkpoint_dir = out_dir` pour permettre des checkpoints d’interruption Ctrl+C.
+- `decoder_causal=true` est recommandé pour la génération de dialogue auto-régressive.
+- Les contextes internes sont appris en auto-supervision à partir des tokens d’entrée.
 
 ## Sampler
 

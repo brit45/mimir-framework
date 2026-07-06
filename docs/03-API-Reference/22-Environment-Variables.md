@@ -15,6 +15,7 @@ Conventions:
 | Variable | Type | Défaut | Effet |
 | --- | --- | --- | --- |
 | `MIMIR_ACCEL_VERBOSE` | bool | `0` | Active des logs de décision d'accélération (CPU/GPU/offload). |
+| `MIMIR_RUNTIME_TRACE` | bool | `0` | Active une trace d'exécution layer-par-layer (backend réellement utilisé, chemin d'appel, taille de sortie). |
 | `MIMIR_DISABLE_CPU` | bool | `0` | Désactive explicitement le runtime CPU. |
 | `MIMIR_DISABLE_CUDA` | bool | `0` | Désactive explicitement le runtime CUDA. |
 | `MIMIR_DISABLE_ROCM` | bool | `0` | Désactive explicitement le runtime ROCm. |
@@ -72,6 +73,28 @@ Important:
 | `MIMIR_ENABLE_FUSION` | bool | `1` | Active les chemins de fusion lorsqu'un plan est utilisé. |
 | `MIMIR_ENABLE_FUSION_TRAIN` | bool | `0` | Autorise la fusion `Conv2d+ReLU` en mode `training=true` (opt-in). Les fusions génériques restent inférence-only. |
 | `MIMIR_PLANNER_DUMP` | bool | `0` | Émet un dump de stats planner au premier forward. |
+
+## 4.1) Verbose runtime et cartographie planner
+
+Avec `MIMIR_ACCEL_VERBOSE=1`, le runtime émet au début du forward:
+
+- le matériel/runtime sélectionné en priorité,
+- un scan des types de layers demandés par le modèle,
+- une cartographie planner (`planner_map`) indiquant, pour chaque layer, la fusion prévue et le chemin d'appel anticipé.
+
+Avec `MIMIR_RUNTIME_TRACE=1`, le runtime ajoute une trace d'exécution réelle layer-par-layer:
+
+- backend effectivement utilisé (`CUDA`, `ROCM`, `CPU_RUNTIME`, `CPU`, `VULKAN`, `OPENCL`, `FUSED_SKIP`),
+- chemin d'appel effectif (`runtime_router.dispatchForwardLayer`, `linear_accel_chain`, `cpu_switch_kernel`, etc.),
+- taille de sortie produite.
+
+Exemple rapide:
+
+```bash
+export MIMIR_ACCEL_VERBOSE=1
+export MIMIR_RUNTIME_TRACE=1
+./bin/mimir --lua scripts/benchmarks/benchmark.lua
+```
 
 ## 5) Bridge scripting (injectées par Mímir)
 

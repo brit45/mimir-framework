@@ -131,6 +131,7 @@ Lecture metier :
 
 ```bash
 export MIMIR_ACCEL_VERBOSE=1
+export MIMIR_RUNTIME_TRACE=1
 export MIMIR_CUDA_LINEAR=1
 export MIMIR_CUDA_LINEAR_MIN_OPS=1048576
 ./bin/mimir --lua scripts/benchmarks/benchmark.lua
@@ -140,7 +141,13 @@ But metier :
 
 - activer un fast-path progressivement,
 - observer son impact,
-- garder une marche arriere immediate via variables d'environnement.
+- garder une marche arriere immediate via variables d'environnement,
+- verifier le backend reellement selectionne a l'execution (trace layer-par-layer).
+
+En pratique:
+
+- `MIMIR_ACCEL_VERBOSE=1` donne une vue "plan/decision" (materiel choisi, scan layers, cartographie planner).
+- `MIMIR_RUNTIME_TRACE=1` donne la vue "execution reelle" (backend effectif et call path par layer).
 
 ## 10. Definition de done pour un nouveau runtime
 

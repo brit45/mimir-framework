@@ -304,6 +304,8 @@ set(MIMIR_SOURCES
     src/Helpers.cpp
     src/stb_image_impl.cpp
     src/runtimes/AbstractRuntime.cpp
+    src/runtimes/RuntimeRouter.cpp
+    src/runtimes/ops_loss_and_grad.cpp
     src/runtimes/cpu/CpuRuntime.cpp
     src/Models/Registry/ModelArchitectures.cpp
     src/Models/External/ExternalSafeTensorsModel.cpp
@@ -359,6 +361,8 @@ set(MIMIR_HEADERS
     src/VulkanCompute.hpp
     src/OpenCLCompute.hpp
     src/runtimes/AbstractRuntime.hpp
+    src/runtimes/RuntimeRouter.hpp
+    src/runtimes/ops_loss_and_grad.hpp
     src/runtimes/cpu/CpuRuntime.hpp
     src/runtimes/cuda/CudaRuntime.hpp
     src/runtimes/rocm/RocmRuntime.hpp
@@ -422,6 +426,7 @@ if(ENABLE_SFML AND SFML_FOUND)
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES}
         ${MIMIR_HEADERS}
+        src/runtimes/ops_loss_and_grad.hpp
         src/runtimes/cpu/DynamicTensorAllocator.hpp
         src/scriptings/ScriptingContext.hpp
     )

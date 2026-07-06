@@ -58,5 +58,32 @@ bool CpuRuntime::forwardLayer(
     bool training
 ) {
     if (!initialized_) return false;
+    if (!config_.conv_enabled) {
+        if (layer.type_enum == LayerType::Conv2d ||
+            layer.type_enum == LayerType::ConvTranspose2d ||
+            layer.type_enum == LayerType::Conv1d ||
+            layer.type_enum == LayerType::DepthwiseConv2d) {
+            return false;
+        }
+    }
     return RuntimeLayerDispatch::cpu_forward_layer(inputs, outputs, layer, training);
+}
+
+bool CpuRuntime::backwardLayer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer,
+    bool training
+) {
+    if (!initialized_) return false;
+    if (!config_.conv_enabled) {
+        if (layer.type_enum == LayerType::Conv2d ||
+            layer.type_enum == LayerType::ConvTranspose2d ||
+            layer.type_enum == LayerType::Conv1d ||
+            layer.type_enum == LayerType::DepthwiseConv2d) {
+            return false;
+        }
+    }
+    return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);
 }

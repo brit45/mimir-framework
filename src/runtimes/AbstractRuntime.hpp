@@ -79,6 +79,41 @@ public:
         bool training
     ) = 0;
 
+    // API backward générique. Retourne false si non supporté par ce runtime.
+    // Convention:
+    // - grad_outputs[0] = gradient en sortie du layer
+    // - grad_inputs reçoit les gradients d'entrée (même ordre que `inputs`)
+    // - `layer` est non-const pour permettre l'accumulation grad_weights/grad_bias
+    virtual bool backwardLayer(
+        const std::vector<const std::vector<float>*>& inputs,
+        const std::vector<const std::vector<float>*>& grad_outputs,
+        std::vector<std::vector<float>>& grad_inputs,
+        Layer& layer,
+        bool training
+    );
+
+    // Routeur central: interroge les runtimes par ordre de priorité fourni.
+    // Sélectionne le premier runtime initialisé qui supporte l'op.
+    static bool dispatchForwardLayer(
+        const std::vector<AbstractRuntime*>& runtime_priority,
+        const std::vector<const std::vector<float>*>& inputs,
+        std::vector<std::vector<float>>& outputs,
+        const Layer& layer,
+        bool training,
+        AbstractRuntime** selected_runtime = nullptr
+    );
+
+    // Routeur central backward: même logique que dispatchForwardLayer.
+    static bool dispatchBackwardLayer(
+        const std::vector<AbstractRuntime*>& runtime_priority,
+        const std::vector<const std::vector<float>*>& inputs,
+        const std::vector<const std::vector<float>*>& grad_outputs,
+        std::vector<std::vector<float>>& grad_inputs,
+        Layer& layer,
+        bool training,
+        AbstractRuntime** selected_runtime = nullptr
+    );
+
 protected:
     RuntimeConfig config_{};
 };

@@ -253,6 +253,13 @@ static VAETextModel::Config vaeTextCfgFromJson(const json& cfg) {
     out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
     out.latent_tokens = jget<int>(cfg, "latent_tokens", out.latent_tokens);
     out.proj_dim = jget<int>(cfg, "proj_dim", out.proj_dim);
+    out.decoder_causal = jget<bool>(cfg, "decoder_causal", out.decoder_causal);
+    out.tokenizer_integrated = jget<bool>(cfg, "tokenizer_integrated", out.tokenizer_integrated);
+    out.enable_conditional_encoder = jget<bool>(cfg, "enable_conditional_encoder", out.enable_conditional_encoder);
+    out.enable_context_heads = jget<bool>(cfg, "enable_context_heads", out.enable_context_heads);
+    out.context_semantic_dim = jget<int>(cfg, "context_semantic_dim", out.context_semantic_dim);
+    out.context_thematic_dim = jget<int>(cfg, "context_thematic_dim", out.context_thematic_dim);
+    out.context_dialog_dim = jget<int>(cfg, "context_dialog_dim", out.context_dialog_dim);
     out.stochastic_latent = jget<bool>(cfg, "stochastic_latent", out.stochastic_latent);
     out.dropout = jget<float>(cfg, "dropout", out.dropout);
     return out;
@@ -262,7 +269,10 @@ static json vaeTextDefaultConfigJson() {
     VAETextModel::Config d;
     const int latent_dim = std::max(1, d.latent_tokens * d.d_model);
     const int logits_dim = std::max(1, d.seq_len * d.vocab_size);
-    const int output_dim = logits_dim + 2 * latent_dim + 2 * std::max(1, d.proj_dim);
+    const int sem_dim = d.enable_context_heads ? std::max(1, d.context_semantic_dim) : 0;
+    const int them_dim = d.enable_context_heads ? std::max(1, d.context_thematic_dim) : 0;
+    const int dialog_dim = d.enable_context_heads ? std::max(1, d.context_dialog_dim) : 0;
+    const int output_dim = logits_dim + 2 * latent_dim + 2 * std::max(1, d.proj_dim) + sem_dim + them_dim + dialog_dim;
     return json{
         {"vocab_size", d.vocab_size},
         {"padding_idx", d.padding_idx},
@@ -274,6 +284,13 @@ static json vaeTextDefaultConfigJson() {
         {"latent_tokens", d.latent_tokens},
         {"latent_dim", latent_dim},
         {"proj_dim", d.proj_dim},
+        {"decoder_causal", d.decoder_causal},
+        {"tokenizer_integrated", d.tokenizer_integrated},
+        {"enable_conditional_encoder", d.enable_conditional_encoder},
+        {"enable_context_heads", d.enable_context_heads},
+        {"context_semantic_dim", d.context_semantic_dim},
+        {"context_thematic_dim", d.context_thematic_dim},
+        {"context_dialog_dim", d.context_dialog_dim},
         {"stochastic_latent", d.stochastic_latent},
         {"dropout", d.dropout},
 
@@ -282,6 +299,9 @@ static json vaeTextDefaultConfigJson() {
         {"output_dim", output_dim},
         {"target_tensor", "vae_text/target"},
         {"align_weight", 0.0},
+        {"context_semantic_weight", 0.08},
+        {"context_thematic_weight", 0.05},
+        {"context_dialog_weight", 0.10},
         {"kl_beta", 0.01},
         {"kl_warmup_steps", 0},
         {"recon_loss", "ce"},
@@ -305,6 +325,13 @@ static json vaeTextDecodeDefaultConfigJson() {
         {"latent_tokens", d.latent_tokens},
         {"latent_dim", latent_dim},
         {"proj_dim", d.proj_dim},
+        {"decoder_causal", d.decoder_causal},
+        {"tokenizer_integrated", d.tokenizer_integrated},
+        {"enable_conditional_encoder", d.enable_conditional_encoder},
+        {"enable_context_heads", d.enable_context_heads},
+        {"context_semantic_dim", d.context_semantic_dim},
+        {"context_thematic_dim", d.context_thematic_dim},
+        {"context_dialog_dim", d.context_dialog_dim},
         {"stochastic_latent", d.stochastic_latent},
         {"dropout", d.dropout},
 

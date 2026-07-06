@@ -42,8 +42,36 @@ inline bool cpu_forward_layer(
                 const int stride = layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h();
                 const int pad = layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h();
                 const int dilation = layer.dilation_h > 0 ? layer.dilation_h : 1;
-                const int H = layer.input_height > 0 ? layer.input_height : 1;
-                const int W = layer.input_width > 0 ? layer.input_width : 1;
+                int H = layer.input_height > 0 ? layer.input_height : 0;
+                int W = layer.input_width > 0 ? layer.input_width : 0;
+
+                if (in_c > 0 && !x.empty() && (x.size() % static_cast<size_t>(in_c)) == 0) {
+                    const size_t hw = x.size() / static_cast<size_t>(in_c);
+                    const size_t cfg_hw = static_cast<size_t>(std::max(1, H)) * static_cast<size_t>(std::max(1, W));
+                    if (H <= 0 || W <= 0 || cfg_hw != hw) {
+                        bool fixed = false;
+                        if (H > 0 && (hw % static_cast<size_t>(H)) == 0) {
+                            W = static_cast<int>(hw / static_cast<size_t>(H));
+                            fixed = true;
+                        } else if (W > 0 && (hw % static_cast<size_t>(W)) == 0) {
+                            H = static_cast<int>(hw / static_cast<size_t>(W));
+                            fixed = true;
+                        }
+                        if (!fixed) {
+                            const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                            if (s > 0 && s * s == hw) {
+                                H = static_cast<int>(s);
+                                W = static_cast<int>(s);
+                                fixed = true;
+                            }
+                        }
+                        if (!fixed) {
+                            H = 1;
+                            W = static_cast<int>(hw);
+                        }
+                    }
+                }
+                if (H <= 0 || W <= 0) return false;
 
                 const float* w = layer.getWeights();
                 if (!w) return false;
@@ -69,8 +97,36 @@ inline bool cpu_forward_layer(
                 const int k = layer.kernel_h > 0 ? layer.kernel_h : layer.get_kernel_h();
                 const int stride = layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h();
                 const int pad = layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h();
-                const int H = layer.input_height > 0 ? layer.input_height : 1;
-                const int W = layer.input_width > 0 ? layer.input_width : 1;
+                int H = layer.input_height > 0 ? layer.input_height : 0;
+                int W = layer.input_width > 0 ? layer.input_width : 0;
+
+                if (in_c > 0 && !x.empty() && (x.size() % static_cast<size_t>(in_c)) == 0) {
+                    const size_t hw = x.size() / static_cast<size_t>(in_c);
+                    const size_t cfg_hw = static_cast<size_t>(std::max(1, H)) * static_cast<size_t>(std::max(1, W));
+                    if (H <= 0 || W <= 0 || cfg_hw != hw) {
+                        bool fixed = false;
+                        if (H > 0 && (hw % static_cast<size_t>(H)) == 0) {
+                            W = static_cast<int>(hw / static_cast<size_t>(H));
+                            fixed = true;
+                        } else if (W > 0 && (hw % static_cast<size_t>(W)) == 0) {
+                            H = static_cast<int>(hw / static_cast<size_t>(W));
+                            fixed = true;
+                        }
+                        if (!fixed) {
+                            const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                            if (s > 0 && s * s == hw) {
+                                H = static_cast<int>(s);
+                                W = static_cast<int>(s);
+                                fixed = true;
+                            }
+                        }
+                        if (!fixed) {
+                            H = 1;
+                            W = static_cast<int>(hw);
+                        }
+                    }
+                }
+                if (H <= 0 || W <= 0) return false;
 
                 const float* w = layer.getWeights();
                 if (!w) return false;
@@ -1000,6 +1056,155 @@ inline bool cpu_forward_layer(
 
         // Si un layer n'est pas pris en charge ici, on renvoie false.
         return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+inline bool cpu_backward_layer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer,
+    bool training
+) {
+    (void)training;
+    grad_inputs.clear();
+
+    if (inputs.empty() || inputs[0] == nullptr) {
+        return false;
+    }
+    if (grad_outputs.empty() || grad_outputs[0] == nullptr) {
+        return false;
+    }
+
+    try {
+        switch (layer.type_enum) {
+            case LayerType::Conv2d: {
+                const std::vector<float>& x = *inputs[0];
+                const std::vector<float>& grad_out = *grad_outputs[0];
+
+                const int kernel_size = layer.kernel_size > 0 ? layer.kernel_size : 3;
+                const int in_channels = layer.in_channels > 0 ? layer.in_channels : 1;
+                const int out_channels = layer.out_channels > 0 ? layer.out_channels : 1;
+                int height = layer.input_height > 0 ? layer.input_height : 0;
+                int width = layer.input_width > 0 ? layer.input_width : 0;
+                const int stride = layer.stride > 0 ? layer.stride : 1;
+                const int padding = layer.padding;
+
+                if (in_channels <= 0 || out_channels <= 0 || kernel_size <= 0) return false;
+
+                if ((height <= 0 || width <= 0) && !x.empty() && (x.size() % static_cast<size_t>(in_channels)) == 0) {
+                    const size_t hw = x.size() / static_cast<size_t>(in_channels);
+                    const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                    if (s > 0 && s * s == hw) {
+                        height = static_cast<int>(s);
+                        width = static_cast<int>(s);
+                    }
+                }
+                if (height <= 0 || width <= 0) return false;
+
+                const int out_h = (height + 2 * padding - kernel_size) / stride + 1;
+                const int out_w = (width + 2 * padding - kernel_size) / stride + 1;
+                const int out_spatial = out_h * out_w;
+                if (out_h <= 0 || out_w <= 0) return false;
+                if (grad_out.size() != static_cast<size_t>(out_channels) * static_cast<size_t>(out_spatial)) return false;
+
+                const size_t in_size = static_cast<size_t>(in_channels) * static_cast<size_t>(height) * static_cast<size_t>(width);
+                if (x.size() != in_size) return false;
+
+                const float* w = layer.getWeights();
+                const size_t w_need = static_cast<size_t>(out_channels) * static_cast<size_t>(in_channels)
+                    * static_cast<size_t>(kernel_size) * static_cast<size_t>(kernel_size);
+                if (!w || layer.getWeightsSize() < w_need) return false;
+
+                if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                    layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+                }
+
+                std::vector<float> grad_input(in_size, 0.0f);
+
+                for (int oc = 0; oc < out_channels; ++oc) {
+                    for (int ic = 0; ic < in_channels; ++ic) {
+                        for (int kh = 0; kh < kernel_size; ++kh) {
+                            for (int kw = 0; kw < kernel_size; ++kw) {
+                                float grad_weight = 0.0f;
+
+                                for (int oh = 0; oh < out_h; ++oh) {
+                                    for (int ow = 0; ow < out_w; ++ow) {
+                                        const int ih = oh * stride + kh - padding;
+                                        const int iw = ow * stride + kw - padding;
+                                        if (ih < 0 || ih >= height || iw < 0 || iw >= width) continue;
+
+                                        const size_t out_idx = static_cast<size_t>(oc) * static_cast<size_t>(out_spatial)
+                                            + static_cast<size_t>(oh) * static_cast<size_t>(out_w)
+                                            + static_cast<size_t>(ow);
+                                        const size_t in_idx = static_cast<size_t>(ic) * static_cast<size_t>(height) * static_cast<size_t>(width)
+                                            + static_cast<size_t>(ih) * static_cast<size_t>(width)
+                                            + static_cast<size_t>(iw);
+                                        grad_weight += grad_out[out_idx] * x[in_idx];
+                                    }
+                                }
+
+                                const size_t w_idx = ((static_cast<size_t>(oc) * static_cast<size_t>(in_channels)
+                                    + static_cast<size_t>(ic)) * static_cast<size_t>(kernel_size)
+                                    + static_cast<size_t>(kh)) * static_cast<size_t>(kernel_size)
+                                    + static_cast<size_t>(kw);
+                                if (w_idx < layer.grad_weights.size()) {
+                                    layer.grad_weights[w_idx] += grad_weight;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (int ic = 0; ic < in_channels; ++ic) {
+                    for (int ih = 0; ih < height; ++ih) {
+                        for (int iw = 0; iw < width; ++iw) {
+                            float grad_sum = 0.0f;
+
+                            for (int oc = 0; oc < out_channels; ++oc) {
+                                for (int kh = 0; kh < kernel_size; ++kh) {
+                                    for (int kw = 0; kw < kernel_size; ++kw) {
+                                        int oh = ih - kh + padding;
+                                        int ow = iw - kw + padding;
+
+                                        if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w &&
+                                            (oh % stride) == 0 && (ow % stride) == 0) {
+                                            oh /= stride;
+                                            ow /= stride;
+
+                                            const size_t out_idx = static_cast<size_t>(oc) * static_cast<size_t>(out_spatial)
+                                                + static_cast<size_t>(oh) * static_cast<size_t>(out_w)
+                                                + static_cast<size_t>(ow);
+                                            const size_t w_idx = ((static_cast<size_t>(oc) * static_cast<size_t>(in_channels)
+                                                + static_cast<size_t>(ic)) * static_cast<size_t>(kernel_size)
+                                                + static_cast<size_t>(kh)) * static_cast<size_t>(kernel_size)
+                                                + static_cast<size_t>(kw);
+                                            if (w_idx < layer.getWeightsSize()) {
+                                                grad_sum += grad_out[out_idx] * w[w_idx];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            const size_t in_idx = static_cast<size_t>(ic) * static_cast<size_t>(height) * static_cast<size_t>(width)
+                                + static_cast<size_t>(ih) * static_cast<size_t>(width)
+                                + static_cast<size_t>(iw);
+                            grad_input[in_idx] = grad_sum;
+                        }
+                    }
+                }
+
+                grad_inputs.resize(1);
+                grad_inputs[0] = std::move(grad_input);
+                return true;
+            }
+
+            default:
+                return false;
+        }
     } catch (...) {
         return false;
     }

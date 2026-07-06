@@ -719,6 +719,8 @@ protected:
         bool built = false;
         bool built_for_training = false;
         bool dumped = false;
+        bool runtime_scan_dumped = false;
+        std::string runtime_scan_signature;
         Mimir::Planning::ExecutionPlan execution;
     };
     StaticPlanCache static_plan_;

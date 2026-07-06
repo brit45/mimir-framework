@@ -13,6 +13,7 @@
 #include "OpenCLCompute.hpp"
 #endif
 #include "runtimes/AbstractRuntime.hpp"
+#include "runtimes/RuntimeRouter.hpp"
 #ifdef ENABLE_CUDA
 #include "runtimes/cuda/CudaRuntime.hpp"
 #endif
@@ -23,6 +24,7 @@
 #include "RuntimeAllocator.hpp"
 #include "LayerOpsExt.hpp"
 #include "runtimes/cpu/CpuRuntime.hpp"
+#include "runtimes/ops_loss_and_grad.hpp"
 #include "Planning/Planner.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Serialization/Serialization.hpp"
@@ -73,411 +75,6 @@ static inline DistMoments compute_moments(const std::vector<float>& v) {
         m.skew = 0.0;
     }
     return m;
-}
-
-static inline float sigmoid_scalar_f(float x) {
-    // Stable-ish sigmoid
-    if (x >= 0.0f) {
-        const float z = std::exp(-x);
-        return 1.0f / (1.0f + z);
-    }
-    const float z = std::exp(x);
-    return z / (1.0f + z);
-}
-
-struct GlobalSSIM {
-    double loss = 0.0;
-    std::vector<float> grad; // d(loss)/d(pred), same size as pred
-};
-
-static GlobalSSIM ssim_global_hwc(
-    const std::vector<float>& pred,
-    const std::vector<float>& target,
-    int w,
-    int h,
-    int c,
-    float k1,
-    float k2,
-    float L
-) {
-    GlobalSSIM out;
-    const int W = std::max(1, w);
-    const int H = std::max(1, h);
-    const int C = std::max(1, c);
-    const size_t N = static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C);
-    out.grad.assign(N, 0.0f);
-    if (pred.size() < N || target.size() < N) {
-        out.loss = 0.0;
-        return out;
-    }
-
-    const double C1 = static_cast<double>(k1) * static_cast<double>(L);
-    const double C2 = static_cast<double>(k2) * static_cast<double>(L);
-    const double c1 = C1 * C1;
-    const double c2 = C2 * C2;
-
-    // Per-channel SSIM, averaged.
-    double loss_sum = 0.0;
-
-    const size_t HW = static_cast<size_t>(W) * static_cast<size_t>(H);
-    const double inv_hw = 1.0 / static_cast<double>(std::max<size_t>(1, HW));
-    for (int ch = 0; ch < C; ++ch) {
-        // Compute means and second moments for channel
-        double sum_x = 0.0, sum_y = 0.0;
-        double sum_x2 = 0.0, sum_y2 = 0.0;
-        double sum_xy = 0.0;
-
-        for (int yy = 0; yy < H; ++yy) {
-            const size_t row = static_cast<size_t>(yy) * static_cast<size_t>(W);
-            for (int xx = 0; xx < W; ++xx) {
-                const size_t idx = (row + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(ch);
-                const double x = static_cast<double>(pred[idx]);
-                const double y = static_cast<double>(target[idx]);
-                sum_x += x;
-                sum_y += y;
-                sum_x2 += x * x;
-                sum_y2 += y * y;
-                sum_xy += x * y;
-            }
-        }
-
-        const double mu_x = sum_x * inv_hw;
-        const double mu_y = sum_y * inv_hw;
-        const double ex2 = sum_x2 * inv_hw;
-        const double ey2 = sum_y2 * inv_hw;
-        const double exy = sum_xy * inv_hw;
-        const double sigma_x2 = std::max(0.0, ex2 - mu_x * mu_x);
-        const double sigma_y2 = std::max(0.0, ey2 - mu_y * mu_y);
-        const double sigma_xy = exy - mu_x * mu_y;
-
-        const double A = 2.0 * mu_x * mu_y + c1;
-        const double B = 2.0 * sigma_xy + c2;
-        const double Cc = mu_x * mu_x + mu_y * mu_y + c1;
-        const double D = sigma_x2 + sigma_y2 + c2;
-
-        const double eps = 1e-12;
-        const double denom = (Cc * D);
-        const double ssim = (denom != 0.0) ? ((A * B) / (denom + eps)) : 0.0;
-        const double loss_ch = 1.0 - ssim;
-        loss_sum += loss_ch;
-
-        // dSSIM/dx_i (global version)
-        const double invA = 1.0 / (A + eps);
-        const double invB = 1.0 / (B + eps);
-        const double invC = 1.0 / (Cc + eps);
-        const double invD = 1.0 / (D + eps);
-        const double ssim_safe = ssim;
-
-        for (int yy = 0; yy < H; ++yy) {
-            const size_t row = static_cast<size_t>(yy) * static_cast<size_t>(W);
-            for (int xx = 0; xx < W; ++xx) {
-                const size_t idx = (row + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(ch);
-                const double x = static_cast<double>(pred[idx]);
-                const double y = static_cast<double>(target[idx]);
-                const double dmu_x = inv_hw;
-                const double dA = 2.0 * mu_y * dmu_x;
-                const double dC = 2.0 * mu_x * dmu_x;
-                const double dsigma_xy = (static_cast<double>(y) - mu_y) * inv_hw;
-                const double dB = 2.0 * dsigma_xy;
-                const double dsigma_x2 = 2.0 * (x - mu_x) * inv_hw;
-                const double dD = dsigma_x2;
-
-                const double dssim = ssim_safe * (dA * invA + dB * invB - dC * invC - dD * invD);
-                const double dloss = -dssim;
-                out.grad[idx] += static_cast<float>(dloss / static_cast<double>(C));
-            }
-        }
-    }
-
-    out.loss = loss_sum / static_cast<double>(std::max(1, c));
-    return out;
-}
-
-static inline void avgpool2x2_hwc(
-    const std::vector<float>& in,
-    int w,
-    int h,
-    int c,
-    std::vector<float>& out,
-    int& out_w,
-    int& out_h
-) {
-    const int W = std::max(1, w);
-    const int H = std::max(1, h);
-    const int C = std::max(1, c);
-    out_w = std::max(1, W / 2);
-    out_h = std::max(1, H / 2);
-    out.assign(static_cast<size_t>(out_w) * static_cast<size_t>(out_h) * static_cast<size_t>(C), 0.0f);
-    for (int yy = 0; yy < out_h; ++yy) {
-        for (int xx = 0; xx < out_w; ++xx) {
-            const int in_y = yy * 2;
-            const int in_x = xx * 2;
-            for (int ch = 0; ch < C; ++ch) {
-                double sum = 0.0;
-                int count = 0;
-                for (int dy = 0; dy < 2; ++dy) {
-                    for (int dx = 0; dx < 2; ++dx) {
-                        const int sy = in_y + dy;
-                        const int sx = in_x + dx;
-                        if (sy >= H || sx >= W) continue;
-                        const size_t sidx = (static_cast<size_t>(sy) * static_cast<size_t>(W) + static_cast<size_t>(sx)) * static_cast<size_t>(C) + static_cast<size_t>(ch);
-                        sum += static_cast<double>(in[sidx]);
-                        ++count;
-                    }
-                }
-                const size_t didx = (static_cast<size_t>(yy) * static_cast<size_t>(out_w) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(ch);
-                out[didx] = static_cast<float>(sum / static_cast<double>(std::max(1, count)));
-            }
-        }
-    }
-}
-
-static inline void avgpool2x2_back_hwc(
-    const std::vector<float>& grad_out,
-    int in_w,
-    int in_h,
-    int c,
-    std::vector<float>& grad_in
-) {
-    const int W = std::max(1, in_w);
-    const int H = std::max(1, in_h);
-    const int C = std::max(1, c);
-    const int out_w = std::max(1, W / 2);
-    const int out_h = std::max(1, H / 2);
-    grad_in.assign(static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C), 0.0f);
-    if (grad_out.size() < static_cast<size_t>(out_w) * static_cast<size_t>(out_h) * static_cast<size_t>(C)) return;
-
-    for (int yy = 0; yy < out_h; ++yy) {
-        for (int xx = 0; xx < out_w; ++xx) {
-            const int in_y = yy * 2;
-            const int in_x = xx * 2;
-            int count = 0;
-            for (int dy = 0; dy < 2; ++dy) {
-                for (int dx = 0; dx < 2; ++dx) {
-                    const int sy = in_y + dy;
-                    const int sx = in_x + dx;
-                    if (sy >= H || sx >= W) continue;
-                    ++count;
-                }
-            }
-            const float inv = 1.0f / static_cast<float>(std::max(1, count));
-            for (int ch = 0; ch < C; ++ch) {
-                const size_t oidx = (static_cast<size_t>(yy) * static_cast<size_t>(out_w) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(ch);
-                const float g = grad_out[oidx] * inv;
-                for (int dy = 0; dy < 2; ++dy) {
-                    for (int dx = 0; dx < 2; ++dx) {
-                        const int sy = in_y + dy;
-                        const int sx = in_x + dx;
-                        if (sy >= H || sx >= W) continue;
-                        const size_t iidx = (static_cast<size_t>(sy) * static_cast<size_t>(W) + static_cast<size_t>(sx)) * static_cast<size_t>(C) + static_cast<size_t>(ch);
-                        grad_in[iidx] += g;
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct LossWithGrad {
-    double loss = 0.0;
-    std::vector<float> grad;
-};
-
-struct Dct1DCache {
-    int n = 0;
-    std::vector<float> cos_nk;   // [n*N + k] = cos(pi*(n+0.5)*k/N)
-    std::vector<float> alpha_k;  // orthonormal scaling
-};
-
-static inline const Dct1DCache& get_dct1d_cache(int N) {
-    static std::mutex m;
-    static std::unordered_map<int, Dct1DCache> caches;
-    N = std::max(1, N);
-
-    {
-        std::lock_guard<std::mutex> lock(m);
-        auto it = caches.find(N);
-        if (it != caches.end()) return it->second;
-
-        Dct1DCache c;
-        c.n = N;
-        c.cos_nk.assign(static_cast<size_t>(N) * static_cast<size_t>(N), 0.0f);
-        c.alpha_k.assign(static_cast<size_t>(N), 0.0f);
-
-        const double invN = 1.0 / static_cast<double>(N);
-        for (int k = 0; k < N; ++k) {
-            const double a = (k == 0) ? std::sqrt(invN) : std::sqrt(2.0 * invN);
-            c.alpha_k[static_cast<size_t>(k)] = static_cast<float>(a);
-        }
-
-        const double pi = 3.1415926535897932384626433832795;
-        for (int n = 0; n < N; ++n) {
-            const double nn = static_cast<double>(n) + 0.5;
-            for (int k = 0; k < N; ++k) {
-                const double ang = (pi * nn * static_cast<double>(k)) * invN;
-                c.cos_nk[static_cast<size_t>(n) * static_cast<size_t>(N) + static_cast<size_t>(k)] = static_cast<float>(std::cos(ang));
-            }
-        }
-
-        auto [insIt, _] = caches.emplace(N, std::move(c));
-        return insIt->second;
-    }
-}
-
-static inline void dct2d_ortho_hwc(
-    const std::vector<float>& in,
-    int w,
-    int h,
-    int c,
-    std::vector<float>& out
-) {
-    const int W = std::max(1, w);
-    const int H = std::max(1, h);
-    const int C = std::max(1, c);
-    const size_t n = static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C);
-    out.assign(n, 0.0f);
-    if (in.size() < n) return;
-
-    const auto& cw = get_dct1d_cache(W);
-    const auto& ch = get_dct1d_cache(H);
-
-    std::vector<float> tmp_row(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
-    std::vector<float> tmp_col(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
-
-    for (int cc = 0; cc < C; ++cc) {
-        // Row DCT
-        for (int yy = 0; yy < H; ++yy) {
-            for (int kk = 0; kk < W; ++kk) {
-                double sum = 0.0;
-                const float alpha = cw.alpha_k[static_cast<size_t>(kk)];
-                for (int xx = 0; xx < W; ++xx) {
-                    const size_t iidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                    const float x = in[iidx];
-                    const float co = cw.cos_nk[static_cast<size_t>(xx) * static_cast<size_t>(W) + static_cast<size_t>(kk)];
-                    sum += static_cast<double>(x) * static_cast<double>(co);
-                }
-                tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kk)] = static_cast<float>(static_cast<double>(alpha) * sum);
-            }
-        }
-
-        // Col DCT
-        for (int kkx = 0; kkx < W; ++kkx) {
-            for (int kky = 0; kky < H; ++kky) {
-                double sum = 0.0;
-                const float alpha = ch.alpha_k[static_cast<size_t>(kky)];
-                for (int yy = 0; yy < H; ++yy) {
-                    const float v = tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kkx)];
-                    const float co = ch.cos_nk[static_cast<size_t>(yy) * static_cast<size_t>(H) + static_cast<size_t>(kky)];
-                    sum += static_cast<double>(v) * static_cast<double>(co);
-                }
-                tmp_col[static_cast<size_t>(kky) * static_cast<size_t>(W) + static_cast<size_t>(kkx)] = static_cast<float>(static_cast<double>(alpha) * sum);
-            }
-        }
-
-        // Store
-        for (int yy = 0; yy < H; ++yy) {
-            for (int xx = 0; xx < W; ++xx) {
-                const size_t oidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                out[oidx] = tmp_col[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)];
-            }
-        }
-    }
-}
-
-static inline void idct2d_ortho_hwc(
-    const std::vector<float>& in,
-    int w,
-    int h,
-    int c,
-    std::vector<float>& out
-) {
-    const int W = std::max(1, w);
-    const int H = std::max(1, h);
-    const int C = std::max(1, c);
-    const size_t n = static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C);
-    out.assign(n, 0.0f);
-    if (in.size() < n) return;
-
-    const auto& cw = get_dct1d_cache(W);
-    const auto& ch = get_dct1d_cache(H);
-
-    std::vector<float> tmp_row(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
-    std::vector<float> tmp_col(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
-
-    for (int cc = 0; cc < C; ++cc) {
-        // Gather coefficients for this channel into tmp_col
-        for (int yy = 0; yy < H; ++yy) {
-            for (int xx = 0; xx < W; ++xx) {
-                const size_t iidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                tmp_col[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)] = in[iidx];
-            }
-        }
-
-        // Inverse Col (DCT-III)
-        for (int kkx = 0; kkx < W; ++kkx) {
-            for (int yy = 0; yy < H; ++yy) {
-                double sum = 0.0;
-                for (int kky = 0; kky < H; ++kky) {
-                    const float alpha = ch.alpha_k[static_cast<size_t>(kky)];
-                    const float v = tmp_col[static_cast<size_t>(kky) * static_cast<size_t>(W) + static_cast<size_t>(kkx)];
-                    const float co = ch.cos_nk[static_cast<size_t>(yy) * static_cast<size_t>(H) + static_cast<size_t>(kky)];
-                    sum += static_cast<double>(alpha) * static_cast<double>(v) * static_cast<double>(co);
-                }
-                tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kkx)] = static_cast<float>(sum);
-            }
-        }
-
-        // Inverse Row (DCT-III)
-        for (int yy = 0; yy < H; ++yy) {
-            for (int xx = 0; xx < W; ++xx) {
-                double sum = 0.0;
-                for (int kk = 0; kk < W; ++kk) {
-                    const float alpha = cw.alpha_k[static_cast<size_t>(kk)];
-                    const float v = tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kk)];
-                    const float co = cw.cos_nk[static_cast<size_t>(xx) * static_cast<size_t>(W) + static_cast<size_t>(kk)];
-                    sum += static_cast<double>(alpha) * static_cast<double>(v) * static_cast<double>(co);
-                }
-                const size_t oidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                out[oidx] = static_cast<float>(sum);
-            }
-        }
-    }
-}
-
-static inline LossWithGrad spectral_dct_l1_hwc(
-    const std::vector<float>& pred,
-    const std::vector<float>& target,
-    int w,
-    int h,
-    int c
-) {
-    LossWithGrad out;
-    const int W = std::max(1, w);
-    const int H = std::max(1, h);
-    const int C = std::max(1, c);
-    const size_t n = static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C);
-    out.grad.assign(n, 0.0f);
-    if (pred.size() < n || target.size() < n) return out;
-
-    std::vector<float> coeff_p;
-    std::vector<float> coeff_t;
-    dct2d_ortho_hwc(pred, W, H, C, coeff_p);
-    dct2d_ortho_hwc(target, W, H, C, coeff_t);
-
-    std::vector<float> grad_coeff(n, 0.0f);
-    const double inv_n = 1.0 / static_cast<double>(std::max<size_t>(1, n));
-    double sum_abs = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const float d = coeff_p[i] - coeff_t[i];
-        sum_abs += static_cast<double>(std::abs(d));
-        const float s = (d > 0.0f) ? 1.0f : (d < 0.0f ? -1.0f : 0.0f);
-        grad_coeff[i] = static_cast<float>(inv_n) * s;
-    }
-    out.loss = sum_abs * inv_n;
-
-    // Backprop to pixel space
-    idct2d_ortho_hwc(grad_coeff, W, H, C, out.grad);
-    return out;
 }
 
 static inline DistMoments compute_moments_prefix(const std::vector<float>& v, size_t off, int n) {
@@ -752,6 +349,22 @@ static inline int env_int(const char* name, int default_value) {
         return default_value;
     }
 }
+
+static inline void refresh_runtime_router_bindings() {
+    AbstractRuntime* rocm = nullptr;
+    AbstractRuntime* cuda = nullptr;
+    AbstractRuntime* cpu = nullptr;
+
+#ifdef ENABLE_ROCM
+    rocm = g_rocm_engine.get();
+#endif
+#ifdef ENABLE_CUDA
+    cuda = g_cuda_engine.get();
+#endif
+    cpu = g_cpu_engine.get();
+
+    RuntimeRouter::instance().setRuntimes(rocm, cuda, cpu);
+}
 }
 
 // === constructeurs / destructeurs (déjà présents) ===
@@ -759,15 +372,19 @@ Model::Model()
     : tokenizer(20000), encoder(256, 20000), hasTokenizer(true), hasEncoder(true),
     max_ram_mb_(0)
 {
+    RuntimeRouter::instance().setActivators(
+        [this]() -> bool { return this->initializeRocmComputeEngine(); },
+        [this]() -> bool { return this->initializeCudaComputeEngine(); },
+        [this]() -> bool { return this->initializeCpuComputeEngine(); }
+    );
+
     tw = 64; th = 64;
     // ConditioningEncoder toujours présent + embeddings spéciaux (SEQ/MOD/MAG) disponibles.
     encoder.ensureSpecialEmbeddings();
     // Tenter d'initialiser le compute engine
-    initializeCpuComputeEngine();
     initializeComputeEngine();
     initializeOpenCLComputeEngine();
-    initializeCudaComputeEngine();
-    initializeRocmComputeEngine();
+    RuntimeRouter::instance().activateAvailableRuntimes();
 }
 
 Model::~Model() {
@@ -839,6 +456,7 @@ bool Model::initializeCpuComputeEngine() {
         if (cfg_from_env.disabled) {
             g_cpu_available = false;
             g_cpu_engine.reset();
+        refresh_runtime_router_bindings();
         initialized.store(true, std::memory_order_release);
         if (cfg_from_env.verbose && !Model::frameworkLogsSuppressed()) {
             std::cerr << "⚠ CPU runtime disabled via MIMIR_DISABLE_CPU" << std::endl;
@@ -854,11 +472,13 @@ bool Model::initializeCpuComputeEngine() {
     try {
         g_cpu_engine = std::make_unique<CpuRuntime>();
         g_cpu_available = g_cpu_engine->initialize(cfg);
+        refresh_runtime_router_bindings();
         if (g_cpu_available && cfg.verbose && !Model::frameworkLogsSuppressed()) {
             std::cerr << "✓ CPU Runtime initialized" << std::endl;
         }
         if (!g_cpu_available) {
             g_cpu_engine.reset();
+            refresh_runtime_router_bindings();
         }
     } catch (const std::exception& e) {
         if (!Model::frameworkLogsSuppressed()) {
@@ -866,6 +486,7 @@ bool Model::initializeCpuComputeEngine() {
         }
         g_cpu_available = false;
         g_cpu_engine.reset();
+        refresh_runtime_router_bindings();
     }
 
     initialized.store(true, std::memory_order_release);
@@ -995,6 +616,7 @@ bool Model::initializeCudaComputeEngine() {
     if (cfg.disabled || !cfg.linear_enabled) {
         g_cuda_available = false;
         g_cuda_engine.reset();
+        refresh_runtime_router_bindings();
         initialized.store(true, std::memory_order_release);
         if (cfg.verbose && cfg.disabled) {
             std::cerr << "⚠ CUDA Compute disabled via MIMIR_DISABLE_CUDA" << std::endl;
@@ -1014,17 +636,20 @@ bool Model::initializeCudaComputeEngine() {
     try {
         g_cuda_engine = std::make_unique<CudaRuntime>();
         g_cuda_available = g_cuda_engine->initialize(cfg);
+        refresh_runtime_router_bindings();
         if (g_cuda_available) {
             if (cfg.verbose) {
                 std::cerr << "✓ CUDA Compute initialized" << std::endl;
             }
         } else {
             g_cuda_engine.reset();
+            refresh_runtime_router_bindings();
         }
     } catch (const std::exception& e) {
         std::cerr << "⚠ CUDA Compute unavailable: " << e.what() << std::endl;
         g_cuda_available = false;
         g_cuda_engine.reset();
+        refresh_runtime_router_bindings();
     }
 
     initialized.store(true, std::memory_order_release);
@@ -1044,6 +669,7 @@ bool Model::initializeRocmComputeEngine() {
     if (cfg.disabled || !cfg.linear_enabled) {
         g_rocm_available = false;
         g_rocm_engine.reset();
+        refresh_runtime_router_bindings();
         initialized.store(true, std::memory_order_release);
         if (cfg.verbose && cfg.disabled) {
             std::cerr << "⚠ ROCm Compute disabled via MIMIR_DISABLE_ROCM" << std::endl;
@@ -1063,17 +689,20 @@ bool Model::initializeRocmComputeEngine() {
     try {
         g_rocm_engine = std::make_unique<RocmRuntime>();
         g_rocm_available = g_rocm_engine->initialize(cfg);
+        refresh_runtime_router_bindings();
         if (g_rocm_available) {
             if (cfg.verbose) {
                 std::cerr << "✓ ROCm Compute initialized" << std::endl;
             }
         } else {
             g_rocm_engine.reset();
+            refresh_runtime_router_bindings();
         }
     } catch (const std::exception& e) {
         std::cerr << "⚠ ROCm Compute unavailable: " << e.what() << std::endl;
         g_rocm_available = false;
         g_rocm_engine.reset();
+        refresh_runtime_router_bindings();
     }
 
     initialized.store(true, std::memory_order_release);
@@ -1111,6 +740,7 @@ void Model::shutdownCudaComputeEngine() {
         g_cuda_engine->shutdown();
         g_cuda_engine.reset();
         g_cuda_available = false;
+        refresh_runtime_router_bindings();
     }
 #else
     g_cuda_available = false;
@@ -1123,6 +753,7 @@ void Model::shutdownRocmComputeEngine() {
         g_rocm_engine->shutdown();
         g_rocm_engine.reset();
         g_rocm_available = false;
+        refresh_runtime_router_bindings();
     }
 #else
     g_rocm_available = false;
@@ -1134,8 +765,10 @@ void Model::shutdownCpuComputeEngine() {
         g_cpu_engine->shutdown();
         g_cpu_engine.reset();
         g_cpu_available = false;
+        refresh_runtime_router_bindings();
     } else {
         g_cpu_available = false;
+        refresh_runtime_router_bindings();
     }
 }
 
@@ -1426,10 +1059,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
         }
     };
 
-    MemoryGuard& guard = MemoryGuard::instance();
-    const size_t guard_mb = guard.getLimit() / (1024ULL * 1024ULL);
-    const size_t cap_mb = (max_ram_mb_ > 0) ? max_ram_mb_ : guard_mb;
-    RuntimeAllocator allocator(guard, cap_mb);
+    if (!(g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized())) {
+        (void)initializeCpuComputeEngine();
+    }
 
     static const std::vector<std::string> kDefaultInputNameX = {"x"};
 
@@ -1442,388 +1074,79 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
         const auto &layer = layers[layer_idx];
 
         std::vector<float> layer_output;
+        std::vector<std::vector<float>> runtime_outputs;
+        auto& embedding_ids_tmp = scratch_embedding_ids_tmp_;
+        auto& embedding_ids_fallback = scratch_embedding_ids_fallback_;
 
         try {
-            if (layer.type_enum == LayerType::Embedding) {
-                const std::vector<std::string>& input_names =
-                    (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
-                const std::vector<int>& ids = getTensorInt(input_names[0]);
+            const std::vector<std::string>& input_names =
+                (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
 
-                // Snapshot inputs for backward (ids stockés en float)
-                if (training) {
-                    forward_state.layer_input_names.push_back(input_names);
+            auto& inputs = scratch_input_ptrs_;
+            inputs.clear();
+            inputs.reserve(input_names.size());
 
-                    std::vector<size_t> sizes;
-                    sizes.reserve(1);
-                    sizes.push_back(ids.size());
-                    forward_state.layer_input_sizes_multi.push_back(std::move(sizes));
+            embedding_ids_tmp.clear();
+            for (size_t in_i = 0; in_i < input_names.size(); ++in_i) {
+                const auto& name = input_names[in_i];
 
-                    std::vector<std::vector<float>> snap;
-                    snap.reserve(1);
-                    std::vector<float> ids_as_float;
-                    ids_as_float.reserve(ids.size());
-                    for (int v : ids) ids_as_float.push_back(static_cast<float>(v));
-                    snap.push_back(std::move(ids_as_float));
-                    forward_state.layer_inputs_multi.push_back(std::move(snap));
-
-                    forward_state.layer_outputs.emplace_back();
-                    forward_state.layer_output_masks.emplace_back();
+                auto itf = tensor_store.find(name);
+                if (itf != tensor_store.end()) {
+                    inputs.push_back(&itf->second);
+                    continue;
                 }
 
-                const int vocab = std::max(1, layer.vocab_size);
-                const int dim = std::max(1, layer.embed_dim);
-                const int pad = layer.padding_idx;
+                if (layer.type_enum == LayerType::Embedding && in_i == 0) {
+                    auto iti = tensor_store_int.find(name);
+                    if (iti == tensor_store_int.end()) {
+                        const int L = (layer.seq_len > 0) ? layer.seq_len : 1;
+                        const int pad = (layer.padding_idx >= 0) ? layer.padding_idx : 0;
+                        embedding_ids_fallback.assign(static_cast<size_t>(L), pad);
+                        iti = tensor_store_int.emplace(name, embedding_ids_fallback).first;
+                    }
+                    const std::vector<int>& ids = iti->second;
+                    embedding_ids_tmp.reserve(ids.size());
+                    for (int v : ids) embedding_ids_tmp.push_back(static_cast<float>(v));
+                    inputs.push_back(&embedding_ids_tmp);
+                    continue;
+                }
 
-                RUNTIME_CHECK(layer.getWeights() != nullptr, "Embedding: weights not initialized");
-                RUNTIME_CHECK(static_cast<int>(layer.getWeightsSize()) >= vocab * dim, "Embedding: invalid weight size");
+                RUNTIME_ERROR_STRICT("forwardPass(int): missing input tensor '" + name + "' for layer " + layer.name);
+            }
 
-                const float* w = layer.getWeights();
-                const size_t outN = static_cast<size_t>(ids.size()) * static_cast<size_t>(dim);
-                auto output_handle = allocator.allocate_tensor(
-                    {static_cast<int>(outN)},
-                    "float32",
-                    layer.name + "_output"
+            if (training) {
+                forward_state.layer_input_names.push_back(input_names);
+
+                std::vector<size_t> sizes;
+                sizes.reserve(inputs.size());
+                for (auto* p : inputs) sizes.push_back(p ? p->size() : 0ULL);
+                forward_state.layer_input_sizes_multi.push_back(std::move(sizes));
+
+                std::vector<std::vector<float>> snap;
+                if (needs_input_value_snapshot(layer.type_enum)) {
+                    snap.reserve(inputs.size());
+                    for (auto* p : inputs) snap.push_back(*p);
+                }
+                forward_state.layer_inputs_multi.push_back(std::move(snap));
+
+                forward_state.layer_outputs.emplace_back();
+                forward_state.layer_output_masks.emplace_back();
+            }
+
+            if (!RuntimeRouter::instance().dispatchForwardLayer(inputs, runtime_outputs, layer, training)) {
+                RUNTIME_ERROR_STRICT(
+                    "forwardPass(int): layer type not supported by runtimes: " + type_to_string(layer.type_enum)
                 );
-                std::vector<float>& out = output_handle.data();
-                out.assign(outN, 0.0f);
+            }
 
-                for (size_t t = 0; t < ids.size(); ++t) {
-                    const int id = ids[t];
-                    if (pad >= 0 && id == pad) continue;
-                    if (id < 0 || id >= vocab) continue;
-                    const size_t base_w = static_cast<size_t>(id) * static_cast<size_t>(dim);
-                    const size_t base_o = t * static_cast<size_t>(dim);
-                    for (int d = 0; d < dim; ++d) {
-                        out[base_o + static_cast<size_t>(d)] = w[base_w + static_cast<size_t>(d)];
-                    }
+            const std::string output_name = layer.output.empty() ? "x" : layer.output;
+            if ((layer.type_enum == LayerType::Split || layer.type_enum == LayerType::Chunk) && runtime_outputs.size() > 1) {
+                for (size_t i = 0; i < runtime_outputs.size(); ++i) {
+                    storeTensor(output_name + "_" + std::to_string(i), std::move(runtime_outputs[i]));
                 }
-
-                layer_output = std::move(out);
+                layer_output = getTensor(output_name + "_0");
             } else {
-                // Pour les autres layers, reprendre le chemin float habituel:
-                // récupérer les inputs float depuis tensor_store.
-                const std::vector<std::string>& input_names =
-                    (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
-
-                auto& inputs = scratch_input_ptrs_;
-                inputs.clear();
-                inputs.reserve(input_names.size());
-                for (const auto& name : input_names) {
-                    inputs.push_back(&getTensor(name));
-                }
-
-                // Snapshot inputs for backward
-                if (training) {
-                    forward_state.layer_input_names.push_back(input_names);
-
-                    std::vector<size_t> sizes;
-                    sizes.reserve(inputs.size());
-                    for (auto* p : inputs) sizes.push_back(p ? p->size() : 0ULL);
-                    forward_state.layer_input_sizes_multi.push_back(std::move(sizes));
-
-                    std::vector<std::vector<float>> snap;
-                    if (needs_input_value_snapshot(layer.type_enum)) {
-                        snap.reserve(inputs.size());
-                        for (auto* p : inputs) snap.push_back(*p);
-                    }
-                    forward_state.layer_inputs_multi.push_back(std::move(snap));
-
-                    forward_state.layer_outputs.emplace_back();
-                    forward_state.layer_output_masks.emplace_back();
-                }
-
-                static const std::vector<float> kEmptyInput;
-                const std::vector<float>& x = (!inputs.empty() && inputs[0] != nullptr) ? *inputs[0] : kEmptyInput;
-
-                // Réutiliser le switch-case existant en appelant une petite lambda locale
-                // en se basant sur le même dispatch que forwardPass(float).
-                switch (layer.type_enum) {
-                    case LayerType::Identity: {
-                        layer_output = x;
-                        break;
-                    }
-                    case LayerType::Constant: {
-                        RUNTIME_CHECK(layer.getWeights() != nullptr, "Constant: weights not initialized");
-                        const float* src = layer.getWeights();
-                        const size_t n = layer.getWeightsSize();
-                        layer_output.assign(src, src + n);
-                        break;
-                    }
-                    case LayerType::Linear: {
-                        layer_output = LayerOps::linear_forward(x, layer, training);
-                        break;
-                    }
-                    case LayerType::LayerNorm: {
-                        layer_output = LayerOps::layernorm_forward(x, layer, training);
-                        break;
-                    }
-                    case LayerType::GELU: {
-                        layer_output = LayerOps::gelu_forward(x);
-                        break;
-                    }
-                    case LayerType::GEGLU: {
-                        layer_output = LayerOps::geglu_forward(x, layer.seq_len, layer.out_features);
-                        break;
-                    }
-                    case LayerType::ReLU: {
-                        layer_output = LayerOps::relu_forward(x);
-                        break;
-                    }
-                    case LayerType::Tanh: {
-                        layer_output = LayerOps::tanh_forward(x);
-                        break;
-                    }
-                    case LayerType::Sigmoid: {
-                        layer_output = LayerOps::sigmoid_forward(x);
-                        break;
-                    }
-                    case LayerType::Softmax:
-                    case LayerType::LogSoftmax: {
-                        layer_output = LayerOps::softmax_forward(x, layer);
-                        break;
-                    }
-                    case LayerType::Dropout:
-                    case LayerType::Dropout2d: {
-                        layer_output = LayerOps::dropout_forward(x, layer, training);
-                        break;
-                    }
-                    case LayerType::Add: {
-                        RUNTIME_CHECK(inputs.size() >= 2, "Add requires 2 inputs");
-                        layer_output = LayerOps::add_forward(*inputs[0], *inputs[1]);
-                        break;
-                    }
-                    case LayerType::Concat: {
-                        RUNTIME_CHECK(inputs.size() >= 2, "Concat requires >=2 inputs");
-                        std::vector<std::vector<float>> inputs_vec;
-                        inputs_vec.reserve(inputs.size());
-                        for (auto* p : inputs) inputs_vec.push_back(*p);
-                        layer_output = LayerOps::concat_forward(inputs_vec, layer.concat_axis);
-                        break;
-                    }
-                    case LayerType::TokenMeanPool: {
-                        const int seq_len = layer.seq_len > 0 ? layer.seq_len : 0;
-                        const int embed_dim = layer.embed_dim > 0 ? layer.embed_dim : 0;
-                        RUNTIME_CHECK(seq_len > 0 && embed_dim > 0, "TokenMeanPool: seq_len and embed_dim must be set");
-                        RUNTIME_CHECK(static_cast<int>(x.size()) == seq_len * embed_dim, "TokenMeanPool: input size mismatch");
-
-                        layer_output.assign(static_cast<size_t>(embed_dim), 0.0f);
-                        for (int t = 0; t < seq_len; ++t) {
-                            const int base = t * embed_dim;
-                            for (int d = 0; d < embed_dim; ++d) {
-                                layer_output[static_cast<size_t>(d)] += x[static_cast<size_t>(base + d)];
-                            }
-                        }
-                        const float inv = 1.0f / static_cast<float>(seq_len);
-                        for (int d = 0; d < embed_dim; ++d) {
-                            layer_output[static_cast<size_t>(d)] *= inv;
-                        }
-                        break;
-                    }
-                    case LayerType::MultiHeadAttention:
-                    case LayerType::SelfAttention: {
-                        RUNTIME_CHECK(layer.getWeights() != nullptr, "Attention: weights not initialized");
-                        int seq_len = layer.seq_len > 0 ? layer.seq_len : 1;
-                        int embed_dim = layer.embed_dim > 0 ? layer.embed_dim : static_cast<int>(x.size());
-                        int num_heads = layer.num_heads > 0 ? layer.num_heads : 1;
-                        bool causal = layer.causal;
-
-                        const float* weights = layer.getWeights();
-                        int qkv_size = embed_dim * embed_dim * 3;
-                        int out_size = embed_dim * embed_dim;
-                        int qkv_bias_size = embed_dim * 3;
-                        int out_bias_size = embed_dim;
-                        size_t expected_no_bias = static_cast<size_t>(qkv_size + out_size);
-                        size_t expected_with_bias = expected_no_bias + static_cast<size_t>(qkv_bias_size + out_bias_size);
-                        size_t actual_size = layer.getWeightsSize();
-                        bool has_bias = (actual_size >= expected_with_bias);
-                        std::vector<float> qkv_weight(weights, weights + qkv_size);
-                        std::vector<float> out_weight(weights + qkv_size, weights + qkv_size + out_size);
-                        std::vector<float> qkv_bias;
-                        std::vector<float> out_bias;
-                        if (has_bias) {
-                            const float* bias_ptr = weights + qkv_size + out_size;
-                            qkv_bias.assign(bias_ptr, bias_ptr + qkv_bias_size);
-                            out_bias.assign(bias_ptr + qkv_bias_size, bias_ptr + qkv_bias_size + out_bias_size);
-                        }
-
-                        if (layer.type_enum == LayerType::SelfAttention) {
-                            const bool can_use_kv_cache =
-                                (!training) &&
-                                kv_cache_enabled_ &&
-                                embed_dim > 0 &&
-                                num_heads > 0 &&
-                                (embed_dim % num_heads == 0) &&
-                                !x.empty() &&
-                                ((x.size() % static_cast<size_t>(embed_dim)) == 0);
-
-                            if (!can_use_kv_cache) {
-                                layer_output = LayerOps::self_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
-                                break;
-                            }
-
-                            const int query_len = static_cast<int>(x.size() / static_cast<size_t>(embed_dim));
-                            const int head_dim = embed_dim / num_heads;
-                            const int qkv_dim = embed_dim * 3;
-
-                            std::vector<float> qkv(static_cast<size_t>(query_len) * static_cast<size_t>(qkv_dim), 0.0f);
-                            #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * qkv_dim * embed_dim > 262144)
-                            for (int m = 0; m < query_len; ++m) {
-                                const float* xrow = &x[static_cast<size_t>(m) * static_cast<size_t>(embed_dim)];
-                                float* qkv_row = &qkv[static_cast<size_t>(m) * static_cast<size_t>(qkv_dim)];
-                                for (int n = 0; n < qkv_dim; ++n) {
-                                    const float* w_row = &qkv_weight[static_cast<size_t>(n) * static_cast<size_t>(embed_dim)];
-                                    float sum = qkv_bias.empty() ? 0.0f : qkv_bias[static_cast<size_t>(n)];
-                                    for (int k = 0; k < embed_dim; ++k) {
-                                        sum += xrow[k] * w_row[k];
-                                    }
-                                    qkv_row[n] = sum;
-                                }
-                            }
-
-                            std::vector<float> Q(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
-                            std::vector<float> K_new(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
-                            std::vector<float> V_new(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
-                            for (int m = 0; m < query_len; ++m) {
-                                const int base = m * qkv_dim;
-                                const int out = m * embed_dim;
-                                std::memcpy(&Q[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base)], static_cast<size_t>(embed_dim) * sizeof(float));
-                                std::memcpy(&K_new[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base + embed_dim)], static_cast<size_t>(embed_dim) * sizeof(float));
-                                std::memcpy(&V_new[static_cast<size_t>(out)], &qkv[static_cast<size_t>(base + 2 * embed_dim)], static_cast<size_t>(embed_dim) * sizeof(float));
-                            }
-
-                            auto& cache = kv_cache_by_layer_[layer_idx];
-                            const bool cache_compatible =
-                                cache.embed_dim == embed_dim &&
-                                cache.num_heads == num_heads &&
-                                cache.head_dim == head_dim &&
-                                static_cast<int>(cache.key.size()) == cache.seq_len * embed_dim &&
-                                static_cast<int>(cache.value.size()) == cache.seq_len * embed_dim;
-                            if (!cache_compatible) {
-                                cache.clear();
-                                cache.embed_dim = embed_dim;
-                                cache.num_heads = num_heads;
-                                cache.head_dim = head_dim;
-                            }
-
-                            const int prev_len = cache.seq_len;
-                            const int key_len = prev_len + query_len;
-                            cache.key.insert(cache.key.end(), K_new.begin(), K_new.end());
-                            cache.value.insert(cache.value.end(), V_new.begin(), V_new.end());
-                            cache.seq_len = key_len;
-
-                            std::vector<float> attended(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
-                            const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-
-                            std::vector<float> Qh(static_cast<size_t>(query_len) * static_cast<size_t>(head_dim));
-                            std::vector<float> Vh(static_cast<size_t>(key_len) * static_cast<size_t>(head_dim));
-                            std::vector<float> KhT(static_cast<size_t>(head_dim) * static_cast<size_t>(key_len));
-                            std::vector<float> scores(static_cast<size_t>(query_len) * static_cast<size_t>(key_len));
-                            std::vector<float> context(static_cast<size_t>(query_len) * static_cast<size_t>(head_dim));
-
-                            for (int h = 0; h < num_heads; ++h) {
-                                const int head_off = h * head_dim;
-
-                                for (int i = 0; i < query_len; ++i) {
-                                    const float* qsrc = &Q[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
-                                    float* qdst = &Qh[static_cast<size_t>(i) * static_cast<size_t>(head_dim)];
-                                    std::memcpy(qdst, qsrc, static_cast<size_t>(head_dim) * sizeof(float));
-                                }
-
-                                for (int j = 0; j < key_len; ++j) {
-                                    const float* ksrc = &cache.key[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
-                                    const float* vsrc = &cache.value[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
-                                    float* vdst = &Vh[static_cast<size_t>(j) * static_cast<size_t>(head_dim)];
-                                    for (int k = 0; k < head_dim; ++k) {
-                                        KhT[static_cast<size_t>(k) * static_cast<size_t>(key_len) + static_cast<size_t>(j)] = ksrc[k];
-                                        vdst[k] = vsrc[k];
-                                    }
-                                }
-
-                                HardwareOpt::matmul_fma_saturated(scores.data(), Qh.data(), KhT.data(),
-                                                                  static_cast<size_t>(query_len),
-                                                                  static_cast<size_t>(key_len),
-                                                                  static_cast<size_t>(head_dim));
-
-                                const size_t scores_n = static_cast<size_t>(query_len) * static_cast<size_t>(key_len);
-                                #pragma omp simd
-                                for (size_t idx = 0; idx < scores_n; ++idx) {
-                                    scores[idx] *= scale;
-                                }
-
-                                if (causal) {
-                                    for (int qi = 0; qi < query_len; ++qi) {
-                                        const int abs_q = prev_len + qi;
-                                        float* row = &scores[static_cast<size_t>(qi) * static_cast<size_t>(key_len)];
-                                        for (int kj = abs_q + 1; kj < key_len; ++kj) {
-                                            row[kj] = -1e9f;
-                                        }
-                                    }
-                                }
-
-                                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * key_len > 262144)
-                                for (int qi = 0; qi < query_len; ++qi) {
-                                    float* row = &scores[static_cast<size_t>(qi) * static_cast<size_t>(key_len)];
-                                    float max_val = row[0];
-                                    for (int kj = 1; kj < key_len; ++kj) {
-                                        if (row[kj] > max_val) max_val = row[kj];
-                                    }
-
-                                    float sum = 0.0f;
-                                    for (int kj = 0; kj < key_len; ++kj) {
-                                        const float e = std::exp(row[kj] - max_val);
-                                        row[kj] = e;
-                                        sum += e;
-                                    }
-                                    const float inv_sum = 1.0f / (sum + 1e-9f);
-                                    #pragma omp simd
-                                    for (int kj = 0; kj < key_len; ++kj) {
-                                        row[kj] *= inv_sum;
-                                    }
-                                }
-
-                                HardwareOpt::matmul_fma_saturated(context.data(), scores.data(), Vh.data(),
-                                                                  static_cast<size_t>(query_len),
-                                                                  static_cast<size_t>(head_dim),
-                                                                  static_cast<size_t>(key_len));
-
-                                for (int i = 0; i < query_len; ++i) {
-                                    float* dst = &attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(head_off)];
-                                    const float* src = &context[static_cast<size_t>(i) * static_cast<size_t>(head_dim)];
-                                    std::memcpy(dst, src, static_cast<size_t>(head_dim) * sizeof(float));
-                                }
-                            }
-
-                            layer_output.resize(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
-                            HardwareOpt::matmul_fma_saturated(layer_output.data(), attended.data(), out_weight.data(),
-                                                              static_cast<size_t>(query_len),
-                                                              static_cast<size_t>(embed_dim),
-                                                              static_cast<size_t>(embed_dim));
-                            if (!out_bias.empty()) {
-                                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * embed_dim > 262144)
-                                for (int i = 0; i < query_len; ++i) {
-                                    float* row = &layer_output[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                                    #pragma omp simd
-                                    for (int j = 0; j < embed_dim; ++j) {
-                                        row[j] += out_bias[static_cast<size_t>(j)];
-                                    }
-                                }
-                            }
-                        } else {
-                            layer_output = LayerOps::multihead_attention_forward(x, qkv_weight, out_weight, qkv_bias, out_bias, seq_len, embed_dim, num_heads, causal);
-                        }
-                        break;
-                    }
-                    default: {
-                        // Fallback: appeler le forward float standard en utilisant le tensor_store "x".
-                        // NOTE: on ne veut pas dupliquer tout le switch ici.
-                        // Stratégie: exécuter un forward float complet si ce layer n'est pas dans la liste.
-                        // Pour éviter un coût élevé, on force l'utilisateur à ne pas mélanger trop de types ici.
-                        RUNTIME_ERROR_STRICT(
-                            "forwardPass(int): layer type not supported in int path: " + type_to_string(layer.type_enum)
-                        );
-                        break;
-                    }
-                }
+                layer_output = std::move(runtime_outputs[0]);
             }
         } catch (const std::exception& e) {
             std::cerr << "❌ ERROR in layer " << layer_idx << " (" << layer.name
@@ -2244,8 +1567,8 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
                 if (cur_w < 8 || cur_h < 8) break;
                 std::vector<float> xd, td;
                 int nw = 0, nh = 0;
-                avgpool2x2_hwc(x_scales.back(), cur_w, cur_h, img_c, xd, nw, nh);
-                avgpool2x2_hwc(t_scales.back(), cur_w, cur_h, img_c, td, nw, nh);
+                RuntimeLossGrad::avgpool2x2_hwc(x_scales.back(), cur_w, cur_h, img_c, xd, nw, nh);
+                RuntimeLossGrad::avgpool2x2_hwc(t_scales.back(), cur_w, cur_h, img_c, td, nw, nh);
                 cur_w = nw;
                 cur_h = nh;
                 x_scales.push_back(std::move(xd));
@@ -2266,14 +1589,14 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
             std::vector<float> grad_full(static_cast<size_t>(recon_n), 0.0f);
             for (int s = 0; s < S; ++s) {
                 const double ws_norm = w_default[s] / wsum;
-                const auto r = ssim_global_hwc(x_scales[s], t_scales[s], ws[s], hs[s], img_c, k1, k2, L);
+                const auto r = RuntimeLossGrad::ssim_global_hwc(x_scales[s], t_scales[s], ws[s], hs[s], img_c, k1, k2, L);
                 ms_loss += ws_norm * r.loss;
 
                 // Backprop grad to full resolution via avgpool adjoint
                 std::vector<float> g = r.grad;
                 for (int back = s - 1; back >= 0; --back) {
                     std::vector<float> up;
-                    avgpool2x2_back_hwc(g, ws[back], hs[back], img_c, up);
+                    RuntimeLossGrad::avgpool2x2_back_hwc(g, ws[back], hs[back], img_c, up);
                     g.swap(up);
                 }
                 if (g.size() == grad_full.size()) {
@@ -2289,7 +1612,7 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
         } else {
             const std::vector<float> pred_recon(pred.begin(), pred.begin() + recon_n);
             const std::vector<float> tgt_recon(x.begin(), x.begin() + recon_n);
-            const auto r = ssim_global_hwc(pred_recon, tgt_recon, img_w, img_h, img_c, k1, k2, L);
+            const auto r = RuntimeLossGrad::ssim_global_hwc(pred_recon, tgt_recon, img_w, img_h, img_c, k1, k2, L);
             recon += static_cast<double>(ssim_weight) * r.loss;
             for (int i = 0; i < recon_n; ++i) {
                 grad_recon[static_cast<size_t>(i)] += ssim_weight * r.grad[static_cast<size_t>(i)];
@@ -2318,8 +1641,8 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
             if (cur_w < 8 || cur_h < 8) break;
             std::vector<float> xd, td;
             int nw = 0, nh = 0;
-            avgpool2x2_hwc(x_scales.back(), cur_w, cur_h, img_c, xd, nw, nh);
-            avgpool2x2_hwc(t_scales.back(), cur_w, cur_h, img_c, td, nw, nh);
+            RuntimeLossGrad::avgpool2x2_hwc(x_scales.back(), cur_w, cur_h, img_c, xd, nw, nh);
+            RuntimeLossGrad::avgpool2x2_hwc(t_scales.back(), cur_w, cur_h, img_c, td, nw, nh);
             cur_w = nw;
             cur_h = nh;
             x_scales.push_back(std::move(xd));
@@ -2337,14 +1660,14 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
         std::vector<float> grad_full(static_cast<size_t>(recon_n), 0.0f);
         for (int s = 0; s < S; ++s) {
             const double ws_norm = std::pow(0.5, static_cast<double>(s)) / wsum;
-            const auto r = spectral_dct_l1_hwc(x_scales[s], t_scales[s], ws[s], hs[s], img_c);
+            const auto r = RuntimeLossGrad::spectral_dct_l1_hwc(x_scales[s], t_scales[s], ws[s], hs[s], img_c);
             spec_loss += ws_norm * r.loss;
 
             // Backprop grad to full resolution via avgpool adjoint
             std::vector<float> g = r.grad;
             for (int back = s - 1; back >= 0; --back) {
                 std::vector<float> up;
-                avgpool2x2_back_hwc(g, ws[back], hs[back], img_c, up);
+                RuntimeLossGrad::avgpool2x2_back_hwc(g, ws[back], hs[back], img_c, up);
                 g.swap(up);
             }
             if (g.size() == grad_full.size()) {
@@ -2816,6 +2139,75 @@ static inline float norm2_f(const std::vector<float>& a, size_t a_off, int n) {
     return static_cast<float>(std::sqrt(s));
 }
 
+static inline uint64_t mix_u64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+static inline std::vector<float> make_text_hash_target_unigram(const std::vector<int>& ids,
+                                                                int pad_id,
+                                                                int dim,
+                                                                uint64_t seed) {
+    std::vector<float> out(static_cast<size_t>(std::max(0, dim)), 0.0f);
+    if (dim <= 0) return out;
+
+    int valid = 0;
+    for (int tok : ids) {
+        if (pad_id >= 0 && tok == pad_id) continue;
+        const uint64_t h = mix_u64(static_cast<uint64_t>(static_cast<uint32_t>(tok)) ^ seed);
+        const int idx = static_cast<int>(h % static_cast<uint64_t>(dim));
+        const float sgn = ((h >> 63) != 0ULL) ? 1.0f : -1.0f;
+        out[static_cast<size_t>(idx)] += sgn;
+        valid += 1;
+    }
+
+    if (valid > 0) {
+        const float inv = 1.0f / static_cast<float>(valid);
+        for (float& v : out) v *= inv;
+    }
+
+    const float n = std::max(1e-8f, norm2_f(out, 0, dim));
+    for (float& v : out) v /= n;
+    return out;
+}
+
+static inline std::vector<float> make_text_hash_target_bigram(const std::vector<int>& ids,
+                                                               int pad_id,
+                                                               int dim,
+                                                               uint64_t seed) {
+    std::vector<float> out(static_cast<size_t>(std::max(0, dim)), 0.0f);
+    if (dim <= 0) return out;
+
+    int prev = -1;
+    int valid = 0;
+    for (int tok : ids) {
+        if (pad_id >= 0 && tok == pad_id) continue;
+        if (prev >= 0) {
+            const uint64_t pair = (static_cast<uint64_t>(static_cast<uint32_t>(prev)) << 32)
+                                ^ static_cast<uint64_t>(static_cast<uint32_t>(tok));
+            const uint64_t h = mix_u64(pair ^ seed);
+            const int idx = static_cast<int>(h % static_cast<uint64_t>(dim));
+            const float sgn = ((h >> 62) & 1ULL) ? 1.0f : -1.0f;
+            out[static_cast<size_t>(idx)] += sgn;
+            valid += 1;
+        }
+        prev = tok;
+    }
+
+    if (valid > 0) {
+        const float inv = 1.0f / static_cast<float>(valid);
+        for (float& v : out) v *= inv;
+    }
+
+    const float n = std::max(1e-8f, norm2_f(out, 0, dim));
+    for (float& v : out) v /= n;
+    return out;
+}
+
 Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
                                            const std::vector<int>& text_ids,
                                            Optimizer& opt,
@@ -2894,6 +2286,20 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     if (modelConfig.contains("proj_dim")) {
         proj_dim = std::max(0, modelConfig["proj_dim"].get<int>());
     }
+
+    int sem_dim = 0;
+    int them_dim = 0;
+    int dialog_dim = 0;
+    if (modelConfig.contains("context_semantic_dim")) sem_dim = std::max(0, modelConfig["context_semantic_dim"].get<int>());
+    if (modelConfig.contains("context_thematic_dim")) them_dim = std::max(0, modelConfig["context_thematic_dim"].get<int>());
+    if (modelConfig.contains("context_dialog_dim")) dialog_dim = std::max(0, modelConfig["context_dialog_dim"].get<int>());
+
+    float context_sem_weight = 0.0f;
+    float context_them_weight = 0.0f;
+    float context_dialog_weight = 0.0f;
+    if (modelConfig.contains("context_semantic_weight")) context_sem_weight = std::max(0.0f, modelConfig["context_semantic_weight"].get<float>());
+    if (modelConfig.contains("context_thematic_weight")) context_them_weight = std::max(0.0f, modelConfig["context_thematic_weight"].get<float>());
+    if (modelConfig.contains("context_dialog_weight")) context_dialog_weight = std::max(0.0f, modelConfig["context_dialog_weight"].get<float>());
 
     float align_weight = 0.1f;
     if (modelConfig.contains("align_weight")) {
@@ -2999,6 +2405,21 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
         throw std::runtime_error("Model::trainStepVAEText: missing/invalid proj_dim (proj_tail=" + std::to_string(proj_tail) + ")");
     }
 
+    const int base_dim = image_dim + 2 * latent_dim + 2 * proj_dim;
+    int extra_tail = std::max(0, out_dim - base_dim);
+    if ((sem_dim + them_dim + dialog_dim) <= 0 && extra_tail > 0) {
+        sem_dim = extra_tail;
+        them_dim = 0;
+        dialog_dim = 0;
+    }
+    const int requested_extra = sem_dim + them_dim + dialog_dim;
+    if (requested_extra > extra_tail) {
+        const int overflow = requested_extra - extra_tail;
+        if (dialog_dim >= overflow) dialog_dim -= overflow;
+        else if (them_dim >= overflow) them_dim -= overflow;
+        else sem_dim = std::max(0, sem_dim - overflow);
+    }
+
     const int recon_n = std::min(image_dim, static_cast<int>(target->size()));
 
     // Recon
@@ -3095,6 +2516,9 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     // Alignment (1 - cosine)
     const size_t imgp_off = static_cast<size_t>(image_dim + 2 * latent_dim);
     const size_t txtp_off = imgp_off + static_cast<size_t>(proj_dim);
+    const size_t sem_off = txtp_off + static_cast<size_t>(proj_dim);
+    const size_t them_off = sem_off + static_cast<size_t>(sem_dim);
+    const size_t dialog_off = them_off + static_cast<size_t>(them_dim);
     const float eps = 1e-8f;
     const float na = std::max(eps, norm2_f(pred, imgp_off, proj_dim));
     const float nb = std::max(eps, norm2_f(pred, txtp_off, proj_dim));
@@ -3102,7 +2526,41 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     const float cos_sim = dp / (na * nb);
     const float align = (align_weight > 0.0f) ? (align_weight * (1.0f - cos_sim)) : 0.0f;
 
-    const double total_loss = static_cast<double>(marker_scale) * recon + static_cast<double>(beta_eff) * kl + static_cast<double>(align);
+    auto sem_target = make_text_hash_target_unigram(text_ids, pad_id, sem_dim, 0x9e3779b97f4a7c15ULL);
+    auto them_target = make_text_hash_target_bigram(text_ids, pad_id, them_dim, 0xbf58476d1ce4e5b9ULL);
+    auto dialog_target = make_text_hash_target_unigram(text_ids, pad_id, dialog_dim, 0x94d049bb133111ebULL);
+
+    double sem_loss = 0.0;
+    double them_loss = 0.0;
+    double dialog_loss = 0.0;
+    if (sem_dim > 0 && context_sem_weight > 0.0f) {
+        for (int i = 0; i < sem_dim; ++i) {
+            const double d = static_cast<double>(pred[sem_off + static_cast<size_t>(i)]) - static_cast<double>(sem_target[static_cast<size_t>(i)]);
+            sem_loss += d * d;
+        }
+        sem_loss /= static_cast<double>(sem_dim);
+    }
+    if (them_dim > 0 && context_them_weight > 0.0f) {
+        for (int i = 0; i < them_dim; ++i) {
+            const double d = static_cast<double>(pred[them_off + static_cast<size_t>(i)]) - static_cast<double>(them_target[static_cast<size_t>(i)]);
+            them_loss += d * d;
+        }
+        them_loss /= static_cast<double>(them_dim);
+    }
+    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
+        for (int i = 0; i < dialog_dim; ++i) {
+            const double d = static_cast<double>(pred[dialog_off + static_cast<size_t>(i)]) - static_cast<double>(dialog_target[static_cast<size_t>(i)]);
+            dialog_loss += d * d;
+        }
+        dialog_loss /= static_cast<double>(dialog_dim);
+    }
+
+    const double total_loss = static_cast<double>(marker_scale) * recon
+                            + static_cast<double>(beta_eff) * kl
+                            + static_cast<double>(align)
+                            + static_cast<double>(context_sem_weight) * sem_loss
+                            + static_cast<double>(context_them_weight) * them_loss
+                            + static_cast<double>(context_dialog_weight) * dialog_loss;
 
     // Gradient on packed output
     scratch_packed_grad_.resize(static_cast<size_t>(out_dim));
@@ -3189,6 +2647,28 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
             const float dcos_db = (u - cos_sim * v) * inv_nb;
             grad[imgp_off + static_cast<size_t>(i)] = -align_weight * dcos_da;
             grad[txtp_off + static_cast<size_t>(i)] = -align_weight * dcos_db;
+        }
+    }
+
+    if (sem_dim > 0 && context_sem_weight > 0.0f) {
+        const float s = (2.0f * context_sem_weight) / static_cast<float>(std::max(1, sem_dim));
+        for (int i = 0; i < sem_dim; ++i) {
+            const size_t idx = sem_off + static_cast<size_t>(i);
+            grad[idx] = s * (pred[idx] - sem_target[static_cast<size_t>(i)]);
+        }
+    }
+    if (them_dim > 0 && context_them_weight > 0.0f) {
+        const float s = (2.0f * context_them_weight) / static_cast<float>(std::max(1, them_dim));
+        for (int i = 0; i < them_dim; ++i) {
+            const size_t idx = them_off + static_cast<size_t>(i);
+            grad[idx] = s * (pred[idx] - them_target[static_cast<size_t>(i)]);
+        }
+    }
+    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
+        const float s = (2.0f * context_dialog_weight) / static_cast<float>(std::max(1, dialog_dim));
+        for (int i = 0; i < dialog_dim; ++i) {
+            const size_t idx = dialog_off + static_cast<size_t>(i);
+            grad[idx] = s * (pred[idx] - dialog_target[static_cast<size_t>(i)]);
         }
     }
 
@@ -3304,6 +2784,20 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
         proj_dim = std::max(0, modelConfig["proj_dim"].get<int>());
     }
 
+    int sem_dim = 0;
+    int them_dim = 0;
+    int dialog_dim = 0;
+    if (modelConfig.contains("context_semantic_dim")) sem_dim = std::max(0, modelConfig["context_semantic_dim"].get<int>());
+    if (modelConfig.contains("context_thematic_dim")) them_dim = std::max(0, modelConfig["context_thematic_dim"].get<int>());
+    if (modelConfig.contains("context_dialog_dim")) dialog_dim = std::max(0, modelConfig["context_dialog_dim"].get<int>());
+
+    float context_sem_weight = 0.0f;
+    float context_them_weight = 0.0f;
+    float context_dialog_weight = 0.0f;
+    if (modelConfig.contains("context_semantic_weight")) context_sem_weight = std::max(0.0f, modelConfig["context_semantic_weight"].get<float>());
+    if (modelConfig.contains("context_thematic_weight")) context_them_weight = std::max(0.0f, modelConfig["context_thematic_weight"].get<float>());
+    if (modelConfig.contains("context_dialog_weight")) context_dialog_weight = std::max(0.0f, modelConfig["context_dialog_weight"].get<float>());
+
     float align_weight = 0.1f;
     if (modelConfig.contains("align_weight")) {
         align_weight = modelConfig["align_weight"].get<float>();
@@ -3396,18 +2890,65 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
         throw std::runtime_error("Model::backwardStepVAEText: invalid dims");
     }
 
+    const int base_dim = image_dim + 2 * latent_dim + 2 * proj_dim;
+    int extra_tail = std::max(0, out_dim - base_dim);
+    if ((sem_dim + them_dim + dialog_dim) <= 0 && extra_tail > 0) {
+        sem_dim = extra_tail;
+        them_dim = 0;
+        dialog_dim = 0;
+    }
+    const int requested_extra = sem_dim + them_dim + dialog_dim;
+    if (requested_extra > extra_tail) {
+        const int overflow = requested_extra - extra_tail;
+        if (dialog_dim >= overflow) dialog_dim -= overflow;
+        else if (them_dim >= overflow) them_dim -= overflow;
+        else sem_dim = std::max(0, sem_dim - overflow);
+    }
+
     const int recon_n = (!recon_is_ce) ? std::min(image_dim, static_cast<int>(target->size())) : 0;
 
     const int mu_off = image_dim;
     const int lv_off = image_dim + latent_dim;
     const size_t imgp_off = static_cast<size_t>(image_dim + 2 * latent_dim);
     const size_t txtp_off = imgp_off + static_cast<size_t>(proj_dim);
+    const size_t sem_off = txtp_off + static_cast<size_t>(proj_dim);
+    const size_t them_off = sem_off + static_cast<size_t>(sem_dim);
+    const size_t dialog_off = them_off + static_cast<size_t>(them_dim);
     const float eps = 1e-8f;
     const float na = std::max(eps, norm2_f(pred, imgp_off, proj_dim));
     const float nb = std::max(eps, norm2_f(pred, txtp_off, proj_dim));
     const float dp = dot_f(pred, imgp_off, pred, txtp_off, proj_dim);
     const float cos_sim = dp / (na * nb);
     const float align = (align_weight > 0.0f) ? (align_weight * (1.0f - cos_sim)) : 0.0f;
+
+    auto sem_target = make_text_hash_target_unigram(text_ids, pad_id, sem_dim, 0x9e3779b97f4a7c15ULL);
+    auto them_target = make_text_hash_target_bigram(text_ids, pad_id, them_dim, 0xbf58476d1ce4e5b9ULL);
+    auto dialog_target = make_text_hash_target_unigram(text_ids, pad_id, dialog_dim, 0x94d049bb133111ebULL);
+
+    double sem_loss = 0.0;
+    double them_loss = 0.0;
+    double dialog_loss = 0.0;
+    if (sem_dim > 0 && context_sem_weight > 0.0f) {
+        for (int i = 0; i < sem_dim; ++i) {
+            const double d = static_cast<double>(pred[sem_off + static_cast<size_t>(i)]) - static_cast<double>(sem_target[static_cast<size_t>(i)]);
+            sem_loss += d * d;
+        }
+        sem_loss /= static_cast<double>(sem_dim);
+    }
+    if (them_dim > 0 && context_them_weight > 0.0f) {
+        for (int i = 0; i < them_dim; ++i) {
+            const double d = static_cast<double>(pred[them_off + static_cast<size_t>(i)]) - static_cast<double>(them_target[static_cast<size_t>(i)]);
+            them_loss += d * d;
+        }
+        them_loss /= static_cast<double>(them_dim);
+    }
+    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
+        for (int i = 0; i < dialog_dim; ++i) {
+            const double d = static_cast<double>(pred[dialog_off + static_cast<size_t>(i)]) - static_cast<double>(dialog_target[static_cast<size_t>(i)]);
+            dialog_loss += d * d;
+        }
+        dialog_loss /= static_cast<double>(dialog_dim);
+    }
 
     // Metrics (unscaled)
     double recon = 0.0;
@@ -3485,7 +3026,12 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
         marker_scale = std::clamp(marker_scale, 0.1f, marker_scale_max);
     }
 
-    const double total_loss = static_cast<double>(marker_scale) * recon + static_cast<double>(beta_eff) * kl + static_cast<double>(align);
+    const double total_loss = static_cast<double>(marker_scale) * recon
+                            + static_cast<double>(beta_eff) * kl
+                            + static_cast<double>(align)
+                            + static_cast<double>(context_sem_weight) * sem_loss
+                            + static_cast<double>(context_them_weight) * them_loss
+                            + static_cast<double>(context_dialog_weight) * dialog_loss;
 
     // Build grad
     scratch_packed_grad_.resize(static_cast<size_t>(out_dim));
@@ -3566,6 +3112,28 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
             const float dcos_db = (u - cos_sim * v) * inv_nb;
             grad[imgp_off + static_cast<size_t>(i)] = -w * dcos_da;
             grad[txtp_off + static_cast<size_t>(i)] = -w * dcos_db;
+        }
+    }
+
+    if (sem_dim > 0 && context_sem_weight > 0.0f) {
+        const float s = ((2.0f * context_sem_weight) / static_cast<float>(std::max(1, sem_dim))) * grad_scale;
+        for (int i = 0; i < sem_dim; ++i) {
+            const size_t idx = sem_off + static_cast<size_t>(i);
+            grad[idx] = s * (pred[idx] - sem_target[static_cast<size_t>(i)]);
+        }
+    }
+    if (them_dim > 0 && context_them_weight > 0.0f) {
+        const float s = ((2.0f * context_them_weight) / static_cast<float>(std::max(1, them_dim))) * grad_scale;
+        for (int i = 0; i < them_dim; ++i) {
+            const size_t idx = them_off + static_cast<size_t>(i);
+            grad[idx] = s * (pred[idx] - them_target[static_cast<size_t>(i)]);
+        }
+    }
+    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
+        const float s = ((2.0f * context_dialog_weight) / static_cast<float>(std::max(1, dialog_dim))) * grad_scale;
+        for (int i = 0; i < dialog_dim; ++i) {
+            const size_t idx = dialog_off + static_cast<size_t>(i);
+            grad[idx] = s * (pred[idx] - dialog_target[static_cast<size_t>(i)]);
         }
     }
 
@@ -5335,6 +4903,177 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                       << std::endl;
         }
     }
+
+    const bool runtime_verbose = env_flag_true("MIMIR_ACCEL_VERBOSE", false) && !Model::frameworkLogsSuppressed();
+    const bool runtime_trace = env_flag_true("MIMIR_RUNTIME_TRACE", false) && !Model::frameworkLogsSuppressed();
+    if (runtime_verbose) {
+        auto join_strings = [](const std::vector<std::string>& items, const char* sep) -> std::string {
+            if (items.empty()) return std::string();
+            std::ostringstream oss;
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (i > 0) oss << sep;
+                oss << items[i];
+            }
+            return oss.str();
+        };
+
+        auto fusion_to_string = [](Mimir::Planning::FusionKind fusion) -> const char* {
+            switch (fusion) {
+                case Mimir::Planning::FusionKind::NONE: return "NONE";
+                case Mimir::Planning::FusionKind::CONV2D_RELU: return "CONV2D_RELU";
+                case Mimir::Planning::FusionKind::GENERIC_ACTIVATION: return "GENERIC_ACTIVATION";
+                case Mimir::Planning::FusionKind::GENERIC_SPLIT: return "GENERIC_SPLIT";
+                case Mimir::Planning::FusionKind::GENERIC_CHUNK: return "GENERIC_CHUNK";
+                case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_SPLIT: return "GENERIC_ACTIVATION_SPLIT";
+                case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_CHUNK: return "GENERIC_ACTIVATION_CHUNK";
+                case Mimir::Planning::FusionKind::GENERIC_UNARY_SHAPE: return "GENERIC_UNARY_SHAPE";
+                default: return "UNKNOWN";
+            }
+        };
+
+        auto layer_uses_runtime_router = [](LayerType t) -> bool {
+            switch (t) {
+                case LayerType::Conv2d:
+                case LayerType::LayerNorm:
+                case LayerType::RMSNorm:
+                case LayerType::MatMul:
+                case LayerType::BatchMatMul:
+                case LayerType::SelfAttention:
+                case LayerType::MultiHeadAttention:
+                case LayerType::CrossAttention:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        std::vector<std::string> active_runtimes;
+        active_runtimes.reserve(3);
+
+#ifdef ENABLE_ROCM
+        if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
+            active_runtimes.emplace_back(g_rocm_engine->name());
+        }
+#endif
+
+#ifdef ENABLE_CUDA
+        if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
+            active_runtimes.emplace_back(g_cuda_engine->name());
+        }
+#endif
+
+        if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized()) {
+            active_runtimes.emplace_back(g_cpu_engine->name());
+        }
+
+        const std::string selected_hardware = active_runtimes.empty() ? std::string("NONE") : active_runtimes.front();
+        std::unordered_map<std::string, size_t> layer_type_count;
+        layer_type_count.reserve(layers.size());
+        for (const auto& layer : layers) {
+            ++layer_type_count[layer.type.empty() ? type_to_string(layer.type_enum) : layer.type];
+        }
+
+        std::vector<std::pair<std::string, size_t>> sorted_types(layer_type_count.begin(), layer_type_count.end());
+        std::sort(sorted_types.begin(), sorted_types.end(), [](const auto& a, const auto& b) {
+            if (a.second != b.second) return a.second > b.second;
+            return a.first < b.first;
+        });
+
+        std::vector<int> fused_into(layers.size(), -1);
+        if (planner_enabled && static_plan_.built) {
+            const auto& plan = static_plan_.execution;
+            for (size_t i = 0; i < plan.fuse_activation_consumer.size(); ++i) {
+                const int consumer = plan.fuse_activation_consumer[i];
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
+            }
+            for (size_t i = 0; i < plan.fuse_unary_consumer.size(); ++i) {
+                const int consumer = plan.fuse_unary_consumer[i];
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
+            }
+            for (size_t i = 0; i < plan.fuse_split_consumer.size(); ++i) {
+                const int consumer = plan.fuse_split_consumer[i];
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
+            }
+        }
+
+        std::ostringstream signature;
+        signature << "hw=" << selected_hardware
+                  << " train=" << (training ? 1 : 0)
+                  << " planner=" << (planner_enabled ? 1 : 0)
+                  << " layers=" << layers.size();
+        for (size_t i = 0; i < layers.size(); ++i) {
+            const auto& layer = layers[i];
+            signature << '|' << i << ':' << layer.name << ':' << layer.type << ':' << Mimir::Planning::planner_output_name_for(layer);
+            if (planner_enabled && static_plan_.built && i < static_plan_.execution.skip_layer.size()) {
+                signature << ":skip=" << static_cast<int>(static_plan_.execution.skip_layer[i]);
+            }
+        }
+
+        if (!static_plan_.runtime_scan_dumped || static_plan_.runtime_scan_signature != signature.str()) {
+            static_plan_.runtime_scan_dumped = true;
+            static_plan_.runtime_scan_signature = signature.str();
+
+            std::cerr << "[runtime] selected_hardware=" << selected_hardware
+                      << " active_priority=[" << join_strings(active_runtimes, ",") << "]"
+                      << " planner_enabled=" << (planner_enabled ? 1 : 0)
+                      << " fusion_enabled=" << (fusion_enabled ? 1 : 0)
+                      << " training=" << (training ? 1 : 0)
+                      << std::endl;
+
+            std::ostringstream type_scan;
+            type_scan << "[runtime] layer_scan total=" << layers.size() << " types=";
+            for (size_t i = 0; i < sorted_types.size(); ++i) {
+                if (i > 0) type_scan << ", ";
+                type_scan << sorted_types[i].first << ':' << sorted_types[i].second;
+            }
+            std::cerr << type_scan.str() << std::endl;
+
+            if (planner_enabled && static_plan_.built) {
+                const auto& plan = static_plan_.execution;
+                std::cerr << "[runtime] planner_map begin" << std::endl;
+                for (size_t i = 0; i < layers.size(); ++i) {
+                    const auto& layer = layers[i];
+                    const auto& input_names = Mimir::Planning::planner_inputs_for(layer);
+
+                    std::vector<std::string> io_parts;
+                    io_parts.reserve(input_names.size());
+                    for (const auto& in : input_names) io_parts.push_back(in);
+
+                    const bool skipped = i < plan.skip_layer.size() && plan.skip_layer[i] != 0;
+                    std::string call_path;
+                    if (skipped) {
+                        const int producer = fused_into[i];
+                        call_path = (producer >= 0)
+                            ? (std::string("fused_skip<-layer#") + std::to_string(producer))
+                            : std::string("fused_skip");
+                    } else if (layer.type_enum == LayerType::Linear) {
+                        call_path = "linear_accel_chain";
+                    } else if (layer_uses_runtime_router(layer.type_enum)) {
+                        call_path = "runtime_router.dispatchForwardLayer";
+                    } else {
+                        call_path = "cpu_switch_kernel";
+                    }
+
+                    const char* fusion = "NONE";
+                    if (i < plan.ops.size()) {
+                        fusion = fusion_to_string(plan.ops[i].fusion);
+                    }
+
+                    std::cerr << "[runtime] planner_map layer#" << i
+                              << " name='" << layer.name
+                              << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
+                              << "' inputs=[" << join_strings(io_parts, ",")
+                              << "] output='" << Mimir::Planning::planner_output_name_for(layer)
+                              << "' fusion=" << fusion
+                              << " call=" << call_path
+                              << std::endl;
+                }
+                std::cerr << "[runtime] planner_map end" << std::endl;
+            } else {
+                std::cerr << "[runtime] planner_map unavailable (planner disabled)" << std::endl;
+            }
+        }
+    }
     
     // État du forward
     if (training) {
@@ -5530,6 +5269,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         if (planner_enabled && static_plan_.built &&
             layer_idx < static_plan_.execution.skip_layer.size() &&
             static_plan_.execution.skip_layer[layer_idx] != 0) {
+            if (runtime_trace) {
+                const auto& skipped_layer = layers[layer_idx];
+                std::cerr << "[runtime-trace] layer#" << layer_idx
+                          << " name='" << skipped_layer.name
+                          << "' type='" << (skipped_layer.type.empty() ? type_to_string(skipped_layer.type_enum) : skipped_layer.type)
+                          << "' backend=FUSED_SKIP call=fused_skip output_size=0"
+                          << std::endl;
+            }
             continue;
         }
 
@@ -5622,6 +5369,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Pour compatibilité: x est généralement inputs[0], sauf pour des layers sans entrée comme Constant.
         static const std::vector<float> kEmptyInput;
         const std::vector<float>& x = (!inputs.empty() && inputs[0] != nullptr) ? *inputs[0] : kEmptyInput;
+
+        std::string executed_backend = "CPU";
+        std::string executed_call = "cpu_switch_kernel";
         
         std::vector<float> layer_output;
 
@@ -5629,32 +5379,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Retourne true si un runtime a produit une sortie valide (outputs[0]).
         auto try_runtime_forward_layer = [&](std::vector<float>& out) -> bool {
             std::vector<std::vector<float>> runtime_outputs;
-
-#ifdef ENABLE_CUDA
-            if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
-                runtime_outputs.clear();
-                if (g_cuda_engine->forwardLayer(inputs, runtime_outputs, layer, training)) {
-                    if (!runtime_outputs.empty()) {
-                        out = std::move(runtime_outputs[0]);
-                        return true;
-                    }
-                }
+            AbstractRuntime* selected_runtime = nullptr;
+            if (!RuntimeRouter::instance().dispatchForwardLayer(inputs, runtime_outputs, layer, training, &selected_runtime)) {
+                return false;
             }
-#endif
-
-#ifdef ENABLE_ROCM
-            if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
-                runtime_outputs.clear();
-                if (g_rocm_engine->forwardLayer(inputs, runtime_outputs, layer, training)) {
-                    if (!runtime_outputs.empty()) {
-                        out = std::move(runtime_outputs[0]);
-                        return true;
-                    }
-                }
-            }
-#endif
-
-            return false;
+            out = std::move(runtime_outputs[0]);
+            executed_call = "runtime_router.dispatchForwardLayer";
+            executed_backend = selected_runtime ? std::string(selected_runtime->name()) : std::string("runtime_router(unknown)");
+            return true;
         };
         
         // ====================================================================
@@ -6012,6 +5744,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         bool did_rocm = false;
         bool did_cpu = false;
 
+        executed_call = "linear_accel_chain";
+        executed_backend = "CPU";
+
 #ifdef ENABLE_CUDA
     if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
             const RuntimeConfig& cuda_cfg = g_cuda_engine->config();
@@ -6048,6 +5783,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         in_f,
                         out_f
                     );
+                    if (did_cuda) executed_backend = "CUDA";
                     if (did_cuda && cuda_cfg.verbose) {
                         std::cerr << "[accel] Linear via CUDA (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                     }
@@ -6092,6 +5828,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         in_f,
                         out_f
                     );
+                    if (did_rocm) executed_backend = "ROCM";
                     if (did_rocm && rocm_cfg.verbose) {
                         std::cerr << "[accel] Linear via ROCm (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                     }
@@ -6137,6 +5874,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         in_f,
                         out_f
                     );
+                    if (did_vulkan) executed_backend = "VULKAN";
                     if (did_vulkan && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
                         std::cerr << "[accel] Linear via Vulkan (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                     }
@@ -6185,6 +5923,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         in_f,
                         out_f
                     );
+                    if (did_opencl) executed_backend = "OPENCL";
                 }
             }
         }
@@ -6250,6 +5989,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                 in_f,
                                 out_f
                             );
+                            if (did_cpu) executed_backend = "CPU_RUNTIME";
                             if (did_cpu && cpu_cfg.verbose) {
                                 std::cerr << "[accel] Linear via CPU runtime (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
                             }
@@ -6259,6 +5999,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             }
 
             if (!did_cpu) {
+                executed_backend = "CPU";
                 layer_output = LayerOps::linear_forward(x, layer, training);
             }
         }
@@ -8234,6 +7975,17 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
         if (training && has_branches) {
             all_layer_outputs.push_back(getTensor(output_name));
+        }
+
+        if (runtime_trace) {
+            const auto& layer_out_view = getTensor(output_name);
+            std::cerr << "[runtime-trace] layer#" << layer_idx
+                      << " name='" << layer.name
+                      << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
+                      << "' backend=" << executed_backend
+                      << " call=" << executed_call
+                      << " output_size=" << layer_out_view.size()
+                      << std::endl;
         }
         
         // Gestion des branches
@@ -10323,6 +10075,25 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 for (size_t i = 0; i < grad_pre_relu.size(); ++i) {
                     const bool active = maskp ? ((*maskp)[i] != 0) : (actp && i < actp->size() && (*actp)[i] > 0.0f);
                     if (!active) grad_pre_relu[i] = 0.0f;
+                }
+            }
+
+            {
+                std::vector<const std::vector<float>*> rt_inputs;
+                rt_inputs.reserve(1);
+                rt_inputs.push_back(&layer_input0);
+
+                std::vector<const std::vector<float>*> rt_grad_outputs;
+                rt_grad_outputs.reserve(1);
+                rt_grad_outputs.push_back(&grad_pre_relu);
+
+                std::vector<std::vector<float>> rt_grad_inputs;
+                if (RuntimeRouter::instance().dispatchBackwardLayer(
+                        rt_inputs, rt_grad_outputs, rt_grad_inputs, layer, true)) {
+                    if (!rt_grad_inputs.empty()) {
+                        accumulate_grad(grad_store[input_names[0]], rt_grad_inputs[0]);
+                        continue;
+                    }
                 }
             }
             
