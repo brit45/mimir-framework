@@ -5005,12 +5005,19 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 case LayerType::MultiHeadAttention:
                 case LayerType::CrossAttention:
                 case LayerType::Add:
+                case LayerType::Subtract:
                 case LayerType::Multiply:
+                case LayerType::Divide:
                 case LayerType::ReLU:
+                case LayerType::LeakyReLU:
                 case LayerType::GELU:
                 case LayerType::SiLU:
                 case LayerType::Tanh:
                 case LayerType::Sigmoid:
+                case LayerType::Softplus:
+                case LayerType::Mish:
+                case LayerType::HardSigmoid:
+                case LayerType::HardSwish:
                     return true;
                 default:
                     return false;
@@ -6107,6 +6114,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::LeakyReLU: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         float alpha = layer.leaky_relu_alpha > 0 ? layer.leaky_relu_alpha : 0.01f;
         layer_output = LayerOpsExt::leaky_relu_forward(x, alpha);
         break;
@@ -6156,21 +6166,33 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::Softplus: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOpsExt::softplus_forward(x);
         break;
     }
     
     case LayerType::Mish: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOpsExt::mish_forward(x);
         break;
     }
     
     case LayerType::HardSigmoid: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOpsExt::hard_sigmoid_forward(x);
         break;
     }
     
     case LayerType::HardSwish: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOpsExt::hard_swish_forward(x);
         break;
     }
@@ -6426,6 +6448,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::Subtract: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         RUNTIME_CHECK(
             inputs.size() >= 2,
             "Subtract layer requires 2 inputs, got " + std::to_string(inputs.size())
@@ -6447,6 +6472,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::Divide: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         RUNTIME_CHECK(
             inputs.size() >= 2,
             "Divide layer requires 2 inputs, got " + std::to_string(inputs.size())

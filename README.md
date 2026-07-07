@@ -8,14 +8,10 @@
 
 **[Scripting Contract](./docs/03-API-Reference/00-Scripting-Contract.md)** — specification officielle que tous les bridges doivent implementer.
 
-<div align="center">
-
 | Branche | unit-tests | publish-wiki |
 | --- | --- | --- |
 | `main` | [![unit-tests main](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=main)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki main](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=main)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 | `develop` | [![unit-tests develop](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki develop](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
-
-</div>
 
 Version framework : **3.1.0**
 Révision documentation : **2026-07-01**
@@ -68,15 +64,15 @@ Philosophie:
 
 ```text
 Architecture
-	↓
+  ↓
 C++
-	↓
+  ↓
 Registry
-	↓
+  ↓
 Runtime
-	↓
+  ↓
 Lua / JSON
-	↓
+  ↓
 Entraînement / Inférence / Analyse
 ```
 
@@ -85,20 +81,20 @@ Entraînement / Inférence / Analyse
 ### Architecture générale
 
 ```text
-						Lua / JSON / CLI
-										│
-										▼
-						API publique Mímir
-										│
-										▼
-				Registry d'architectures
-										│
-										▼
-						 Runtime IA
-										│
-				┌───────────┼───────────┐
-				▼           ▼           ▼
-			CPU         CUDA        ROCm
+            Lua / JSON / CLI
+                    │
+                    ▼
+            API publique Mímir
+                    │
+                    ▼
+        Registry d'architectures
+                    │
+                    ▼
+               Runtime IA
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+      CPU         CUDA        ROCm
 ```
 
 ---
@@ -111,19 +107,28 @@ Guide complet : **[GET STARTED](./docs/01-Getting-Started/00-GET-STARTED.md)**
 # 1) Dépendances minimales (Ubuntu/Debian)
 sudo apt-get install -y cmake build-essential lua5.3 liblua5.3-dev libomp-dev
 
-# 2) Compiler
+# 2) (Option recommande) bootstrap automatique Linux
+./config.sh
+
+# 3) Compiler
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# 3) Vérifier le binaire
+# 4) Vérifier le binaire
 ./bin/mimir --help
 
-# 4) Smoke test
+# 5) Smoke test
 ./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
 
-# 5) Premier modèle
+# 6) Premier modèle
 ./bin/mimir --lua scripts/templates/template_new_model.lua
 ```
+
+Notes rapides sur `config.sh`:
+
+- Script Linux (Debian/Ubuntu) qui installe les dependances et configure CMake dans `build/`.
+- Variables utiles: `BUILD_TYPE=Debug`, `ENABLE_VULKAN=0`, `ENABLE_OPENCL=0`, `ENABLE_SFML=0`, `ENABLE_LZ4=0`.
+- Voir la doc detaillee: `docs/01-Getting-Started/02-Installation.md`.
 
 ---
 
@@ -154,20 +159,20 @@ Exemple de config minimale `--conf`:
 
 ```json
 {
-	"lua": {
-		"scripts": [
-			"scripts/templates/template_conf_load_and_train.lua"
-		]
-	},
-	"model": {
-		"architecture": "transformer",
-		"vocab_size": 4096,
-		"seq_len": 128,
-		"d_model": 256,
-		"num_layers": 4,
-		"num_heads": 8,
-		"mlp_hidden": 1024
-	}
+  "lua": {
+    "scripts": [
+      "scripts/templates/template_conf_load_and_train.lua"
+    ]
+  },
+  "model": {
+    "architecture": "transformer",
+    "vocab_size": 4096,
+    "seq_len": 128,
+    "d_model": 256,
+    "num_layers": 4,
+    "num_heads": 8,
+    "mlp_hidden": 1024
+  }
 }
 ```
 

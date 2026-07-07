@@ -99,6 +99,8 @@ public:
 
     void cleanup() {
 #ifdef ENABLE_OPENCL
+        if (kernel_binary_) { clReleaseKernel(kernel_binary_); kernel_binary_ = nullptr; }
+        if (kernel_unary_) { clReleaseKernel(kernel_unary_); kernel_unary_ = nullptr; }
         if (kernel_batch_matmul_) { clReleaseKernel(kernel_batch_matmul_); kernel_batch_matmul_ = nullptr; }
         if (kernel_matmul_) { clReleaseKernel(kernel_matmul_); kernel_matmul_ = nullptr; }
         if (kernel_linear_) { clReleaseKernel(kernel_linear_); kernel_linear_ = nullptr; }
@@ -302,6 +304,99 @@ public:
 #endif
     }
 
+    // Unary element-wise: out[i] = f(in[i])
+    bool unaryForward(
+        const float* in,
+        float* out,
+        int n,
+        int op,
+        float alpha
+    ) {
+#ifndef ENABLE_OPENCL
+        (void)in; (void)out; (void)n; (void)op; (void)alpha;
+        return false;
+#else
+        if (!initialized_ || !context_ || !queue_ || !kernel_unary_) return false;
+        if (!in || !out || n <= 0) return false;
+
+        cl_int err = CL_SUCCESS;
+        const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+        cl_mem buf_in = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_in) return false;
+        cl_mem buf_out = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_out) { clReleaseMemObject(buf_in); return false; }
+
+        err = clEnqueueWriteBuffer(queue_, buf_in, CL_TRUE, 0, bytes, in, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_in) clReleaseMemObject(buf_in); if (buf_out) clReleaseMemObject(buf_out); return false; }
+
+        err  = clSetKernelArg(kernel_unary_, 0, sizeof(cl_mem), &buf_in);
+        err |= clSetKernelArg(kernel_unary_, 1, sizeof(cl_mem), &buf_out);
+        err |= clSetKernelArg(kernel_unary_, 2, sizeof(int), &n);
+        err |= clSetKernelArg(kernel_unary_, 3, sizeof(int), &op);
+        err |= clSetKernelArg(kernel_unary_, 4, sizeof(float), &alpha);
+        if (err != CL_SUCCESS) { if (buf_in) clReleaseMemObject(buf_in); if (buf_out) clReleaseMemObject(buf_out); return false; }
+
+        const size_t global = static_cast<size_t>(n);
+        err = clEnqueueNDRangeKernel(queue_, kernel_unary_, 1, nullptr, &global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_in) clReleaseMemObject(buf_in); if (buf_out) clReleaseMemObject(buf_out); return false; }
+
+        err = clEnqueueReadBuffer(queue_, buf_out, CL_TRUE, 0, bytes, out, 0, nullptr, nullptr);
+        if (buf_in) clReleaseMemObject(buf_in);
+        if (buf_out) clReleaseMemObject(buf_out);
+        return err == CL_SUCCESS;
+#endif
+    }
+
+    // Binary element-wise: out[i] = f(a[i], b[i])
+    bool binaryForward(
+        const float* a,
+        const float* b,
+        float* out,
+        int n,
+        int op
+    ) {
+#ifndef ENABLE_OPENCL
+        (void)a; (void)b; (void)out; (void)n; (void)op;
+        return false;
+#else
+        if (!initialized_ || !context_ || !queue_ || !kernel_binary_) return false;
+        if (!a || !b || !out || n <= 0) return false;
+
+        cl_int err = CL_SUCCESS;
+        const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+        cl_mem buf_a = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_a) return false;
+        cl_mem buf_b = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_b) { clReleaseMemObject(buf_a); return false; }
+        cl_mem buf_out = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_out) { clReleaseMemObject(buf_a); clReleaseMemObject(buf_b); return false; }
+
+        err = clEnqueueWriteBuffer(queue_, buf_a, CL_TRUE, 0, bytes, a, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_out) clReleaseMemObject(buf_out); return false; }
+        err = clEnqueueWriteBuffer(queue_, buf_b, CL_TRUE, 0, bytes, b, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_out) clReleaseMemObject(buf_out); return false; }
+
+        err  = clSetKernelArg(kernel_binary_, 0, sizeof(cl_mem), &buf_a);
+        err |= clSetKernelArg(kernel_binary_, 1, sizeof(cl_mem), &buf_b);
+        err |= clSetKernelArg(kernel_binary_, 2, sizeof(cl_mem), &buf_out);
+        err |= clSetKernelArg(kernel_binary_, 3, sizeof(int), &n);
+        err |= clSetKernelArg(kernel_binary_, 4, sizeof(int), &op);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_out) clReleaseMemObject(buf_out); return false; }
+
+        const size_t global = static_cast<size_t>(n);
+        err = clEnqueueNDRangeKernel(queue_, kernel_binary_, 1, nullptr, &global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_out) clReleaseMemObject(buf_out); return false; }
+
+        err = clEnqueueReadBuffer(queue_, buf_out, CL_TRUE, 0, bytes, out, 0, nullptr, nullptr);
+        if (buf_a) clReleaseMemObject(buf_a);
+        if (buf_b) clReleaseMemObject(buf_b);
+        if (buf_out) clReleaseMemObject(buf_out);
+        return err == CL_SUCCESS;
+#endif
+    }
+
 private:
 #ifdef ENABLE_OPENCL
     cl_platform_id platform_ = nullptr;
@@ -312,6 +407,8 @@ private:
     cl_kernel kernel_linear_ = nullptr;
     cl_kernel kernel_matmul_ = nullptr;
     cl_kernel kernel_batch_matmul_ = nullptr;
+    cl_kernel kernel_unary_ = nullptr;
+    cl_kernel kernel_binary_ = nullptr;
 
     std::vector<float> zeroBiasScratch_;
 
@@ -441,6 +538,54 @@ __kernel void batch_matmul_forward(
         C[b * (M * N) + m * N + n] = acc;
     }
 }
+
+__kernel void unary_forward(
+    __global const float* in,
+    __global float* out,
+    int n,
+    int op,
+    float alpha
+) {
+    const int i = (int)get_global_id(0);
+    if (i >= n) return;
+    const float x = in[i];
+    float y = x;
+
+    switch (op) {
+        case 0: y = fmax(x, 0.0f); break;                              // ReLU
+        case 1: y = x > 0.0f ? x : alpha * x; break;                   // LeakyReLU
+        case 2: y = 1.0f / (1.0f + exp(-x)); break;                    // Sigmoid
+        case 3: y = tanh(x); break;                                    // Tanh
+        case 4: { float s = 1.0f / (1.0f + exp(-x)); y = x * s; } break; // SiLU
+        case 5: { float c = 0.7978845608f; float x3 = x*x*x; y = 0.5f * x * (1.0f + tanh(c * (x + 0.044715f * x3))); } break; // GELU
+        case 6: y = log(1.0f + exp(x)); break;                         // Softplus
+        case 7: { float sp = log(1.0f + exp(x)); y = x * tanh(sp); } break; // Mish
+        case 8: { float hs = x * 0.2f + 0.5f; y = clamp(hs, 0.0f, 1.0f); } break; // HardSigmoid
+        case 9: { float hs = clamp(x * 0.2f + 0.5f, 0.0f, 1.0f); y = x * hs; } break; // HardSwish
+        default: break;
+    }
+    out[i] = y;
+}
+
+__kernel void binary_forward(
+    __global const float* a,
+    __global const float* b,
+    __global float* out,
+    int n,
+    int op
+) {
+    const int i = (int)get_global_id(0);
+    if (i >= n) return;
+    float y = a[i];
+    switch (op) {
+        case 0: y = a[i] + b[i]; break;                                // Add
+        case 1: y = a[i] - b[i]; break;                                // Subtract
+        case 2: y = a[i] * b[i]; break;                                // Multiply
+        case 3: { float d = b[i]; y = fabs(d) > 1e-12f ? (a[i] / d) : 0.0f; } break; // Divide
+        default: break;
+    }
+    out[i] = y;
+}
 )CLC";
 
         const size_t src_len = std::strlen(src);
@@ -459,6 +604,10 @@ __kernel void batch_matmul_forward(
         if (err != CL_SUCCESS || !kernel_matmul_) return false;
         kernel_batch_matmul_ = clCreateKernel(program_, "batch_matmul_forward", &err);
         if (err != CL_SUCCESS || !kernel_batch_matmul_) return false;
+        kernel_unary_ = clCreateKernel(program_, "unary_forward", &err);
+        if (err != CL_SUCCESS || !kernel_unary_) return false;
+        kernel_binary_ = clCreateKernel(program_, "binary_forward", &err);
+        if (err != CL_SUCCESS || !kernel_binary_) return false;
         return true;
     }
 #endif

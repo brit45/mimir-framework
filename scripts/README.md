@@ -124,6 +124,17 @@ Lecture pratique de ces commandes :
 ./run_mimir.sh --lua scripts/templates/template_new_model.lua
 ```
 
+### Bootstrap environnement (config.sh)
+
+`config.sh` est un script utilitaire a la racine du repo (pas dans `scripts/`) pour Linux Debian/Ubuntu.
+
+```bash
+./config.sh
+cmake --build build -j"$(nproc)"
+```
+
+Variables frequentes : `BUILD_TYPE=Debug`, `ENABLE_VULKAN=0`, `ENABLE_OPENCL=0`, `ENABLE_SFML=0`, `ENABLE_LZ4=0`.
+
 ## Statistiques
 
 - **NB** : ce README reflète l'état du dossier `scripts/` à la date de la release.

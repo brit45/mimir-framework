@@ -118,6 +118,180 @@ struct RocmRuntime::Impl {
     bool initialized = false;
 };
 
+#ifdef ENABLE_ROCM
+enum class RocmUnaryOp : int {
+    ReLU = 0,
+    LeakyReLU = 1,
+    Sigmoid = 2,
+    Tanh = 3,
+    SiLU = 4,
+    GELU = 5,
+    Softplus = 6,
+    Mish = 7,
+    HardSigmoid = 8,
+    HardSwish = 9,
+};
+
+enum class RocmBinaryOp : int {
+    Add = 0,
+    Subtract = 1,
+    Multiply = 2,
+    Divide = 3,
+};
+
+__global__ static void rocm_unary_kernel(const float* in, float* out, int n, int op, float alpha) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) return;
+    const float x = in[i];
+    switch (op) {
+        case static_cast<int>(RocmUnaryOp::ReLU):
+            out[i] = x > 0.0f ? x : 0.0f;
+            break;
+        case static_cast<int>(RocmUnaryOp::LeakyReLU):
+            out[i] = x > 0.0f ? x : alpha * x;
+            break;
+        case static_cast<int>(RocmUnaryOp::Sigmoid):
+            out[i] = 1.0f / (1.0f + expf(-x));
+            break;
+        case static_cast<int>(RocmUnaryOp::Tanh):
+            out[i] = tanhf(x);
+            break;
+        case static_cast<int>(RocmUnaryOp::SiLU): {
+            const float s = 1.0f / (1.0f + expf(-x));
+            out[i] = x * s;
+            break;
+        }
+        case static_cast<int>(RocmUnaryOp::GELU): {
+            const float c = 0.7978845608f;
+            const float x3 = x * x * x;
+            out[i] = 0.5f * x * (1.0f + tanhf(c * (x + 0.044715f * x3)));
+            break;
+        }
+        case static_cast<int>(RocmUnaryOp::Softplus):
+            out[i] = log1pf(expf(x));
+            break;
+        case static_cast<int>(RocmUnaryOp::Mish): {
+            const float sp = log1pf(expf(x));
+            out[i] = x * tanhf(sp);
+            break;
+        }
+        case static_cast<int>(RocmUnaryOp::HardSigmoid): {
+            const float hs = x * 0.2f + 0.5f;
+            out[i] = fminf(1.0f, fmaxf(0.0f, hs));
+            break;
+        }
+        case static_cast<int>(RocmUnaryOp::HardSwish): {
+            const float hs = fminf(1.0f, fmaxf(0.0f, x * 0.2f + 0.5f));
+            out[i] = x * hs;
+            break;
+        }
+        default:
+            out[i] = x;
+            break;
+    }
+}
+
+__global__ static void rocm_binary_kernel(const float* a, const float* b, float* out, int n, int op) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) return;
+    switch (op) {
+        case static_cast<int>(RocmBinaryOp::Add):
+            out[i] = a[i] + b[i];
+            break;
+        case static_cast<int>(RocmBinaryOp::Subtract):
+            out[i] = a[i] - b[i];
+            break;
+        case static_cast<int>(RocmBinaryOp::Multiply):
+            out[i] = a[i] * b[i];
+            break;
+        case static_cast<int>(RocmBinaryOp::Divide): {
+            const float d = b[i];
+            out[i] = (fabsf(d) > 1e-12f) ? (a[i] / d) : 0.0f;
+            break;
+        }
+        default:
+            out[i] = a[i];
+            break;
+    }
+}
+
+static bool rocm_run_unary(const std::vector<float>& input, std::vector<float>& output, RocmUnaryOp op, float alpha) {
+    const int n = static_cast<int>(input.size());
+    if (n <= 0) return false;
+
+    float* d_in = nullptr;
+    float* d_out = nullptr;
+    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+    if (hipMalloc(&d_in, bytes) != hipSuccess) return false;
+    if (hipMalloc(&d_out, bytes) != hipSuccess) {
+        hipFree(d_in);
+        return false;
+    }
+
+    bool ok = true;
+    if (hipMemcpy(d_in, input.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
+
+    if (ok) {
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
+        hipLaunchKernelGGL(rocm_unary_kernel, dim3(blocks), dim3(threads), 0, 0, d_in, d_out, n, static_cast<int>(op), alpha);
+        if (hipGetLastError() != hipSuccess || hipDeviceSynchronize() != hipSuccess) ok = false;
+    }
+
+    if (ok) {
+        output.resize(static_cast<size_t>(n));
+        if (hipMemcpy(output.data(), d_out, bytes, hipMemcpyDeviceToHost) != hipSuccess) ok = false;
+    }
+
+    hipFree(d_in);
+    hipFree(d_out);
+    return ok;
+}
+
+static bool rocm_run_binary(const std::vector<float>& a, const std::vector<float>& b, std::vector<float>& output, RocmBinaryOp op) {
+    const int n = static_cast<int>(a.size());
+    if (n <= 0 || a.size() != b.size()) return false;
+
+    float* d_a = nullptr;
+    float* d_b = nullptr;
+    float* d_out = nullptr;
+    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+    if (hipMalloc(&d_a, bytes) != hipSuccess) return false;
+    if (hipMalloc(&d_b, bytes) != hipSuccess) {
+        hipFree(d_a);
+        return false;
+    }
+    if (hipMalloc(&d_out, bytes) != hipSuccess) {
+        hipFree(d_a);
+        hipFree(d_b);
+        return false;
+    }
+
+    bool ok = true;
+    if (hipMemcpy(d_a, a.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
+    if (ok && hipMemcpy(d_b, b.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
+
+    if (ok) {
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
+        hipLaunchKernelGGL(rocm_binary_kernel, dim3(blocks), dim3(threads), 0, 0, d_a, d_b, d_out, n, static_cast<int>(op));
+        if (hipGetLastError() != hipSuccess || hipDeviceSynchronize() != hipSuccess) ok = false;
+    }
+
+    if (ok) {
+        output.resize(static_cast<size_t>(n));
+        if (hipMemcpy(output.data(), d_out, bytes, hipMemcpyDeviceToHost) != hipSuccess) ok = false;
+    }
+
+    hipFree(d_a);
+    hipFree(d_b);
+    hipFree(d_out);
+    return ok;
+}
+#endif
+
 bool RocmRuntime::initialize(const RuntimeConfig& cfg) {
     config_ = cfg;
 
@@ -588,6 +762,83 @@ bool RocmRuntime::forwardLayer(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Fast-path: Element-wise binaire + activations unaires
+    // ─────────────────────────────────────────────────────────────────────────
+    switch (layer.type_enum) {
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+            if (!config_.linear_enabled) break;
+            do {
+            if (inputs.size() < 2 || !inputs[0] || !inputs[1]) break;
+            const std::vector<float>& a = *inputs[0];
+            const std::vector<float>& b = *inputs[1];
+            if (a.empty() || a.size() != b.size()) break;
+            if (static_cast<long long>(a.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+
+            RocmBinaryOp op = RocmBinaryOp::Add;
+            switch (layer.type_enum) {
+                case LayerType::Add: op = RocmBinaryOp::Add; break;
+                case LayerType::Subtract: op = RocmBinaryOp::Subtract; break;
+                case LayerType::Multiply: op = RocmBinaryOp::Multiply; break;
+                case LayerType::Divide: op = RocmBinaryOp::Divide; break;
+                default: break;
+            }
+
+            outputs.resize(1);
+            if (!rocm_run_binary(a, b, outputs[0], op)) break;
+            return true;
+            } while (false);
+            break;
+
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            if (!config_.linear_enabled) break;
+            do {
+            if (inputs.empty() || !inputs[0]) break;
+            const std::vector<float>& in = *inputs[0];
+            if (in.empty()) break;
+            if (static_cast<long long>(in.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+
+            RocmUnaryOp op = RocmUnaryOp::ReLU;
+            float alpha = 0.01f;
+            switch (layer.type_enum) {
+                case LayerType::ReLU: op = RocmUnaryOp::ReLU; break;
+                case LayerType::LeakyReLU:
+                    op = RocmUnaryOp::LeakyReLU;
+                    alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
+                    break;
+                case LayerType::Sigmoid: op = RocmUnaryOp::Sigmoid; break;
+                case LayerType::Tanh: op = RocmUnaryOp::Tanh; break;
+                case LayerType::SiLU: op = RocmUnaryOp::SiLU; break;
+                case LayerType::GELU: op = RocmUnaryOp::GELU; break;
+                case LayerType::Softplus: op = RocmUnaryOp::Softplus; break;
+                case LayerType::Mish: op = RocmUnaryOp::Mish; break;
+                case LayerType::HardSigmoid: op = RocmUnaryOp::HardSigmoid; break;
+                case LayerType::HardSwish: op = RocmUnaryOp::HardSwish; break;
+                default: break;
+            }
+
+            outputs.resize(1);
+            if (!rocm_run_unary(in, outputs[0], op, alpha)) break;
+            return true;
+            } while (false);
+            break;
+
+        default:
+            break;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Fast-path: SelfAttention / MultiHeadAttention
     // ─────────────────────────────────────────────────────────────────────────
     switch (layer.type_enum) {
@@ -879,4 +1130,55 @@ bool RocmRuntime::forwardLayer(
 #endif // ENABLE_ROCM
 
     return RuntimeLayerDispatch::cpu_forward_layer(inputs, outputs, layer, training);
+}
+
+bool RocmRuntime::backwardLayer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer,
+    bool training
+) {
+    if (!isInitialized()) return false;
+    if (config_.disabled) return false;
+
+    switch (layer.type_enum) {
+        case LayerType::Linear:
+            if (!config_.linear_enabled) return false;
+            break;
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            if (!config_.linear_enabled) return false;
+            break;
+        case LayerType::Conv2d:
+            if (!config_.conv_enabled) return false;
+            break;
+        case LayerType::LayerNorm:
+        case LayerType::RMSNorm:
+            if (!config_.norm_enabled) return false;
+            break;
+        case LayerType::SelfAttention:
+        case LayerType::MultiHeadAttention:
+        case LayerType::CrossAttention:
+            if (!config_.attention_enabled) return false;
+            break;
+        default:
+            return false;
+    }
+
+    return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);
 }

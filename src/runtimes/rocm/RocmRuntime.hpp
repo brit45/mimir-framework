@@ -29,6 +29,14 @@ public:
         bool training
     ) override;
 
+    bool backwardLayer(
+        const std::vector<const std::vector<float>*>& inputs,
+        const std::vector<const std::vector<float>*>& grad_outputs,
+        std::vector<std::vector<float>>& grad_inputs,
+        Layer& layer,
+        bool training
+    ) override;
+
 private:
     struct Impl;
     Impl* impl_ = nullptr;

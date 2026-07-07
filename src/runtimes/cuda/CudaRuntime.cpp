@@ -125,6 +125,396 @@ struct CudaRuntime::Impl {
     bool initialized = false;
 };
 
+#ifdef ENABLE_CUDA
+enum class CudaUnaryOp : int {
+    ReLU = 0,
+    LeakyReLU = 1,
+    Sigmoid = 2,
+    Tanh = 3,
+    SiLU = 4,
+    GELU = 5,
+    Softplus = 6,
+    Mish = 7,
+    HardSigmoid = 8,
+    HardSwish = 9,
+};
+
+enum class CudaBinaryOp : int {
+    Add = 0,
+    Subtract = 1,
+    Multiply = 2,
+    Divide = 3,
+};
+
+__global__ static void cuda_unary_kernel(const float* in, float* out, int n, int op, float alpha) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) return;
+    const float x = in[i];
+    switch (op) {
+        case static_cast<int>(CudaUnaryOp::ReLU):
+            out[i] = x > 0.0f ? x : 0.0f;
+            break;
+        case static_cast<int>(CudaUnaryOp::LeakyReLU):
+            out[i] = x > 0.0f ? x : alpha * x;
+            break;
+        case static_cast<int>(CudaUnaryOp::Sigmoid):
+            out[i] = 1.0f / (1.0f + expf(-x));
+            break;
+        case static_cast<int>(CudaUnaryOp::Tanh):
+            out[i] = tanhf(x);
+            break;
+        case static_cast<int>(CudaUnaryOp::SiLU): {
+            const float s = 1.0f / (1.0f + expf(-x));
+            out[i] = x * s;
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::GELU): {
+            const float c = 0.7978845608f;
+            const float x3 = x * x * x;
+            out[i] = 0.5f * x * (1.0f + tanhf(c * (x + 0.044715f * x3)));
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::Softplus):
+            out[i] = log1pf(expf(x));
+            break;
+        case static_cast<int>(CudaUnaryOp::Mish): {
+            const float sp = log1pf(expf(x));
+            out[i] = x * tanhf(sp);
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::HardSigmoid): {
+            const float hs = x * 0.2f + 0.5f;
+            out[i] = fminf(1.0f, fmaxf(0.0f, hs));
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::HardSwish): {
+            const float hs = fminf(1.0f, fmaxf(0.0f, x * 0.2f + 0.5f));
+            out[i] = x * hs;
+            break;
+        }
+        default:
+            out[i] = x;
+            break;
+    }
+}
+
+__global__ static void cuda_binary_kernel(const float* a, const float* b, float* out, int n, int op) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) return;
+    switch (op) {
+        case static_cast<int>(CudaBinaryOp::Add):
+            out[i] = a[i] + b[i];
+            break;
+        case static_cast<int>(CudaBinaryOp::Subtract):
+            out[i] = a[i] - b[i];
+            break;
+        case static_cast<int>(CudaBinaryOp::Multiply):
+            out[i] = a[i] * b[i];
+            break;
+        case static_cast<int>(CudaBinaryOp::Divide): {
+            const float d = b[i];
+            out[i] = (fabsf(d) > 1e-12f) ? (a[i] / d) : 0.0f;
+            break;
+        }
+        default:
+            out[i] = a[i];
+            break;
+    }
+}
+
+static bool cuda_run_unary(const std::vector<float>& input, std::vector<float>& output, CudaUnaryOp op, float alpha) {
+    const int n = static_cast<int>(input.size());
+    if (n <= 0) return false;
+
+    float* d_in = nullptr;
+    float* d_out = nullptr;
+    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+    if (cudaMalloc(&d_in, bytes) != cudaSuccess) return false;
+    if (cudaMalloc(&d_out, bytes) != cudaSuccess) {
+        cudaFree(d_in);
+        return false;
+    }
+
+    bool ok = true;
+    if (cudaMemcpy(d_in, input.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+
+    if (ok) {
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
+        cuda_unary_kernel<<<blocks, threads>>>(d_in, d_out, n, static_cast<int>(op), alpha);
+        if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) ok = false;
+    }
+
+    if (ok) {
+        output.resize(static_cast<size_t>(n));
+        if (cudaMemcpy(output.data(), d_out, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) ok = false;
+    }
+
+    cudaFree(d_in);
+    cudaFree(d_out);
+    return ok;
+}
+
+static bool cuda_run_binary(const std::vector<float>& a, const std::vector<float>& b, std::vector<float>& output, CudaBinaryOp op) {
+    const int n = static_cast<int>(a.size());
+    if (n <= 0 || a.size() != b.size()) return false;
+
+    float* d_a = nullptr;
+    float* d_b = nullptr;
+    float* d_out = nullptr;
+    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+    if (cudaMalloc(&d_a, bytes) != cudaSuccess) return false;
+    if (cudaMalloc(&d_b, bytes) != cudaSuccess) {
+        cudaFree(d_a);
+        return false;
+    }
+    if (cudaMalloc(&d_out, bytes) != cudaSuccess) {
+        cudaFree(d_a);
+        cudaFree(d_b);
+        return false;
+    }
+
+    bool ok = true;
+    if (cudaMemcpy(d_a, a.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+    if (ok && cudaMemcpy(d_b, b.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+
+    if (ok) {
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
+        cuda_binary_kernel<<<blocks, threads>>>(d_a, d_b, d_out, n, static_cast<int>(op));
+        if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) ok = false;
+    }
+
+    if (ok) {
+        output.resize(static_cast<size_t>(n));
+        if (cudaMemcpy(output.data(), d_out, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) ok = false;
+    }
+
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_out);
+    return ok;
+}
+
+__global__ static void cuda_unary_backward_kernel(
+    const float* in,
+    const float* grad_out,
+    float* grad_in,
+    int n,
+    int op,
+    float alpha
+) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) return;
+
+    const float x = in[i];
+    const float go = grad_out[i];
+    float d = 1.0f;
+
+    switch (op) {
+        case static_cast<int>(CudaUnaryOp::ReLU):
+            d = x > 0.0f ? 1.0f : 0.0f;
+            break;
+        case static_cast<int>(CudaUnaryOp::LeakyReLU):
+            d = x > 0.0f ? 1.0f : alpha;
+            break;
+        case static_cast<int>(CudaUnaryOp::Sigmoid): {
+            const float s = 1.0f / (1.0f + expf(-x));
+            d = s * (1.0f - s);
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::Tanh): {
+            const float t = tanhf(x);
+            d = 1.0f - t * t;
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::SiLU): {
+            const float s = 1.0f / (1.0f + expf(-x));
+            d = s + x * s * (1.0f - s);
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::GELU): {
+            const float c = 0.7978845608f;
+            const float x2 = x * x;
+            const float x3 = x2 * x;
+            const float u = c * (x + 0.044715f * x3);
+            const float t = tanhf(u);
+            const float sech2 = 1.0f - t * t;
+            (void)training;
+            const float du = c * (1.0f + 0.134145f * x2);
+            d = 0.5f * (1.0f + t) + 0.5f * x * sech2 * du;
+            if (!impl_ || !impl_->handle) return false;
+            if (inputs.empty() || !inputs[0] || grad_outputs.empty() || !grad_outputs[0]) return false;
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::Softplus):
+            d = 1.0f / (1.0f + expf(-x));
+            break;
+        case static_cast<int>(CudaUnaryOp::Mish): {
+            const float sp = log1pf(expf(x));
+            const float t = tanhf(sp);
+            const float s = 1.0f / (1.0f + expf(-x));
+            d = t + x * s * (1.0f - t * t);
+            break;
+        }
+        case static_cast<int>(CudaUnaryOp::HardSigmoid):
+            d = (x > -2.5f && x < 2.5f) ? 0.2f : 0.0f;
+            break;
+        case static_cast<int>(CudaUnaryOp::HardSwish):
+            if (x <= -2.5f) d = 0.0f;
+            else if (x >= 2.5f) d = 1.0f;
+            else d = 0.4f * x + 0.5f;
+            break;
+        default:
+            d = 1.0f;
+            break;
+    }
+
+    grad_in[i] = go * d;
+}
+
+__global__ static void cuda_binary_backward_kernel(
+    const float* a,
+    const float* b,
+    const float* grad_out,
+    float* grad_a,
+    float* grad_b,
+    int n,
+    int op
+) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) return;
+
+    const float av = a[i];
+    const float bv = b[i];
+    const float go = grad_out[i];
+    constexpr float kEps = 1e-12f;
+
+    switch (op) {
+        case static_cast<int>(CudaBinaryOp::Add):
+            grad_a[i] = go;
+            grad_b[i] = go;
+            break;
+        case static_cast<int>(CudaBinaryOp::Subtract):
+            grad_a[i] = go;
+            grad_b[i] = -go;
+            break;
+        case static_cast<int>(CudaBinaryOp::Multiply):
+            grad_a[i] = go * bv;
+            grad_b[i] = go * av;
+            break;
+        case static_cast<int>(CudaBinaryOp::Divide): {
+            if (fabsf(bv) > kEps) {
+                grad_a[i] = go / bv;
+                grad_b[i] = -go * av / (bv * bv);
+            } else {
+                grad_a[i] = 0.0f;
+                grad_b[i] = 0.0f;
+            }
+            break;
+        }
+        default:
+            grad_a[i] = go;
+            grad_b[i] = 0.0f;
+            break;
+    }
+}
+
+static bool cuda_run_unary_backward(
+    const std::vector<float>& in,
+    const std::vector<float>& grad_out,
+    std::vector<float>& grad_in,
+    CudaUnaryOp op,
+    float alpha
+) {
+    const int n = static_cast<int>(in.size());
+    if (n <= 0 || grad_out.size() != in.size()) return false;
+
+    float* d_in = nullptr;
+    float* d_go = nullptr;
+    float* d_gi = nullptr;
+    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+    if (cudaMalloc(&d_in, bytes) != cudaSuccess) return false;
+    if (cudaMalloc(&d_go, bytes) != cudaSuccess) { cudaFree(d_in); return false; }
+    if (cudaMalloc(&d_gi, bytes) != cudaSuccess) { cudaFree(d_in); cudaFree(d_go); return false; }
+
+    bool ok = true;
+    if (cudaMemcpy(d_in, in.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+    if (ok && cudaMemcpy(d_go, grad_out.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+
+    if (ok) {
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
+        cuda_unary_backward_kernel<<<blocks, threads>>>(d_in, d_go, d_gi, n, static_cast<int>(op), alpha);
+        if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) ok = false;
+    }
+
+    if (ok) {
+        grad_in.resize(static_cast<size_t>(n));
+        if (cudaMemcpy(grad_in.data(), d_gi, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) ok = false;
+    }
+
+    cudaFree(d_in);
+    cudaFree(d_go);
+    cudaFree(d_gi);
+    return ok;
+}
+
+static bool cuda_run_binary_backward(
+    const std::vector<float>& a,
+    const std::vector<float>& b,
+    const std::vector<float>& grad_out,
+    std::vector<float>& grad_a,
+    std::vector<float>& grad_b,
+    CudaBinaryOp op
+) {
+    const int n = static_cast<int>(a.size());
+    if (n <= 0 || b.size() != a.size() || grad_out.size() != a.size()) return false;
+
+    float* d_a = nullptr;
+    float* d_b = nullptr;
+    float* d_go = nullptr;
+    float* d_ga = nullptr;
+    float* d_gb = nullptr;
+    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+
+    if (cudaMalloc(&d_a, bytes) != cudaSuccess) return false;
+    if (cudaMalloc(&d_b, bytes) != cudaSuccess) { cudaFree(d_a); return false; }
+    if (cudaMalloc(&d_go, bytes) != cudaSuccess) { cudaFree(d_a); cudaFree(d_b); return false; }
+    if (cudaMalloc(&d_ga, bytes) != cudaSuccess) { cudaFree(d_a); cudaFree(d_b); cudaFree(d_go); return false; }
+    if (cudaMalloc(&d_gb, bytes) != cudaSuccess) { cudaFree(d_a); cudaFree(d_b); cudaFree(d_go); cudaFree(d_ga); return false; }
+
+    bool ok = true;
+    if (cudaMemcpy(d_a, a.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+    if (ok && cudaMemcpy(d_b, b.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+    if (ok && cudaMemcpy(d_go, grad_out.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) ok = false;
+
+    if (ok) {
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
+        cuda_binary_backward_kernel<<<blocks, threads>>>(d_a, d_b, d_go, d_ga, d_gb, n, static_cast<int>(op));
+        if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) ok = false;
+    }
+
+    if (ok) {
+        grad_a.resize(static_cast<size_t>(n));
+        grad_b.resize(static_cast<size_t>(n));
+        if (cudaMemcpy(grad_a.data(), d_ga, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) ok = false;
+        if (ok && cudaMemcpy(grad_b.data(), d_gb, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) ok = false;
+    }
+
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_go);
+    cudaFree(d_ga);
+    cudaFree(d_gb);
+    return ok;
+}
+#endif
+
 bool CudaRuntime::initialize(const RuntimeConfig& cfg) {
     config_ = cfg;
 
@@ -298,10 +688,10 @@ bool CudaRuntime::forwardLayer(
     const Layer& layer,
     bool training
 ) {
+    (void)training;
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
 
-    // Fast-path: Linear sur GPU (si activé).
     switch (layer.type_enum) {
         case LayerType::Linear:
             if (config_.linear_enabled) {
@@ -316,7 +706,7 @@ bool CudaRuntime::forwardLayer(
                         const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
                         const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
                         const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
-
+            // Fallback pour les chemins non encore couverts en backward GPU.
                         const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
                         if (ops >= std::max(0, config_.linear_min_ops) && x.size() == expected_in) {
                             const float* w = layer.getWeights();
@@ -333,14 +723,8 @@ bool CudaRuntime::forwardLayer(
                 }
             }
             break;
-        default:
-            break;
-    }
 
-    // Fast-path: MatMul / BatchMatMul sur GPU (piloté par le flag linear).
-    switch (layer.type_enum) {
         case LayerType::MatMul:
-        case LayerType::BatchMatMul:
             if (!config_.linear_enabled) break;
             do {
             if (inputs.size() < 2 || !inputs[0] || !inputs[1]) break;
@@ -352,19 +736,7 @@ bool CudaRuntime::forwardLayer(
             const int N = layer.embed_dim;
             if (M <= 0 || K <= 0 || N <= 0) break;
 
-            int batches = 1;
-            bool valid_batches = true;
-            switch (layer.type_enum) {
-                case LayerType::BatchMatMul:
-                    batches = layer.seq_len;
-                    valid_batches = (batches > 0);
-                    break;
-                case LayerType::MatMul:
-                    break;
-                default:
-                    break;
-            }
-            if (!valid_batches) break;
+            const int batches = 1;
 
             const size_t a_batch_elems = static_cast<size_t>(M) * static_cast<size_t>(K);
             const size_t b_batch_elems = static_cast<size_t>(K) * static_cast<size_t>(N);
@@ -424,15 +796,79 @@ bool CudaRuntime::forwardLayer(
 #endif
             } while (false);
             break;
-        default:
-            break;
-    }
+
+        case LayerType::BatchMatMul:
+            if (!config_.linear_enabled) break;
+            do {
+            if (inputs.size() < 2 || !inputs[0] || !inputs[1]) break;
+            const std::vector<float>& A = *inputs[0];
+            const std::vector<float>& B = *inputs[1];
+
+            const int M = layer.in_features;
+            const int K = layer.out_features;
+            const int N = layer.embed_dim;
+            const int batches = layer.seq_len;
+            if (M <= 0 || K <= 0 || N <= 0 || batches <= 0) break;
+
+            const size_t a_batch_elems = static_cast<size_t>(M) * static_cast<size_t>(K);
+            const size_t b_batch_elems = static_cast<size_t>(K) * static_cast<size_t>(N);
+            const size_t c_batch_elems = static_cast<size_t>(M) * static_cast<size_t>(N);
+
+            if (A.size() != static_cast<size_t>(batches) * a_batch_elems) break;
+            if (B.size() != static_cast<size_t>(batches) * b_batch_elems) break;
+
+            const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) *
+                                  static_cast<long long>(K) * static_cast<long long>(N);
+            if (ops < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
 
 #ifdef ENABLE_CUDA
-    // ─────────────────────────────────────────────────────────────────────────
-    // Fast-path: Conv2d  (im2col + cuBLAS SGEMM)
-    // ─────────────────────────────────────────────────────────────────────────
-    switch (layer.type_enum) {
+            Impl::DeviceBuf d_a, d_b, d_c;
+            if (!d_a.alloc(static_cast<size_t>(batches) * a_batch_elems * sizeof(float))) break;
+            if (!d_b.alloc(static_cast<size_t>(batches) * b_batch_elems * sizeof(float))) break;
+            if (!d_c.alloc(static_cast<size_t>(batches) * c_batch_elems * sizeof(float))) break;
+            if (!d_a.copyFromHost(A.data(), static_cast<size_t>(batches) * a_batch_elems * sizeof(float))) break;
+            if (!d_b.copyFromHost(B.data(), static_cast<size_t>(batches) * b_batch_elems * sizeof(float))) break;
+
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            bool ok = true;
+            for (int bi = 0; bi < batches; ++bi) {
+                const float* a_ptr = reinterpret_cast<const float*>(d_a.ptr) + static_cast<size_t>(bi) * a_batch_elems;
+                const float* b_ptr = reinterpret_cast<const float*>(d_b.ptr) + static_cast<size_t>(bi) * b_batch_elems;
+                float* c_ptr = reinterpret_cast<float*>(d_c.ptr) + static_cast<size_t>(bi) * c_batch_elems;
+                if (cublasSgemm(
+                        impl_->handle,
+                        CUBLAS_OP_N,
+                        CUBLAS_OP_N,
+                        N,
+                        M,
+                        K,
+                        &alpha,
+                        b_ptr,
+                        N,
+                        a_ptr,
+                        K,
+                        &beta,
+                        c_ptr,
+                        N
+                    ) != CUBLAS_STATUS_SUCCESS) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) break;
+            if (cudaDeviceSynchronize() != cudaSuccess) break;
+
+            outputs.resize(1);
+            outputs[0].resize(static_cast<size_t>(batches) * c_batch_elems);
+            if (!d_c.copyToHost(outputs[0].data(), static_cast<size_t>(batches) * c_batch_elems * sizeof(float))) break;
+            return true;
+#endif
+            } while (false);
+            break;
+
+
+#ifdef ENABLE_CUDA
         case LayerType::Conv2d:
             if (!config_.conv_enabled) break;
             do {
@@ -505,16 +941,8 @@ bool CudaRuntime::forwardLayer(
             return true;
             } while (false);
             break;
-        default:
-            break;
-    }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Fast-path: LayerNorm / RMSNorm  (stats sur host, affine sur GPU)
-    // ─────────────────────────────────────────────────────────────────────────
-    switch (layer.type_enum) {
         case LayerType::LayerNorm:
-        case LayerType::RMSNorm:
             if (!config_.norm_enabled) break;
             do {
             if (inputs.empty() || !inputs[0]) break;
@@ -530,37 +958,23 @@ bool CudaRuntime::forwardLayer(
             const float* gw = layer.getWeights();
             if (!gw || static_cast<int>(layer.getWeightsSize()) < norm_sz) break;
 
-            // Normalisation sur host
             const float eps = (layer.eps > 0.0f) ? layer.eps : 1e-5f;
             std::vector<float> x_hat(static_cast<size_t>(N));
 
-            switch (layer.type_enum) {
-                case LayerType::RMSNorm:
-                    for (int g = 0; g < groups; ++g) {
-                        const int base = g * norm_sz;
-                        float ss = 0.0f;
-                        for (int i = 0; i < norm_sz; ++i) { float v = xn[base+i]; ss += v*v; }
-                        const float inv = 1.0f / std::sqrt(ss / norm_sz + eps);
-                        for (int i = 0; i < norm_sz; ++i) x_hat[base+i] = xn[base+i] * inv;
-                    }
-                    break;
-                case LayerType::LayerNorm:
-                    for (int g = 0; g < groups; ++g) {
-                        const int base = g * norm_sz;
-                        float mean = 0.0f;
-                        for (int i = 0; i < norm_sz; ++i) mean += xn[base+i];
-                        mean /= norm_sz;
-                        float var = 0.0f;
-                        for (int i = 0; i < norm_sz; ++i) { float d = xn[base+i]-mean; var += d*d; }
-                        const float inv = 1.0f / std::sqrt(var/norm_sz + eps);
-                        for (int i = 0; i < norm_sz; ++i) x_hat[base+i] = (xn[base+i]-mean)*inv;
-                    }
-                    break;
-                default:
-                    break;
+            for (int g = 0; g < groups; ++g) {
+                const int base = g * norm_sz;
+                float mean = 0.0f;
+                for (int i = 0; i < norm_sz; ++i) mean += xn[base+i];
+                mean /= norm_sz;
+                float var = 0.0f;
+                for (int i = 0; i < norm_sz; ++i) {
+                    float d = xn[base+i] - mean;
+                    var += d * d;
+                }
+                const float inv = 1.0f / std::sqrt(var / norm_sz + eps);
+                for (int i = 0; i < norm_sz; ++i) x_hat[base+i] = (xn[base+i] - mean) * inv;
             }
 
-            // Affine sur GPU: y = gamma ⊙ x_hat  (+beta si use_bias)
             Impl::DeviceBuf d_xh, d_gamma, d_out;
             if (!d_xh.alloc(static_cast<size_t>(N) * sizeof(float))) break;
             if (!d_gamma.alloc(static_cast<size_t>(norm_sz) * sizeof(float))) break;
@@ -606,15 +1020,153 @@ bool CudaRuntime::forwardLayer(
             break;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Fast-path: SelfAttention / MultiHeadAttention
-    // ─────────────────────────────────────────────────────────────────────────
-    switch (layer.type_enum) {
-        case LayerType::SelfAttention:
-        case LayerType::MultiHeadAttention:
-            if (!config_.attention_enabled) break;
+
+        case LayerType::RMSNorm:
+            if (!config_.norm_enabled) break;
             do {
             if (inputs.empty() || !inputs[0]) break;
+            const std::vector<float>& xn = *inputs[0];
+            const int N = static_cast<int>(xn.size());
+            if (N < config_.norm_min_elements) break;
+            if (!layer.affine) break;
+
+            const int norm_sz = (layer.in_features > 0) ? layer.in_features : N;
+            if (norm_sz <= 0 || N % norm_sz != 0) break;
+            const int groups = N / norm_sz;
+
+            const float* gw = layer.getWeights();
+            if (!gw || static_cast<int>(layer.getWeightsSize()) < norm_sz) break;
+
+            const float eps = (layer.eps > 0.0f) ? layer.eps : 1e-5f;
+            std::vector<float> x_hat(static_cast<size_t>(N));
+
+            for (int g = 0; g < groups; ++g) {
+                const int base = g * norm_sz;
+                float ss = 0.0f;
+                for (int i = 0; i < norm_sz; ++i) {
+                    float v = xn[base + i];
+                    ss += v * v;
+                }
+                const float inv = 1.0f / std::sqrt(ss / norm_sz + eps);
+                for (int i = 0; i < norm_sz; ++i) x_hat[base + i] = xn[base + i] * inv;
+            }
+
+            Impl::DeviceBuf d_xh, d_gamma, d_out;
+            if (!d_xh.alloc(static_cast<size_t>(N) * sizeof(float))) break;
+            if (!d_gamma.alloc(static_cast<size_t>(norm_sz) * sizeof(float))) break;
+            if (!d_out.alloc(static_cast<size_t>(N) * sizeof(float))) break;
+            if (!d_xh.copyFromHost(x_hat.data(), static_cast<size_t>(N) * sizeof(float))) break;
+            if (!d_gamma.copyFromHost(gw, static_cast<size_t>(norm_sz) * sizeof(float))) break;
+
+            bool ok = true;
+            for (int g = 0; g < groups && ok; ++g) {
+                const int base = g * norm_sz;
+                if (cublasSdgmm(impl_->handle, CUBLAS_SIDE_LEFT,
+                        norm_sz, 1,
+                        reinterpret_cast<const float*>(d_xh.ptr) + base, norm_sz,
+                        reinterpret_cast<const float*>(d_gamma.ptr), 1,
+                        reinterpret_cast<float*>(d_out.ptr) + base, norm_sz
+                    ) != CUBLAS_STATUS_SUCCESS) ok = false;
+            }
+            if (!ok) break;
+
+            if (layer.use_bias && static_cast<int>(layer.getWeightsSize()) >= 2 * norm_sz) {
+                Impl::DeviceBuf d_beta;
+                if (!d_beta.alloc(static_cast<size_t>(norm_sz) * sizeof(float))) break;
+                if (!d_beta.copyFromHost(gw + norm_sz, static_cast<size_t>(norm_sz) * sizeof(float))) break;
+                const float na = 1.0f;
+                for (int g = 0; g < groups && ok; ++g) {
+                    const int base = g * norm_sz;
+                    if (cublasSaxpy(impl_->handle, norm_sz, &na,
+                            reinterpret_cast<const float*>(d_beta.ptr), 1,
+                            reinterpret_cast<float*>(d_out.ptr) + base, 1
+                        ) != CUBLAS_STATUS_SUCCESS) ok = false;
+                }
+                if (!ok) break;
+            }
+
+            if (cudaDeviceSynchronize() != cudaSuccess) break;
+            outputs.resize(1);
+            outputs[0].resize(static_cast<size_t>(N));
+            if (!d_out.copyToHost(outputs[0].data(), static_cast<size_t>(N) * sizeof(float))) break;
+            return true;
+            } while (false);
+            break;
+#endif // ENABLE_CUDA
+
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+            if (!config_.linear_enabled) break;
+            do {
+            if (inputs.size() < 2 || !inputs[0] || !inputs[1]) break;
+            const std::vector<float>& a = *inputs[0];
+            const std::vector<float>& b = *inputs[1];
+            if (a.empty() || a.size() != b.size()) break;
+            if (static_cast<long long>(a.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+
+            CudaBinaryOp op = CudaBinaryOp::Add;
+            if (layer.type_enum == LayerType::Subtract) {
+                op = CudaBinaryOp::Subtract;
+            } else if (layer.type_enum == LayerType::Multiply) {
+                op = CudaBinaryOp::Multiply;
+            } else if (layer.type_enum == LayerType::Divide) {
+                op = CudaBinaryOp::Divide;
+            }
+
+            outputs.resize(1);
+            if (!cuda_run_binary(a, b, outputs[0], op)) break;
+            return true;
+            } while (false);
+            break;
+
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            if (!config_.linear_enabled) break;
+            do {
+            if (inputs.empty() || !inputs[0]) break;
+            const std::vector<float>& in = *inputs[0];
+            if (in.empty()) break;
+            if (static_cast<long long>(in.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+
+            CudaUnaryOp op = CudaUnaryOp::ReLU;
+            float alpha = 0.01f;
+            if (layer.type_enum == LayerType::LeakyReLU) {
+                op = CudaUnaryOp::LeakyReLU;
+                alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
+            } else if (layer.type_enum == LayerType::Sigmoid) {
+                op = CudaUnaryOp::Sigmoid;
+            } else if (layer.type_enum == LayerType::Tanh) {
+                op = CudaUnaryOp::Tanh;
+            } else if (layer.type_enum == LayerType::SiLU) {
+                op = CudaUnaryOp::SiLU;
+            } else if (layer.type_enum == LayerType::GELU) {
+                op = CudaUnaryOp::GELU;
+            } else if (layer.type_enum == LayerType::Softplus) {
+                op = CudaUnaryOp::Softplus;
+            } else if (layer.type_enum == LayerType::Mish) {
+                op = CudaUnaryOp::Mish;
+            } else if (layer.type_enum == LayerType::HardSigmoid) {
+                op = CudaUnaryOp::HardSigmoid;
+            } else if (layer.type_enum == LayerType::HardSwish) {
+                op = CudaUnaryOp::HardSwish;
+            }
+
+            outputs.resize(1);
+            if (!cuda_run_unary(in, outputs[0], op, alpha)) break;
+            return true;
+            } while (false);
+            break;
+    // ─────────────────────────────────────────────────────────────────────────
             const std::vector<float>& xa = *inputs[0];
 
             const int seq = layer.seq_len > 0 ? layer.seq_len : 1;
@@ -750,14 +1302,7 @@ bool CudaRuntime::forwardLayer(
             return true;
             } while (false);
             break;
-        default:
-            break;
-    }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Fast-path: CrossAttention
-    // ─────────────────────────────────────────────────────────────────────────
-    switch (layer.type_enum) {
         case LayerType::CrossAttention:
             if (!config_.attention_enabled) break;
             if (inputs.size() < 2 || inputs[1] == nullptr) break;
@@ -902,6 +1447,7 @@ bool CudaRuntime::forwardLayer(
             return true;
             } while (false);
             break;
+
         default:
             break;
     }
@@ -909,4 +1455,248 @@ bool CudaRuntime::forwardLayer(
 
     // Fallback: CPU (implémentation complète des LayerType).
     return RuntimeLayerDispatch::cpu_forward_layer(inputs, outputs, layer, training);
+}
+
+bool CudaRuntime::backwardLayer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer,
+    bool training
+) {
+    (void)training;
+    if (!isInitialized()) return false;
+    if (config_.disabled) return false;
+    if (!impl_ || !impl_->handle) return false;
+    if (inputs.empty() || !inputs[0] || grad_outputs.empty() || !grad_outputs[0]) return false;
+
+    switch (layer.type_enum) {
+        case LayerType::Linear: {
+            if (!config_.linear_enabled) return false;
+            const std::vector<float>& x = *inputs[0];
+            const std::vector<float>& go = *grad_outputs[0];
+
+            const int in_f = layer.in_features;
+            const int out_f = layer.out_features;
+            const int batch = (layer.seq_len > 0) ? layer.seq_len : (in_f > 0 ? static_cast<int>(x.size()) / in_f : 0);
+            if (batch <= 0 || in_f <= 0 || out_f <= 0) return false;
+
+            const size_t x_elems = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
+            const size_t go_elems = static_cast<size_t>(batch) * static_cast<size_t>(out_f);
+            const size_t w_elems = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
+            if (x.size() != x_elems || go.size() != go_elems) return false;
+
+            const float* w = layer.getWeights();
+            if (!w || layer.getWeightsSize() < w_elems) return false;
+
+            Impl::DeviceBuf d_x, d_go, d_w, d_gx, d_gw;
+            if (!d_x.alloc(x_elems * sizeof(float))) return false;
+            if (!d_go.alloc(go_elems * sizeof(float))) return false;
+            if (!d_w.alloc(w_elems * sizeof(float))) return false;
+            if (!d_gx.alloc(x_elems * sizeof(float))) return false;
+            if (!d_gw.alloc(w_elems * sizeof(float))) return false;
+            if (!d_x.copyFromHost(x.data(), x_elems * sizeof(float))) return false;
+            if (!d_go.copyFromHost(go.data(), go_elems * sizeof(float))) return false;
+            if (!d_w.copyFromHost(w, w_elems * sizeof(float))) return false;
+
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+
+            // grad_input = grad_out * W
+            if (cublasSgemm(impl_->handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                    in_f, batch, out_f, &alpha,
+                    reinterpret_cast<const float*>(d_w.ptr), in_f,
+                    reinterpret_cast<const float*>(d_go.ptr), out_f,
+                    &beta,
+                    reinterpret_cast<float*>(d_gx.ptr), in_f) != CUBLAS_STATUS_SUCCESS) {
+                return false;
+            }
+
+            // grad_W = grad_out^T * X
+            if (cublasSgemm(impl_->handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                    in_f, out_f, batch, &alpha,
+                    reinterpret_cast<const float*>(d_x.ptr), in_f,
+                    reinterpret_cast<const float*>(d_go.ptr), out_f,
+                    &beta,
+                    reinterpret_cast<float*>(d_gw.ptr), in_f) != CUBLAS_STATUS_SUCCESS) {
+                return false;
+            }
+
+            if (cudaDeviceSynchronize() != cudaSuccess) return false;
+
+            grad_inputs.resize(1);
+            grad_inputs[0].resize(x_elems);
+            std::vector<float> grad_w(w_elems, 0.0f);
+            if (!d_gx.copyToHost(grad_inputs[0].data(), x_elems * sizeof(float))) return false;
+            if (!d_gw.copyToHost(grad_w.data(), w_elems * sizeof(float))) return false;
+
+            if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            }
+            for (size_t i = 0; i < w_elems; ++i) layer.grad_weights[i] += grad_w[i];
+
+            if (layer.use_bias && layer.getWeightsSize() >= w_elems + static_cast<size_t>(out_f)) {
+                if (layer.grad_bias.size() != static_cast<size_t>(out_f)) {
+                    layer.grad_bias.assign(static_cast<size_t>(out_f), 0.0f);
+                }
+                for (int b = 0; b < batch; ++b) {
+                    const float* row = go.data() + static_cast<size_t>(b) * static_cast<size_t>(out_f);
+                    for (int o = 0; o < out_f; ++o) layer.grad_bias[static_cast<size_t>(o)] += row[o];
+                }
+            }
+            return true;
+        }
+
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul: {
+            if (!config_.linear_enabled) return false;
+            if (inputs.size() < 2 || !inputs[1]) return false;
+
+            const std::vector<float>& A = *inputs[0];
+            const std::vector<float>& B = *inputs[1];
+            const std::vector<float>& go = *grad_outputs[0];
+            const int M = layer.in_features;
+            const int K = layer.out_features;
+            const int N = layer.embed_dim;
+            const int batches = (layer.type_enum == LayerType::BatchMatMul) ? layer.seq_len : 1;
+            if (M <= 0 || K <= 0 || N <= 0 || batches <= 0) return false;
+
+            const size_t a_batch = static_cast<size_t>(M) * static_cast<size_t>(K);
+            const size_t b_batch = static_cast<size_t>(K) * static_cast<size_t>(N);
+            const size_t c_batch = static_cast<size_t>(M) * static_cast<size_t>(N);
+            const size_t a_elems = static_cast<size_t>(batches) * a_batch;
+            const size_t b_elems = static_cast<size_t>(batches) * b_batch;
+            const size_t c_elems = static_cast<size_t>(batches) * c_batch;
+            if (A.size() != a_elems || B.size() != b_elems || go.size() != c_elems) return false;
+
+            Impl::DeviceBuf d_a, d_b, d_go, d_ga, d_gb;
+            if (!d_a.alloc(a_elems * sizeof(float))) return false;
+            if (!d_b.alloc(b_elems * sizeof(float))) return false;
+            if (!d_go.alloc(c_elems * sizeof(float))) return false;
+            if (!d_ga.alloc(a_elems * sizeof(float))) return false;
+            if (!d_gb.alloc(b_elems * sizeof(float))) return false;
+            if (!d_a.copyFromHost(A.data(), a_elems * sizeof(float))) return false;
+            if (!d_b.copyFromHost(B.data(), b_elems * sizeof(float))) return false;
+            if (!d_go.copyFromHost(go.data(), c_elems * sizeof(float))) return false;
+
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            for (int bi = 0; bi < batches; ++bi) {
+                const float* a_ptr = reinterpret_cast<const float*>(d_a.ptr) + static_cast<size_t>(bi) * a_batch;
+                const float* b_ptr = reinterpret_cast<const float*>(d_b.ptr) + static_cast<size_t>(bi) * b_batch;
+                const float* go_ptr = reinterpret_cast<const float*>(d_go.ptr) + static_cast<size_t>(bi) * c_batch;
+                float* ga_ptr = reinterpret_cast<float*>(d_ga.ptr) + static_cast<size_t>(bi) * a_batch;
+                float* gb_ptr = reinterpret_cast<float*>(d_gb.ptr) + static_cast<size_t>(bi) * b_batch;
+
+                // dA = dC * B^T
+                if (cublasSgemm(impl_->handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                        K, M, N, &alpha,
+                        b_ptr, N,
+                        go_ptr, N,
+                        &beta,
+                        ga_ptr, K) != CUBLAS_STATUS_SUCCESS) {
+                    return false;
+                }
+
+                // dB = A^T * dC
+                if (cublasSgemm(impl_->handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                        N, K, M, &alpha,
+                        go_ptr, N,
+                        a_ptr, K,
+                        &beta,
+                        gb_ptr, N) != CUBLAS_STATUS_SUCCESS) {
+                    return false;
+                }
+            }
+
+            if (cudaDeviceSynchronize() != cudaSuccess) return false;
+
+            grad_inputs.resize(2);
+            grad_inputs[0].resize(a_elems);
+            grad_inputs[1].resize(b_elems);
+            if (!d_ga.copyToHost(grad_inputs[0].data(), a_elems * sizeof(float))) return false;
+            if (!d_gb.copyToHost(grad_inputs[1].data(), b_elems * sizeof(float))) return false;
+            return true;
+        }
+
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide: {
+            if (!config_.linear_enabled) return false;
+            if (inputs.size() < 2 || !inputs[1]) return false;
+            const std::vector<float>& a = *inputs[0];
+            const std::vector<float>& b = *inputs[1];
+            const std::vector<float>& go = *grad_outputs[0];
+            if (a.empty() || a.size() != b.size() || go.size() != a.size()) return false;
+
+            CudaBinaryOp op = CudaBinaryOp::Add;
+            if (layer.type_enum == LayerType::Subtract) op = CudaBinaryOp::Subtract;
+            else if (layer.type_enum == LayerType::Multiply) op = CudaBinaryOp::Multiply;
+            else if (layer.type_enum == LayerType::Divide) op = CudaBinaryOp::Divide;
+
+            grad_inputs.resize(2);
+            return cuda_run_binary_backward(a, b, go, grad_inputs[0], grad_inputs[1], op);
+        }
+
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish: {
+            if (!config_.linear_enabled) return false;
+            const std::vector<float>& in = *inputs[0];
+            const std::vector<float>& go = *grad_outputs[0];
+            if (in.empty() || go.size() != in.size()) return false;
+
+            CudaUnaryOp op = CudaUnaryOp::ReLU;
+            float alpha = 0.01f;
+            if (layer.type_enum == LayerType::LeakyReLU) {
+                op = CudaUnaryOp::LeakyReLU;
+                alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
+            } else if (layer.type_enum == LayerType::Sigmoid) {
+                op = CudaUnaryOp::Sigmoid;
+            } else if (layer.type_enum == LayerType::Tanh) {
+                op = CudaUnaryOp::Tanh;
+            } else if (layer.type_enum == LayerType::SiLU) {
+                op = CudaUnaryOp::SiLU;
+            } else if (layer.type_enum == LayerType::GELU) {
+                op = CudaUnaryOp::GELU;
+            } else if (layer.type_enum == LayerType::Softplus) {
+                op = CudaUnaryOp::Softplus;
+            } else if (layer.type_enum == LayerType::Mish) {
+                op = CudaUnaryOp::Mish;
+            } else if (layer.type_enum == LayerType::HardSigmoid) {
+                op = CudaUnaryOp::HardSigmoid;
+            } else if (layer.type_enum == LayerType::HardSwish) {
+                op = CudaUnaryOp::HardSwish;
+            }
+
+            grad_inputs.resize(1);
+            return cuda_run_unary_backward(in, go, grad_inputs[0], op, alpha);
+        }
+
+        case LayerType::Conv2d:
+            if (!config_.conv_enabled) return false;
+            break;
+        case LayerType::LayerNorm:
+        case LayerType::RMSNorm:
+            if (!config_.norm_enabled) return false;
+            break;
+        case LayerType::SelfAttention:
+        case LayerType::MultiHeadAttention:
+        case LayerType::CrossAttention:
+            if (!config_.attention_enabled) return false;
+            break;
+        default:
+            return false;
+    }
+
+    // Fallback pour les chemins non encore couverts en backward GPU.
+    return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);
 }

@@ -5,9 +5,11 @@
 #endif
 
 #include "Layers.hpp"
+#include "runtimes/cpu/RuntimeLayerDispatch.hpp"
 
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <new>
 #include <vector>
 
@@ -93,10 +95,11 @@ bool OpenCLRuntime::forwardLayer(
     return false;
 #else
     if (!isInitialized() || !impl_) return false;
-    if (config_.disabled || !config_.linear_enabled) return false;
+    if (config_.disabled) return false;
 
     switch (layer.type_enum) {
         case LayerType::Linear: {
+            if (!config_.linear_enabled) return false;
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& x = *inputs[0];
 
@@ -121,6 +124,7 @@ bool OpenCLRuntime::forwardLayer(
             return linearForward(x.data(), w, b, outputs[0].data(), batch, in_f, out_f);
         }
         case LayerType::MatMul: {
+            if (!config_.linear_enabled) return false;
             if (inputs.size() < 2 || !inputs[0] || !inputs[1]) return false;
             const std::vector<float>& A = *inputs[0];
             const std::vector<float>& B = *inputs[1];
@@ -141,6 +145,7 @@ bool OpenCLRuntime::forwardLayer(
             return impl_->engine.matmulForward(A.data(), B.data(), outputs[0].data(), M, K, N);
         }
         case LayerType::BatchMatMul: {
+            if (!config_.linear_enabled) return false;
             if (inputs.size() < 2 || !inputs[0] || !inputs[1]) return false;
             const std::vector<float>& A = *inputs[0];
             const std::vector<float>& B = *inputs[1];
@@ -161,8 +166,121 @@ bool OpenCLRuntime::forwardLayer(
             outputs[0].assign(static_cast<size_t>(batches) * static_cast<size_t>(M) * static_cast<size_t>(N), 0.0f);
             return impl_->engine.batchMatMulForward(A.data(), B.data(), outputs[0].data(), batches, M, K, N);
         }
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide: {
+            if (!config_.linear_enabled) return false;
+            if (inputs.size() < 2 || !inputs[0] || !inputs[1]) return false;
+            const std::vector<float>& A = *inputs[0];
+            const std::vector<float>& B = *inputs[1];
+            if (A.empty() || A.size() != B.size()) return false;
+            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+
+            int op = 0;
+            if (layer.type_enum == LayerType::Subtract) {
+                op = 1;
+            } else if (layer.type_enum == LayerType::Multiply) {
+                op = 2;
+            } else if (layer.type_enum == LayerType::Divide) {
+                op = 3;
+            }
+
+            outputs.resize(1);
+            outputs[0].assign(A.size(), 0.0f);
+            return impl_->engine.binaryForward(A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()), op);
+        }
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish: {
+            if (!config_.linear_enabled) return false;
+            if (inputs.empty() || !inputs[0]) return false;
+            const std::vector<float>& A = *inputs[0];
+            if (A.empty()) return false;
+            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+
+            int op = 0;
+            float alpha = 0.01f;
+            if (layer.type_enum == LayerType::LeakyReLU) {
+                op = 1;
+                alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
+            } else if (layer.type_enum == LayerType::Sigmoid) {
+                op = 2;
+            } else if (layer.type_enum == LayerType::Tanh) {
+                op = 3;
+            } else if (layer.type_enum == LayerType::SiLU) {
+                op = 4;
+            } else if (layer.type_enum == LayerType::GELU) {
+                op = 5;
+            } else if (layer.type_enum == LayerType::Softplus) {
+                op = 6;
+            } else if (layer.type_enum == LayerType::Mish) {
+                op = 7;
+            } else if (layer.type_enum == LayerType::HardSigmoid) {
+                op = 8;
+            } else if (layer.type_enum == LayerType::HardSwish) {
+                op = 9;
+            }
+
+            outputs.resize(1);
+            outputs[0].assign(A.size(), 0.0f);
+            return impl_->engine.unaryForward(A.data(), outputs[0].data(), static_cast<int>(A.size()), op, alpha);
+        }
         default:
             return false;
     }
+#endif
+}
+
+bool OpenCLRuntime::backwardLayer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer,
+    bool training
+) {
+#ifndef ENABLE_OPENCL
+    (void)inputs;
+    (void)grad_outputs;
+    (void)grad_inputs;
+    (void)layer;
+    (void)training;
+    return false;
+#else
+    if (!isInitialized() || !impl_) return false;
+    if (config_.disabled) return false;
+
+    switch (layer.type_enum) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            if (!config_.linear_enabled) return false;
+            break;
+        default:
+            return false;
+    }
+
+    return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);
 #endif
 }

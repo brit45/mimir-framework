@@ -44,6 +44,15 @@ Puis lis dans cet ordre :
 ./bin/mimir --lua scripts/templates/template_new_model.lua
 ```
 
+- Bootstrap Linux rapide (deps + CMake)
+  - Lis : [docs/01-Getting-Started/02-Installation.md](01-Getting-Started/02-Installation.md)
+  - Lance :
+
+```bash
+./config.sh
+cmake --build build -j"$(nproc)"
+```
+
 - Comprendre create/build/alloc/init
   - Lis : [docs/02-User-Guide/02-Model-Lifecycle.md](02-User-Guide/02-Model-Lifecycle.md)
   - Lance :
