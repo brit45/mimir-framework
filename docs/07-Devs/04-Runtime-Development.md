@@ -133,7 +133,7 @@ Lecture metier :
 export MIMIR_ACCEL_VERBOSE=1
 export MIMIR_RUNTIME_TRACE=1
 export MIMIR_CUDA_LINEAR=1
-export MIMIR_CUDA_LINEAR_MIN_OPS=1048576
+export MIMIR_CUDA_LINEAR_MIN_OPS=0
 ./bin/mimir --lua scripts/benchmarks/benchmark.lua
 ```
 

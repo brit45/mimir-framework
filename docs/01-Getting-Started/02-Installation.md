@@ -55,6 +55,24 @@ Pour compiler Mímir, il faut CMake, C++17 et quelques dépendances. Cette page 
 
 ### Linux (Ubuntu/Debian)
 
+**Script automatique recommande:**
+
+```bash
+cd ~/path/to/tensor-2
+
+# Installe les dependances systeme et configure CMake dans build/
+./config.sh
+
+# Compile le projet
+cmake --build build -j$(nproc)
+```
+
+Variables utiles du script:
+
+- `WORKROOT=/path/to/tensor-2` pour pointer explicitement la racine projet
+- `BUILD_TYPE=Debug` pour preparer un build debug
+- `ENABLE_VULKAN=0`, `ENABLE_OPENCL=0`, `ENABLE_SFML=0`, `ENABLE_LZ4=0` pour desactiver des dependances optionnelles
+
 **Installation des dépendances:**
 
 ```bash

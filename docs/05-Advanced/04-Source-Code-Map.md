@@ -218,11 +218,16 @@ Chaque modèle “builder” sait pousser une séquence de layers cohérente (no
 
 - Rôle : primitives SIMD (CPU) utilisées par des ops.
 
-### `src/VulkanCompute.hpp` et `src/OpenCLCompute.hpp`
+### `src/runtimes/vulkan/VulkanCompute.hpp` et `src/runtimes/opencl/OpenCLCompute.hpp`
 
-- Rôle : engines compute legacy (si compilés) pour accélérer Linear uniquement.
+- Rôle : engines compute GPU pour Vulkan/OpenCL (si compilés).
 - Build flags : `ENABLE_VULKAN`, `ENABLE_OPENCL`.
-- Variables d'environnement (legacy Vulkan/OpenCL) : `MIMIR_VULKAN_LINEAR_SPV`, `MIMIR_OPENCL_LINEAR=1`.
+- Variables d'environnement (Vulkan/OpenCL) : `MIMIR_VULKAN_LINEAR_SPV`, `MIMIR_VULKAN_LINEAR`, `MIMIR_OPENCL_LINEAR`.
+
+Portée actuelle:
+
+- Vulkan : `Linear`, `MatMul`, `BatchMatMul`, `Add`, `Multiply`, `ReLU`, `SiLU`, `GELU`, `Sigmoid`, `Tanh`.
+- OpenCL : `Linear`, `MatMul`, `BatchMatMul`.
 
 ### `src/runtimes/AbstractRuntime.hpp`
 
@@ -252,6 +257,7 @@ Documentation détaillée : [docs/04-Architecture-Internals/03-Hardware-Backends
 ### `src/Planning/Planner.hpp`
 
 - Rôle : analyse statique du graphe — durées de vie des tenseurs, fusions Conv2d+ReLU, pré-calcul des scratchpads.
+- Au lancement : le plan est construit au premier forward (ou reconstruit si invalidé), puis réutilisé tant que le graphe et le mode training restent compatibles.
 - Documentation : [docs/04-Architecture-Internals/22-Planning.md](../04-Architecture-Internals/22-Planning.md).
 
 ## 8) Monitoring / visualisation

@@ -66,19 +66,24 @@ Conseils pratiques :
 - Éviter de créer/détruire des gros buffers dans des boucles chaudes si un scratchpad/pool existe déjà.
 - Sur OOM, préférez d’abord réduire batch/seq/dims avant d’essayer d’“optimiser le CPU”.
 
-## 5) Offload Vulkan/OpenCL (Linear, inférence)
+## 5) Offload Vulkan/OpenCL (ops GPU, inférence)
 
-Le code peut dispatcher certaines couches `Linear` vers Vulkan ou OpenCL **uniquement en inférence** et **si explicitement activé**.
+Le code peut dispatcher des couches vers Vulkan/OpenCL **uniquement en inférence**. Quand le backend est compilé et détecté, l'activation est automatique.
+
+Portée actuelle:
+
+- Vulkan: `Linear`, `MatMul`, `BatchMatMul`, `Add`, `Multiply`, `ReLU`.
+- OpenCL: `Linear`, `MatMul`, `BatchMatMul`.
 
 Pré-requis : le binaire doit avoir été compilé avec le support backend correspondant (gating via `ENABLE_VULKAN` / `ENABLE_OPENCL` dans le code).
 
 Variables d’environnement (voir `src/Model.cpp`) :
 
-- `MIMIR_VULKAN_LINEAR=1` active Vulkan pour `Linear`.
-- `MIMIR_VULKAN_LINEAR_MIN_OPS` (défaut `1<<20`) fixe le seuil minimal d’opérations.
-- `MIMIR_VULKAN_LINEAR_SPV=/chemin/vers/linear_forward.comp.spv` force le chemin du shader SPIR-V (sinon, le runtime cherche dans quelques emplacements standards, voir `src/VulkanCompute.hpp`).
-- `MIMIR_OPENCL_LINEAR=1` active OpenCL pour `Linear`.
-- `MIMIR_OPENCL_LINEAR_MIN_OPS` (défaut `1<<20`) fixe le seuil minimal d’opérations.
+- `MIMIR_VULKAN_LINEAR=1` active Vulkan pour `Linear` (et le gating MatMul/BatchMatMul du runtime Vulkan).
+- `MIMIR_VULKAN_LINEAR_MIN_OPS` (défaut `0`) fixe le seuil minimal d’opérations.
+- `MIMIR_VULKAN_LINEAR_SPV=/chemin/vers/linear_forward.comp.spv` force le chemin du shader SPIR-V (sinon, le runtime cherche dans quelques emplacements standards, voir `src/runtimes/vulkan/VulkanCompute.hpp`).
+- `MIMIR_OPENCL_LINEAR=1` active OpenCL pour `Linear` (et le gating MatMul/BatchMatMul du runtime OpenCL).
+- `MIMIR_OPENCL_LINEAR_MIN_OPS` (défaut `0`) fixe le seuil minimal d’opérations.
 - `MIMIR_ACCEL_VERBOSE=1` logge quand un offload est réellement utilisé.
 - `MIMIR_RUNTIME_TRACE=1` logge, pour chaque layer exécuté, le backend réellement utilisé et le chemin d’appel runtime.
 - `MIMIR_DISABLE_VULKAN=1` / `MIMIR_DISABLE_OPENCL=1` désactive le backend correspondant.

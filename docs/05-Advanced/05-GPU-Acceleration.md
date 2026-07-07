@@ -29,9 +29,11 @@ Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécut
 Mímir maintient une **pile de runtimes** ordonnée par priorité :
 
 ```text
-1. CUDA Runtime   (si ENABLE_CUDA compilé et fast-paths `MIMIR_CUDA_*` activés)
-2. ROCm  Runtime  (si ENABLE_ROCM compilé et fast-paths `MIMIR_ROCM_*` activés)
-3. CPU   Runtime  (toujours actif, fallback universel)
+1. ROCm Runtime
+2. CUDA Runtime
+3. Vulkan Runtime
+4. OpenCL Runtime
+5. CPU Runtime (toujours actif, fallback universel)
 ```
 
 Pour chaque layer à exécuter, le runtime le plus prioritaire *tente* de le prendre en charge. Il vérifie deux conditions :
@@ -84,9 +86,20 @@ cmake --build . -j$(nproc)
 
 > **Avertissement :** si le build n'inclut pas `ENABLE_CUDA` ou `ENABLE_ROCM`, les variables d'environnement correspondantes seront ignorées sans message d'erreur. Vérifiez la sortie de `cmake` pour confirmer que le backend est activé.
 
-### Pour Vulkan (legacy)
+### Pour Vulkan
 
-Vulkan est un backend **hérité** orienté `Linear`. À moins d'avoir une raison spécifique, préférez CUDA ou ROCm.
+Vulkan est disponible via le runtime routeur avec des kernels compute dédiés.
+
+Scope actuel Vulkan (forward):
+
+- `Linear`
+- `MatMul`
+- `BatchMatMul`
+- `Add`
+- `Multiply`
+- `ReLU`
+
+Pour les autres layers, le fallback routeur vers CPU/CUDA/ROCm reste automatique.
 
 - Vulkan SDK installé, `glslangValidator` disponible
 - Compilé avec `-DENABLE_VULKAN=ON`
@@ -95,7 +108,7 @@ Vulkan est un backend **hérité** orienté `Linear`. À moins d'avoir une raiso
 
 ## Activation pas à pas
 
-Tous les fast-paths sont **désactivés par défaut**, même si le build les inclut. Vous devez les activer explicitement via des variables d'environnement, ce qui vous permet d'ajuster finement ce qui passe par GPU.
+Les fast-paths matériels sont **activés par défaut** quand le backend est compilé et le device détecté. Vous pouvez toujours affiner via variables d'environnement ou forcer la désactivation avec `MIMIR_DISABLE_*`.
 
 ### Activer tous les fast-paths sur CUDA
 
@@ -129,10 +142,10 @@ Chaque fast-path possède un **seuil minimal de MACs** (Multiply-Accumulate oper
 
 | Fast-path | Variable de seuil | Valeur par défaut |
 | --- | --- | --- |
-| `Linear` | `MIMIR_CUDA_LINEAR_MIN_OPS` | `1 048 576` (~1 M MACs) |
-| `Conv2d` | `MIMIR_CUDA_CONV_MIN_OPS` | `262 144` (~256 K MACs) |
-| `LayerNorm` / `RMSNorm` | `MIMIR_CUDA_NORM_MIN_ELEMS` | `4 096` (éléments) |
-| `Attention` | `MIMIR_CUDA_ATTENTION_MIN_OPS` | `262 144` (~256 K MACs) |
+| `Linear` | `MIMIR_CUDA_LINEAR_MIN_OPS` | `0` |
+| `Conv2d` | `MIMIR_CUDA_CONV_MIN_OPS` | `0` |
+| `LayerNorm` / `RMSNorm` | `MIMIR_CUDA_NORM_MIN_ELEMS` | `0` |
+| `Attention` | `MIMIR_CUDA_ATTENTION_MIN_OPS` | `0` |
 
 Pour les variables ROCm, remplacez `CUDA` par `ROCM`.
 
@@ -225,7 +238,7 @@ export MIMIR_RUNTIME_TRACE=1
 Exemple de sortie :
 
 ```text
-[CUDA] Linear 4096x4096: SGEMM (ops=16777216 >= 1048576) ✓
+[CUDA] Linear 4096x4096: SGEMM (ops=16777216 >= 0) ✓
 [CUDA] Conv2d 64x3x3: SGEMM fast-path ✓
 [CUDA] LayerNorm 512: hybride (512 >= 4096 ? non) → fallback CPU
 ```
@@ -245,6 +258,17 @@ Cette vue permet de distinguer facilement les layers effectivement offloades de 
 ---
 
 ## Problèmes courants
+
+### "Comment forcer CPU-only malgré l'auto-détection matériel ?"
+
+Utilisez les kill-switchs runtime:
+
+```bash
+export MIMIR_DISABLE_CUDA=1
+export MIMIR_DISABLE_ROCM=1
+export MIMIR_DISABLE_VULKAN=1
+export MIMIR_DISABLE_OPENCL=1
+```
 
 ### "Mon fast-path Conv2d n'est jamais utilisé pendant l'entraînement"
 

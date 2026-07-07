@@ -7,10 +7,10 @@
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
 #ifdef ENABLE_VULKAN
-#include "VulkanCompute.hpp"
+#include "runtimes/vulkan/VulkanRuntime.hpp"
 #endif
 #ifdef ENABLE_OPENCL
-#include "OpenCLCompute.hpp"
+#include "runtimes/opencl/OpenCLRuntime.hpp"
 #endif
 #include "runtimes/AbstractRuntime.hpp"
 #include "runtimes/RuntimeRouter.hpp"
@@ -299,14 +299,14 @@ bool Model::hasBMI2() {
 
 // Global compute engine (initialized on demand)
 #ifdef ENABLE_VULKAN
-static std::unique_ptr<VulkanCompute::ComputeEngine> g_compute_engine = nullptr;
+static std::unique_ptr<VulkanRuntime> g_compute_engine = nullptr;
 #endif
 static bool g_compute_available = false;
 static bool g_suppress_framework_logs = false;
 
 // OpenCL compute engine (initialized on demand)
 #ifdef ENABLE_OPENCL
-static std::unique_ptr<OpenCLCompute::ComputeEngine> g_opencl_engine = nullptr;
+static std::unique_ptr<OpenCLRuntime> g_opencl_engine = nullptr;
 #endif
 static bool g_opencl_available = false;
 
@@ -350,9 +350,15 @@ static inline int env_int(const char* name, int default_value) {
     }
 }
 
+static inline bool any_runtime_fastpath_enabled(const RuntimeConfig& cfg) {
+    return cfg.linear_enabled || cfg.conv_enabled || cfg.norm_enabled || cfg.attention_enabled;
+}
+
 static inline void refresh_runtime_router_bindings() {
     AbstractRuntime* rocm = nullptr;
     AbstractRuntime* cuda = nullptr;
+    AbstractRuntime* vulkan = nullptr;
+    AbstractRuntime* opencl = nullptr;
     AbstractRuntime* cpu = nullptr;
 
 #ifdef ENABLE_ROCM
@@ -361,9 +367,15 @@ static inline void refresh_runtime_router_bindings() {
 #ifdef ENABLE_CUDA
     cuda = g_cuda_engine.get();
 #endif
+#ifdef ENABLE_VULKAN
+    vulkan = g_compute_engine.get();
+#endif
+#ifdef ENABLE_OPENCL
+    opencl = g_opencl_engine.get();
+#endif
     cpu = g_cpu_engine.get();
 
-    RuntimeRouter::instance().setRuntimes(rocm, cuda, cpu);
+    RuntimeRouter::instance().setRuntimes(rocm, cuda, vulkan, opencl, cpu);
 }
 }
 
@@ -375,15 +387,15 @@ Model::Model()
     RuntimeRouter::instance().setActivators(
         [this]() -> bool { return this->initializeRocmComputeEngine(); },
         [this]() -> bool { return this->initializeCudaComputeEngine(); },
+        [this]() -> bool { return this->initializeComputeEngine(); },
+        [this]() -> bool { return this->initializeOpenCLComputeEngine(); },
         [this]() -> bool { return this->initializeCpuComputeEngine(); }
     );
 
     tw = 64; th = 64;
     // ConditioningEncoder toujours présent + embeddings spéciaux (SEQ/MOD/MAG) disponibles.
     encoder.ensureSpecialEmbeddings();
-    // Tenter d'initialiser le compute engine
-    initializeComputeEngine();
-    initializeOpenCLComputeEngine();
+    // Tenter d'initialiser les runtimes disponibles
     RuntimeRouter::instance().activateAvailableRuntimes();
 }
 
@@ -508,6 +520,7 @@ bool Model::initializeComputeEngine() {
         if (v[0] != '\0' && !(v[0] == '0' && v[1] == '\0')) {
             g_compute_available = false;
             g_compute_engine.reset();
+            refresh_runtime_router_bindings();
             initialized.store(true, std::memory_order_release);
             if (!Model::frameworkLogsSuppressed()) {
                 std::cerr << "⚠ Vulkan Compute disabled via MIMIR_DISABLE_VULKAN" << std::endl;
@@ -526,11 +539,23 @@ bool Model::initializeComputeEngine() {
     if (initialized.load(std::memory_order_relaxed)) {
         return g_compute_available;
     }
-    
+
+    RuntimeConfig cfg = RuntimeConfig::fromEnv("VULKAN");
+    cfg.linear_enabled = env_flag_true("MIMIR_VULKAN_LINEAR", true);
+    cfg.linear_min_ops = env_int("MIMIR_VULKAN_LINEAR_MIN_OPS", 0);
+    if (cfg.disabled || !cfg.linear_enabled) {
+        g_compute_available = false;
+        g_compute_engine.reset();
+        refresh_runtime_router_bindings();
+        initialized.store(true, std::memory_order_release);
+        return false;
+    }
+
     try {
-        g_compute_engine = std::make_unique<VulkanCompute::ComputeEngine>();
-        g_compute_available = g_compute_engine->initialize();
-        
+        g_compute_engine = std::make_unique<VulkanRuntime>();
+        g_compute_available = g_compute_engine->initialize(cfg);
+        refresh_runtime_router_bindings();
+
         if (g_compute_available) {
             if (!Model::frameworkLogsSuppressed()) {
             std::cerr << "✓ Vulkan Compute initialized" << std::endl;
@@ -540,6 +565,7 @@ bool Model::initializeComputeEngine() {
                 std::cerr << "⚠ Vulkan Compute initialization failed, using CPU fallback" << std::endl;
             }
             g_compute_engine.reset();
+            refresh_runtime_router_bindings();
         }
     } catch (const std::exception& e) {
         if (!Model::frameworkLogsSuppressed()) {
@@ -547,6 +573,7 @@ bool Model::initializeComputeEngine() {
         }
         g_compute_available = false;
         g_compute_engine.reset();
+        refresh_runtime_router_bindings();
     }
     
     initialized.store(true, std::memory_order_release);
@@ -567,6 +594,7 @@ bool Model::initializeOpenCLComputeEngine() {
         if (v[0] != '\0' && !(v[0] == '0' && v[1] == '\0')) {
             g_opencl_available = false;
             g_opencl_engine.reset();
+            refresh_runtime_router_bindings();
             initialized.store(true, std::memory_order_release);
             std::cerr << "⚠ OpenCL Compute disabled via MIMIR_DISABLE_OPENCL" << std::endl;
             return false;
@@ -582,9 +610,21 @@ bool Model::initializeOpenCLComputeEngine() {
         return g_opencl_available;
     }
 
+    RuntimeConfig cfg = RuntimeConfig::fromEnv("OPENCL");
+    cfg.linear_enabled = env_flag_true("MIMIR_OPENCL_LINEAR", true);
+    cfg.linear_min_ops = env_int("MIMIR_OPENCL_LINEAR_MIN_OPS", 0);
+    if (cfg.disabled || !cfg.linear_enabled) {
+        g_opencl_available = false;
+        g_opencl_engine.reset();
+        refresh_runtime_router_bindings();
+        initialized.store(true, std::memory_order_release);
+        return false;
+    }
+
     try {
-        g_opencl_engine = std::make_unique<OpenCLCompute::ComputeEngine>();
-        g_opencl_available = g_opencl_engine->initialize();
+        g_opencl_engine = std::make_unique<OpenCLRuntime>();
+        g_opencl_available = g_opencl_engine->initialize(cfg);
+        refresh_runtime_router_bindings();
         if (g_opencl_available) {
             std::cerr << "✓ OpenCL Compute initialized" << std::endl;
         } else {
@@ -592,11 +632,13 @@ bool Model::initializeOpenCLComputeEngine() {
                 std::cerr << "⚠ OpenCL Compute unavailable, using CPU fallback" << std::endl;
             }
             g_opencl_engine.reset();
+            refresh_runtime_router_bindings();
         }
     } catch (const std::exception& e) {
         std::cerr << "⚠ OpenCL Compute unavailable: " << e.what() << std::endl;
         g_opencl_available = false;
         g_opencl_engine.reset();
+        refresh_runtime_router_bindings();
     }
 
     initialized.store(true, std::memory_order_release);
@@ -612,8 +654,17 @@ bool Model::initializeCudaComputeEngine() {
     static std::atomic<bool> initialized{false};
     static std::mutex init_mutex;
 
-    const RuntimeConfig cfg = RuntimeConfig::fromEnv("CUDA");
-    if (cfg.disabled || !cfg.linear_enabled) {
+    RuntimeConfig cfg = RuntimeConfig::fromEnv("CUDA");
+    cfg.linear_enabled = env_flag_true("MIMIR_CUDA_LINEAR", true);
+    cfg.linear_min_ops = env_int("MIMIR_CUDA_LINEAR_MIN_OPS", 0);
+    cfg.conv_enabled = env_flag_true("MIMIR_CUDA_CONV", true);
+    cfg.conv_min_ops = env_int("MIMIR_CUDA_CONV_MIN_OPS", 0);
+    cfg.norm_enabled = env_flag_true("MIMIR_CUDA_NORM", true);
+    cfg.norm_min_elements = env_int("MIMIR_CUDA_NORM_MIN_ELEMS", 0);
+    cfg.attention_enabled = env_flag_true("MIMIR_CUDA_ATTENTION", true);
+    cfg.attention_min_ops = env_int("MIMIR_CUDA_ATTENTION_MIN_OPS", 0);
+
+    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
         g_cuda_available = false;
         g_cuda_engine.reset();
         refresh_runtime_router_bindings();
@@ -665,8 +716,17 @@ bool Model::initializeRocmComputeEngine() {
     static std::atomic<bool> initialized{false};
     static std::mutex init_mutex;
 
-    const RuntimeConfig cfg = RuntimeConfig::fromEnv("ROCM");
-    if (cfg.disabled || !cfg.linear_enabled) {
+    RuntimeConfig cfg = RuntimeConfig::fromEnv("ROCM");
+    cfg.linear_enabled = env_flag_true("MIMIR_ROCM_LINEAR", true);
+    cfg.linear_min_ops = env_int("MIMIR_ROCM_LINEAR_MIN_OPS", 0);
+    cfg.conv_enabled = env_flag_true("MIMIR_ROCM_CONV", true);
+    cfg.conv_min_ops = env_int("MIMIR_ROCM_CONV_MIN_OPS", 0);
+    cfg.norm_enabled = env_flag_true("MIMIR_ROCM_NORM", true);
+    cfg.norm_min_elements = env_int("MIMIR_ROCM_NORM_MIN_ELEMS", 0);
+    cfg.attention_enabled = env_flag_true("MIMIR_ROCM_ATTENTION", true);
+    cfg.attention_min_ops = env_int("MIMIR_ROCM_ATTENTION_MIN_OPS", 0);
+
+    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
         g_rocm_available = false;
         g_rocm_engine.reset();
         refresh_runtime_router_bindings();
@@ -713,9 +773,10 @@ bool Model::initializeRocmComputeEngine() {
 void Model::shutdownComputeEngine() {
 #ifdef ENABLE_VULKAN
     if (g_compute_engine) {
-        g_compute_engine->cleanup();
+        g_compute_engine->shutdown();
         g_compute_engine.reset();
         g_compute_available = false;
+        refresh_runtime_router_bindings();
     }
 #else
     g_compute_available = false;
@@ -725,9 +786,10 @@ void Model::shutdownComputeEngine() {
 void Model::shutdownOpenCLComputeEngine() {
 #ifdef ENABLE_OPENCL
     if (g_opencl_engine) {
-        g_opencl_engine->cleanup();
+        g_opencl_engine->shutdown();
         g_opencl_engine.reset();
         g_opencl_available = false;
+        refresh_runtime_router_bindings();
     }
 #else
     g_opencl_available = false;
@@ -4934,6 +4996,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         auto layer_uses_runtime_router = [](LayerType t) -> bool {
             switch (t) {
                 case LayerType::Conv2d:
+                case LayerType::ConvTranspose2d:
                 case LayerType::LayerNorm:
                 case LayerType::RMSNorm:
                 case LayerType::MatMul:
@@ -4941,6 +5004,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 case LayerType::SelfAttention:
                 case LayerType::MultiHeadAttention:
                 case LayerType::CrossAttention:
+                case LayerType::Add:
+                case LayerType::Multiply:
+                case LayerType::ReLU:
+                case LayerType::GELU:
+                case LayerType::SiLU:
+                case LayerType::Tanh:
+                case LayerType::Sigmoid:
                     return true;
                 default:
                     return false;
@@ -4948,7 +5018,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         };
 
         std::vector<std::string> active_runtimes;
-        active_runtimes.reserve(3);
+        active_runtimes.reserve(5);
 
 #ifdef ENABLE_ROCM
         if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
@@ -4961,6 +5031,18 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             active_runtimes.emplace_back(g_cuda_engine->name());
         }
 #endif
+
+    #ifdef ENABLE_VULKAN
+        if (g_compute_available && g_compute_engine && g_compute_engine->isInitialized()) {
+            active_runtimes.emplace_back(g_compute_engine->name());
+        }
+    #endif
+
+    #ifdef ENABLE_OPENCL
+        if (g_opencl_available && g_opencl_engine && g_opencl_engine->isInitialized()) {
+            active_runtimes.emplace_back(g_opencl_engine->name());
+        }
+    #endif
 
         if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized()) {
             active_runtimes.emplace_back(g_cpu_engine->name());
@@ -5381,6 +5463,44 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             std::vector<std::vector<float>> runtime_outputs;
             AbstractRuntime* selected_runtime = nullptr;
             if (!RuntimeRouter::instance().dispatchForwardLayer(inputs, runtime_outputs, layer, training, &selected_runtime)) {
+                if (runtime_trace) {
+                    std::vector<std::string> active_runtimes;
+                    active_runtimes.reserve(5);
+#ifdef ENABLE_ROCM
+                    if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) active_runtimes.emplace_back(g_rocm_engine->name());
+#endif
+#ifdef ENABLE_CUDA
+                    if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) active_runtimes.emplace_back(g_cuda_engine->name());
+#endif
+#ifdef ENABLE_VULKAN
+                    if (g_compute_available && g_compute_engine && g_compute_engine->isInitialized()) active_runtimes.emplace_back(g_compute_engine->name());
+#endif
+#ifdef ENABLE_OPENCL
+                    if (g_opencl_available && g_opencl_engine && g_opencl_engine->isInitialized()) active_runtimes.emplace_back(g_opencl_engine->name());
+#endif
+                    if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized()) active_runtimes.emplace_back(g_cpu_engine->name());
+
+                    auto join_runtime_names = [](const std::vector<std::string>& names) -> std::string {
+                        if (names.empty()) return std::string();
+                        std::ostringstream oss;
+                        for (size_t i = 0; i < names.size(); ++i) {
+                            if (i) oss << ",";
+                            oss << names[i];
+                        }
+                        return oss.str();
+                    };
+
+                    const char* reason = active_runtimes.empty()
+                        ? "no_active_runtime"
+                        : "unsupported_or_runtime_rejected";
+
+                    std::cerr << "[runtime-fallback] layer#" << layer_idx
+                              << " name='" << layer.name
+                              << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
+                              << "' reason=" << reason
+                              << " active_priority=[" << join_runtime_names(active_runtimes) << "]"
+                              << std::endl;
+                }
                 return false;
             }
             out = std::move(runtime_outputs[0]);
@@ -5404,7 +5524,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     case LayerType::ConvTranspose2d: {
         static bool accel_logged_conv2d = false;
 
-        if (layer.type_enum == LayerType::Conv2d && try_runtime_forward_layer(layer_output)) {
+        if ((layer.type_enum == LayerType::Conv2d || layer.type_enum == LayerType::ConvTranspose2d) &&
+            try_runtime_forward_layer(layer_output)) {
             // Le runtime renvoie la sortie conv; on conserve l'activation côté Model pour
             // rester cohérent avec le chemin CPU.
             if (layer.activation != ActivationType::NONE) {
@@ -5738,271 +5859,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // ====================================================================
     
     case LayerType::Linear: {
-        bool did_vulkan = false;
-        bool did_opencl = false;
-        bool did_cuda = false;
-        bool did_rocm = false;
-        bool did_cpu = false;
-
-        executed_call = "linear_accel_chain";
+        executed_call = "runtime_router.dispatchForwardLayer";
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
+        executed_call = "cpu_switch_kernel";
         executed_backend = "CPU";
-
-#ifdef ENABLE_CUDA
-    if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
-            const RuntimeConfig& cuda_cfg = g_cuda_engine->config();
-            const bool cuda_linear = cuda_cfg.linear_enabled;
-            const int cuda_min_ops = cuda_cfg.linear_min_ops;
-            const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
-            const int out_f = layer.out_features;
-            int batch = 1;
-            if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
-                batch = layer.seq_len;
-            }
-
-            const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
-            const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
-            const size_t expected_b = static_cast<size_t>(out_f);
-            const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
-
-            const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-            if (out_f > 0 && in_f > 0 && ops >= cuda_min_ops && x.size() == expected_in) {
-                const float* weights = layer.getWeights();
-                const float* bias = nullptr;
-                const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
-                if (weights && weights_n >= expected_total_w) {
-                    if (layer.use_bias) {
-                        bias = weights + expected_w;
-                    }
-                    layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
-                    did_cuda = g_cuda_engine->linearForward(
-                        x.data(),
-                        weights,
-                        bias,
-                        layer_output.data(),
-                        batch,
-                        in_f,
-                        out_f
-                    );
-                    if (did_cuda) executed_backend = "CUDA";
-                    if (did_cuda && cuda_cfg.verbose) {
-                        std::cerr << "[accel] Linear via CUDA (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
-                    }
-                }
-            }
-        }
-#endif
-
-#ifdef ENABLE_ROCM
-    if (!did_cuda && g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
-            const RuntimeConfig& rocm_cfg = g_rocm_engine->config();
-            const bool rocm_linear = rocm_cfg.linear_enabled;
-            const int rocm_min_ops = rocm_cfg.linear_min_ops;
-            const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
-            const int out_f = layer.out_features;
-            int batch = 1;
-            if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
-                batch = layer.seq_len;
-            }
-
-            const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
-            const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
-            const size_t expected_b = static_cast<size_t>(out_f);
-            const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
-
-            const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-            if (out_f > 0 && in_f > 0 && ops >= rocm_min_ops && x.size() == expected_in) {
-                const float* weights = layer.getWeights();
-                const float* bias = nullptr;
-                const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
-                if (weights && weights_n >= expected_total_w) {
-                    if (layer.use_bias) {
-                        bias = weights + expected_w;
-                    }
-                    layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
-                    did_rocm = g_rocm_engine->linearForward(
-                        x.data(),
-                        weights,
-                        bias,
-                        layer_output.data(),
-                        batch,
-                        in_f,
-                        out_f
-                    );
-                    if (did_rocm) executed_backend = "ROCM";
-                    if (did_rocm && rocm_cfg.verbose) {
-                        std::cerr << "[accel] Linear via ROCm (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
-                    }
-                }
-            }
-        }
-#endif
-
-#ifdef ENABLE_VULKAN
-        // Politique: par défaut off. Activer avec MIMIR_VULKAN_LINEAR=1.
-        const bool vulkan_linear = env_flag_true("MIMIR_VULKAN_LINEAR", false);
-        const int vk_min_ops = env_int("MIMIR_VULKAN_LINEAR_MIN_OPS", 1 << 20);
-        if (!did_cuda && !did_rocm && vulkan_linear && g_compute_available && g_compute_engine) {
-            const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
-            const int out_f = layer.out_features;
-            int batch = 1;
-            if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
-                batch = layer.seq_len;
-            }
-
-            // Garde-fous: éviter tout OOB côté GPU (peut crasher le driver => SIGSEGV).
-            const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
-            const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
-            const size_t expected_b = static_cast<size_t>(out_f);
-            const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
-
-            const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-            if (out_f > 0 && in_f > 0 && ops >= vk_min_ops && x.size() == expected_in) {
-                const float* weights = layer.getWeights();
-                const float* bias = nullptr;
-                const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
-                if (weights && weights_n >= expected_total_w) {
-                    if (layer.use_bias) {
-                        bias = weights + expected_w;
-                    }
-                    layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
-                    did_vulkan = g_compute_engine->linearForward(
-                        x.data(),
-                        weights,
-                        bias,
-                        layer_output.data(),
-                        batch,
-                        in_f,
-                        out_f
-                    );
-                    if (did_vulkan) executed_backend = "VULKAN";
-                    if (did_vulkan && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
-                        std::cerr << "[accel] Linear via Vulkan (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
-                    }
-                } else if (env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
-                    std::cerr << "[accel] Vulkan Linear skipped (shape/weights mismatch)."
-                              << " x=" << x.size() << " expected=" << expected_in
-                              << " weights=" << weights_n << " expected>=" << expected_total_w << "\n";
-                }
-            }
-        }
-#endif
-#ifdef ENABLE_OPENCL
-        // Politique: par défaut off (sécurité). Activer avec MIMIR_OPENCL_LINEAR=1.
-        // Permet d'utiliser OpenCL et Vulkan simultanément (backends indépendants).
-        const bool opencl_linear = env_flag_true("MIMIR_OPENCL_LINEAR", false);
-        const int min_ops = env_int("MIMIR_OPENCL_LINEAR_MIN_OPS", 1 << 20);
-    if (!did_cuda && !did_rocm && !did_vulkan && opencl_linear && g_opencl_available && g_opencl_engine) {
-            const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
-            const int out_f = layer.out_features;
-            int batch = 1;
-            if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
-                batch = layer.seq_len;
-            }
-
-            const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
-            const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
-            const size_t expected_b = static_cast<size_t>(out_f);
-            const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
-
-            const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-            if (out_f > 0 && in_f > 0 && ops >= min_ops && x.size() == expected_in) {
-                const float* weights = layer.getWeights();
-                const float* bias = nullptr;
-                const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
-                if (weights && weights_n >= expected_total_w) {
-                    if (layer.use_bias) {
-                        bias = weights + expected_w;
-                    }
-                    layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
-                    did_opencl = g_opencl_engine->linearForward(
-                        x.data(),
-                        weights,
-                        bias,
-                        layer_output.data(),
-                        batch,
-                        in_f,
-                        out_f
-                    );
-                    if (did_opencl) executed_backend = "OPENCL";
-                }
-            }
-        }
-#endif
-        if (!did_cuda && !did_rocm && !did_vulkan && !did_opencl) {
-            static bool accel_logged_linear_cpu = false;
-            if (!accel_logged_linear_cpu && env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
-                accel_logged_linear_cpu = true;
-                #if defined(__AVX2__)
-                    std::cerr << "Linear(CPU): compiled_with_avx2=1";
-                #else
-                    std::cerr << "Linear(CPU): compiled_with_avx2=0";
-                #endif
-
-                #if defined(__FMA__)
-                    std::cerr << " compiled_with_fma=1";
-                #else
-                    std::cerr << " compiled_with_fma=0";
-                #endif
-
-                std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
-                          << " runtime_fma=" << (hasFMA() ? 1 : 0)
-                          << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
-                              << " cuda_linear=" << (env_flag_true("MIMIR_CUDA_LINEAR", false) ? 1 : 0)
-                              << " rocm_linear=" << (env_flag_true("MIMIR_ROCM_LINEAR", false) ? 1 : 0)
-                          << " vulkan_linear=" << (env_flag_true("MIMIR_VULKAN_LINEAR", false) ? 1 : 0)
-                          << " opencl_linear=" << (env_flag_true("MIMIR_OPENCL_LINEAR", false) ? 1 : 0)
-                          << std::endl;
-            }
-            // Fallback CPU via runtime (unifie le chemin Linear)
-            if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized()) {
-                const RuntimeConfig& cpu_cfg = g_cpu_engine->config();
-                if (cpu_cfg.linear_enabled) {
-                    const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(x.size());
-                    const int out_f = layer.out_features;
-                    int batch = 1;
-                    if (layer.seq_len > 0 && static_cast<int>(x.size()) == layer.seq_len * in_f) {
-                        batch = layer.seq_len;
-                    }
-
-                    const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
-                    const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
-                    const size_t expected_b = static_cast<size_t>(out_f);
-                    const size_t expected_total_w = expected_w + ((layer.use_bias) ? expected_b : 0u);
-
-                    const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-                    const int min_ops = std::max(0, cpu_cfg.linear_min_ops);
-                    if (out_f > 0 && in_f > 0 && ops >= min_ops && x.size() == expected_in) {
-                        const float* weights = layer.getWeights();
-                        const float* bias = nullptr;
-                        const size_t weights_n = static_cast<size_t>(layer.getWeightsSize());
-                        if (weights && weights_n >= expected_total_w) {
-                            if (layer.use_bias) {
-                                bias = weights + expected_w;
-                            }
-                            layer_output.assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
-                            did_cpu = g_cpu_engine->linearForward(
-                                x.data(),
-                                weights,
-                                bias,
-                                layer_output.data(),
-                                batch,
-                                in_f,
-                                out_f
-                            );
-                            if (did_cpu) executed_backend = "CPU_RUNTIME";
-                            if (did_cpu && cpu_cfg.verbose) {
-                                std::cerr << "[accel] Linear via CPU runtime (batch=" << batch << ", in=" << in_f << ", out=" << out_f << ")\n";
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!did_cpu) {
-                executed_backend = "CPU";
-                layer_output = LayerOps::linear_forward(x, layer, training);
-            }
-        }
+        layer_output = LayerOps::linear_forward(x, layer, training);
         break;
     }
 
@@ -6236,6 +6099,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // ====================================================================
     
     case LayerType::ReLU: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOps::relu_forward(x);
         break;
     }
@@ -6247,6 +6113,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::GELU: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOps::gelu_forward(x);
         break;
     }
@@ -6257,16 +6126,25 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::SiLU: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOps::silu_forward(x);
         break;
     }
     
     case LayerType::Tanh: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOps::tanh_forward(x);
         break;
     }
     
     case LayerType::Sigmoid: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         layer_output = LayerOps::sigmoid_forward(x);
         break;
     }
@@ -6536,6 +6414,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // ====================================================================
     
     case LayerType::Add: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         RUNTIME_CHECK(
             inputs.size() >= 2,
             "Add layer requires 2 inputs, got " + std::to_string(inputs.size())
@@ -6554,6 +6435,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     }
     
     case LayerType::Multiply: {
+        if (try_runtime_forward_layer(layer_output)) {
+            break;
+        }
         RUNTIME_CHECK(
             inputs.size() >= 2,
             "Multiply layer requires 2 inputs, got " + std::to_string(inputs.size())

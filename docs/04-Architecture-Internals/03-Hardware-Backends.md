@@ -29,8 +29,8 @@ Ce document décrit l'architecture interne du système de runtimes de Mímir : c
 | `src/runtimes/cpu/CpuRuntime.cpp` | Implémentation CPU (fallback universel) |
 | `src/runtimes/cuda/CudaRuntime.cpp` | Fast-paths cuBLAS (CUDA) |
 | `src/runtimes/rocm/RocmRuntime.cpp` | Fast-paths rocBLAS (ROCm/HIP) |
-| `src/VulkanCompute.hpp` | Compute Vulkan (legacy, Linear uniquement) |
-| `src/OpenCLCompute.hpp` | Compute OpenCL (legacy) |
+| `src/runtimes/vulkan/VulkanCompute.hpp` | Compute Vulkan (Linear, MatMul/BatchMatMul, Add/Multiply, ReLU/SiLU/GELU/Sigmoid/Tanh) |
+| `src/runtimes/opencl/OpenCLCompute.hpp` | Compute OpenCL (legacy) |
 | `CMakeLists.txt` | Flags de compilation : `ENABLE_CUDA`, `ENABLE_ROCM`, `ENABLE_VULKAN` |
 
 ---
@@ -59,21 +59,21 @@ public:
 
 `forwardLayer()` retourne `false` pour signaler "je ne peux pas gérer ce layer" — ce n'est pas une erreur, c'est le mécanisme de fallback.
 
-> **Statut actuel (important) :** dans le chemin de forward réellement exécuté (`Model.cpp`), ce dispatch générique via `forwardLayer()` n'est **pas branché** pour CUDA/ROCm. Le forward actif utilise un dispatch inline dédié à `LayerType::Linear`.
+La sélection des opérations dans les runtimes suit une convention explicite : **switch (`LayerType`)** dans `forwardLayer(...)` (pas de chaîne de `if` sur le type).
 
 ### Ordre de dispatch réellement exécuté
 
-Dans `Model.cpp`, le dispatch GPU actif est implémenté **dans le `case LayerType::Linear`** avec des appels directs `linearForward(...)` :
+Le forward s'appuie sur le `RuntimeRouter`, qui parcourt les backends initialisés par ordre de priorité et appelle `forwardLayer(...)`.
 
 ```
-1. CUDA `linearForward` — si compilé/initialisé et `!training`
-2. ROCm `linearForward` — si compilé/initialisé et `!training`
-3. Vulkan `linearForward` (legacy)
-4. OpenCL `linearForward` (legacy)
-5. CPU runtime `linearForward`, puis fallback `LayerOps::linear_forward`
-
-Pour les autres types de layers (`Conv2d`, norms, attention, etc.), le chemin actif reste CPU dans le switch de `Model.cpp`.
+1. CUDA (si compilé, initialisé et activé)
+2. ROCm (si compilé, initialisé et activé)
+3. Vulkan (si compilé, initialisé et activé)
+4. OpenCL (si compilé, initialisé et activé)
+5. CPU (fallback universel)
 ```
+
+Chaque backend décide via son `switch (layer.type_enum)` s'il peut traiter l'opération. Si le backend retourne `false`, le router essaie le suivant.
 
 ### Le pattern "do-while-false" dans les runtimes GPU
 
@@ -100,7 +100,7 @@ bool CudaRuntime::forwardLayer(...) {
 }
 ```
 
-> **Note :** ce pattern est correct côté implémentation runtime, mais ces chemins ne sont pas actuellement appelés par le dispatch principal de `Model.cpp` (sauf `linearForward` direct pour `Linear`).
+> **Note :** ce pattern est actif dans les runtimes GPU et fonctionne avec le dispatch du `RuntimeRouter`.
 
 ---
 
@@ -135,19 +135,19 @@ struct RuntimeConfig {
 
 | Variable | Valeur | Effet |
 |---|---|---|
-| `MIMIR_CUDA` | `0` | Désactive complètement le runtime CUDA |
-| `MIMIR_CUDA_VERBOSE` | `1` | Log chaque décision de dispatch (utile pour le diagnostic) |
+| `MIMIR_DISABLE_CUDA` | `1` | Désactive complètement le runtime CUDA |
+| `MIMIR_ACCEL_VERBOSE` | `1` | Log les décisions de dispatch (utile pour le diagnostic) |
 | `MIMIR_CUDA_DEVICE` | entier | Index du GPU à utiliser (défaut : `0`) |
 | `MIMIR_CUDA_LINEAR` | `1` | Active le fast-path `Linear` |
-| `MIMIR_CUDA_LINEAR_MIN_OPS` | entier | Seuil MACs pour `Linear` (défaut : `1048576`) |
+| `MIMIR_CUDA_LINEAR_MIN_OPS` | entier | Seuil MACs pour `Linear` (défaut runtime : `0`) |
 | `MIMIR_CUDA_CONV` | `1` | Active le fast-path `Conv2d` |
-| `MIMIR_CUDA_CONV_MIN_OPS` | entier | Seuil MACs pour `Conv2d` (défaut : `262144`) |
+| `MIMIR_CUDA_CONV_MIN_OPS` | entier | Seuil MACs pour `Conv2d` (défaut runtime : `0`) |
 | `MIMIR_CUDA_NORM` | `1` | Active le fast-path `LayerNorm` / `RMSNorm` |
-| `MIMIR_CUDA_NORM_MIN_ELEMS` | entier | Seuil éléments pour les norms (défaut : `4096`) |
+| `MIMIR_CUDA_NORM_MIN_ELEMS` | entier | Seuil éléments pour les norms (défaut runtime : `0`) |
 | `MIMIR_CUDA_ATTENTION` | `1` | Active le fast-path `Attention` |
-| `MIMIR_CUDA_ATTENTION_MIN_OPS` | entier | Seuil MACs pour Attention (défaut : `262144`) |
+| `MIMIR_CUDA_ATTENTION_MIN_OPS` | entier | Seuil MACs pour Attention (défaut runtime : `0`) |
 
-> **Portée effective aujourd'hui :** dans le forward actif, seuls `MIMIR_*_LINEAR` et `MIMIR_*_LINEAR_MIN_OPS` ont un impact direct sur l'accélération GPU/ROCm. Les flags `CONV`/`NORM`/`ATTENTION` correspondent à des chemins implémentés dans `forwardLayer()` mais non branchés dans le dispatch principal.
+> **Portée effective aujourd'hui :** le dispatch principal passe par le `RuntimeRouter`; les fast-paths `LINEAR`/`CONV`/`NORM`/`ATTENTION` de CUDA/ROCm sont pris en compte quand activés.
 
 ---
 
@@ -165,7 +165,7 @@ Calcule `output[M,N] = input[M,K] × W[K,N]` via `cublasSgemm`, puis ajoute le b
 
 Les convolutions ne sont pas directement supportées par cuBLAS, mais peuvent être réduites à une multiplication matricielle via la transformation **im2col**.
 
-**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer`, mais non appelé dans le forward principal actuel.
+**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer` et appelé via `RuntimeRouter`.
 
 1. **im2col sur CPU** — le tenseur d'entrée `[C, H, W]` est réorganisé en matrice `col[C·kH·kW, H_out·W_out]` qui "aplatit" chaque fenêtre de convolution en une colonne.
 2. **Transfert vers GPU** — `col` et les filtres `W` sont copiés en VRAM.
@@ -184,7 +184,7 @@ La normalisation elle-même est conservée sur CPU (calcul de la moyenne et vari
 
 Ce découpage hybride donne un bon rapport perf/complexité sans avoir à porter le calcul de variance sur CUDA.
 
-**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer`, mais non appelé dans le forward principal actuel.
+**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer` et appelé via `RuntimeRouter`.
 
 `GroupNorm` et `BatchNorm2d` restent entièrement sur CPU (layout de mémoire incompatible avec cette stratégie).
 
@@ -203,7 +203,7 @@ Pour `SelfAttention`, `MultiHeadAttention` et `CrossAttention` :
 
 Pour `CrossAttention`, `Q` et `KV` proviennent de deux sources différentes (`qlen ≠ kvlen` est supporté).
 
-**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer`, mais non appelé dans le forward principal actuel.
+**Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer` et appelé via `RuntimeRouter`.
 
 ### `DeviceBuf` — helper de buffer device
 
@@ -243,7 +243,7 @@ L'implémentation est **fonctionnellement identique** au backend CUDA. Les corre
 
 Le code est conditionnel via `#ifdef ENABLE_ROCM` / `#endif`. Les variables d'environnement utilisent le préfixe `MIMIR_ROCM_*`.
 
-**Statut de dispatch :** même situation que CUDA (`forwardLayer()` implémenté mais non branché dans le dispatch principal actuel).
+**Statut de dispatch :** même logique que CUDA; `forwardLayer()` est utilisé via `RuntimeRouter`.
 
 ---
 
@@ -266,14 +266,19 @@ Les boucles dans `LayerOps` sont parallélisées via **OpenMP** si activé au bu
 
 ---
 
-## Backends legacy (Vulkan / OpenCL)
+## Backends Vulkan / OpenCL
 
-Ces backends précèdent l'architecture à base de runtimes et ne supportent que les layers `Linear` en **inférence** uniquement. Ils sont conservés pour la rétrocompatibilité mais ne reçoivent plus de développement actif.
+Ces backends sont exposés via runtimes dédiés (`VulkanRuntime` / `OpenCLRuntime`) et routés par `RuntimeRouter`.
+
+En pratique:
+
+- Vulkan couvre `Linear`, `MatMul`, `BatchMatMul`, `Add`, `Multiply`, `ReLU` (forward).
+- OpenCL couvre `Linear`, `MatMul`, `BatchMatMul` (forward).
 
 | Backend | Build flag | Scope | Variables |
 |---|---|---|---|
-| Vulkan | `ENABLE_VULKAN` | Linear (inférence) | `MIMIR_VULKAN_LINEAR_SPV` |
-| OpenCL | `ENABLE_OPENCL` | Linear (inférence) | `MIMIR_OPENCL_LINEAR=1` |
+| Vulkan | `ENABLE_VULKAN` | Linear + MatMul/BatchMatMul + Add/Multiply/ReLU (forward) | `MIMIR_VULKAN_LINEAR_SPV`, `MIMIR_VULKAN_LINEAR` |
+| OpenCL | `ENABLE_OPENCL` | Linear + MatMul/BatchMatMul (inférence) | `MIMIR_OPENCL_LINEAR` |
 
 ---
 
@@ -281,18 +286,21 @@ Ces backends précèdent l'architecture à base de runtimes et ne supportent que
 
 | Layer | CPU | CUDA | ROCm | Vulkan |
 |---|---|---|---|---|
-| `Linear` | ✓ ref | ✓ actif (inférence, dispatch inline `Model.cpp`) | ✓ actif (inférence, dispatch inline `Model.cpp`) | ✓ actif (legacy) |
-| `Conv2d` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
-| `LayerNorm` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
-| `RMSNorm` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
+| `Linear` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter |
+| `Conv2d` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
+| `LayerNorm` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
+| `RMSNorm` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
 | `GroupNorm` | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
 | `BatchNorm2d` | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
-| `SelfAttention` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
-| `MultiHeadAttention` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
-| `CrossAttention` | ✓ ref | implémenté dans runtime mais non dispatché | implémenté dans runtime mais non dispatché | ✗ |
+| `SelfAttention` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
+| `MultiHeadAttention` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
+| `CrossAttention` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
+| `Add` | ✓ ref | ✗ fallback | ✗ fallback | ✓ routé via RuntimeRouter |
+| `Multiply` | ✓ ref | ✗ fallback | ✗ fallback | ✓ routé via RuntimeRouter |
+| `ReLU` | ✓ ref | ✗ fallback | ✗ fallback | ✓ routé via RuntimeRouter |
 | Tous les autres | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
 
-> **Note explicite :** `CudaRuntime::forwardLayer()` et `RocmRuntime::forwardLayer()` existent et contiennent les chemins Conv/Norm/Attention, mais ne sont actuellement pas invoqués depuis le `switch` de forward dans `Model.cpp`.
+> **Note explicite :** le forward principal route via `RuntimeRouter`; les runtimes peuvent refuser une op et laisser le fallback CPU prendre le relais.
 
 ---
 

@@ -290,39 +290,47 @@ bool RocmRuntime::forwardLayer(
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
 
-    if (layer.type_enum == LayerType::Linear && config_.linear_enabled) {
-        if (!inputs.empty() && inputs[0]) {
-            const std::vector<float>& x = *inputs[0];
-            const int in_f = layer.in_features;
-            const int out_f = layer.out_features;
-            const int seq_len = layer.seq_len;
-            const int batch = (seq_len > 0) ? seq_len : (in_f > 0 ? static_cast<int>(x.size()) / in_f : 0);
+    switch (layer.type_enum) {
+        case LayerType::Linear:
+            if (config_.linear_enabled) {
+                if (!inputs.empty() && inputs[0]) {
+                    const std::vector<float>& x = *inputs[0];
+                    const int in_f = layer.in_features;
+                    const int out_f = layer.out_features;
+                    const int seq_len = layer.seq_len;
+                    const int batch = (seq_len > 0) ? seq_len : (in_f > 0 ? static_cast<int>(x.size()) / in_f : 0);
 
-            if (batch > 0 && in_f > 0 && out_f > 0) {
-                const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
-                const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
-                const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
+                    if (batch > 0 && in_f > 0 && out_f > 0) {
+                        const size_t expected_in = static_cast<size_t>(batch) * static_cast<size_t>(in_f);
+                        const size_t expected_w = static_cast<size_t>(out_f) * static_cast<size_t>(in_f);
+                        const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
 
-                const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-                if (ops >= std::max(0, config_.linear_min_ops) && x.size() == expected_in) {
-                    const float* w = layer.getWeights();
-                    if (w && layer.getWeightsSize() >= expected_total_w) {
-                        const float* b = layer.use_bias ? (w + expected_w) : nullptr;
-                        outputs.resize(1);
-                        outputs[0].assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
-                        if (linearForward(x.data(), w, b, outputs[0].data(), batch, in_f, out_f)) {
-                            return true;
+                        const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
+                        if (ops >= std::max(0, config_.linear_min_ops) && x.size() == expected_in) {
+                            const float* w = layer.getWeights();
+                            if (w && layer.getWeightsSize() >= expected_total_w) {
+                                const float* b = layer.use_bias ? (w + expected_w) : nullptr;
+                                outputs.resize(1);
+                                outputs[0].assign(static_cast<size_t>(batch) * static_cast<size_t>(out_f), 0.0f);
+                                if (linearForward(x.data(), w, b, outputs[0].data(), batch, in_f, out_f)) {
+                                    return true;
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
+            break;
+        default:
+            break;
     }
 
     // Fast-path: MatMul / BatchMatMul sur GPU (piloté par le flag linear).
-    if ((layer.type_enum == LayerType::MatMul || layer.type_enum == LayerType::BatchMatMul) &&
-        config_.linear_enabled) {
-        do {
+    switch (layer.type_enum) {
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+            if (!config_.linear_enabled) break;
+            do {
             if (inputs.size() < 2 || !inputs[0] || !inputs[1]) break;
             const std::vector<float>& A = *inputs[0];
             const std::vector<float>& B = *inputs[1];
@@ -333,10 +341,18 @@ bool RocmRuntime::forwardLayer(
             if (M <= 0 || K <= 0 || N <= 0) break;
 
             int batches = 1;
-            if (layer.type_enum == LayerType::BatchMatMul) {
-                batches = layer.seq_len;
-                if (batches <= 0) break;
+            bool valid_batches = true;
+            switch (layer.type_enum) {
+                case LayerType::BatchMatMul:
+                    batches = layer.seq_len;
+                    valid_batches = (batches > 0);
+                    break;
+                case LayerType::MatMul:
+                    break;
+                default:
+                    break;
             }
+            if (!valid_batches) break;
 
             const size_t a_batch_elems = static_cast<size_t>(M) * static_cast<size_t>(K);
             const size_t b_batch_elems = static_cast<size_t>(K) * static_cast<size_t>(N);
@@ -394,15 +410,20 @@ bool RocmRuntime::forwardLayer(
             if (!d_c.copyToHost(outputs[0].data(), static_cast<size_t>(batches) * c_batch_elems * sizeof(float))) break;
             return true;
 #endif
-        } while (false);
+            } while (false);
+            break;
+        default:
+            break;
     }
 
 #ifdef ENABLE_ROCM
     // ─────────────────────────────────────────────────────────────────────────
     // Fast-path: Conv2d  (im2col + rocBLAS SGEMM)
     // ─────────────────────────────────────────────────────────────────────────
-    if (layer.type_enum == LayerType::Conv2d && config_.conv_enabled) {
-        do {
+    switch (layer.type_enum) {
+        case LayerType::Conv2d:
+            if (!config_.conv_enabled) break;
+            do {
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& xc = *inputs[0];
             const int C_in  = std::max(1, layer.in_channels);
@@ -465,16 +486,20 @@ bool RocmRuntime::forwardLayer(
             outputs[0].resize(static_cast<size_t>(C_out) * HW);
             if (!d_out.copyToHost(outputs[0].data(), static_cast<size_t>(C_out) * HW * sizeof(float))) break;
             return true;
-        } while (false);
+            } while (false);
+            break;
+        default:
+            break;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Fast-path: LayerNorm / RMSNorm  (stats sur host, affine sur GPU)
     // ─────────────────────────────────────────────────────────────────────────
-    const bool is_norm = (layer.type_enum == LayerType::LayerNorm ||
-                          layer.type_enum == LayerType::RMSNorm);
-    if (is_norm && config_.norm_enabled) {
-        do {
+    switch (layer.type_enum) {
+        case LayerType::LayerNorm:
+        case LayerType::RMSNorm:
+            if (!config_.norm_enabled) break;
+            do {
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& xn = *inputs[0];
             const int N = static_cast<int>(xn.size());
@@ -491,25 +516,30 @@ bool RocmRuntime::forwardLayer(
             const float eps = (layer.eps > 0.0f) ? layer.eps : 1e-5f;
             std::vector<float> x_hat(static_cast<size_t>(N));
 
-            if (layer.type_enum == LayerType::RMSNorm) {
-                for (int g = 0; g < groups; ++g) {
-                    const int base = g * norm_sz;
-                    float ss = 0.0f;
-                    for (int i = 0; i < norm_sz; ++i) { float v = xn[base+i]; ss += v*v; }
-                    const float inv = 1.0f / std::sqrt(ss / norm_sz + eps);
-                    for (int i = 0; i < norm_sz; ++i) x_hat[base+i] = xn[base+i] * inv;
-                }
-            } else {
-                for (int g = 0; g < groups; ++g) {
-                    const int base = g * norm_sz;
-                    float mean = 0.0f;
-                    for (int i = 0; i < norm_sz; ++i) mean += xn[base+i];
-                    mean /= norm_sz;
-                    float var = 0.0f;
-                    for (int i = 0; i < norm_sz; ++i) { float d = xn[base+i]-mean; var += d*d; }
-                    const float inv = 1.0f / std::sqrt(var/norm_sz + eps);
-                    for (int i = 0; i < norm_sz; ++i) x_hat[base+i] = (xn[base+i]-mean)*inv;
-                }
+            switch (layer.type_enum) {
+                case LayerType::RMSNorm:
+                    for (int g = 0; g < groups; ++g) {
+                        const int base = g * norm_sz;
+                        float ss = 0.0f;
+                        for (int i = 0; i < norm_sz; ++i) { float v = xn[base+i]; ss += v*v; }
+                        const float inv = 1.0f / std::sqrt(ss / norm_sz + eps);
+                        for (int i = 0; i < norm_sz; ++i) x_hat[base+i] = xn[base+i] * inv;
+                    }
+                    break;
+                case LayerType::LayerNorm:
+                    for (int g = 0; g < groups; ++g) {
+                        const int base = g * norm_sz;
+                        float mean = 0.0f;
+                        for (int i = 0; i < norm_sz; ++i) mean += xn[base+i];
+                        mean /= norm_sz;
+                        float var = 0.0f;
+                        for (int i = 0; i < norm_sz; ++i) { float d = xn[base+i]-mean; var += d*d; }
+                        const float inv = 1.0f / std::sqrt(var/norm_sz + eps);
+                        for (int i = 0; i < norm_sz; ++i) x_hat[base+i] = (xn[base+i]-mean)*inv;
+                    }
+                    break;
+                default:
+                    break;
             }
 
             Impl::DeviceBuf d_xh, d_gamma, d_out;
@@ -551,17 +581,20 @@ bool RocmRuntime::forwardLayer(
             outputs[0].resize(static_cast<size_t>(N));
             if (!d_out.copyToHost(outputs[0].data(), static_cast<size_t>(N) * sizeof(float))) break;
             return true;
-        } while (false);
+            } while (false);
+            break;
+        default:
+            break;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Fast-path: SelfAttention / MultiHeadAttention
     // ─────────────────────────────────────────────────────────────────────────
-    if ((layer.type_enum == LayerType::SelfAttention ||
-         layer.type_enum == LayerType::MultiHeadAttention) &&
-        config_.attention_enabled)
-    {
-        do {
+    switch (layer.type_enum) {
+        case LayerType::SelfAttention:
+        case LayerType::MultiHeadAttention:
+            if (!config_.attention_enabled) break;
+            do {
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& xa = *inputs[0];
 
@@ -689,17 +722,20 @@ bool RocmRuntime::forwardLayer(
             outputs[0].resize(static_cast<size_t>(seq) * ed);
             if (!d_final.copyToHost(outputs[0].data(), static_cast<size_t>(seq)*ed*sizeof(float))) break;
             return true;
-        } while (false);
+            } while (false);
+            break;
+        default:
+            break;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Fast-path: CrossAttention
     // ─────────────────────────────────────────────────────────────────────────
-    if (layer.type_enum == LayerType::CrossAttention &&
-        config_.attention_enabled &&
-        inputs.size() >= 2 && inputs[1] != nullptr)
-    {
-        do {
+    switch (layer.type_enum) {
+        case LayerType::CrossAttention:
+            if (!config_.attention_enabled) break;
+            if (inputs.size() < 2 || inputs[1] == nullptr) break;
+            do {
             const std::vector<float>& q_in  = *inputs[0];
             const std::vector<float>& kv_in = *inputs[1];
 
@@ -835,7 +871,10 @@ bool RocmRuntime::forwardLayer(
             outputs[0].resize(static_cast<size_t>(qlen) * ed);
             if (!d_final_c.copyToHost(outputs[0].data(), static_cast<size_t>(qlen)*ed*sizeof(float))) break;
             return true;
-        } while (false);
+            } while (false);
+            break;
+        default:
+            break;
     }
 #endif // ENABLE_ROCM
 

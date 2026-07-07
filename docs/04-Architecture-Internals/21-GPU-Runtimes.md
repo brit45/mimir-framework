@@ -53,23 +53,17 @@ public:
 };
 ```
 
-### Patron de dispatch (Model.cpp)
+### Patron de dispatch (Model.cpp + RuntimeRouter)
 
 ```cpp
-// Dans le forward actuel, le dispatch GPU est inline dans case LayerType::Linear.
-// Exemple simplifié :
-if (g_cuda_engine && g_cuda_engine->isInitialized()) {
-    did_cuda = g_cuda_engine->linearForward(...);
-}
-if (!did_cuda && g_rocm_engine && g_rocm_engine->isInitialized()) {
-    did_rocm = g_rocm_engine->linearForward(...);
-}
-if (!did_cuda && !did_rocm) {
-    // fallback CPU runtime puis LayerOps::linear_forward
-}
+// Le forward route via RuntimeRouter.
+// Le router essaie chaque backend initialisé dans l'ordre,
+// et appelle forwardLayer(...).
+// Chaque runtime sélectionne les LayerType supportés via
+// switch (layer.type_enum) et retourne false sinon.
 ```
 
-Le dispatch `forwardLayer(...)` est utilisé dans le forward principal pour plusieurs types de layers (Convolution, Normes, Attention, etc.).
+Le dispatch `forwardLayer(...)` est utilisé dans le forward principal pour Linear, Convolution, Normes, Attention, et autres ops supportées par les backends.
 
 ---
 
@@ -295,7 +289,37 @@ Les fast-paths activés, seuils, et logique de fallback sont strictement identiq
 
 ---
 
-## 6) Invariants et gotchas
+## 6) Vulkan Runtime — kernels compute réels (SPIR-V)
+
+Vulkan est branché via `VulkanRuntime` + `VulkanCompute::ComputeEngine` et dispatché par `RuntimeRouter`.
+
+Ops actuellement accélérées côté Vulkan compute:
+
+- `Linear`
+- `MatMul`
+- `BatchMatMul`
+- `Add`
+- `Multiply`
+- `ReLU`
+
+Shaders associés (compilés au build):
+
+- `shaders/linear_forward.comp`
+- `shaders/add_forward.comp`
+- `shaders/mul_forward.comp`
+- `shaders/relu_forward.comp`
+
+Pipeline technique:
+
+1. CMake compile les `.comp` en `.spv` via `glslangValidator`.
+2. Les `.spv` sont copiés dans `bin/shaders`.
+3. `VulkanCompute.hpp` charge les SPIR-V, crée pipeline/layout/descriptor pool.
+4. `VulkanRuntime::forwardLayer` route les layers compatibles vers ces kernels.
+5. En cas d'indisponibilité shader/device, le runtime retourne `false` et le fallback routeur prend le relais.
+
+---
+
+## 7) Invariants et gotchas
 
 ### Aucun état persistent entre les couches
 
@@ -321,7 +345,7 @@ CUDA et ROCm sont mutuellement exclusifs (liés par `#ifdef`). On ne peut pas co
 
 ---
 
-## 7) Ajouter un nouveau fast-path GPU
+## 8) Ajouter un nouveau fast-path GPU
 
 Pré-requis pratique : vérifier que le nouveau case est intégré au dispatch du forward principal (direct ou via `forwardLayer()`) pour être effectivement utilisé au runtime.
 

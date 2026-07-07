@@ -37,6 +37,22 @@ Ces informations permettent de :
 - Allouer des activations de façon optimale (réutilisation mémoire)
 - Éviter des passes intermédiaires (fusions)
 
+En pratique, le planner est le composant qui transforme la liste brute des layers en un plan exécutable stable et réutilisable entre forwards.
+
+---
+
+## Ce que fait le planner au lancement
+
+Au démarrage du process, aucun plan n'est encore calculé. Le planner intervient au **premier forward** (ou au premier forward qui invalide le cache plan) :
+
+1. Lecture des toggles runtime (`MIMIR_ENABLE_PLANNER`, `MIMIR_ENABLE_FUSION`, `MIMIR_ENABLE_FUSION_TRAIN`).
+2. Vérification du cache `static_plan_` (présence + compatibilité avec le mode `training` + taille des layers inchangée).
+3. Si invalide ou absent : construction du plan statique (lifetimes, fusions, skip map, scratch Conv2d).
+4. Optionnel : dump de diagnostic si `MIMIR_PLANNER_DUMP=1`.
+5. Exécution du forward avec application du plan (skip des layers fusionnés et réutilisation du plan sur les passes suivantes).
+
+Cette phase remplace une partie du coût "décisionnel" à chaque layer par un coût de préparation unique, puis des exécutions plus régulières.
+
 ---
 
 ## 1) Analyse des durées de vie (`TensorLifetime`)
@@ -139,6 +155,12 @@ Pendant le forward :
 - `MIMIR_ENABLE_FUSION_TRAIN` (défaut `0`) autorise uniquement `Conv2d+ReLU` en mode `training=true` (opt-in). Les fusions génériques restent inférence-only.
 - Le plan est (re)construit si nécessaire s'il n'a jamais été construit, si le mode `training` change, ou si le nombre d'ops planifiées ne correspond plus au nombre de layers.
 - `MIMIR_PLANNER_DUMP=1` déclenche un dump des stats planner (durées de vie, fusions, scratch Conv2d).
+
+Résumé opérationnel au lancement d'un run :
+
+- lancement process : pas de plan calculé,
+- premier forward : build du plan si planner activé,
+- forwards suivants : réutilisation du plan tant que les invariants ne changent pas.
 
 Exemple prêt à copier/coller :
 

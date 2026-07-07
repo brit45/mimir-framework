@@ -30,14 +30,14 @@ Ces variables sont lues via `RuntimeConfig::fromEnv("CPU"|"CUDA"|"ROCM")`.
 
 | Suffixe | Type | Défaut | Effet |
 | --- | --- | --- | --- |
-| `_LINEAR` | bool | `0` (sauf CPU) | Active fast-path `Linear` sur le backend. |
-| `_LINEAR_MIN_OPS` | int | `1048576` (sauf CPU) | Seuil minimal d'opérations pour offload `Linear`. |
-| `_CONV` | bool | `0` | Active fast-path `Conv2d`. |
-| `_CONV_MIN_OPS` | int | `262144` | Seuil minimal d'opérations pour `Conv2d`. |
-| `_NORM` | bool | `0` | Active fast-path normalisations (`LayerNorm`/`RMSNorm`). |
-| `_NORM_MIN_ELEMS` | int | `4096` | Seuil minimal en nombre d'éléments pour normalisations. |
-| `_ATTENTION` | bool | `0` | Active fast-path attention (`Self`/`MultiHead`/`Cross`). |
-| `_ATTENTION_MIN_OPS` | int | `262144` | Seuil minimal d'opérations pour attention. |
+| `_LINEAR` | bool | `1` | Active fast-path `Linear` sur le backend. |
+| `_LINEAR_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour offload `Linear`. |
+| `_CONV` | bool | `1` (CUDA/ROCM) | Active fast-path `Conv2d`. |
+| `_CONV_MIN_OPS` | int | `0` (CUDA/ROCM) | Seuil minimal d'opérations pour `Conv2d`. |
+| `_NORM` | bool | `1` (CUDA/ROCM) | Active fast-path normalisations (`LayerNorm`/`RMSNorm`). |
+| `_NORM_MIN_ELEMS` | int | `0` (CUDA/ROCM) | Seuil minimal en nombre d'éléments pour normalisations. |
+| `_ATTENTION` | bool | `1` (CUDA/ROCM) | Active fast-path attention (`Self`/`MultiHead`/`Cross`). |
+| `_ATTENTION_MIN_OPS` | int | `0` (CUDA/ROCM) | Seuil minimal d'opérations pour attention. |
 | `_DEVICE` | int | `0` | Index de device à utiliser pour le backend. |
 
 ### Exemples concrets
@@ -54,16 +54,22 @@ Notes CPU:
 Important:
 
 - Il n'existe pas de variable globale `MIMIR_CUDA=1` ou `MIMIR_ROCM=1` dans le code actuel. L'activation se fait par les flags de fast-path (`MIMIR_CUDA_*`, `MIMIR_ROCM_*`) et les kill-switch `MIMIR_DISABLE_*`.
+- Par défaut, les fast-paths sont auto-activés. Pour forcer un mode CPU-only, utilisez `MIMIR_DISABLE_CUDA=1`, `MIMIR_DISABLE_ROCM=1`, `MIMIR_DISABLE_VULKAN=1`, `MIMIR_DISABLE_OPENCL=1`.
 
-## 3) Vulkan/OpenCL (offload Linear)
+## 3) Vulkan/OpenCL (offload Linear + MatMul)
 
 | Variable | Type | Défaut | Effet |
 | --- | --- | --- | --- |
-| `MIMIR_VULKAN_LINEAR` | bool | `0` | Active offload `Linear` vers Vulkan. |
-| `MIMIR_VULKAN_LINEAR_MIN_OPS` | int | `1048576` | Seuil minimal d'opérations pour Vulkan `Linear`. |
-| `MIMIR_VULKAN_LINEAR_SPV` | path | auto | Chemin explicite du shader SPIR-V `linear_forward.comp.spv`. |
-| `MIMIR_OPENCL_LINEAR` | bool | `0` | Active offload `Linear` vers OpenCL. |
-| `MIMIR_OPENCL_LINEAR_MIN_OPS` | int | `1048576` | Seuil minimal d'opérations pour OpenCL `Linear`. |
+| `MIMIR_VULKAN_LINEAR` | bool | `1` | Active offload `Linear` (et gating MatMul/BatchMatMul du runtime) vers Vulkan. |
+| `MIMIR_VULKAN_LINEAR_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour Vulkan `Linear`/MatMul. |
+| `MIMIR_VULKAN_LINEAR_SPV` | path | auto | Chemin explicite du shader SPIR-V `linear_forward.comp.spv` (Linear). |
+| `MIMIR_OPENCL_LINEAR` | bool | `1` | Active offload `Linear` (et gating MatMul/BatchMatMul du runtime) vers OpenCL. |
+| `MIMIR_OPENCL_LINEAR_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour OpenCL `Linear`/MatMul. |
+
+Notes Vulkan SPIR-V:
+
+- Le build compile aussi `add_forward.comp.spv`, `mul_forward.comp.spv` et `relu_forward.comp.spv` pour les fast-paths Vulkan `Add`, `Multiply`, `ReLU`.
+- Ces shaders sont chargés automatiquement depuis `bin/shaders`/`build/shaders` (pas de variable d'environnement dédiée nécessaire pour ces trois kernels).
 
 ## 4) Planner et fusion
 
@@ -188,7 +194,7 @@ Ces variables ne pilotent pas le runtime C++ directement; elles servent de param
 
 - `src/runtimes/AbstractRuntime.cpp`
 - `src/Model.cpp`
-- `src/VulkanCompute.hpp`
+- `src/runtimes/vulkan/VulkanCompute.hpp`
 - `src/scriptings/ScriptingBridgeCommon.hpp`
 - `src/scriptings/ScriptingBridgeCommon.cpp`
 - `src/scriptings/JavaScript/jsScripting/JSScripting.cpp`

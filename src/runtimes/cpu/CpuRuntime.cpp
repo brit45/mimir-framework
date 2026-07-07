@@ -59,11 +59,14 @@ bool CpuRuntime::forwardLayer(
 ) {
     if (!initialized_) return false;
     if (!config_.conv_enabled) {
-        if (layer.type_enum == LayerType::Conv2d ||
-            layer.type_enum == LayerType::ConvTranspose2d ||
-            layer.type_enum == LayerType::Conv1d ||
-            layer.type_enum == LayerType::DepthwiseConv2d) {
-            return false;
+        switch (layer.type_enum) {
+            case LayerType::Conv2d:
+            case LayerType::ConvTranspose2d:
+            case LayerType::Conv1d:
+            case LayerType::DepthwiseConv2d:
+                return false;
+            default:
+                break;
         }
     }
     return RuntimeLayerDispatch::cpu_forward_layer(inputs, outputs, layer, training);
@@ -78,11 +81,14 @@ bool CpuRuntime::backwardLayer(
 ) {
     if (!initialized_) return false;
     if (!config_.conv_enabled) {
-        if (layer.type_enum == LayerType::Conv2d ||
-            layer.type_enum == LayerType::ConvTranspose2d ||
-            layer.type_enum == LayerType::Conv1d ||
-            layer.type_enum == LayerType::DepthwiseConv2d) {
-            return false;
+        switch (layer.type_enum) {
+            case LayerType::Conv2d:
+            case LayerType::ConvTranspose2d:
+            case LayerType::Conv1d:
+            case LayerType::DepthwiseConv2d:
+                return false;
+            default:
+                break;
         }
     }
     return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);

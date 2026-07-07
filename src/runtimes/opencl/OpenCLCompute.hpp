@@ -99,6 +99,8 @@ public:
 
     void cleanup() {
 #ifdef ENABLE_OPENCL
+        if (kernel_batch_matmul_) { clReleaseKernel(kernel_batch_matmul_); kernel_batch_matmul_ = nullptr; }
+        if (kernel_matmul_) { clReleaseKernel(kernel_matmul_); kernel_matmul_ = nullptr; }
         if (kernel_linear_) { clReleaseKernel(kernel_linear_); kernel_linear_ = nullptr; }
         if (program_) { clReleaseProgram(program_); program_ = nullptr; }
         if (queue_) { clReleaseCommandQueue(queue_); queue_ = nullptr; }
@@ -179,6 +181,127 @@ public:
 #endif
     }
 
+    // MatMul: C[M,N] = A[M,K] @ B[K,N]
+    bool matmulForward(
+        const float* a,
+        const float* b,
+        float* c,
+        int M,
+        int K,
+        int N
+    ) {
+#ifndef ENABLE_OPENCL
+        (void)a; (void)b; (void)c; (void)M; (void)K; (void)N;
+        return false;
+#else
+    if (!initialized_ || !context_ || !queue_ || !kernel_matmul_) return false;
+        if (!a || !b || !c) return false;
+        if (M <= 0 || K <= 0 || N <= 0) return false;
+
+    cl_int err = CL_SUCCESS;
+    const size_t bytes_a = static_cast<size_t>(M) * static_cast<size_t>(K) * sizeof(float);
+    const size_t bytes_b = static_cast<size_t>(K) * static_cast<size_t>(N) * sizeof(float);
+    const size_t bytes_c = static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float);
+
+    cl_mem buf_a = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_a, nullptr, &err);
+    if (err != CL_SUCCESS || !buf_a) return false;
+    cl_mem buf_b = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_b, nullptr, &err);
+    if (err != CL_SUCCESS || !buf_b) { clReleaseMemObject(buf_a); return false; }
+    cl_mem buf_c = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes_c, nullptr, &err);
+    if (err != CL_SUCCESS || !buf_c) { clReleaseMemObject(buf_a); clReleaseMemObject(buf_b); return false; }
+
+    err = clEnqueueWriteBuffer(queue_, buf_a, CL_TRUE, 0, bytes_a, a, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+    err = clEnqueueWriteBuffer(queue_, buf_b, CL_TRUE, 0, bytes_b, b, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+
+    err  = clSetKernelArg(kernel_matmul_, 0, sizeof(cl_mem), &buf_a);
+    err |= clSetKernelArg(kernel_matmul_, 1, sizeof(cl_mem), &buf_b);
+    err |= clSetKernelArg(kernel_matmul_, 2, sizeof(cl_mem), &buf_c);
+    err |= clSetKernelArg(kernel_matmul_, 3, sizeof(int), &M);
+    err |= clSetKernelArg(kernel_matmul_, 4, sizeof(int), &K);
+    err |= clSetKernelArg(kernel_matmul_, 5, sizeof(int), &N);
+    if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+
+        constexpr size_t kTile = 16;
+        const size_t global[2] = {
+            ((static_cast<size_t>(M) + kTile - 1) / kTile) * kTile,
+            ((static_cast<size_t>(N) + kTile - 1) / kTile) * kTile
+        };
+        const size_t local[2] = { kTile, kTile };
+        err = clEnqueueNDRangeKernel(queue_, kernel_matmul_, 2, nullptr, global, local, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+
+    err = clEnqueueReadBuffer(queue_, buf_c, CL_TRUE, 0, bytes_c, c, 0, nullptr, nullptr);
+    if (buf_a) clReleaseMemObject(buf_a);
+    if (buf_b) clReleaseMemObject(buf_b);
+    if (buf_c) clReleaseMemObject(buf_c);
+    return err == CL_SUCCESS;
+#endif
+    }
+
+    // BatchMatMul: C[B,M,N] = A[B,M,K] @ Bm[B,K,N]
+    bool batchMatMulForward(
+        const float* a,
+        const float* b,
+        float* c,
+        int B,
+        int M,
+        int K,
+        int N
+    ) {
+#ifndef ENABLE_OPENCL
+        (void)a; (void)b; (void)c; (void)B; (void)M; (void)K; (void)N;
+        return false;
+#else
+        if (!initialized_ || !context_ || !queue_ || !kernel_batch_matmul_) return false;
+        if (!a || !b || !c) return false;
+        if (B <= 0 || M <= 0 || K <= 0 || N <= 0) return false;
+
+        cl_int err = CL_SUCCESS;
+        const size_t bytes_a = static_cast<size_t>(B) * static_cast<size_t>(M) * static_cast<size_t>(K) * sizeof(float);
+        const size_t bytes_b = static_cast<size_t>(B) * static_cast<size_t>(K) * static_cast<size_t>(N) * sizeof(float);
+        const size_t bytes_c = static_cast<size_t>(B) * static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float);
+
+        cl_mem buf_a = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_a, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_a) return false;
+        cl_mem buf_b = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_b, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_b) { clReleaseMemObject(buf_a); return false; }
+        cl_mem buf_c = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes_c, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_c) { clReleaseMemObject(buf_a); clReleaseMemObject(buf_b); return false; }
+
+        err = clEnqueueWriteBuffer(queue_, buf_a, CL_TRUE, 0, bytes_a, a, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+        err = clEnqueueWriteBuffer(queue_, buf_b, CL_TRUE, 0, bytes_b, b, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+
+        err  = clSetKernelArg(kernel_batch_matmul_, 0, sizeof(cl_mem), &buf_a);
+        err |= clSetKernelArg(kernel_batch_matmul_, 1, sizeof(cl_mem), &buf_b);
+        err |= clSetKernelArg(kernel_batch_matmul_, 2, sizeof(cl_mem), &buf_c);
+        err |= clSetKernelArg(kernel_batch_matmul_, 3, sizeof(int), &B);
+        err |= clSetKernelArg(kernel_batch_matmul_, 4, sizeof(int), &M);
+        err |= clSetKernelArg(kernel_batch_matmul_, 5, sizeof(int), &K);
+        err |= clSetKernelArg(kernel_batch_matmul_, 6, sizeof(int), &N);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+
+        constexpr size_t kTile = 16;
+        const size_t global[3] = {
+            static_cast<size_t>(B),
+            ((static_cast<size_t>(M) + kTile - 1) / kTile) * kTile,
+            ((static_cast<size_t>(N) + kTile - 1) / kTile) * kTile
+        };
+        const size_t local[3] = { 1, kTile, kTile };
+        err = clEnqueueNDRangeKernel(queue_, kernel_batch_matmul_, 3, nullptr, global, local, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
+
+        err = clEnqueueReadBuffer(queue_, buf_c, CL_TRUE, 0, bytes_c, c, 0, nullptr, nullptr);
+        if (buf_a) clReleaseMemObject(buf_a);
+        if (buf_b) clReleaseMemObject(buf_b);
+        if (buf_c) clReleaseMemObject(buf_c);
+        return err == CL_SUCCESS;
+#endif
+    }
+
 private:
 #ifdef ENABLE_OPENCL
     cl_platform_id platform_ = nullptr;
@@ -187,6 +310,8 @@ private:
     cl_command_queue queue_ = nullptr;
     cl_program program_ = nullptr;
     cl_kernel kernel_linear_ = nullptr;
+    cl_kernel kernel_matmul_ = nullptr;
+    cl_kernel kernel_batch_matmul_ = nullptr;
 
     std::vector<float> zeroBiasScratch_;
 
@@ -229,6 +354,93 @@ __kernel void linear_forward(
     }
     output[b * out_f + o] = acc;
 }
+
+__kernel void matmul_forward(
+    __global const float* A,   // [M, K]
+    __global const float* B,   // [K, N]
+    __global float* C,         // [M, N]
+    int M,
+    int K,
+    int N
+) {
+#define TILE 16
+    const int m = (int)get_global_id(0);
+    const int n = (int)get_global_id(1);
+    const int lm = (int)get_local_id(0);
+    const int ln = (int)get_local_id(1);
+
+    __local float As[TILE][TILE];
+    __local float Bs[TILE][TILE];
+
+    float acc = 0.0f;
+    const int num_tiles = (K + TILE - 1) / TILE;
+
+    for (int t = 0; t < num_tiles; ++t) {
+        const int kA = t * TILE + ln;
+        const int kB = t * TILE + lm;
+
+        As[lm][ln] = (m < M && kA < K) ? A[m * K + kA] : 0.0f;
+        Bs[lm][ln] = (kB < K && n < N) ? B[kB * N + n] : 0.0f;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int k = 0; k < TILE; ++k) {
+            acc += As[lm][k] * Bs[k][ln];
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (m < M && n < N) {
+        C[m * N + n] = acc;
+    }
+}
+
+__kernel void batch_matmul_forward(
+    __global const float* A,   // [B, M, K]
+    __global const float* Bm,  // [B, K, N]
+    __global float* C,         // [B, M, N]
+    int batches,
+    int M,
+    int K,
+    int N
+) {
+    const int b = (int)get_global_id(0);
+    const int m = (int)get_global_id(1);
+    const int n = (int)get_global_id(2);
+    const int lm = (int)get_local_id(1);
+    const int ln = (int)get_local_id(2);
+
+    if (b >= batches) return;
+
+    __local float As[TILE][TILE];
+    __local float Bs[TILE][TILE];
+
+    float acc = 0.0f;
+    const int num_tiles = (K + TILE - 1) / TILE;
+    const int a_batch_base = b * (M * K);
+    const int b_batch_base = b * (K * N);
+
+    for (int t = 0; t < num_tiles; ++t) {
+        const int kA = t * TILE + ln;
+        const int kB = t * TILE + lm;
+
+        As[lm][ln] = (m < M && kA < K) ? A[a_batch_base + m * K + kA] : 0.0f;
+        Bs[lm][ln] = (kB < K && n < N) ? Bm[b_batch_base + kB * N + n] : 0.0f;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int k = 0; k < TILE; ++k) {
+            acc += As[lm][k] * Bs[k][ln];
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (m < M && n < N) {
+        C[b * (M * N) + m * N + n] = acc;
+    }
+}
 )CLC";
 
         const size_t src_len = std::strlen(src);
@@ -243,6 +455,10 @@ __kernel void linear_forward(
 
         kernel_linear_ = clCreateKernel(program_, "linear_forward", &err);
         if (err != CL_SUCCESS || !kernel_linear_) return false;
+        kernel_matmul_ = clCreateKernel(program_, "matmul_forward", &err);
+        if (err != CL_SUCCESS || !kernel_matmul_) return false;
+        kernel_batch_matmul_ = clCreateKernel(program_, "batch_matmul_forward", &err);
+        if (err != CL_SUCCESS || !kernel_batch_matmul_) return false;
         return true;
     }
 #endif

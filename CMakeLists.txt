@@ -162,6 +162,24 @@ if(ENABLE_VULKAN)
 
         set(SHADER_LINEAR_SRC "${MIMIR_SHADER_SRC_DIR}/linear_forward.comp")
         set(SHADER_LINEAR_SPV "${MIMIR_SHADER_OUT_DIR}/linear_forward.comp.spv")
+        set(SHADER_ADD_SRC "${MIMIR_SHADER_SRC_DIR}/add_forward.comp")
+        set(SHADER_ADD_SPV "${MIMIR_SHADER_OUT_DIR}/add_forward.comp.spv")
+        set(SHADER_MUL_SRC "${MIMIR_SHADER_SRC_DIR}/mul_forward.comp")
+        set(SHADER_MUL_SPV "${MIMIR_SHADER_OUT_DIR}/mul_forward.comp.spv")
+        set(SHADER_RELU_SRC "${MIMIR_SHADER_SRC_DIR}/relu_forward.comp")
+        set(SHADER_RELU_SPV "${MIMIR_SHADER_OUT_DIR}/relu_forward.comp.spv")
+        set(SHADER_SILU_SRC "${MIMIR_SHADER_SRC_DIR}/silu_forward.comp")
+        set(SHADER_SILU_SPV "${MIMIR_SHADER_OUT_DIR}/silu_forward.comp.spv")
+        set(SHADER_GELU_SRC "${MIMIR_SHADER_SRC_DIR}/gelu_forward.comp")
+        set(SHADER_GELU_SPV "${MIMIR_SHADER_OUT_DIR}/gelu_forward.comp.spv")
+        set(SHADER_SIGMOID_SRC "${MIMIR_SHADER_SRC_DIR}/sigmoid_forward.comp")
+        set(SHADER_SIGMOID_SPV "${MIMIR_SHADER_OUT_DIR}/sigmoid_forward.comp.spv")
+        set(SHADER_TANH_SRC "${MIMIR_SHADER_SRC_DIR}/tanh_forward.comp")
+        set(SHADER_TANH_SPV "${MIMIR_SHADER_OUT_DIR}/tanh_forward.comp.spv")
+        set(SHADER_CONV2D_SRC "${MIMIR_SHADER_SRC_DIR}/conv2d_forward.comp")
+        set(SHADER_CONV2D_SPV "${MIMIR_SHADER_OUT_DIR}/conv2d_forward.comp.spv")
+        set(SHADER_CONVTRANSPOSE2D_SRC "${MIMIR_SHADER_SRC_DIR}/conv_transpose2d_forward.comp")
+        set(SHADER_CONVTRANSPOSE2D_SPV "${MIMIR_SHADER_OUT_DIR}/conv_transpose2d_forward.comp.spv")
 
         add_custom_command(
             OUTPUT "${SHADER_LINEAR_SPV}"
@@ -171,7 +189,90 @@ if(ENABLE_VULKAN)
             VERBATIM
         )
 
-        add_custom_target(mimir_shaders ALL DEPENDS "${SHADER_LINEAR_SPV}")
+        add_custom_command(
+            OUTPUT "${SHADER_ADD_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_ADD_SRC}" -o "${SHADER_ADD_SPV}"
+            DEPENDS "${SHADER_ADD_SRC}"
+            COMMENT "Compiling Vulkan shader add_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_MUL_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_MUL_SRC}" -o "${SHADER_MUL_SPV}"
+            DEPENDS "${SHADER_MUL_SRC}"
+            COMMENT "Compiling Vulkan shader mul_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_RELU_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_RELU_SRC}" -o "${SHADER_RELU_SPV}"
+            DEPENDS "${SHADER_RELU_SRC}"
+            COMMENT "Compiling Vulkan shader relu_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_SILU_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_SILU_SRC}" -o "${SHADER_SILU_SPV}"
+            DEPENDS "${SHADER_SILU_SRC}"
+            COMMENT "Compiling Vulkan shader silu_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_GELU_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_GELU_SRC}" -o "${SHADER_GELU_SPV}"
+            DEPENDS "${SHADER_GELU_SRC}"
+            COMMENT "Compiling Vulkan shader gelu_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_SIGMOID_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_SIGMOID_SRC}" -o "${SHADER_SIGMOID_SPV}"
+            DEPENDS "${SHADER_SIGMOID_SRC}"
+            COMMENT "Compiling Vulkan shader sigmoid_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_TANH_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_TANH_SRC}" -o "${SHADER_TANH_SPV}"
+            DEPENDS "${SHADER_TANH_SRC}"
+            COMMENT "Compiling Vulkan shader tanh_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_CONV2D_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_CONV2D_SRC}" -o "${SHADER_CONV2D_SPV}"
+            DEPENDS "${SHADER_CONV2D_SRC}"
+            COMMENT "Compiling Vulkan shader conv2d_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${SHADER_CONVTRANSPOSE2D_SPV}"
+            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_CONVTRANSPOSE2D_SRC}" -o "${SHADER_CONVTRANSPOSE2D_SPV}"
+            DEPENDS "${SHADER_CONVTRANSPOSE2D_SRC}"
+            COMMENT "Compiling Vulkan shader conv_transpose2d_forward.comp -> SPIR-V"
+            VERBATIM
+        )
+
+        add_custom_target(mimir_shaders ALL DEPENDS
+            "${SHADER_LINEAR_SPV}"
+            "${SHADER_ADD_SPV}"
+            "${SHADER_MUL_SPV}"
+            "${SHADER_RELU_SPV}"
+            "${SHADER_SILU_SPV}"
+            "${SHADER_GELU_SPV}"
+            "${SHADER_SIGMOID_SPV}"
+            "${SHADER_TANH_SPV}"
+            "${SHADER_CONV2D_SPV}"
+            "${SHADER_CONVTRANSPOSE2D_SPV}"
+        )
         if(TARGET glslang-standalone)
             add_dependencies(mimir_shaders glslang-standalone)
         endif()
@@ -358,14 +459,16 @@ set(MIMIR_HEADERS
     src/Autograd.hpp
     src/runtimes/cpu/SIMD_Ops.hpp
     src/runtimes/cpu/HardwareOpt.hpp
-    src/VulkanCompute.hpp
-    src/OpenCLCompute.hpp
+    src/runtimes/vulkan/VulkanCompute.hpp
+    src/runtimes/opencl/OpenCLCompute.hpp
     src/runtimes/AbstractRuntime.hpp
     src/runtimes/RuntimeRouter.hpp
     src/runtimes/ops_loss_and_grad.hpp
     src/runtimes/cpu/CpuRuntime.hpp
     src/runtimes/cuda/CudaRuntime.hpp
     src/runtimes/rocm/RocmRuntime.hpp
+    src/runtimes/vulkan/VulkanRuntime.hpp
+    src/runtimes/opencl/OpenCLRuntime.hpp
     src/runtimes/cpu/DynamicTensorAllocator.hpp
     src/AdvancedRAMManager.hpp
     src/MemoryGuard.hpp
@@ -414,6 +517,14 @@ if(ENABLE_ROCM AND HIP_LIBRARY AND ROCBLAS_LIBRARY)
     list(APPEND MIMIR_SOURCES src/runtimes/rocm/RocmRuntime.cpp)
 endif()
 
+if(ENABLE_VULKAN AND Vulkan_FOUND)
+    list(APPEND MIMIR_SOURCES src/runtimes/vulkan/VulkanRuntime.cpp)
+endif()
+
+if(ENABLE_OPENCL AND OPENCL_LIBRARY)
+    list(APPEND MIMIR_SOURCES src/runtimes/opencl/OpenCLRuntime.cpp)
+endif()
+
 # Variante de sources sans SFML (utile pour builds headless / statiques)
 set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})
 list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML src/Visualizer.cpp)
@@ -435,6 +546,7 @@ else()
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES_NO_SFML}
         ${MIMIR_HEADERS}
+        src/runtimes/opencl/OpenCLRuntime.hpp
     )
 endif()
 
@@ -524,6 +636,33 @@ if(TARGET mimir_shaders)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_BINARY_DIR}/shaders/linear_forward.comp.spv"
             "$<TARGET_FILE_DIR:mimir>/shaders/linear_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/add_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/add_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/mul_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/mul_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/relu_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/relu_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/silu_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/silu_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/gelu_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/gelu_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/sigmoid_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/sigmoid_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/tanh_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/tanh_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/conv2d_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/conv2d_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/shaders/conv_transpose2d_forward.comp.spv"
+            "$<TARGET_FILE_DIR:mimir>/shaders/conv_transpose2d_forward.comp.spv"
         COMMENT "Copy Vulkan shaders to bin/shaders"
     )
 endif()

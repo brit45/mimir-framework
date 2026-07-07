@@ -5,28 +5,42 @@ RuntimeRouter& RuntimeRouter::instance() {
     return router;
 }
 
-void RuntimeRouter::setRuntimes(AbstractRuntime* rocm, AbstractRuntime* cuda, AbstractRuntime* cpu) {
+void RuntimeRouter::setRuntimes(
+    AbstractRuntime* rocm,
+    AbstractRuntime* cuda,
+    AbstractRuntime* vulkan,
+    AbstractRuntime* opencl,
+    AbstractRuntime* cpu
+) {
     runtime_priority_.clear();
-    runtime_priority_.reserve(3);
+    runtime_priority_.reserve(5);
 
     if (rocm) runtime_priority_.push_back(rocm);
     if (cuda) runtime_priority_.push_back(cuda);
+    if (vulkan) runtime_priority_.push_back(vulkan);
+    if (opencl) runtime_priority_.push_back(opencl);
     if (cpu) runtime_priority_.push_back(cpu);
 }
 
 void RuntimeRouter::setActivators(
     std::function<bool()> rocm,
     std::function<bool()> cuda,
+    std::function<bool()> vulkan,
+    std::function<bool()> opencl,
     std::function<bool()> cpu
 ) {
     activate_rocm_ = std::move(rocm);
     activate_cuda_ = std::move(cuda);
+    activate_vulkan_ = std::move(vulkan);
+    activate_opencl_ = std::move(opencl);
     activate_cpu_ = std::move(cpu);
 }
 
 void RuntimeRouter::activateAvailableRuntimes() const {
     if (activate_rocm_) (void)activate_rocm_();
     if (activate_cuda_) (void)activate_cuda_();
+    if (activate_vulkan_) (void)activate_vulkan_();
+    if (activate_opencl_) (void)activate_opencl_();
     if (activate_cpu_) (void)activate_cpu_();
 }
 

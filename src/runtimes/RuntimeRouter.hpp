@@ -9,14 +9,22 @@ class RuntimeRouter {
 public:
     static RuntimeRouter& instance();
 
-    // Priority is fixed internally as [ROCM, CUDA, CPU].
-    void setRuntimes(AbstractRuntime* rocm, AbstractRuntime* cuda, AbstractRuntime* cpu);
+    // Priority is fixed internally as [ROCM, CUDA, VULKAN, OPENCL, CPU].
+    void setRuntimes(
+        AbstractRuntime* rocm,
+        AbstractRuntime* cuda,
+        AbstractRuntime* vulkan,
+        AbstractRuntime* opencl,
+        AbstractRuntime* cpu
+    );
 
-    // Activation callbacks are also ordered [ROCM, CUDA, CPU].
+    // Activation callbacks are also ordered [ROCM, CUDA, VULKAN, OPENCL, CPU].
     // They may initialize runtimes lazily before dispatch.
     void setActivators(
         std::function<bool()> rocm,
         std::function<bool()> cuda,
+        std::function<bool()> vulkan,
+        std::function<bool()> opencl,
         std::function<bool()> cpu
     );
 
@@ -45,5 +53,7 @@ private:
     std::vector<AbstractRuntime*> runtime_priority_;
     std::function<bool()> activate_rocm_;
     std::function<bool()> activate_cuda_;
+    std::function<bool()> activate_vulkan_;
+    std::function<bool()> activate_opencl_;
     std::function<bool()> activate_cpu_;
 };

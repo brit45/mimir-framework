@@ -315,8 +315,18 @@ Prérequis principaux:
 Build rapide:
 
 ```bash
+# Bootstrap automatique (installe les dependances puis configure CMake)
+./config.sh
+
+# Compilation
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
+```
+
+Exemple avec options:
+
+```bash
+WORKROOT=/home/user/tensor-2 ENABLE_VULKAN=1 ENABLE_OPENCL=1 ./config.sh
 ```
 
 Installation détaillée (Linux/macOS/Windows, options CMake, troubleshooting):
