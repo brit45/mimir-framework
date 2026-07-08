@@ -1,4 +1,7 @@
 #!/usr/bin/env mimir --lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- Smoke test: force disk spill into .mimir-spill, then verify cleanup-on-exit.
 -- Goal: create spill files during execution (under memory pressure) then exit normally.
 

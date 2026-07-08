@@ -1,3 +1,6 @@
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 ---@diagnostic disable: undefined-global, undefined-field, inject-field
 
 -- Smoke-test: VAEConv avec attention (sans mémoire encodeur).

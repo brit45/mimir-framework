@@ -1,3 +1,6 @@
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- scripts/api_ws_server.lua
 -- Serveur HTTP + WebSocket minimal pour piloter Mímir via REST (GET/POST/PUT/PATCH/DELETE)
 -- Dépendances: LuaSocket (luasocket)

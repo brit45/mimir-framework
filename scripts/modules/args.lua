@@ -9,6 +9,20 @@
 --   -- (fin des options)
 
 local M = {}
+local Help = dofile("scripts/modules/help_cli.lua")
+local caller_script_path = Help.find_script_from_stack(3, 24)
+
+Help.auto_exit_help({
+  script_path = caller_script_path,
+  common_flags = {
+    "--help, -h : affiche cette aide",
+    "--htop/--tux : active le moniteur TUI",
+    "--viz : active la visualisation (et htop sauf si --no-htop)",
+    "--no-htop, --no-viz : desactive explicitement un mode",
+    "--csv, --csv-path, --csv-enabled : options export CSV",
+    "--override key=value : override de configuration (repete)",
+  },
+})
 
 local function maybe_start_htop(opts)
   if not opts then return end

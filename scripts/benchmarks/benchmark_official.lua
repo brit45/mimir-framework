@@ -1,4 +1,7 @@
 #!/usr/bin/env mimir --lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- ============================================================================
 --  Mímir Framework - OFFICIAL BENCHMARK (Init Speed + Memory Guard)
 --  Objectif:

@@ -35,6 +35,14 @@ Un script se lance via :
 
 Le `--` est important : il sépare les flags du binaire `mimir` des arguments passés au script Lua.
 
+Pour afficher l'aide d'un script Lua:
+
+```bash
+./bin/mimir --lua path/to/script.lua -- --help
+```
+
+Le support `--help` est unifie sur les scripts executables du repo. La sortie contient la description du script et ses options disponibles.
+
 ### Ce que le runtime fournit
 
 | Nom | Contenu | À quoi ça sert |
@@ -101,6 +109,7 @@ Conseil : garde une `config.json` “humaine” et génère des configs plus dé
 Ces modules ne sont pas “magiques” : ils sont juste là pour uniformiser les scripts.
 
 - `scripts/modules/args.lua` : parse d’arguments style `--key value`
+- `scripts/modules/help_cli.lua` : aide CLI commune (`--help`) pour scripts executables
 - `scripts/modules/checkpoint_resume.lua` : reprise automatique
 - `scripts/modules/base_tokenizer.lua` : base vocab stable
 

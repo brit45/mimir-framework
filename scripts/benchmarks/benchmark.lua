@@ -1,4 +1,7 @@
 #!/usr/bin/env mimir --lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- ================================================================
 -- Mímir Benchmark Script - CPU Performance Tests
 -- (Updated for registry-based architectures + int-token forward)

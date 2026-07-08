@@ -1,4 +1,7 @@
 #!/usr/bin/env mimir --lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- Benchmark minimal: mesure le coût du forward d'un modèle avec attention.
 -- Usage:
 --   MIMIR_ACCEL_VERBOSE=1 ./bin/mimir --lua scripts/benchmarks/benchmark_attention.lua

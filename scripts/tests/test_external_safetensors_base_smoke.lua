@@ -1,4 +1,7 @@
 #!/usr/bin/env lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 ---@diagnostic disable: undefined-field, need-check-nil
 
 local function die(msg)

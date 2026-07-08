@@ -1,4 +1,7 @@
 #!/usr/bin/env mimir --lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- scripts/benchmarks/benchmark_stress.lua
 -- Benchmark "loss from output-gradient" (no targets needed)
 -- Loss: L = 0.5 * sum(y^2)  => dL/dy = y

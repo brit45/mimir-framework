@@ -1,3 +1,6 @@
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- Smoke test: dtype API bridging
 
 log("dtype_api_smoke: start")

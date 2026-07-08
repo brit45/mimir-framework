@@ -1,3 +1,6 @@
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- Smoke test: VAEConv avec blocs ResNet à la place de l'attention.
 --
 -- Usage:

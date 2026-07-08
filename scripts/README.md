@@ -83,6 +83,22 @@ Choix rapide :
 
 ## Utilisation
 
+### Aide CLI des scripts Lua
+
+Tous les scripts Lua executables du repo (dossiers `scripts/` et `examples/`) acceptent maintenant:
+
+```bash
+./bin/mimir --lua <script.lua> -- --help
+```
+
+Le flag `--help` affiche:
+
+- une description du script,
+- les options/flags detectes dans le script,
+- les flags communs (ex: `--help`, et selon le script des flags `args.lua` comme `--viz`, `--htop`, `--override`).
+
+Note: conserver le separateur `--` avant les arguments du script Lua.
+
 ### Exécution depuis la racine du projet
 
 ```bash

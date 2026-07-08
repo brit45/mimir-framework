@@ -1,4 +1,7 @@
 #!/usr/bin/env mimir --lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 
 log("╔════════════════════════════════════════════════════════════════════╗")
 log("║ BasicMLP Training Bench (API optimizer_step) - loss should decrease║")

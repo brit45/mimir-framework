@@ -1,4 +1,7 @@
 #!/usr/bin/env mimir --lua
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- scripts/benchmarks/benchmark_complet.lua
 -- ╔════════════════════════════════════════════════════════════════════╗
 -- ║     Mímir Framework - Full Benchmark Suite (CPU-FIRST, v2.3+)     ║

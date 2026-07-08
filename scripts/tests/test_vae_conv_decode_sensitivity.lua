@@ -1,3 +1,6 @@
+local Help = dofile("scripts/modules/help_cli.lua")
+Help.auto_exit_help()
+
 -- Test: le décodeur VAEConv doit dépendre du latent.
 --
 -- Usage:

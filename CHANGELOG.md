@@ -9,6 +9,7 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ### 🧾 Documentation
 
+- Scripts Lua: documentation du support `--help` unifie pour les scripts executables (`scripts/` et `examples/`), avec description et options detectees.
 - Mise à jour de la documentation `DebugJson` vers **enhanced v1.3**.
 - Ajout de la documentation du bloc `framework_state` (runtime/backends, mémoire, registre layers, état modèle) dans :
   - `docs/03-API-Reference/16-Serialization.md`
