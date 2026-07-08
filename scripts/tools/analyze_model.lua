@@ -537,6 +537,124 @@ local function read_prefix(path, n)
     return s or ""
 end
 
+local function write_all(path, content)
+    local f = io.open(path, "wb")
+    if not f then return nil, "cannot open for write" end
+    f:write(content or "")
+    f:close()
+    return true
+end
+
+local function shell_quote(s)
+    s = tostring(s or "")
+    return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function run_cmd(cmd)
+    local ok, why, code = os.execute(cmd)
+    if type(ok) == "number" then
+        return ok == 0, ok
+    end
+    if type(ok) == "boolean" then
+        if ok then return true, 0 end
+        return false, tonumber(code) or -1
+    end
+    return false, -1
+end
+
+local function cmd_exists(name)
+    local ok = run_cmd("command -v " .. shell_quote(name) .. " >/dev/null 2>&1")
+    return ok
+end
+
+local function extract_mermaid_block(markdown)
+    markdown = tostring(markdown or "")
+    local block = markdown:match("```mermaid%s*\n(.-)\n```")
+    if type(block) == "string" and block ~= "" then
+        return block
+    end
+    return nil
+end
+
+local function export_mermaid_graph(markdown, out_path)
+    out_path = tostring(out_path or "")
+    if out_path == "" then
+        return nil, "chemin de sortie vide"
+    end
+
+    local ext = out_path:match("%.([^.]+)$")
+    ext = tostring(ext or ""):lower()
+    if ext == "jpeg" then ext = "jpg" end
+    if ext ~= "svg" and ext ~= "png" and ext ~= "jpg" then
+        return nil, "extension non supportée (utiliser .svg, .png ou .jpg)"
+    end
+
+    local mermaid = extract_mermaid_block(markdown)
+    if not mermaid then
+        return nil, "bloc mermaid introuvable dans la sortie générée"
+    end
+
+    local stamp = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
+    local tmp_mmd = "/tmp/mimir_mlp_graph_" .. stamp .. ".mmd"
+    local ok_w, err_w = write_all(tmp_mmd, mermaid .. "\n")
+    if not ok_w then
+        return nil, "écriture temporaire impossible: " .. tostring(err_w)
+    end
+
+    local mmdc_cmd = nil
+    if cmd_exists("mmdc") then
+        mmdc_cmd = "mmdc"
+    elseif cmd_exists("npx") then
+        mmdc_cmd = "npx -y @mermaid-js/mermaid-cli"
+    else
+        run_cmd("rm -f " .. shell_quote(tmp_mmd))
+        return nil, "mermaid-cli introuvable (installer mmdc, ou Node+npx)"
+    end
+
+    local final_out = out_path
+    local render_out = out_path
+    local tmp_png = nil
+
+    if ext == "jpg" then
+        tmp_png = "/tmp/mimir_mlp_graph_" .. stamp .. ".png"
+        render_out = tmp_png
+    end
+
+    local render_cmd = mmdc_cmd
+        .. " -i " .. shell_quote(tmp_mmd)
+        .. " -o " .. shell_quote(render_out)
+        .. " >/dev/null 2>&1"
+
+    local ok_render = run_cmd(render_cmd)
+    if not ok_render then
+        run_cmd("rm -f " .. shell_quote(tmp_mmd))
+        if tmp_png then run_cmd("rm -f " .. shell_quote(tmp_png)) end
+        return nil, "rendu Mermaid échoué (commande: " .. mmdc_cmd .. ")"
+    end
+
+    if ext == "jpg" then
+        local convert_cmd
+        if cmd_exists("magick") then
+            convert_cmd = "magick " .. shell_quote(tmp_png) .. " " .. shell_quote(final_out)
+        elseif cmd_exists("convert") then
+            convert_cmd = "convert " .. shell_quote(tmp_png) .. " " .. shell_quote(final_out)
+        else
+            run_cmd("rm -f " .. shell_quote(tmp_mmd) .. " " .. shell_quote(tmp_png))
+            return nil, "conversion JPG impossible (installer ImageMagick: magick/convert)"
+        end
+
+        local ok_convert = run_cmd(convert_cmd .. " >/dev/null 2>&1")
+        if not ok_convert then
+            run_cmd("rm -f " .. shell_quote(tmp_mmd) .. " " .. shell_quote(tmp_png))
+            return nil, "conversion PNG -> JPG échouée"
+        end
+    end
+
+    run_cmd("rm -f " .. shell_quote(tmp_mmd))
+    if tmp_png then run_cmd("rm -f " .. shell_quote(tmp_png)) end
+    return final_out
+end
+
 -- ---------------------------------------------------------------------------
 -- SafeTensors reader (header + extraction)
 -- ---------------------------------------------------------------------------
@@ -1805,6 +1923,219 @@ local function render_graph_mermaid_markdown(info, opts)
     return table.concat(lines, "\n")
 end
 
+local function render_graph_mlp_markdown(info, opts)
+    local arch = info.arch
+    if type(arch) ~= "table" then
+        return nil
+    end
+
+    local function n(x)
+        x = tonumber(x)
+        if not x or x <= 0 then return nil end
+        return math.floor(x)
+    end
+
+    local max_layers = tonumber(opts.max_layers)
+    local layers = (type(arch.layers) == "table") and arch.layers or {}
+    if max_layers == nil then max_layers = #layers end
+    max_layers = clamp(max_layers, 0, #layers)
+
+    local function esc_label(s)
+        s = tostring(s or "")
+        s = s:gsub("\\r", " "):gsub("\\n", " ")
+        s = s:gsub('"', "'")
+        return s
+    end
+
+    local function short_name(s)
+        s = tostring(s or "")
+        local last = s:match("([^/]+)$")
+        if last and last ~= "" then return last end
+        return s
+    end
+
+    local function norm_inputs(v, i)
+        if type(v) == "table" and #v > 0 then
+            local out = {}
+            for k = 1, #v do
+                local x = tostring(v[k] or "")
+                if x ~= "" then out[#out + 1] = x end
+            end
+            if #out > 0 then return out end
+        elseif type(v) == "string" and v ~= "" then
+            return { v }
+        end
+        if i and i > 1 then return { "t" .. tostring(i - 1) } end
+        return { "x" }
+    end
+
+    local function norm_output(v, i)
+        if type(v) == "string" and v ~= "" then return v end
+        if i then return "t" .. tostring(i) end
+        return "x"
+    end
+
+    local producers = {}
+    local indeg = {}
+    local outdeg = {}
+    local source_nodes = {}
+    local layer_edges = {}
+    local source_edges = {}
+
+    local function layer_id(i)
+        return "L" .. tostring(i)
+    end
+
+    local function source_id(tensor)
+        if source_nodes[tensor] then return source_nodes[tensor] end
+        local clean = tostring(tensor):gsub("[^%w_]", "_"):gsub("_+", "_")
+        if clean == "" then clean = "x" end
+        local id = "S_" .. clean
+        local base = id
+        local m = 1
+        while source_nodes[id] do
+            m = m + 1
+            id = base .. "_" .. tostring(m)
+        end
+        source_nodes[tensor] = id
+        return id
+    end
+
+    for i = 1, max_layers do
+        local l = layers[i]
+        if type(l) == "table" then
+            local out = norm_output(l.output, i)
+            producers[out] = i
+            indeg[i] = indeg[i] or 0
+            outdeg[i] = outdeg[i] or 0
+        end
+    end
+
+    for i = 1, max_layers do
+        local l = layers[i]
+        if type(l) == "table" then
+            local inputs = norm_inputs(l.inputs, i)
+            for _, inp in ipairs(inputs) do
+                local p = producers[inp]
+                if p and p ~= i then
+                    layer_edges[#layer_edges + 1] = { from = p, to = i, label = inp }
+                    indeg[i] = (indeg[i] or 0) + 1
+                    outdeg[p] = (outdeg[p] or 0) + 1
+                else
+                    source_edges[#source_edges + 1] = { from = inp, to = i, label = inp }
+                    indeg[i] = (indeg[i] or 0) + 1
+                end
+            end
+        end
+    end
+
+    local has_real_edges = (#layer_edges + #source_edges) > 0
+
+    -- Si on n'a pas un graphe exploitable, fallback sur un mini schéma MLP.
+    if not has_real_edges then
+        local sizes = {}
+        for i = 1, max_layers do
+            local l = layers[i]
+            if type(l) == "table" then
+                local cfg = (type(l.config) == "table") and l.config or l
+                local in_f = n(cfg.in_features) or n(cfg.input_dim) or n(cfg.input_size) or n(cfg.in_dim)
+                local out_f = n(cfg.out_features) or n(cfg.output_dim) or n(cfg.output_size) or n(cfg.out_dim)
+                if in_f and out_f then
+                    if #sizes == 0 then sizes[1] = in_f end
+                    sizes[#sizes + 1] = out_f
+                end
+            end
+        end
+        if #sizes < 2 then sizes = { 2, 4, 3 } end
+
+        local lines_fb = {}
+        lines_fb[#lines_fb + 1] = "```mermaid"
+        lines_fb[#lines_fb + 1] = "flowchart LR"
+        lines_fb[#lines_fb + 1] = "  classDef input fill:#ef7f1a,stroke:#b95e17,color:#111,stroke-width:1px"
+        lines_fb[#lines_fb + 1] = "  classDef hidden fill:#b6b2b2,stroke:#777,color:#111,stroke-width:1px"
+        lines_fb[#lines_fb + 1] = "  classDef output fill:#04b454,stroke:#03813c,color:#111,stroke-width:1px"
+        for li = 1, #sizes do
+            local kind = (li == 1) and "input" or ((li == #sizes) and "output" or "hidden")
+            local id = "F" .. tostring(li)
+            lines_fb[#lines_fb + 1] = string.format("  %s[\"Couche %d\\n(%s neurones)\"]", id, li, format_int(sizes[li]))
+            lines_fb[#lines_fb + 1] = string.format("  class %s %s", id, kind)
+            if li > 1 then
+                lines_fb[#lines_fb + 1] = string.format("  F%d --> %s", li - 1, id)
+            end
+        end
+        lines_fb[#lines_fb + 1] = "```"
+        lines_fb[#lines_fb + 1] = ""
+        lines_fb[#lines_fb + 1] = "Mode fallback: topologie reelle indisponible, schema simplifie."
+        return table.concat(lines_fb, "\n")
+    end
+
+    local lines = {}
+    lines[#lines + 1] = "```mermaid"
+    lines[#lines + 1] = "flowchart LR"
+    lines[#lines + 1] = "  classDef input fill:#ef7f1a,stroke:#b95e17,color:#111,stroke-width:1px"
+    lines[#lines + 1] = "  classDef hidden fill:#b6b2b2,stroke:#777,color:#111,stroke-width:1px"
+    lines[#lines + 1] = "  classDef output fill:#04b454,stroke:#03813c,color:#111,stroke-width:1px"
+    lines[#lines + 1] = "  classDef source fill:#ffffff,stroke:#999,color:#333,stroke-dasharray: 3 3"
+
+    for i = 1, max_layers do
+        local l = layers[i]
+        if type(l) == "table" then
+            local typ = esc_label(l.type or "?")
+            local nm = esc_label(short_name(l.name or ("layer_" .. tostring(i))))
+            local dims = esc_label(layer_dims(l) or "")
+            local label = string.format("%d: %s | %s", i, nm, typ)
+            if dims ~= "" then
+                label = label .. "\\n" .. dims
+            end
+            lines[#lines + 1] = string.format("  %s[\"%s\"]", layer_id(i), label)
+        end
+    end
+
+    for tensor, sid in pairs(source_nodes) do
+        lines[#lines + 1] = string.format("  %s((\"%s\"))", sid, esc_label(short_name(tensor)))
+        lines[#lines + 1] = string.format("  class %s source", sid)
+    end
+
+    for i = 1, #layer_edges do
+        local e = layer_edges[i]
+        lines[#lines + 1] = string.format("  %s --> %s", layer_id(e.from), layer_id(e.to))
+    end
+    for i = 1, #source_edges do
+        local e = source_edges[i]
+        lines[#lines + 1] = string.format("  %s --> %s", source_id(e.from), layer_id(e.to))
+    end
+
+    local inputs = {}
+    local hiddens = {}
+    local outputs = {}
+    for i = 1, max_layers do
+        local id = layer_id(i)
+        local di = indeg[i] or 0
+        local do_ = outdeg[i] or 0
+        if di == 0 then
+            inputs[#inputs + 1] = id
+        elseif do_ == 0 then
+            outputs[#outputs + 1] = id
+        else
+            hiddens[#hiddens + 1] = id
+        end
+    end
+    if #inputs > 0 then lines[#lines + 1] = "  class " .. table.concat(inputs, ",") .. " input" end
+    if #hiddens > 0 then lines[#lines + 1] = "  class " .. table.concat(hiddens, ",") .. " hidden" end
+    if #outputs > 0 then lines[#lines + 1] = "  class " .. table.concat(outputs, ",") .. " output" end
+
+    lines[#lines + 1] = "```"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format("Diagramme fonctionnel: %s couches, %s connexions inter-couches, %s entrées externes.",
+        format_int(max_layers), format_int(#layer_edges), format_int(#source_edges))
+
+    if max_layers < #layers then
+        lines[#lines + 1] = string.format("(graphe limité à %d/%d couches; utilisez --max-layers)", max_layers, #layers)
+    end
+
+    return table.concat(lines, "\n")
+end
+
 local function render_top_tensors(info, opts)
     local tensors = info.tensors
     if type(tensors) ~= "table" then return nil end
@@ -1864,8 +2195,9 @@ local function render_help()
         "  --max-layers <n>                    Limite l'affichage des couches / graphe",
         "  --top-tensors <n>                   Nb de tensors listés (par taille)",
         "  --enrich-tensors <n>                [RawFolder] enrichit les N plus gros tensors (dtype/shape)",
-        "  --graph-format <table|blocks|mermaid>  Format de graphe (défaut: table)",
+        "  --graph-format <table|blocks|mermaid|mlp_graph>  Format de graphe (défaut: table)",
         "                                     Alias accepté: mermaind -> mermaid",
+        "  --graph-out <path.{svg|png|jpg}>    Exporte le graphe Mermaid vers un fichier image",
         "  --graph-blocks <bool>               Affiche le graphe 'blocks' en plus du graphe principal (défaut: false)",
         "  --graph-in-width <n>                Largeur inputs (mode blocks)",
         "  --graph-layer-width <n>             Largeur layer (mode blocks)",
@@ -1876,6 +2208,8 @@ local function render_help()
         "",
         colorize("Notes:", C.bold, C.cyan),
         "  - Le graphe Mermaid est émis en Markdown via un bloc ```mermaid```.",
+        "  - Le format mlp_graph émet un diagramme Mermaid orienté architecture MLP (type image).",
+        "  - L'export image utilise Mermaid CLI (mmdc). Pour .jpg, ImageMagick est aussi requis.",
         "  - Les dumps DebugJson n'embarquent pas forcément inputs/output; dans ce cas le graphe Mermaid",
         "    utilise un fallback linéaire (layer1 -> layer2 -> ...).",
     }
@@ -1899,6 +2233,7 @@ opts.graph_in_width = Args.get_num(opts, "graph-in-width", Args.get_num(opts, "g
 opts.graph_layer_width = Args.get_num(opts, "graph-layer-width", Args.get_num(opts, "graph_layer_width", nil))
 opts.graph_out_width = Args.get_num(opts, "graph-out-width", Args.get_num(opts, "graph_out_width", nil))
 opts.graph_format = Args.get_str(opts, "graph-format", Args.get_str(opts, "graph_format", "table"))
+opts.graph_out = Args.get_str(opts, "graph-out", Args.get_str(opts, "graph_out", ""))
 opts.debug = Args.get_bool(opts, "debug", false)
 opts.all = Args.get_bool(opts, "all", false)
 
@@ -1975,6 +2310,22 @@ do
             log("")
             log(colorize("Graphe (Mermaid/Markdown)", C.bold, C.blue))
             log(md)
+        end
+    elseif gf == "mlp_graph" then
+        local mlp = render_graph_mlp_markdown(info, opts)
+        if mlp then
+            log("")
+            log(colorize("Graphe (MLP image/Mermaid)", C.bold, C.blue))
+            log(mlp)
+
+            if opts.graph_out ~= "" then
+                local out_path, ex_err = export_mermaid_graph(mlp, opts.graph_out)
+                if not out_path then
+                    die("export image échoué: " .. tostring(ex_err))
+                end
+                log("")
+                log(colorize("Image exportée", C.bold, C.green) .. " " .. tostring(out_path))
+            end
         end
     elseif gf == "blocks" then
         local blocks = render_graph_blocks(info, opts)

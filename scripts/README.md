@@ -41,8 +41,8 @@ Usage recommandé : commence par `test_serialization_smoke.lua` si tu veux un si
 
 Outils d'inspection et d'analyse:
 
-- `inspect_architectures.lua` - Liste les architectures + dtypes, et affiche les paramètres d'une archi (`-a`, `-l <arch> -p`, `-d`)
-- `analyze_model.lua` - Analyse un checkpoint/modèle (SafeTensors / RawFolder / DebugJson)
+- `inspect_architectures.lua` - Liste les architectures + dtypes, inspecte une archi et peut l'exporter (`-a`, `-l <arch> -p`, `-d`, `-e <path>`)
+- `analyze_model.lua` - Analyse un checkpoint/modèle (SafeTensors / RawFolder / DebugJson) avec graphes `table|blocks|mermaid|mlp_graph` et export image (`--graph-out`)
 - `build_tags_vocab.lua` - Construit un vocab de tags depuis un dataset (`.txt` séparés par des points)
 - `convert_checkpoint2safetensor.lua` - Convertit un checkpoint RawFolder → SafeTensors
 - `convert_safetensors2raw_folder.lua` - Convertit un checkpoint SafeTensors → RawFolder
@@ -118,6 +118,11 @@ Note: conserver le separateur `--` avant les arguments du script Lua.
 
 # Outils
 ./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -l vae_conv -e /tmp/vae_conv_export.json
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -l vae_conv -e /tmp/vae_conv_export/
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -l vae_conv -e /tmp/vae_conv_export.safetensors
+./bin/mimir --lua scripts/tools/analyze_model.lua -- --in checkpoint/vae_conv-generique/epoch_0018 --graph-format mlp_graph
+./bin/mimir --lua scripts/tools/analyze_model.lua -- --in checkpoint/vae_conv-generique/epoch_0018 --graph-format mlp_graph --graph-out /tmp/arch.svg
 
 # Benchmark
 ./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1
@@ -126,6 +131,12 @@ Note: conserver le separateur `--` avant les arguments du script Lua.
 ./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua -- --help
 ./bin/mimir --lua scripts/training/ponyxl_ddpm_direct_train.lua -- --help
 ```
+
+Règles d'export pour `inspect_architectures.lua -e`:
+
+- `*.json` -> export `debugJSON`
+- chemin finissant par `/` -> export `rawFolder`
+- `*.safetensors` (ou `*.st`) -> export `safetensors`
 
 Lecture pratique de ces commandes :
 

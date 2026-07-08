@@ -8,6 +8,7 @@
 -- Options:
 --   -a, --show-archs        Liste les architectures disponibles (+ dtypes)
 --   -l, --list <arch>       Sélectionne une architecture par son nom
+--   -e, --export <path>     Exporte l'architecture sélectionnée vers un checkpoint
 --   -p, --params            Affiche les paramètres de l'archi sélectionnée
 --   --layers                Affiche les layers de l'archi sélectionnée
 --   --stats                 Affiche les statistiques théoriques (params/flops)
@@ -204,6 +205,7 @@ local function parse_flags(argv)
     runtime    = Args.has(opts_long, "runtime"),
     json_out   = Args.has(opts_long, "json"),
     arch       = Args.get_str(opts_long, "list", nil),
+    export_path= Args.get_str(opts_long, "export", nil),
   }
 
   -- Scan des formes courtes depuis les positionnels.
@@ -219,6 +221,8 @@ local function parse_flags(argv)
       opts.help = true
     elseif v == "-l" then
       opts.arch = pos[i + 1]
+    elseif v == "-e" then
+      opts.export_path = pos[i + 1]
     end
   end
 
@@ -231,6 +235,8 @@ local function print_usage()
   log(colorize("Options:", C.bold, C.cyan))
   log("  " .. colorize("-a, --show-archs", C.green) .. "        Liste les architectures disponibles (+ dtypes)")
   log("  " .. colorize("-l, --list <arch>", C.green) .. "       Sélectionne une architecture par son nom")
+  log("  " .. colorize("-e, --export <path>", C.green) .. "     Exporte l'architecture sélectionnée")
+  log("    " .. colorize("formats", C.bold) .. ": .json -> debugJSON, / -> rawFolder, .safetensors -> safetensors")
   log("  " .. colorize("-p, --params", C.green) .. "            Affiche les paramètres de l'archi sélectionnée")
   log("  " .. colorize("    --layers", C.green) .. "            Affiche les layers de l'archi sélectionnée")
   log("  " .. colorize("    --stats", C.green) .. "             Affiche les statistiques théoriques (params par layer)")
@@ -948,6 +954,74 @@ local function show_stats(arch)
   return true
 end
 
+local function infer_export_format(path)
+  path = tostring(path or "")
+  if path == "" then return nil, "chemin vide" end
+
+  if path:sub(-1) == "/" then
+    return "raw_folder", "rawFolder"
+  end
+
+  local lower = path:lower()
+  if lower:match("%.json$") then
+    return "debug_json", "debugJSON"
+  end
+  if lower:match("%.safetensors$") or lower:match("%.st$") then
+    return "safetensors", "safetensors"
+  end
+
+  return nil, "extension non supportée (utiliser .json, .safetensors ou un chemin finissant par /)"
+end
+
+local function shell_quote(s)
+  s = tostring(s or "")
+  return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function ensure_parent_dir(path, fmt)
+  path = tostring(path or "")
+  if fmt == "raw_folder" and path:sub(-1) == "/" then
+    os.execute("mkdir -p " .. shell_quote(path) .. " >/dev/null 2>&1")
+    return
+  end
+
+  local dir = path:match("^(.*)/[^/]+$")
+  if dir and dir ~= "" then
+    os.execute("mkdir -p " .. shell_quote(dir) .. " >/dev/null 2>&1")
+  end
+end
+
+local function export_architecture_checkpoint(arch, export_path)
+  local fmt_internal, fmt_label_or_err = infer_export_format(export_path)
+  if not fmt_internal then
+    log(colorize("[ERROR] ", C.bold, C.red) .. tostring(fmt_label_or_err))
+    return false
+  end
+
+  local ok_inst = instantiate_arch(arch)
+  if not ok_inst then return false end
+
+  ensure_parent_dir(export_path, fmt_internal)
+  local ok_save, err_save = Mimir.Serialization.save(export_path, fmt_internal, {
+    include_git_info = true,
+    include_checksums = true,
+    save_optimizer = true,
+    save_tokenizer = true,
+    save_encoder = true,
+  })
+  if not ok_save then
+    log(colorize("[ERROR] ", C.bold, C.red) .. "Échec export " .. tostring(fmt_label_or_err)
+      .. " vers '" .. tostring(export_path) .. "': " .. tostring(err_save))
+    return false
+  end
+
+  log("\n" .. colorize("✓ Export réussi", C.bold, C.green)
+    .. "  arch=" .. colorize(arch, C.cyan)
+    .. "  format=" .. colorize(fmt_label_or_err, C.yellow)
+    .. "  path=" .. colorize(export_path, C.magenta))
+  return true
+end
+
 -- --json: exporte tout le registre en JSON (stdout).
 local function export_json()
   local entries, err = Mimir.Architectures.info()
@@ -1064,7 +1138,7 @@ if opts.json_out then
 end
 
 -- Aucun flag utile : on affiche l'aide.
-if not opts.show_archs and not opts.arch and not opts.dtypes and not opts.ops and not opts.runtime then
+if not opts.show_archs and not opts.arch and not opts.dtypes and not opts.ops and not opts.runtime and not opts.export_path then
   print_usage()
   return
 end
@@ -1085,14 +1159,15 @@ if opts.ops then
 end
 
 if opts.arch then
-  if not opts.params and not opts.layers and not opts.stats then
+  if not opts.params and not opts.layers and not opts.stats and not opts.export_path then
     -- -l sans aucune sous-option : confirmer l'existence + hint.
     local entry = Mimir.Architectures.info(opts.arch)
     if type(entry) == "table" then
       log("\n" .. colorize("Architecture '" .. opts.arch .. "' disponible.", C.green)
         .. " Options: " .. colorize("-p", C.bold) .. " params · "
         .. colorize("--layers", C.bold) .. " layers · "
-        .. colorize("--stats", C.bold) .. " stats")
+        .. colorize("--stats", C.bold) .. " stats · "
+        .. colorize("-e", C.bold) .. " export")
     else
       log("\n" .. colorize("[ERROR] ", C.bold, C.red) .. "Architecture inconnue: " .. tostring(opts.arch))
     end
@@ -1102,4 +1177,7 @@ if opts.arch then
   if opts.params  then show_params(opts.arch)  end
   if opts.layers  then show_layers(opts.arch)  end
   if opts.stats   then show_stats(opts.arch)   end
+  if opts.export_path then export_architecture_checkpoint(opts.arch, opts.export_path) end
+elseif opts.export_path then
+  log(colorize("[ERROR] ", C.bold, C.red) .. "-e/--export requiert -l/--list <arch>")
 end
