@@ -16,6 +16,12 @@ Connaître les bases C++ et la structure du dépôt.
 
 Tu peux modifier le code interne en limitant les régressions.
 
+## Diagrammes d'explication
+
+![Runtime graphe](../graphs/07_graph_runtime.svg)
+
+![Flux de données runtime](../graphs/27_runtime_dataflow.svg)
+
 
 Cette page décrit le flux d’exécution réel du runtime (côté C++), du point de vue de `Model` : comment les entrées sont injectées, comment les tenseurs sont routés, et comment les layers sont évalués.
 

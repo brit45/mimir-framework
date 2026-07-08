@@ -16,6 +16,10 @@ Savoir lancer un script Lua.
 
 Tu peux créer, initialiser, charger et exécuter un modèle sans casse.
 
+## Diagramme d'explication
+
+![Cycle de vie d'un modèle](../graphs/03_model_lifecycle.svg)
+
 
 Cette page explique **l’ordre des appels** et surtout **pourquoi** cet ordre existe.
 

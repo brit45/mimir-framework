@@ -16,6 +16,10 @@ Connaître le workflow Git et les bases du projet.
 
 Tu sais proposer des changements alignés avec les conventions du framework.
 
+## Diagramme d'explication
+
+![Points d'extension du framework](../graphs/16_extension_points.svg)
+
 
 Ce chapitre est le guide de référence pour ajouter des capacités au framework côté code source.
 

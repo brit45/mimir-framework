@@ -16,6 +16,14 @@ Rien. Cette page est volontairement très courte.
 
 Tu sais pourquoi le projet existe tel qu'il est.
 
+## Diagrammes d'explication
+
+![Vue d'ensemble du framework](graphs/00_framework_overview.svg)
+
+![Architecture en couches](graphs/01_layered_architecture.svg)
+
+![Carte des composants](graphs/02_component_map.svg)
+
 ## Pourquoi ces choix ?
 
 - Pourquoi C++ ? Pour garder le contrôle bas niveau, les performances et la portabilité du coeur.

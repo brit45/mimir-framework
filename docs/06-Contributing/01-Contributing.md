@@ -16,6 +16,10 @@ Connaître le workflow Git et les bases du projet.
 
 Tu sais proposer des changements alignés avec les conventions du framework.
 
+## Diagramme d'explication
+
+![Plaque de publication et diffusion docs](../graphs/28_publication_plate.svg)
+
 
 Compléments développeurs :
 

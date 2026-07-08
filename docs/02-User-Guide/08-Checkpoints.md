@@ -16,6 +16,14 @@ Avoir un modèle en mémoire (créé ou entraîné).
 
 Tu peux reprendre un run de manière fiable.
 
+## Diagrammes d'explication
+
+![Sérialisation des checkpoints](../graphs/09_serialization_checkpoint.svg)
+
+![Inspection et export](../graphs/10_inspection_export.svg)
+
+![Flux d'analyse de checkpoint](../graphs/25_checkpoint_analysis_flow.svg)
+
 
 ## Deux APIs existent
 

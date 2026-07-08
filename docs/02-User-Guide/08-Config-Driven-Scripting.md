@@ -16,6 +16,10 @@ Savoir éditer un fichier JSON.
 
 Tu peux rejouer une expérience avec les mêmes paramètres.
 
+## Diagramme d'explication
+
+![Inspection Lua et JSON](../graphs/26_lua_json_inspection.svg)
+
 
 Le mode `--conf` permet de charger une configuration JSON et d'exécuter automatiquement des scripts Lua avec cette config injectée. C'est idéal pour **automatiser des workflows complexes**, **paramétrer des expériences** et **reproduire des résultats**.
 

@@ -16,6 +16,12 @@ Binaire mimir compilé.
 
 Tu sais lancer un script, une config, et passer des overrides.
 
+## Diagrammes d'explication
+
+![Workflow Lua JSON CLI](../graphs/04_workflow_lua_json_cli.svg)
+
+![Détection des backends au démarrage](../graphs/14_backend_detection.svg)
+
 
 Le binaire principal est `bin/mimir`.
 

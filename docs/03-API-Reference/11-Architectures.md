@@ -16,6 +16,16 @@ Connaître les commandes de base de Mímir.
 
 Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
 
+## Diagrammes d'explication
+
+![Taxonomie du registre](../graphs/05_registry_taxonomy.svg)
+
+![Architecture VGG16](../graphs/21_vgg16_architecture.svg)
+
+![Architecture VGG19](../graphs/22_vgg19_architecture.svg)
+
+![Comparaison de modèles](../graphs/23_model_comparison.svg)
+
 
 Le registre d’architectures est la manière recommandée de créer des modèles.
 

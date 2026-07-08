@@ -16,6 +16,10 @@ Avoir un checkpoint ou une config d'architecture.
 
 Tu obtiens une sortie de modèle reproductible.
 
+## Diagramme d'explication
+
+![Pipeline d'inférence](../graphs/12_inference_pipeline.svg)
+
 Cette page se concentre sur l’inférence **via l’API Lua**.
 
 Voir aussi:

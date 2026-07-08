@@ -47,6 +47,12 @@ Outils d'inspection et d'analyse:
 - `convert_checkpoint2safetensor.lua` - Convertit un checkpoint RawFolder → SafeTensors
 - `convert_safetensors2raw_folder.lua` - Convertit un checkpoint SafeTensors → RawFolder
 
+Schémas utiles (SVG):
+
+![Inspection et export architectures](../docs/graphs/10_inspection_export.svg)
+
+![Flux Lua JSON inspection](../docs/graphs/26_lua_json_inspection.svg)
+
 ### ⚡ Benchmarks (`benchmarks/`)
 
 Scripts de performance:

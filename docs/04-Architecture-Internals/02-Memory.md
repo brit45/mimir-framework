@@ -16,6 +16,10 @@ Connaître les bases C++ et la structure du dépôt.
 
 Tu peux modifier le code interne en limitant les régressions.
 
+## Diagramme d'explication
+
+![Sous-système mémoire](../graphs/08_memory_subsystem.svg)
+
 
 Cette page décrit le système mémoire côté runtime : comment la limite RAM est appliquée, quelles allocations sont comptabilisées, et comment les buffers temporaires sont gérés.
 

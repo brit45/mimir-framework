@@ -14,6 +14,12 @@ Connaître les bases C++ et la structure du dépôt.
 
 Tu peux modifier le code interne en limitant les régressions.
 
+## Diagrammes d'explication
+
+![Flux model factory](../graphs/06_model_factory_flow.svg)
+
+![Flux de création d'architecture](../graphs/24_architecture_creation_flow.svg)
+
 # Internals : registre d’architectures (`ModelArchitectures`) et builders
 
 Cette page documente le registre d’architectures (config JSON → instance de `Model`) et la manière dont les topologies sont construites.

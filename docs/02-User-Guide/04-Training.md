@@ -16,6 +16,10 @@ Comprendre la différence entre entraînement from scratch et reprise.
 
 Tu peux exécuter un run d'entraînement complet et le reprendre.
 
+## Diagramme d'explication
+
+![Pipeline d'entraînement](../graphs/11_training_pipeline.svg)
+
 
 Ce guide couvre le workflow complet pour entraîner un modèle Mímir : de la configuration mémoire jusqu'au checkpoint final. Il présente les deux styles disponibles — **haut-niveau** (recommandé pour la plupart des cas) et **boucle manuelle** (pour les entraînements personnalisés).
 

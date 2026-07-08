@@ -11,6 +11,20 @@ Philosophie du projet : [docs/00-Framework-Philosophy.md](00-Framework-Philosoph
 
 ---
 
+## Schémas SVG recommandés
+
+Pour accélérer la compréhension, voici les schémas les plus utiles:
+
+![Vue framework](graphs/00_framework_overview.svg)
+
+![Workflow Lua JSON CLI](graphs/04_workflow_lua_json_cli.svg)
+
+![Lifecycle modèle](graphs/03_model_lifecycle.svg)
+
+![Inspection et export](graphs/10_inspection_export.svg)
+
+---
+
 ## 🚀 NOUVEAU — Démarrage rapide (5-10 min)
 
 **👉 Si tu débutes, commence ICI :**

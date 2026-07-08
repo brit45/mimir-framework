@@ -16,6 +16,16 @@ Checkpoints/config adaptés au modèle choisi.
 
 Tu sais lancer un pipeline diffusion sans ambiguïté de setup.
 
+## Diagrammes d'explication
+
+![Architecture VAE Conv](../graphs/17_vaeconv_architecture.svg)
+
+![Architecture UNet](../graphs/18_unet_architecture.svg)
+
+![Architecture diffusion](../graphs/19_diffusion_architecture.svg)
+
+![Transformer SD3.5](../graphs/20_sd35_transformer.svg)
+
 Ce dépôt contient des architectures diffusion/autoencoder exposées via le registre.
 
 Voir aussi:

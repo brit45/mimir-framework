@@ -16,6 +16,12 @@ Connaître les bases C++ et la structure du dépôt.
 
 Tu peux modifier le code interne en limitant les régressions.
 
+## Diagrammes d'explication
+
+![Détection des backends](../graphs/14_backend_detection.svg)
+
+![Exécution CPU-first](../graphs/15_cpu_first_execution.svg)
+
 
 Ce document décrit l'architecture interne du système de runtimes de Mímir : comment les layers sont dispatchés vers les différents backends matériels, comment `RuntimeConfig` est configuré, et comment chaque fast-path est implémenté en C++.
 

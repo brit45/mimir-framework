@@ -97,6 +97,12 @@ Entraînement / Inférence / Analyse
       CPU         CUDA        ROCm
 ```
 
+Schéma visuel (SVG):
+
+![Vue d'ensemble du framework](./docs/graphs/00_framework_overview.svg)
+
+![Exécution CPU-first](./docs/graphs/15_cpu_first_execution.svg)
+
 ---
 
 ### Quick Start (5 minutes)
@@ -139,6 +145,10 @@ Mímir expose trois modes principaux:
 1. **C++** : définition d'architectures, runtime et couches bas niveau.
 2. **Lua** : pilotage des runs (train/inference/tools).
 3. **JSON (`--conf`)** : exécution reproductible et scénarios paramétrés.
+
+Schéma des flux d'exécution (SVG):
+
+![Workflow Lua JSON CLI](./docs/graphs/04_workflow_lua_json_cli.svg)
 
 ### CLI essentielle
 
@@ -255,6 +265,12 @@ Le planner de graphes prend en charge:
 - planification d'allocation des buffers,
 - réutilisation mémoire,
 - préparation du runtime.
+
+Schémas internes (SVG):
+
+![Runtime graphe](./docs/graphs/07_graph_runtime.svg)
+
+![Sous-système mémoire](./docs/graphs/08_memory_subsystem.svg)
 
 ---
 

@@ -16,6 +16,10 @@ Connaître les commandes de base de Mímir.
 
 Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
 
+## Diagramme d'explication
+
+![Registre des layers et ops](../graphs/13_layer_registry.svg)
+
 
 `Mimir.Layers` expose des opérations “standalone” (hors graphe) pour des tests rapides.
 
