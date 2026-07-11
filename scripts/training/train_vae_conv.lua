@@ -1,6 +1,7 @@
 ---@diagnostic disable: undefined-global, undefined-field, inject-field
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
+local FS = dofile("scripts/modules/fs.lua")
 
 local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
 
@@ -706,7 +707,7 @@ end
 -- NOTE: format côté C++/Lua = "debug_json" (alias: "debug", "json").
 do
   local starttrain_path = save_out_dir .. "/starttrain.json"
-  os.execute("mkdir -p '" .. save_out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+  FS.mkdir_p(save_out_dir)
   local ok_dbg, err_dbg = Mimir.Serialization.save(starttrain_path, "debug_json", {
     save_tokenizer = true,
     save_encoder = true,
@@ -733,7 +734,7 @@ if ok_train == false and tostring(err_train) == "STOP_REQUESTED" then
     last_dir = save_out_dir
   end
 
-  os.execute("mkdir -p '" .. tostring(last_dir):gsub("'", "'\\''") .. "' 2>/dev/null")
+  FS.mkdir_p(last_dir)
   local ok_save_stop, err_save_stop = Mimir.Serialization.save(last_dir, "raw_folder", {
     save_optimizer = true,
     save_tokenizer = true,
@@ -752,7 +753,7 @@ end
 assert_ok(ok_train, err_train, "Model.train failed")
 
 -- Sauvegarde
-os.execute("mkdir -p '" .. save_out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+FS.mkdir_p(save_out_dir)
 local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
   save_optimizer = true,
   save_tokenizer = true,

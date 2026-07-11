@@ -25,6 +25,7 @@
 
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
+local FS = dofile("scripts/modules/fs.lua")
 
 local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
 
@@ -73,19 +74,8 @@ local function apply_dtype(cfg)
   return true
 end
 
-local function shell_quote(s)
-  if s == nil then return "''" end
-  s = tostring(s)
-  return "'" .. s:gsub("'", "'\\''") .. "'"
-end
-
 local function file_exists(path)
-  if not path or #tostring(path) == 0 then return false end
-  local cmd = "test -f " .. shell_quote(path) .. " >/dev/null 2>&1"
-  local ok, why, code = os.execute(cmd)
-  if type(ok) == "number" then return ok == 0 end
-  if type(ok) == "boolean" then return ok end
-  return (why == "exit" and code == 0)
+  return FS.file_exists(path)
 end
 
 local function read_lines(path)
@@ -165,7 +155,7 @@ local viz_taps_every_steps = opt_int("viz-taps-every-steps", opt_int("viz-every-
 local viz_taps_max_frames = opt_int("viz-taps-max-frames", 12)
 local viz_taps_max_side = opt_int("viz-taps-max-side", 64)
 
-os.execute("mkdir -p " .. shell_quote(out_dir) .. " 2>/dev/null")
+FS.mkdir_p(out_dir)
 
 -- Vocab de tags/classes
 if tags_vocab_path == "" then
@@ -276,7 +266,7 @@ assert_ok(ok_train, err_train, "Model.train failed")
 
 -- Sauvegarde finale
 local final_dir = out_dir .. "/final"
-os.execute("mkdir -p " .. shell_quote(final_dir) .. " 2>/dev/null")
+FS.mkdir_p(final_dir)
 local ok_save, err_save = Mimir.Serialization.save(final_dir, "raw_folder", {
   save_optimizer = true,
   include_checksums = true,

@@ -25,6 +25,7 @@
 
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
+local FS = dofile("scripts/modules/fs.lua")
 
 -- ---------------------------------------------------------------------------
 -- Logging / erreur
@@ -69,13 +70,11 @@ local function clamp(x, a, b)
 end
 
 local function mkdir_p(dir)
-    if dir == nil or dir == "" then return end
-    os.execute("mkdir -p '" .. tostring(dir):gsub("'", "'\\''") .. "' 2>/dev/null")
+    FS.mkdir_p(dir)
 end
 
 local function dirname(path)
-    path = tostring(path or "")
-    local p = path:match("^(.*)/[^/]+$")
+    local p = FS.dirname(path)
     if p == nil or p == "" then return "." end
     return p
 end

@@ -10,9 +10,15 @@
 #include "test_utils.hpp"
 
 #include "include/json.hpp"
+#ifdef MIMIR_ENABLE_SCRIPTING_JS
 #include "scriptings/JavaScript/jsScripting/JSScripting.hpp"
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_CSHARP
 #include "scriptings/CSharp/csharpScripting/CSharpScripting.hpp"
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_RUST
 #include "scriptings/Rust/rustScripting/RustScripting.hpp"
+#endif
 #include "scriptings/ScriptingBridgeCommon.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 
@@ -21,6 +27,11 @@ using json = nlohmann::json;
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -32,9 +43,29 @@ static bool commandAvailable(const char* cmd) {
     return std::system((std::string("command -v ") + cmd + " >/dev/null 2>&1").c_str()) == 0;
 }
 
+static bool dotnetRuntimeAvailable() {
+    if (const char* root = std::getenv("DOTNET_ROOT")) {
+        const fs::path fxr = fs::path(root) / "host" / "fxr";
+        if (fs::exists(fxr)) return true;
+    }
+    if (const char* home = std::getenv("HOME")) {
+        const fs::path fxr = fs::path(home) / ".dotnet" / "host" / "fxr";
+        if (fs::exists(fxr)) return true;
+    }
+    return false;
+}
+
+static int currentPid() {
+#if defined(_WIN32)
+    return static_cast<int>(_getpid());
+#else
+    return static_cast<int>(::getpid());
+#endif
+}
+
 static fs::path writeTempScript(const std::string& ext, const std::string& content) {
     const auto tmp = fs::temp_directory_path() /
-                     ("mimir_test_bridge" + std::to_string(::getpid()) + "." + ext);
+                     ("mimir_test_bridge" + std::to_string(currentPid()) + "." + ext);
     std::ofstream f(tmp);
     f << content;
     return tmp;
@@ -116,7 +147,7 @@ static int testBridgeCommonData() {
 static int testBridgeDirectCommands() {
     // Simuler l'ecriture d'un fichier de commandes et sa lecture par processBridgeCommands.
     const auto cmd_file = fs::temp_directory_path() /
-                          ("mimir_test_cmds_" + std::to_string(::getpid()) + ".cmd");
+                          ("mimir_test_cmds_" + std::to_string(currentPid()) + ".cmd");
 
     {
         std::ofstream f(cmd_file);
@@ -126,8 +157,21 @@ static int testBridgeDirectCommands() {
         f << "Model.total_params\n";
     }
 
-    // Utiliser JSContext comme contexte generique (n'importe lequel ferait l'affaire).
+    // Utiliser un contexte runtime disponible comme contexte generique.
+#if defined(MIMIR_ENABLE_SCRIPTING_JS)
     JSContext& ctx = JSContext::getInstance();
+#elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
+    CSharpContext& ctx = CSharpContext::getInstance();
+#elif defined(MIMIR_ENABLE_SCRIPTING_RUST)
+    RustContext& ctx = RustContext::getInstance();
+#else
+    std::cerr << "[SKIP] BridgeTest.Direct: aucun bridge script activé\n";
+    {
+        std::error_code skip_ec;
+        fs::remove(cmd_file, skip_ec);
+    }
+    return 0;
+#endif
     ctx.resetRuntimeState();
 
     const bool ok = ScriptingBridgeCommon::processBridgeCommands(ctx, cmd_file, "[test]");
@@ -147,6 +191,10 @@ static int testBridgeDirectCommands() {
 // ---------------------------------------------------------------------------
 
 static int testJsBridge() {
+#ifndef MIMIR_ENABLE_SCRIPTING_JS
+    std::cerr << "[SKIP] BridgeTest.JS: bridge JS désactivé à la compilation\n";
+    return 0;
+#else
     if (!commandAvailable("node")) {
         std::cerr << "[SKIP] BridgeTest.JS: node absent du PATH\n";
         return 0;
@@ -176,6 +224,7 @@ static int testJsBridge() {
 
     ctx.resetRuntimeState();
     return 0;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -183,8 +232,12 @@ static int testJsBridge() {
 // ---------------------------------------------------------------------------
 
 static int testCSharpBridge() {
+#ifndef MIMIR_ENABLE_SCRIPTING_CSHARP
+    std::cerr << "[SKIP] BridgeTest.CSharp: bridge C# désactivé à la compilation\n";
+    return 0;
+#else
     const bool has_cs = commandAvailable("dotnet-script") || commandAvailable("csi");
-    if (!has_cs) {
+    if (!has_cs || !dotnetRuntimeAvailable()) {
         std::cerr << "[SKIP] BridgeTest.CSharp: dotnet-script/csi absent du PATH\n";
         return 0;
     }
@@ -213,6 +266,7 @@ static int testCSharpBridge() {
 
     ctx.resetRuntimeState();
     return 0;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +274,10 @@ static int testCSharpBridge() {
 // ---------------------------------------------------------------------------
 
 static int testRustBridge() {
+#ifndef MIMIR_ENABLE_SCRIPTING_RUST
+    std::cerr << "[SKIP] BridgeTest.Rust: bridge Rust désactivé à la compilation\n";
+    return 0;
+#else
     if (!commandAvailable("rust-script")) {
         std::cerr << "[SKIP] BridgeTest.Rust: rust-script absent du PATH\n";
         return 0;
@@ -249,6 +307,7 @@ static int testRustBridge() {
 
     ctx.resetRuntimeState();
     return 0;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +316,7 @@ static int testRustBridge() {
 
 static int testBridgeCreateWithConfig() {
     const auto cmd_file = fs::temp_directory_path() /
-                          ("mimir_test_cfg_" + std::to_string(::getpid()) + ".cmd");
+                          ("mimir_test_cfg_" + std::to_string(currentPid()) + ".cmd");
     {
         std::ofstream f(cmd_file);
         // Config minimale valide pour basic_mlp
@@ -265,7 +324,20 @@ static int testBridgeCreateWithConfig() {
         f << "Model.allocate_params\n";
     }
 
+#if defined(MIMIR_ENABLE_SCRIPTING_JS)
     JSContext& ctx = JSContext::getInstance();
+#elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
+    CSharpContext& ctx = CSharpContext::getInstance();
+#elif defined(MIMIR_ENABLE_SCRIPTING_RUST)
+    RustContext& ctx = RustContext::getInstance();
+#else
+    std::cerr << "[SKIP] BridgeTest.CreateWithConfig: aucun bridge script activé\n";
+    {
+        std::error_code skip_ec;
+        fs::remove(cmd_file, skip_ec);
+    }
+    return 0;
+#endif
     ctx.resetRuntimeState();
 
     const bool ok = ScriptingBridgeCommon::processBridgeCommands(ctx, cmd_file, "[test-cfg]");

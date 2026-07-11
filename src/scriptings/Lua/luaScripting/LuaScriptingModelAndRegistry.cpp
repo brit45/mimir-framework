@@ -517,6 +517,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         } catch (...) {
         }
 
+        auto recon_metric_label = [&]() -> std::string {
+            std::string t = recon_loss_type;
+            std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+            if (t.empty() || t == "mse") return "mse";
+            if (t == "mae") return "l1";
+            if (t == "cross_entropy") return "ce";
+            if (t == "nll_gaussian") return "gaussian_nll";
+            return t;
+        };
+
         int global_step = 0;
 
         // -----------------------------------------------------------------
@@ -703,10 +713,11 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
         auto log_step = [&](int global_step, const Model::VAEStepStats& st, const char* prefix) {
             if ((global_step % log_every) != 0) return;
+            const std::string recon_label = recon_metric_label();
             ctx.addLog(std::string(prefix) +
                        " step=" + std::to_string(global_step) +
                        " loss=" + std::to_string(st.loss) +
-                       " mse=" + std::to_string(st.mse) +
+                       " " + recon_label + "=" + std::to_string(st.mse) +
                        " kl=" + std::to_string(st.kl) +
                        " beta_eff=" + std::to_string(st.kl_beta_effective) +
                        " grad_norm=" + std::to_string(st.grad_norm));
@@ -1037,49 +1048,61 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                         // Mode runtime optionnel: apprend la corrélation image↔texte via l'ConditioningEncoder,
                         // sans modifier le chemin de loss/convergence du graphe vae_conv existant.
-                        if (text_cond_runtime && !ids.empty() && ctx.currentModel) {
+                        if (text_cond_runtime && ctx.currentModel) {
                             try {
                                 auto& enc = ctx.currentModel->getMutableEncoder();
                                 enc.ensureVocabSize(ctx.currentTokenizer->getVocabSize());
                                 enc.ensureSpecialEmbeddings();
 
+                                const bool single_modality_sample = (item.countModalities() <= 1);
+
                                 // Cible image simple en espace embedding.
                                 const std::vector<float> img_emb = imageToEmbedding(item.img, image_w, image_h, enc.dim);
 
-                                // Met à jour les embeddings token_ids vers la cible image.
-                                if (text_encoder_lr > 0.0f) {
+                                // En mono-modalité image: remplir uniquement le vecteur image (mag).
+                                enc.fillImageVectorSingleModality(img_emb, text_special_lr, single_modality_sample);
+
+                                // En mono-modalité texte: remplir uniquement le vecteur texte (seq).
+                                if (!ids.empty()) {
+                                    enc.fillTextVectorSingleModality(ids, pad_id, text_special_lr, single_modality_sample);
+                                }
+
+                                // Mode multi-modalité: conserver l'alignement image↔texte historique.
+                                if (!single_modality_sample && text_encoder_lr > 0.0f && !ids.empty()) {
                                     enc.trainOnTextTokens(ids, img_emb, text_encoder_lr);
                                 }
 
-                                // Lier mag_embedding à la modalité image du sample courant.
-                                std::string img_dir;
-                                try {
-                                    img_dir = std::filesystem::path(item.image_file).parent_path().string();
-                                } catch (...) {
-                                }
-                                const MagicToken mt = makeMagicToken(MOD_IMAGE, img_dir.empty() ? item.image_file : img_dir);
-                                enc.setMagicFromToken(mt);
-
-                                // Gradient d'alignement sur seq/mod: encode(ids) -> img_emb.
-                                std::vector<float> txt_emb;
-                                enc.encodeInto(txt_emb, ids);
-                                if (txt_emb.size() == img_emb.size() && !txt_emb.empty() && text_special_lr > 0.0f) {
-                                    std::vector<float> grad(txt_emb.size(), 0.0f);
-                                    for (size_t d = 0; d < txt_emb.size(); ++d) {
-                                        grad[d] = txt_emb[d] - img_emb[d];
+                                if (!single_modality_sample && !ids.empty()) {
+                                    // Lier mag_embedding à la modalité image du sample courant.
+                                    std::string img_dir;
+                                    try {
+                                        img_dir = std::filesystem::path(item.image_file).parent_path().string();
+                                    } catch (...) {
                                     }
-                                    enc.sgdUpdateSpecialEmbeddings(grad, text_special_lr, true, true, false);
-                                }
+                                    const MagicToken mt = makeMagicToken(MOD_IMAGE, img_dir.empty() ? item.image_file : img_dir);
+                                    enc.setMagicFromToken(mt);
 
-                                // Compose mod_embedding comme pont seq <-> mag (image feature).
-                                const auto& seq = enc.getSeqEmbedding();
-                                const auto& mag = enc.getMagEmbedding();
-                                if (seq.size() == (size_t)enc.dim && mag.size() == (size_t)enc.dim) {
-                                    std::vector<float> mod((size_t)enc.dim, 0.0f);
-                                    for (int d = 0; d < enc.dim; ++d) {
-                                        mod[(size_t)d] = 0.5f * (seq[(size_t)d] + mag[(size_t)d]);
+                                    // Gradient d'alignement sur seq/mod: encode(ids) -> img_emb.
+                                    std::vector<float> txt_emb;
+                                    enc.encodeInto(txt_emb, ids);
+                                    if (txt_emb.size() == img_emb.size() && !txt_emb.empty() && text_special_lr > 0.0f) {
+                                        std::vector<float> grad(txt_emb.size(), 0.0f);
+                                        for (size_t d = 0; d < txt_emb.size(); ++d) {
+                                            grad[d] = txt_emb[d] - img_emb[d];
+                                        }
+                                        enc.sgdUpdateSpecialEmbeddings(grad, text_special_lr, true, true, false);
                                     }
-                                    enc.setModEmbedding(mod);
+
+                                    // Compose mod_embedding comme pont seq <-> mag (image feature).
+                                    const auto& seq = enc.getSeqEmbedding();
+                                    const auto& mag = enc.getMagEmbedding();
+                                    if (seq.size() == (size_t)enc.dim && mag.size() == (size_t)enc.dim) {
+                                        std::vector<float> mod((size_t)enc.dim, 0.0f);
+                                        for (int d = 0; d < enc.dim; ++d) {
+                                            mod[(size_t)d] = 0.5f * (seq[(size_t)d] + mag[(size_t)d]);
+                                        }
+                                        enc.setModEmbedding(mod);
+                                    }
                                 }
                             } catch (...) {
                                 // best-effort: ne jamais casser le train principal.
@@ -2936,6 +2959,17 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                     poll_viz_live_params();
                     const Model::VAEStepStats st = ctx.currentModel->trainStepVAEText(empty_x, ids, opt, step_learning_rate());
+
+                    // Entraînement texte mono-modalité: remplir uniquement le vecteur texte (seq).
+                    try {
+                        auto& enc = ctx.currentModel->getMutableEncoder();
+                        enc.ensureVocabSize(ctx.currentTokenizer->getVocabSize());
+                        enc.ensureSpecialEmbeddings();
+                        enc.fillTextVectorSingleModality(ids, pad_id, 0.005f, true);
+                    } catch (...) {
+                        // best-effort: ne jamais casser le train principal.
+                    }
+
                     global_step += 1;
                     log_step(global_step, st, "[vae_text]");
                     monitor_step(epoch + 1, k + 1, use_n, st);

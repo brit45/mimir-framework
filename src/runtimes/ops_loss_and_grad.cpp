@@ -256,44 +256,61 @@ static void dct2d_ortho_hwc(
     out.assign(n, 0.0f);
     if (in.size() < n) return;
 
+    const float* __restrict__ in_ptr = in.data();
+    float* __restrict__ out_ptr = out.data();
+
     const auto& cw = get_dct1d_cache(W);
     const auto& ch = get_dct1d_cache(H);
+    const float* __restrict__ cw_cos = cw.cos_nk.data();
+    const float* __restrict__ cw_alpha = cw.alpha_k.data();
+    const float* __restrict__ ch_cos = ch.cos_nk.data();
+    const float* __restrict__ ch_alpha = ch.alpha_k.data();
 
-    std::vector<float> tmp_row(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
-    std::vector<float> tmp_col(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
+    const size_t n2 = static_cast<size_t>(W) * static_cast<size_t>(H);
+    static thread_local std::vector<float> tmp_row;
+    static thread_local std::vector<float> tmp_col;
+    tmp_row.resize(n2);
+    tmp_col.resize(n2);
+    float* __restrict__ tmp_row_ptr = tmp_row.data();
+    float* __restrict__ tmp_col_ptr = tmp_col.data();
+
+    const size_t stride_c = static_cast<size_t>(C);
+    const size_t stride_wc = static_cast<size_t>(W) * stride_c;
+    const size_t stride_w = static_cast<size_t>(W);
+    const size_t stride_h = static_cast<size_t>(H);
 
     for (int cc = 0; cc < C; ++cc) {
         for (int yy = 0; yy < H; ++yy) {
             for (int kk = 0; kk < W; ++kk) {
                 double sum = 0.0;
-                const float alpha = cw.alpha_k[static_cast<size_t>(kk)];
+                const float alpha = cw_alpha[static_cast<size_t>(kk)];
                 for (int xx = 0; xx < W; ++xx) {
-                    const size_t iidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                    const float x = in[iidx];
-                    const float co = cw.cos_nk[static_cast<size_t>(xx) * static_cast<size_t>(W) + static_cast<size_t>(kk)];
+                    const size_t iidx = static_cast<size_t>(yy) * stride_wc + static_cast<size_t>(xx) * stride_c + static_cast<size_t>(cc);
+                    const float x = in_ptr[iidx];
+                    const float co = cw_cos[static_cast<size_t>(xx) * stride_w + static_cast<size_t>(kk)];
                     sum += static_cast<double>(x) * static_cast<double>(co);
                 }
-                tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kk)] = static_cast<float>(static_cast<double>(alpha) * sum);
+                tmp_row_ptr[static_cast<size_t>(yy) * stride_w + static_cast<size_t>(kk)] = static_cast<float>(static_cast<double>(alpha) * sum);
             }
         }
 
         for (int kkx = 0; kkx < W; ++kkx) {
             for (int kky = 0; kky < H; ++kky) {
                 double sum = 0.0;
-                const float alpha = ch.alpha_k[static_cast<size_t>(kky)];
+                const float alpha = ch_alpha[static_cast<size_t>(kky)];
                 for (int yy = 0; yy < H; ++yy) {
-                    const float v = tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kkx)];
-                    const float co = ch.cos_nk[static_cast<size_t>(yy) * static_cast<size_t>(H) + static_cast<size_t>(kky)];
+                    const float v = tmp_row_ptr[static_cast<size_t>(yy) * stride_w + static_cast<size_t>(kkx)];
+                    const float co = ch_cos[static_cast<size_t>(yy) * stride_h + static_cast<size_t>(kky)];
                     sum += static_cast<double>(v) * static_cast<double>(co);
                 }
-                tmp_col[static_cast<size_t>(kky) * static_cast<size_t>(W) + static_cast<size_t>(kkx)] = static_cast<float>(static_cast<double>(alpha) * sum);
+                tmp_col_ptr[static_cast<size_t>(kky) * stride_w + static_cast<size_t>(kkx)] = static_cast<float>(static_cast<double>(alpha) * sum);
             }
         }
 
         for (int yy = 0; yy < H; ++yy) {
             for (int xx = 0; xx < W; ++xx) {
-                const size_t oidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                out[oidx] = tmp_col[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)];
+                const size_t oidx = static_cast<size_t>(yy) * stride_wc + static_cast<size_t>(xx) * stride_c + static_cast<size_t>(cc);
+                out_ptr[oidx] = tmp_col_ptr[static_cast<size_t>(yy) * stride_w + static_cast<size_t>(xx)];
             }
         }
     }
@@ -313,17 +330,34 @@ static void idct2d_ortho_hwc(
     out.assign(n, 0.0f);
     if (in.size() < n) return;
 
+    const float* __restrict__ in_ptr = in.data();
+    float* __restrict__ out_ptr = out.data();
+
     const auto& cw = get_dct1d_cache(W);
     const auto& ch = get_dct1d_cache(H);
+    const float* __restrict__ cw_cos = cw.cos_nk.data();
+    const float* __restrict__ cw_alpha = cw.alpha_k.data();
+    const float* __restrict__ ch_cos = ch.cos_nk.data();
+    const float* __restrict__ ch_alpha = ch.alpha_k.data();
 
-    std::vector<float> tmp_row(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
-    std::vector<float> tmp_col(static_cast<size_t>(W) * static_cast<size_t>(H), 0.0f);
+    const size_t n2 = static_cast<size_t>(W) * static_cast<size_t>(H);
+    static thread_local std::vector<float> tmp_row;
+    static thread_local std::vector<float> tmp_col;
+    tmp_row.resize(n2);
+    tmp_col.resize(n2);
+    float* __restrict__ tmp_row_ptr = tmp_row.data();
+    float* __restrict__ tmp_col_ptr = tmp_col.data();
+
+    const size_t stride_c = static_cast<size_t>(C);
+    const size_t stride_wc = static_cast<size_t>(W) * stride_c;
+    const size_t stride_w = static_cast<size_t>(W);
+    const size_t stride_h = static_cast<size_t>(H);
 
     for (int cc = 0; cc < C; ++cc) {
         for (int yy = 0; yy < H; ++yy) {
             for (int xx = 0; xx < W; ++xx) {
-                const size_t iidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                tmp_col[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)] = in[iidx];
+                const size_t iidx = static_cast<size_t>(yy) * stride_wc + static_cast<size_t>(xx) * stride_c + static_cast<size_t>(cc);
+                tmp_col_ptr[static_cast<size_t>(yy) * stride_w + static_cast<size_t>(xx)] = in_ptr[iidx];
             }
         }
 
@@ -331,12 +365,12 @@ static void idct2d_ortho_hwc(
             for (int yy = 0; yy < H; ++yy) {
                 double sum = 0.0;
                 for (int kky = 0; kky < H; ++kky) {
-                    const float alpha = ch.alpha_k[static_cast<size_t>(kky)];
-                    const float v = tmp_col[static_cast<size_t>(kky) * static_cast<size_t>(W) + static_cast<size_t>(kkx)];
-                    const float co = ch.cos_nk[static_cast<size_t>(yy) * static_cast<size_t>(H) + static_cast<size_t>(kky)];
+                    const float alpha = ch_alpha[static_cast<size_t>(kky)];
+                    const float v = tmp_col_ptr[static_cast<size_t>(kky) * stride_w + static_cast<size_t>(kkx)];
+                    const float co = ch_cos[static_cast<size_t>(yy) * stride_h + static_cast<size_t>(kky)];
                     sum += static_cast<double>(alpha) * static_cast<double>(v) * static_cast<double>(co);
                 }
-                tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kkx)] = static_cast<float>(sum);
+                tmp_row_ptr[static_cast<size_t>(yy) * stride_w + static_cast<size_t>(kkx)] = static_cast<float>(sum);
             }
         }
 
@@ -344,13 +378,13 @@ static void idct2d_ortho_hwc(
             for (int xx = 0; xx < W; ++xx) {
                 double sum = 0.0;
                 for (int kk = 0; kk < W; ++kk) {
-                    const float alpha = cw.alpha_k[static_cast<size_t>(kk)];
-                    const float v = tmp_row[static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(kk)];
-                    const float co = cw.cos_nk[static_cast<size_t>(xx) * static_cast<size_t>(W) + static_cast<size_t>(kk)];
+                    const float alpha = cw_alpha[static_cast<size_t>(kk)];
+                    const float v = tmp_row_ptr[static_cast<size_t>(yy) * stride_w + static_cast<size_t>(kk)];
+                    const float co = cw_cos[static_cast<size_t>(xx) * stride_w + static_cast<size_t>(kk)];
                     sum += static_cast<double>(alpha) * static_cast<double>(v) * static_cast<double>(co);
                 }
-                const size_t oidx = (static_cast<size_t>(yy) * static_cast<size_t>(W) + static_cast<size_t>(xx)) * static_cast<size_t>(C) + static_cast<size_t>(cc);
-                out[oidx] = static_cast<float>(sum);
+                const size_t oidx = static_cast<size_t>(yy) * stride_wc + static_cast<size_t>(xx) * stride_c + static_cast<size_t>(cc);
+                out_ptr[oidx] = static_cast<float>(sum);
             }
         }
     }
@@ -371,19 +405,23 @@ LossWithGrad spectral_dct_l1_hwc(
     out.grad.assign(n, 0.0f);
     if (pred.size() < n || target.size() < n) return out;
 
-    std::vector<float> coeff_p;
-    std::vector<float> coeff_t;
+    static thread_local std::vector<float> coeff_p;
+    static thread_local std::vector<float> coeff_t;
     dct2d_ortho_hwc(pred, W, H, C, coeff_p);
     dct2d_ortho_hwc(target, W, H, C, coeff_t);
 
-    std::vector<float> grad_coeff(n, 0.0f);
+    static thread_local std::vector<float> grad_coeff;
+    grad_coeff.assign(n, 0.0f);
+    const float* __restrict__ coeff_p_ptr = coeff_p.data();
+    const float* __restrict__ coeff_t_ptr = coeff_t.data();
+    float* __restrict__ grad_coeff_ptr = grad_coeff.data();
     const double inv_n = 1.0 / static_cast<double>(std::max<size_t>(1, n));
     double sum_abs = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        const float d = coeff_p[i] - coeff_t[i];
+        const float d = coeff_p_ptr[i] - coeff_t_ptr[i];
         sum_abs += static_cast<double>(std::abs(d));
         const float s = (d > 0.0f) ? 1.0f : (d < 0.0f ? -1.0f : 0.0f);
-        grad_coeff[i] = static_cast<float>(inv_n) * s;
+        grad_coeff_ptr[i] = static_cast<float>(inv_n) * s;
     }
     out.loss = sum_abs * inv_n;
 

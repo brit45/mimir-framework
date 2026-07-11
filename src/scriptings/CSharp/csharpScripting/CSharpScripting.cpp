@@ -28,7 +28,11 @@ static bool commandExists(const char* cmd) {
 }
 
 static void setEnvVar(const std::string& k, const std::string& v) {
+#ifdef _WIN32
+    _putenv_s(k.c_str(), v.c_str());
+#else
     setenv(k.c_str(), v.c_str(), 1);
+#endif
 }
 
 

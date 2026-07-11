@@ -45,7 +45,7 @@ void main() {
 
     for (uint ic = 0; ic < pc.in_c; ++ic) {
         for (uint kh = 0; kh < pc.k; ++kh) {
-            const int ih_num = int(oh) + int(pc.pad) - int(kh);
+            const int ih_num = int(oh) + int(pc.pad) - int(kh * pc.dilation);
             if (ih_num < 0) {
                 continue;
             }
@@ -58,7 +58,7 @@ void main() {
             }
 
             for (uint kw = 0; kw < pc.k; ++kw) {
-                const int iw_num = int(ow) + int(pc.pad) - int(kw);
+                const int iw_num = int(ow) + int(pc.pad) - int(kw * pc.dilation);
                 if (iw_num < 0) {
                     continue;
                 }

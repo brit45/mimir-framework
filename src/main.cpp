@@ -1,9 +1,15 @@
 #include "Model.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "scriptings/Lua/luaScripting/LuaScripting.hpp"
+#ifdef MIMIR_ENABLE_SCRIPTING_RUST
 #include "scriptings/Rust/rustScripting/RustScripting.hpp"
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_CSHARP
 #include "scriptings/CSharp/csharpScripting/CSharpScripting.hpp"
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_JS
 #include "scriptings/JavaScript/jsScripting/JSScripting.hpp"
+#endif
 #include "AsyncMonitor.hpp"
 #include "Helpers.hpp"
 #include "HtopDisplay.hpp"
@@ -155,19 +161,32 @@ void printUsage(const char *prog)
 {
     std::cout << "Usage: " << prog << " [OPTIONS]\n";
     std::cout << "\nOptions:\n";
+    std::cout << "  --version, -v           Afficher la version et quitter\n";
     std::cout << "  --lua <script.lua>       Exécuter un script Lua\n";
+#ifdef MIMIR_ENABLE_SCRIPTING_JS
     std::cout << "  --js <script.js>         Exécuter un script JavaScript (Node.js)\n";
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_CSHARP
     std::cout << "  --csharp <script.csx>    Exécuter un script C# (dotnet-script/csi)\n";
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_RUST
     std::cout << "  --rust <script.rs>       Exécuter un script Rust (rust-script)\n";
+#endif
     std::cout << "  --config <config.json>   Charger et entraîner depuis config\n";
     std::cout << "  --conf <config.json>     Charger une conf et exécuter lua.scripts\n";
     std::cout << "  --override <path=value>  Override (répétable) appliqué à la config du modèle\n";
     std::cout << "  --help                   Afficher cette aide\n";
     std::cout << "\nExamples:\n";
     std::cout << "  " << prog << " --lua scripts/test_lua_api.lua\n";
+#ifdef MIMIR_ENABLE_SCRIPTING_JS
     std::cout << "  " << prog << " --js scripts/examples/example.js\n";
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_CSHARP
     std::cout << "  " << prog << " --csharp scripts/examples/example.csx\n";
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_RUST
     std::cout << "  " << prog << " --rust scripts/examples/example.rs\n";
+#endif
     std::cout << "  " << prog << " --config config.json\n";
     std::cout << "  " << prog << " --conf config.json\n";
     std::cout << "  " << prog << " --config config.json --override max_vocab=64000\n";
@@ -176,6 +195,14 @@ void printUsage(const char *prog)
 
 int main(int argc, char **argv)
 {
+    for (int i = 1; i < argc; ++i) {
+        const std::string opt = argv[i];
+        if (opt == "--version" || opt == "-v") {
+            std::cout << Mimir::Serialization::get_mimir_version() << "\n";
+            return 0;
+        }
+    }
+
     {
         const std::string ver = Mimir::Serialization::get_mimir_version();
         // Largeur interne de la boîte = 40 chars affichage.
@@ -224,6 +251,14 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    auto waitForLuaVizCloseIfOpen = []() {
+        auto& ctx = LuaContext::getInstance();
+        if (ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
+            std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle requise pour quitter le script...\n";
+            ctx.asyncMonitor->waitForVizClose();
+        }
+    };
+
     // Modes scripting directs: on passe tous les args après le script au runtime.
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--help") {
@@ -231,7 +266,37 @@ int main(int argc, char **argv)
             return 0;
         }
         const std::string opt = argv[i];
-        if ((opt == "--lua" || opt == "--js" || opt == "--csharp" || opt == "--rust") && i + 1 < argc) {
+#ifndef MIMIR_ENABLE_SCRIPTING_JS
+        if (opt == "--js") {
+            std::cerr << "❌ Le bridge JavaScript n'est pas compilé dans ce binaire (ENABLE_SCRIPTING_JS=OFF)\n";
+            return 1;
+        }
+#endif
+#ifndef MIMIR_ENABLE_SCRIPTING_CSHARP
+        if (opt == "--csharp") {
+            std::cerr << "❌ Le bridge C# n'est pas compilé dans ce binaire (ENABLE_SCRIPTING_CSHARP=OFF)\n";
+            return 1;
+        }
+#endif
+#ifndef MIMIR_ENABLE_SCRIPTING_RUST
+        if (opt == "--rust") {
+            std::cerr << "❌ Le bridge Rust n'est pas compilé dans ce binaire (ENABLE_SCRIPTING_RUST=OFF)\n";
+            return 1;
+        }
+#endif
+
+        bool is_script_mode = (opt == "--lua");
+    #ifdef MIMIR_ENABLE_SCRIPTING_JS
+        is_script_mode = is_script_mode || (opt == "--js");
+    #endif
+    #ifdef MIMIR_ENABLE_SCRIPTING_CSHARP
+        is_script_mode = is_script_mode || (opt == "--csharp");
+    #endif
+    #ifdef MIMIR_ENABLE_SCRIPTING_RUST
+        is_script_mode = is_script_mode || (opt == "--rust");
+    #endif
+
+        if (is_script_mode && i + 1 < argc) {
             const std::string script_path = argv[++i];
             const std::string lang =
                 (opt == "--lua") ? "Lua" :
@@ -260,19 +325,15 @@ int main(int argc, char **argv)
                         return 1;
                     }
 
-                    // UX: en ponyxl_ddpm, garder la Viz ouverte après la fin du script.
-                    {
-                        auto& ctx = LuaContext::getInstance();
-                        if (ctx.modelType == "ponyxl_ddpm" && ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
-                            std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
-                            ctx.asyncMonitor->waitForVizClose();
-                        }
-                    }
+                    // UX: quand la Viz est active, ne pas fermer tant que l'utilisateur
+                    // n'a pas explicitement fermé la fenêtre.
+                    waitForLuaVizCloseIfOpen();
 
                     {
                         auto& ctx = LuaContext::getInstance();
                         ctx.resetRuntimeState();
                     }
+#ifdef MIMIR_ENABLE_SCRIPTING_JS
                 } else if (opt == "--js") {
                     JSScripting js;
                     js.registerAPI();
@@ -282,6 +343,8 @@ int main(int argc, char **argv)
                         return 1;
                     }
                     JSContext::getInstance().resetRuntimeState();
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_CSHARP
                 } else if (opt == "--csharp") {
                     CSharpScripting cs;
                     cs.registerAPI();
@@ -291,6 +354,8 @@ int main(int argc, char **argv)
                         return 1;
                     }
                     CSharpContext::getInstance().resetRuntimeState();
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_RUST
                 } else if (opt == "--rust") {
                     RustScripting rs;
                     rs.registerAPI();
@@ -300,6 +365,7 @@ int main(int argc, char **argv)
                         return 1;
                     }
                     RustContext::getInstance().resetRuntimeState();
+#endif
                 }
 
                 std::cerr << "\n✅ Script " << lang << " exécuté avec succès\n";
@@ -326,7 +392,17 @@ int main(int argc, char **argv)
             overrides.emplace_back(argv[++i]);
         } else if (a == "--help") {
             // déjà géré plus haut
-        } else if (a == "--lua" || a == "--js" || a == "--csharp" || a == "--rust") {
+        } else if (a == "--lua"
+    #ifdef MIMIR_ENABLE_SCRIPTING_JS
+               || a == "--js"
+    #endif
+    #ifdef MIMIR_ENABLE_SCRIPTING_CSHARP
+               || a == "--csharp"
+    #endif
+    #ifdef MIMIR_ENABLE_SCRIPTING_RUST
+               || a == "--rust"
+    #endif
+              ) {
             // déjà géré plus haut
             ++i;
         } else {
@@ -442,18 +518,13 @@ int main(int argc, char **argv)
                     std::cerr << "❌ Échec exécution Lua: " << script_path << "\n";
                     return 1;
                 }
+
+                // Même comportement qu'en --lua direct: si la Viz est ouverte,
+                // bloquer jusqu'à fermeture explicite par l'utilisateur.
+                waitForLuaVizCloseIfOpen();
             } catch (const std::exception& e) {
                 std::cerr << "❌ Erreur Lua: " << e.what() << "\n";
                 return 1;
-            }
-        }
-
-        // UX: si un script a ouvert la Viz (ponyxl_ddpm), laisser la fenêtre active.
-        {
-            auto& ctx = LuaContext::getInstance();
-            if (ctx.modelType == "ponyxl_ddpm" && ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
-                std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle pour quitter...\n";
-                ctx.asyncMonitor->waitForVizClose();
             }
         }
 

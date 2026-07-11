@@ -1,5 +1,6 @@
 {
   "last": {
+    "heatmap_palette": 1,
     "panels": [
       {
         "allow_drag": true,
@@ -13,11 +14,11 @@
       },
       {
         "allow_drag": true,
-        "h": 659.9998779296875,
+        "h": 666.9998779296875,
         "id": 1,
         "title": "Blocks / Layers",
         "visible": true,
-        "w": 1250.0001220703125,
+        "w": 1252.0001220703125,
         "x": 6.99993896484375,
         "y": 303.0
       },
@@ -33,23 +34,23 @@
       },
       {
         "allow_drag": true,
-        "h": 140.0,
+        "h": 290.0000305175781,
         "id": 3,
         "title": "Training",
         "visible": true,
-        "w": 520.0,
+        "w": 516.0,
         "x": 1268.0,
         "y": 5.0
       },
       {
         "allow_drag": true,
-        "h": 877.9999389648438,
+        "h": 669.0,
         "id": 4,
         "title": "Metrics",
         "visible": true,
-        "w": 524.0,
-        "x": 1264.0,
-        "y": 85.0
+        "w": 529.0,
+        "x": 1259.0,
+        "y": 301.0001220703125
       },
       {
         "allow_drag": true,
@@ -356,6 +357,7 @@
       "window_width": 1792
     },
     "4": {
+      "heatmap_palette": 1,
       "panels": [
         {
           "allow_drag": true,
@@ -369,11 +371,11 @@
         },
         {
           "allow_drag": true,
-          "h": 659.9998779296875,
+          "h": 666.9998779296875,
           "id": 1,
           "title": "Blocks / Layers",
           "visible": true,
-          "w": 1250.0001220703125,
+          "w": 1252.0001220703125,
           "x": 6.99993896484375,
           "y": 303.0
         },
@@ -393,19 +395,19 @@
           "id": 3,
           "title": "Training",
           "visible": true,
-          "w": 520.0,
+          "w": 519.0,
           "x": 1268.0,
           "y": 5.0
         },
         {
           "allow_drag": true,
-          "h": 877.9999389648438,
+          "h": 810.0001220703125,
           "id": 4,
           "title": "Metrics",
           "visible": true,
-          "w": 524.0,
+          "w": 521.0,
           "x": 1267.0,
-          "y": 85.0
+          "y": 152.00006103515625
         },
         {
           "allow_drag": true,
@@ -783,12 +785,4 @@
     }
   },
   "version": 1
-,
-  "showgraph": {
-    "n_dataset": "4634",
-    "validate_every_steps": "100",
-    "validate_items": "32"
-  }
-,
-  "browser": "x-www-browser"
 }

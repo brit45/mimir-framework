@@ -29,8 +29,10 @@
 -- HELPERS FICHIERS / SYSTÈME
 -- ══════════════════════════════════════════════════════════════
 
+local FS = dofile("scripts/modules/fs.lua")
+
 local function file_exists(p)
-  local f = io.open(p, "r"); if f then f:close() end; return f ~= nil
+  return FS.file_exists(p)
 end
 
 -- ══════════════════════════════════════════════════════════════
@@ -40,15 +42,13 @@ end
 -- Retourne la liste triée des fichiers *part[0-9]+.csv dans un dossier,
 -- ou nil si aucun trouvé.
 local function find_part_csvs(dir)
-  local h = io.popen('ls -1 "' .. dir .. '" 2>/dev/null')
-  if not h then return nil end
+  local names = FS.list_dir(dir)
   local found = {}
-  for name in h:lines() do
+  for _, name in ipairs(names) do
     if name:match("part%d+%.csv$") then
-      found[#found+1] = dir .. "/" .. name
+      found[#found+1] = FS.join(dir, name)
     end
   end
-  h:close()
   if #found == 0 then return nil end
   table.sort(found)   -- tri lexicographique = tri numérique sur part0..part9
   return found
@@ -118,22 +118,19 @@ local function write_file(p, s)
 end
 
 local function is_dir(p)
-  local h = io.popen('test -d "' .. p .. '" && echo 1 || echo 0 2>/dev/null')
-  if not h then return false end
-  local r = h:read("*l"); h:close(); return r == "1"
+  return FS.is_dir(p)
 end
 
 local function ls(dir)
-  local t = {}
-  local h = io.popen('ls -1 "' .. dir .. '" 2>/dev/null')
-  if h then for l in h:lines() do t[#t+1] = l end; h:close() end
-  return t
+  return FS.list_dir(dir)
 end
 
 local function file_mtime(p)
-  local h = io.popen('stat -c %Y "' .. p .. '" 2>/dev/null')
-  if not h then return 0 end
-  local r = h:read("*l"); h:close(); return tonumber(r) or 0
+  local f = io.open(p, "rb")
+  if not f then return 0 end
+  local r = f:seek("end")
+  f:close()
+  return tonumber(r) or 0
 end
 
 -- mtime combinée d'une liste de fichiers (max)
@@ -365,7 +362,7 @@ open_browser = function(path)
     url = path
   else
     local abs = path:sub(1,1) == "/" and path
-                or ((io.popen("pwd"):read("*l") or ".") .. "/" .. path)
+                or ((os.getenv("PWD") or ".") .. "/" .. path)
     url = "file://" .. abs
   end
   local settings = load_ui_settings()
@@ -1666,11 +1663,11 @@ local function main()
         opts.csv_dir, #parts))
     else
       -- Fallback : tous les .csv du dossier
-      local h = io.popen('ls -1 "' .. opts.csv_dir .. '"/*.csv 2>/dev/null')
       csv_paths = {}
-      if h then
-        for l in h:lines() do csv_paths[#csv_paths+1] = l end
-        h:close()
+      for _, name in ipairs(FS.list_dir(opts.csv_dir)) do
+        if name:match("%.csv$") then
+          csv_paths[#csv_paths + 1] = FS.join(opts.csv_dir, name)
+        end
       end
       if #csv_paths == 0 then
         io.stderr:write("❌ Aucun CSV trouvé dans : " .. opts.csv_dir .. "\n")

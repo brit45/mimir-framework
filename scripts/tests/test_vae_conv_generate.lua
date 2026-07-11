@@ -31,6 +31,7 @@
 
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
+local FS = dofile("scripts/modules/fs.lua")
 
 local function logx(msg)
   local l = rawget(_G, "log")
@@ -79,14 +80,11 @@ local function clamp(x, a, b)
 end
 
 local function mkdir_p(dir)
-  if dir == nil or dir == "" then return end
-  -- best-effort
-  os.execute("mkdir -p '" .. tostring(dir):gsub("'", "'\\''") .. "' 2>/dev/null")
+  FS.mkdir_p(dir)
 end
 
 local function dirname(path)
-  path = tostring(path or "")
-  local p = path:match("^(.*)/[^/]+$")
+  local p = FS.dirname(path)
   if p == nil or p == "" then return "." end
   return p
 end

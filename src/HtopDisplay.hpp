@@ -14,8 +14,21 @@
 #include <filesystem>
 #include <chrono>
 #include <algorithm>
+#if defined(_WIN32)
+#include <io.h>
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+struct winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+};
+#else
 #include <sys/ioctl.h>
 #include <unistd.h>
+#endif
 
 // Petit streambuf qui écrit directement dans un file descriptor (ex: /dev/tty).
 // Objectif: permettre à l'UI d'écrire sur le terminal même si stdout/stderr sont redirigés.
@@ -56,7 +69,11 @@ private:
         const char* data = pbase();
         std::ptrdiff_t remaining = n;
         while (remaining > 0) {
+#if defined(_WIN32)
+            const int written = _write(fd_, data, static_cast<unsigned int>(remaining));
+#else
             const ssize_t written = ::write(fd_, data, static_cast<size_t>(remaining));
+#endif
             if (written < 0) {
                 if (errno == EINTR) continue;
                 break;
@@ -307,9 +324,14 @@ public:
 
     void getTerminalSize()
     {
+#if defined(_WIN32)
+        width = 120;
+        height = 40;
+#else
         ioctl(out_fd_, TIOCGWINSZ, &terminal_size);
         width = terminal_size.ws_col;
         height = terminal_size.ws_row;
+#endif
     }
 
     void enterAltScreen()
@@ -708,8 +730,15 @@ public:
 
         moveCursor(row++, 4);
         clearLine();
-          out() << "MSE (0.1×)       " << progressBar(std::min(stats.mse_loss * 100, 100.0f), 25, false)
+                {
+                    std::string recon_metric_label = "RECON";
+                    if (!stats.recon_loss_type.empty()) {
+                            recon_metric_label = stats.recon_loss_type;
+                    }
+                    out() << std::left << std::setw(18) << (recon_metric_label + " (0.1×)")
+                            << progressBar(std::min(stats.mse_loss * 100, 100.0f), 25, false)
               << " " << stats.mse_loss;
+                }
 
         moveCursor(row++, 4);
         clearLine();

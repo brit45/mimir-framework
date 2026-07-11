@@ -2,6 +2,7 @@
 ---@diagnostic disable: undefined-field, need-check-nil, inject-field
 
 local Args = dofile("scripts/modules/args.lua")
+local FS = dofile("scripts/modules/fs.lua")
 local opts = Args.parse(arg) or {}
 
 local function log(msg)
@@ -42,21 +43,12 @@ local function apply_dtype(cfg)
   return true
 end
 
-local function shell_quote(s)
-  s = tostring(s or "")
-  return "'" .. s:gsub("'", "'\"'\"'") .. "'"
-end
-
 local function mkdir_p(path)
-  local dir = tostring(path or "")
-  if dir == "" then return end
-  os.execute("mkdir -p " .. shell_quote(dir) .. " >/dev/null 2>&1")
+  FS.mkdir_p(path)
 end
 
 local function dirname(path)
-  path = tostring(path or "")
-  local d = path:match("^(.*)/[^/]*$")
-  return d
+  return FS.dirname(path)
 end
 
 local function write_ppm_rgb_u8(path, pixels, w, h)

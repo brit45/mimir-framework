@@ -26,6 +26,9 @@
 #ifdef ENABLE_ROCM
 #  include "runtimes/rocm/RocmRuntime.hpp"
 #endif
+#ifdef ENABLE_VULKAN
+#  include "runtimes/vulkan/VulkanRuntime.hpp"
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers repris du pattern de test_layers_all_types.cpp
@@ -225,6 +228,80 @@ int main() {
         }
     }
 #endif  // ENABLE_ROCM
+
+    // =========================================================================
+    // 8. GPU Vulkan – cas 1 via linearForward() direct
+    // =========================================================================
+#ifdef ENABLE_VULKAN
+    {
+        VulkanRuntime rt;
+        RuntimeConfig cfg;
+        cfg.linear_enabled = true;
+        cfg.linear_min_ops = 0;
+        if (!rt.initialize(cfg)) {
+            std::cout << "SKIP: no Vulkan compute device\n";
+        } else {
+            const float W[4] = {1.f, 2.f,  3.f, 4.f};
+            const float x[2] = {1.f, 0.f};
+            float y[2]       = {0.f, 0.f};
+            const bool ok = rt.linearForward(x, W, nullptr, y, /*batch=*/1, 2, 2);
+            TASSERT_TRUE(ok);
+            TASSERT_NEAR(y[0], 1.f, 1e-4f);
+            TASSERT_NEAR(y[1], 3.f, 1e-4f);
+        }
+    }
+
+    // GPU Vulkan : cas avec biais
+    {
+        VulkanRuntime rt;
+        RuntimeConfig cfg;
+        cfg.linear_enabled = true;
+        cfg.linear_min_ops = 0;
+        if (rt.initialize(cfg)) {
+            const float W[4]  = {1.f, 0.f,  0.f, 1.f};
+            const float b[2]  = {1.f, -1.f};
+            const float x[2]  = {5.f, -3.f};
+            float y[2]        = {0.f, 0.f};
+            const bool ok = rt.linearForward(x, W, b, y, 1, 2, 2);
+            TASSERT_TRUE(ok);
+            TASSERT_NEAR(y[0],  6.f, 1e-4f);
+            TASSERT_NEAR(y[1], -4.f, 1e-4f);
+        }
+    }
+
+    // GPU Vulkan : batch = 2 via forwardLayer
+    {
+        VulkanRuntime rt;
+        RuntimeConfig cfg;
+        cfg.linear_enabled = true;
+        cfg.linear_min_ops = 0;
+        if (rt.initialize(cfg)) {
+            Model m;
+            m.push("x0", "Linear", 0);
+            auto& L = m.getMutableLayers()[0];
+            L.in_features  = 2;
+            L.out_features = 2;
+            L.use_bias     = false;
+            L.params_count = 4;
+            m.allocateParams();
+            float* w = L.getWeights();
+            TASSERT_TRUE(w != nullptr);
+            w[0] = 2.f; w[1] = 0.f;
+            w[2] = 0.f; w[3] = 3.f;
+
+            const std::vector<float> x = {1.f, 1.f,  2.f, 2.f};
+            const std::vector<const std::vector<float>*> inputs = {&x};
+            std::vector<std::vector<float>> outputs;
+            const bool ok = rt.forwardLayer(inputs, outputs, L, false);
+            TASSERT_TRUE(ok);
+            TASSERT_TRUE(outputs.size() == 1 && outputs[0].size() == 4);
+            TASSERT_NEAR(outputs[0][0], 2.f, 1e-4f);
+            TASSERT_NEAR(outputs[0][1], 3.f, 1e-4f);
+            TASSERT_NEAR(outputs[0][2], 4.f, 1e-4f);
+            TASSERT_NEAR(outputs[0][3], 6.f, 1e-4f);
+        }
+    }
+#endif  // ENABLE_VULKAN
 
     return 0;
 }

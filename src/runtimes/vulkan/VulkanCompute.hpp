@@ -36,11 +36,11 @@ static inline std::optional<std::string> find_shader_path_linear() {
     const char* candidates[] = {
         "./bin/shaders/linear_forward.comp.spv",
         "./shaders/linear_forward.comp.spv",
+        "../bin/shaders/linear_forward.comp.spv",
+        "../shaders/linear_forward.comp.spv",
         "./build/shaders/linear_forward.comp.spv",
         "./build_static/shaders/linear_forward.comp.spv",
         "./build_sfml/shaders/linear_forward.comp.spv",
-        "./shaders/linear_forward.comp.spv",
-        "./bin/shaders/linear_forward.comp.spv",
     };
     for (const char* c : candidates) {
         if (fs::exists(c)) return std::string(c);
@@ -52,6 +52,8 @@ static inline std::optional<std::string> find_shader_path_add() {
     const char* candidates[] = {
         "./bin/shaders/add_forward.comp.spv",
         "./shaders/add_forward.comp.spv",
+        "../bin/shaders/add_forward.comp.spv",
+        "../shaders/add_forward.comp.spv",
         "./build/shaders/add_forward.comp.spv",
         "./build_static/shaders/add_forward.comp.spv",
         "./build_sfml/shaders/add_forward.comp.spv",
@@ -66,6 +68,8 @@ static inline std::optional<std::string> find_shader_path_mul() {
     const char* candidates[] = {
         "./bin/shaders/mul_forward.comp.spv",
         "./shaders/mul_forward.comp.spv",
+        "../bin/shaders/mul_forward.comp.spv",
+        "../shaders/mul_forward.comp.spv",
         "./build/shaders/mul_forward.comp.spv",
         "./build_static/shaders/mul_forward.comp.spv",
         "./build_sfml/shaders/mul_forward.comp.spv",
@@ -80,6 +84,8 @@ static inline std::optional<std::string> find_shader_path_relu() {
     const char* candidates[] = {
         "./bin/shaders/relu_forward.comp.spv",
         "./shaders/relu_forward.comp.spv",
+        "../bin/shaders/relu_forward.comp.spv",
+        "../shaders/relu_forward.comp.spv",
         "./build/shaders/relu_forward.comp.spv",
         "./build_static/shaders/relu_forward.comp.spv",
         "./build_sfml/shaders/relu_forward.comp.spv",
@@ -94,6 +100,8 @@ static inline std::optional<std::string> find_shader_path_silu() {
     const char* candidates[] = {
         "./bin/shaders/silu_forward.comp.spv",
         "./shaders/silu_forward.comp.spv",
+        "../bin/shaders/silu_forward.comp.spv",
+        "../shaders/silu_forward.comp.spv",
         "./build/shaders/silu_forward.comp.spv",
         "./build_static/shaders/silu_forward.comp.spv",
         "./build_sfml/shaders/silu_forward.comp.spv",
@@ -108,6 +116,8 @@ static inline std::optional<std::string> find_shader_path_gelu() {
     const char* candidates[] = {
         "./bin/shaders/gelu_forward.comp.spv",
         "./shaders/gelu_forward.comp.spv",
+        "../bin/shaders/gelu_forward.comp.spv",
+        "../shaders/gelu_forward.comp.spv",
         "./build/shaders/gelu_forward.comp.spv",
         "./build_static/shaders/gelu_forward.comp.spv",
         "./build_sfml/shaders/gelu_forward.comp.spv",
@@ -122,6 +132,8 @@ static inline std::optional<std::string> find_shader_path_sigmoid() {
     const char* candidates[] = {
         "./bin/shaders/sigmoid_forward.comp.spv",
         "./shaders/sigmoid_forward.comp.spv",
+        "../bin/shaders/sigmoid_forward.comp.spv",
+        "../shaders/sigmoid_forward.comp.spv",
         "./build/shaders/sigmoid_forward.comp.spv",
         "./build_static/shaders/sigmoid_forward.comp.spv",
         "./build_sfml/shaders/sigmoid_forward.comp.spv",
@@ -136,6 +148,8 @@ static inline std::optional<std::string> find_shader_path_tanh() {
     const char* candidates[] = {
         "./bin/shaders/tanh_forward.comp.spv",
         "./shaders/tanh_forward.comp.spv",
+        "../bin/shaders/tanh_forward.comp.spv",
+        "../shaders/tanh_forward.comp.spv",
         "./build/shaders/tanh_forward.comp.spv",
         "./build_static/shaders/tanh_forward.comp.spv",
         "./build_sfml/shaders/tanh_forward.comp.spv",
@@ -150,6 +164,8 @@ static inline std::optional<std::string> find_shader_path_conv2d() {
     const char* candidates[] = {
         "./bin/shaders/conv2d_forward.comp.spv",
         "./shaders/conv2d_forward.comp.spv",
+        "../bin/shaders/conv2d_forward.comp.spv",
+        "../shaders/conv2d_forward.comp.spv",
         "./build/shaders/conv2d_forward.comp.spv",
         "./build_static/shaders/conv2d_forward.comp.spv",
         "./build_sfml/shaders/conv2d_forward.comp.spv",
@@ -164,6 +180,8 @@ static inline std::optional<std::string> find_shader_path_conv_transpose2d() {
     const char* candidates[] = {
         "./bin/shaders/conv_transpose2d_forward.comp.spv",
         "./shaders/conv_transpose2d_forward.comp.spv",
+        "../bin/shaders/conv_transpose2d_forward.comp.spv",
+        "../shaders/conv_transpose2d_forward.comp.spv",
         "./build/shaders/conv_transpose2d_forward.comp.spv",
         "./build_static/shaders/conv_transpose2d_forward.comp.spv",
         "./build_sfml/shaders/conv_transpose2d_forward.comp.spv",
@@ -736,16 +754,17 @@ public:
         int out_c,
         int k,
         int stride,
-        int pad
+        int pad,
+        int dilation
     ) {
         std::lock_guard<std::recursive_mutex> lk(linear_mutex_);
         if (!initialized) return false;
         if (!in || !w || !out) return false;
-        if (in_h <= 0 || in_w <= 0 || in_c <= 0 || out_c <= 0 || k <= 0 || stride <= 0) return false;
+        if (in_h <= 0 || in_w <= 0 || in_c <= 0 || out_c <= 0 || k <= 0 || stride <= 0 || dilation <= 0) return false;
         if (!ensureConvTranspose2dKernel()) return false;
 
-        const int out_h = (in_h - 1) * stride - 2 * pad + k;
-        const int out_w = (in_w - 1) * stride - 2 * pad + k;
+        const int out_h = (in_h - 1) * stride - 2 * pad + dilation * (k - 1) + 1;
+        const int out_w = (in_w - 1) * stride - 2 * pad + dilation * (k - 1) + 1;
         if (out_h <= 0 || out_w <= 0) return false;
 
         ConvDims dims{};
@@ -756,7 +775,7 @@ public:
         dims.k = static_cast<uint32_t>(k);
         dims.stride = static_cast<uint32_t>(stride);
         dims.pad = static_cast<uint32_t>(pad);
-        dims.dilation = 1u;
+        dims.dilation = static_cast<uint32_t>(dilation);
         dims.out_h = static_cast<uint32_t>(out_h);
         dims.out_w = static_cast<uint32_t>(out_w);
         dims.use_bias = (b != nullptr) ? 1u : 0u;

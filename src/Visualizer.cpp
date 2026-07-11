@@ -6,6 +6,8 @@
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include <unordered_map>
+#include <cctype>
 
 static const char* kVizUISettingsFile = "viz_ui_settings.json";
 
@@ -147,6 +149,98 @@ static std::string short_layer_type_name(const std::string& t) {
     return {};
 }
 
+static const char* heatmap_palette_name(int palette_id) {
+    switch (palette_id) {
+        case 1: return "TURBO";
+        case 2: return "INFERNO";
+        case 3: return "VIRIDIS";
+        default: return "CLASSIC";
+    }
+}
+
+static std::vector<uint8_t> colorize_gray_heatmap_rgb(const std::vector<uint8_t>& gray, int palette_id) {
+    std::vector<uint8_t> rgb;
+    rgb.resize(gray.size() * 3ULL);
+    for (size_t i = 0; i < gray.size(); ++i) {
+        const float t = static_cast<float>(gray[i]) / 255.0f;
+
+        float r = 0.0f, g = 0.0f, b = 0.0f;
+        if (palette_id == 1) {
+            // TURBO (approximation polynomiale compacte)
+            const float x = t;
+            r = 34.61f + x * (1172.33f + x * (-10793.56f + x * (33300.12f + x * (-38394.49f + x * 14825.05f))));
+            g = 23.31f + x * (557.33f + x * (1225.33f + x * (-3574.96f + x * (1073.77f + x * 707.56f))));
+            b = 27.2f + x * (3211.1f + x * (-15327.97f + x * (27814.0f + x * (-22569.18f + x * 6838.66f))));
+        } else if (palette_id == 2) {
+            // INFERNO (anchors)
+            const float c0r = 20.f,  c0g = 11.f,  c0b = 52.f;
+            const float c1r = 121.f, c1g = 28.f,  c1b = 109.f;
+            const float c2r = 219.f, c2g = 82.f,  c2b = 59.f;
+            const float c3r = 250.f, c3g = 229.f, c3b = 107.f;
+            if (t < 0.33f) {
+                const float u = t / 0.33f;
+                r = c0r + (c1r - c0r) * u;
+                g = c0g + (c1g - c0g) * u;
+                b = c0b + (c1b - c0b) * u;
+            } else if (t < 0.66f) {
+                const float u = (t - 0.33f) / 0.33f;
+                r = c1r + (c2r - c1r) * u;
+                g = c1g + (c2g - c1g) * u;
+                b = c1b + (c2b - c1b) * u;
+            } else {
+                const float u = (t - 0.66f) / 0.34f;
+                r = c2r + (c3r - c2r) * u;
+                g = c2g + (c3g - c2g) * u;
+                b = c2b + (c3b - c2b) * u;
+            }
+        } else if (palette_id == 3) {
+            // VIRIDIS (anchors)
+            const float c0r = 68.f,  c0g = 1.f,   c0b = 84.f;
+            const float c1r = 59.f,  c1g = 82.f,  c1b = 139.f;
+            const float c2r = 33.f,  c2g = 145.f, c2b = 140.f;
+            const float c3r = 253.f, c3g = 231.f, c3b = 37.f;
+            if (t < 0.33f) {
+                const float u = t / 0.33f;
+                r = c0r + (c1r - c0r) * u;
+                g = c0g + (c1g - c0g) * u;
+                b = c0b + (c1b - c0b) * u;
+            } else if (t < 0.66f) {
+                const float u = (t - 0.33f) / 0.33f;
+                r = c1r + (c2r - c1r) * u;
+                g = c1g + (c2g - c1g) * u;
+                b = c1b + (c2b - c1b) * u;
+            } else {
+                const float u = (t - 0.66f) / 0.34f;
+                r = c2r + (c3r - c2r) * u;
+                g = c2g + (c3g - c2g) * u;
+                b = c2b + (c3b - c2b) * u;
+            }
+        } else {
+            // CLASSIC: froid -> neutre -> chaud
+            const float neg_r = 70.0f,  neg_g = 120.0f, neg_b = 210.0f;
+            const float mid_r = 175.0f, mid_g = 175.0f, mid_b = 175.0f;
+            const float pos_r = 220.0f, pos_g = 65.0f,  pos_b = 65.0f;
+            if (t < 0.5f) {
+                const float u = t / 0.5f;
+                r = neg_r + (mid_r - neg_r) * u;
+                g = neg_g + (mid_g - neg_g) * u;
+                b = neg_b + (mid_b - neg_b) * u;
+            } else {
+                const float u = (t - 0.5f) / 0.5f;
+                r = mid_r + (pos_r - mid_r) * u;
+                g = mid_g + (pos_g - mid_g) * u;
+                b = mid_b + (pos_b - mid_b) * u;
+            }
+        }
+
+        const size_t base = i * 3ULL;
+        rgb[base + 0] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(r)), 0, 255));
+        rgb[base + 1] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(g)), 0, 255));
+        rgb[base + 2] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(b)), 0, 255));
+    }
+    return rgb;
+}
+
 static std::string strip_known_block_suffixes(const std::string& s) {
     if (s == "n" || s == "norm") return {};
     if (s == "bot_n") return "bot";
@@ -269,6 +363,12 @@ static std::string format_block_short_text(const std::vector<std::string>& tail_
 }
 
 static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
+    static thread_local std::unordered_map<std::string, ParsedVizLabel> label_cache;
+    const auto it = label_cache.find(label_raw);
+    if (it != label_cache.end()) {
+        return it->second;
+    }
+
     ParsedVizLabel out;
     out.raw = label_raw;
 
@@ -431,6 +531,11 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
             out.extra = bn;
         }
     }
+
+    if (label_cache.size() > 4096) {
+        label_cache.clear();
+    }
+    label_cache.emplace(label_raw, out);
     return out;
 }
 
@@ -459,7 +564,10 @@ static void position_sprite_centered_in_box(sf::Sprite& sprite, float x, float y
     const float ox = (box_size - dw) * 0.5f;
     const float oy = (box_size - dh) * 0.5f;
     // Ajuster avec left/top au cas où localBounds n'est pas (0,0).
-    sprite.setPosition(x + ox - lb.left * sc.x, y + oy - lb.top * sc.y);
+    const float px = x + ox - lb.left * sc.x;
+    const float py = y + oy - lb.top * sc.y;
+    // Snap pixel pour éviter les artefacts d'alignement/sub-pixel dans les grilles.
+    sprite.setPosition(std::round(px), std::round(py));
 }
 
 static bool is_layer_block_preview_smoothing_candidate(const ParsedVizLabel& p, int channels) {
@@ -504,6 +612,38 @@ static std::vector<uint8_t> smooth_preview_pixels(const std::vector<uint8_t>& pi
     }
 
     return out;
+}
+
+static int infer_channels_from_buffer_size(const std::vector<uint8_t>& pixels, int w, int h, int preferred) {
+    if (w <= 0 || h <= 0) return 0;
+    const size_t area = static_cast<size_t>(w) * static_cast<size_t>(h);
+    if (area == 0) return 0;
+
+    const size_t n = pixels.size();
+    auto exact = [&](int c) -> bool {
+        return n == area * static_cast<size_t>(c);
+    };
+    auto at_least = [&](int c) -> bool {
+        return n >= area * static_cast<size_t>(c);
+    };
+
+    // 1) Correspondance exacte prioritaire.
+    if (preferred == 1 || preferred == 3 || preferred == 4) {
+        if (exact(preferred)) return preferred;
+    }
+    if (exact(4)) return 4;
+    if (exact(3)) return 3;
+    if (exact(1)) return 1;
+
+    // 2) Fallback best-effort si le buffer contient plus de données que prévu.
+    // Préférer d'abord le format demandé si plausible.
+    if (preferred == 1 || preferred == 3 || preferred == 4) {
+        if (at_least(preferred)) return preferred;
+    }
+    if (at_least(4)) return 4;
+    if (at_least(3)) return 3;
+    if (at_least(1)) return 1;
+    return 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -555,6 +695,22 @@ static float t_from_klbeta(float beta) {
     float b = beta;
     if (!std::isfinite(b)) b = 0.0f;
     return clamp01(b);
+}
+
+static uint64_t steady_now_ms() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+static bool is_live_input_char(uint32_t cp) {
+    if (cp >= static_cast<uint32_t>('0') && cp <= static_cast<uint32_t>('9')) return true;
+    return cp == static_cast<uint32_t>('.') ||
+           cp == static_cast<uint32_t>('e') ||
+           cp == static_cast<uint32_t>('E') ||
+           cp == static_cast<uint32_t>('+') ||
+           cp == static_cast<uint32_t>('-');
 }
 } // namespace
 
@@ -660,6 +816,9 @@ bool Visualizer::initialize() {
             window_title,
             sf::Style::Titlebar | sf::Style::Close
         );
+        // Certains environnements laissent le contexte inactif au démarrage si la
+        // fenêtre n'a pas encore reçu d'interaction: forcer l'activation.
+        window->setActive(true);
 
         // Logo du programme + splash au lancement (best-effort)
         logo_loaded_ = false;
@@ -695,6 +854,7 @@ bool Visualizer::initialize() {
 
         window->setFramerateLimit(fps_limit);
         syncUIView();
+        first_texture_sync_done_ = false;
 
         // Best-effort: charger une police système pour afficher les métriques.
         // Priorité: Open Sans. Fallback: polices courantes.
@@ -792,6 +952,7 @@ json Visualizer::serializeUILayout() const {
     out["show_training_progress"] = show_training_progress;
     out["show_loss_graph"] = show_loss_graph;
     out["show_prompt_text"] = show_prompt_text_;
+    out["heatmap_palette"] = static_cast<int>(heatmap_palette_);
 
     // Taille de fenêtre (utile pour restaurer un slot de layout)
     out["window_width"] = window_width;
@@ -824,6 +985,10 @@ bool Visualizer::applyUILayout(const json& layout) {
         if (layout.contains("show_training_progress")) show_training_progress = layout["show_training_progress"].get<bool>();
         if (layout.contains("show_loss_graph")) show_loss_graph = layout["show_loss_graph"].get<bool>();
         if (layout.contains("show_prompt_text")) show_prompt_text_ = layout["show_prompt_text"].get<bool>();
+        if (layout.contains("heatmap_palette")) {
+            const int pid = std::clamp(layout["heatmap_palette"].get<int>(), 0, 3);
+            heatmap_palette_ = static_cast<Visualizer::HeatmapPalette>(pid);
+        }
 
         if (!layout.contains("panels") || !layout["panels"].is_array()) {
             // Layout incomplet: appliquer seulement les toggles.
@@ -1174,6 +1339,90 @@ void Visualizer::drawPanelChrome(PanelId id) {
         t.setPosition(p.pos.x + 8.f, p.pos.y + 2.f);
         t.setString(sf::String::fromUtf8(p.title.begin(), p.title.end()));
         window->draw(t);
+
+        // Badge de mode de rendu pour Blocks/Layers (heatmap vs réel).
+        if (id == PanelId::Blocks) {
+            const bool real_mode = !heatmap_mode_;
+            const std::string badge = real_mode ? "REEL" : "HEATMAP";
+
+            const sf::Color badge_fill = real_mode
+                ? sf::Color(46, 122, 86, 220)
+                : sf::Color(126, 78, 42, 220);
+            const sf::Color badge_outline = real_mode
+                ? sf::Color(126, 220, 170, 235)
+                : sf::Color(234, 182, 120, 235);
+
+            const bool smooth_on = smooth_layer_block_previews_;
+            const std::string smooth_badge = smooth_on ? "LISSAGE ON" : "LISSAGE OFF";
+            const sf::Color smooth_fill = smooth_on
+                ? sf::Color(54, 104, 152, 220)
+                : sf::Color(92, 92, 102, 220);
+            const sf::Color smooth_outline = smooth_on
+                ? sf::Color(140, 206, 255, 235)
+                : sf::Color(156, 156, 170, 235);
+
+            const std::string pal_badge = std::string("PAL ") + heatmap_palette_name(static_cast<int>(heatmap_palette_));
+            const sf::Color pal_fill = sf::Color(72, 78, 110, 220);
+            const sf::Color pal_outline = sf::Color(160, 172, 238, 235);
+
+            const float badge_h = std::max(14.f, th - 8.f);
+            const float mode_w = (badge == "HEATMAP") ? 84.f : 58.f;
+            const float smooth_w = 98.f;
+            const float pal_w = 100.f;
+            const float gap = 6.f;
+            const float total_w = mode_w + gap + smooth_w + gap + pal_w;
+            const float base_x = p.pos.x + std::max(8.f, p.size.x - total_w - 28.f);
+            const float badge_y = p.pos.y + (th - badge_h) * 0.5f;
+
+            const float mode_x = base_x;
+            const float smooth_x = base_x + mode_w + gap;
+            const float pal_x = smooth_x + smooth_w + gap;
+
+            sf::RectangleShape b(sf::Vector2f(mode_w, badge_h));
+            b.setPosition(mode_x, badge_y);
+            b.setFillColor(badge_fill);
+            b.setOutlineColor(badge_outline);
+            b.setOutlineThickness(1.f);
+            window->draw(b);
+
+            sf::Text bt;
+            bt.setFont(font);
+            bt.setCharacterSize(12);
+            bt.setFillColor(sf::Color(245, 245, 248));
+            bt.setPosition(mode_x + 7.f, badge_y - 1.f);
+            bt.setString(sf::String::fromUtf8(badge.begin(), badge.end()));
+            window->draw(bt);
+
+            sf::RectangleShape sb(sf::Vector2f(smooth_w, badge_h));
+            sb.setPosition(smooth_x, badge_y);
+            sb.setFillColor(smooth_fill);
+            sb.setOutlineColor(smooth_outline);
+            sb.setOutlineThickness(1.f);
+            window->draw(sb);
+
+            sf::Text st;
+            st.setFont(font);
+            st.setCharacterSize(12);
+            st.setFillColor(sf::Color(245, 245, 248));
+            st.setPosition(smooth_x + 6.f, badge_y - 1.f);
+            st.setString(sf::String::fromUtf8(smooth_badge.begin(), smooth_badge.end()));
+            window->draw(st);
+
+            sf::RectangleShape pb(sf::Vector2f(pal_w, badge_h));
+            pb.setPosition(pal_x, badge_y);
+            pb.setFillColor(pal_fill);
+            pb.setOutlineColor(pal_outline);
+            pb.setOutlineThickness(1.f);
+            window->draw(pb);
+
+            sf::Text pt;
+            pt.setFont(font);
+            pt.setCharacterSize(12);
+            pt.setFillColor(sf::Color(245, 245, 248));
+            pt.setPosition(pal_x + 6.f, badge_y - 1.f);
+            pt.setString(sf::String::fromUtf8(pal_badge.begin(), pal_badge.end()));
+            window->draw(pt);
+        }
     }
 
     // Poignée de redimensionnement (bas-droite)
@@ -1251,6 +1500,20 @@ void Visualizer::processEvents() {
                 syncUIView();
                 const sf::Vector2f mouse = window->mapPixelToCoords(sf::Vector2i(event.mouseButton.x, event.mouseButton.y));
 
+                // Si une saisie live est active et qu'on clique ailleurs, on quitte l'édition.
+                if (live_input_target_ != LiveInputTarget::None) {
+                    const bool hit_any_value_box =
+                        (last_live_lr_value_box_.has_value() && last_live_lr_value_box_->contains(mouse)) ||
+                        (last_live_lrwu_value_box_.has_value() && last_live_lrwu_value_box_->contains(mouse)) ||
+                        (last_live_klb_value_box_.has_value() && last_live_klb_value_box_->contains(mouse)) ||
+                        (last_live_klwu_value_box_.has_value() && last_live_klwu_value_box_->contains(mouse));
+                    if (!hit_any_value_box) {
+                        live_input_target_ = LiveInputTarget::None;
+                        live_input_buffer_.clear();
+                        live_input_error_until_ms_ = 0;
+                    }
+                }
+
                 // STOP training button (dans le panneau Metrics)
                 if (isPanelVisible(PanelId::Metrics) && last_stop_button_rect_.has_value() && last_stop_button_rect_->contains(mouse)) {
                     requestStopTraining();
@@ -1269,6 +1532,21 @@ void Visualizer::processEvents() {
                         live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
                         live_params_version_.fetch_add(1, std::memory_order_relaxed);
                     };
+
+                    auto start_value_edit = [&](LiveInputTarget tgt, const std::optional<sf::FloatRect>& value_rect, const std::string& initial_value) -> bool {
+                        if (!value_rect.has_value()) return false;
+                        if (!value_rect->contains(mouse)) return false;
+                        live_input_target_ = tgt;
+                        live_input_buffer_ = initial_value;
+                        live_input_error_until_ms_ = 0;
+                        live_dragging_ = LiveDragTarget::None;
+                        return true;
+                    };
+
+                    if (start_value_edit(LiveInputTarget::LR, last_live_lr_value_box_, format_decimal(live_ui_lr_, 10))) continue;
+                    if (start_value_edit(LiveInputTarget::LRWarmup, last_live_lrwu_value_box_, std::to_string(live_ui_lr_warmup_steps_))) continue;
+                    if (start_value_edit(LiveInputTarget::KLBeta, last_live_klb_value_box_, format_decimal(live_ui_kl_beta_, 8))) continue;
+                    if (start_value_edit(LiveInputTarget::KLWarmup, last_live_klwu_value_box_, std::to_string(live_ui_kl_warmup_steps_))) continue;
 
                     // Toggle LIVE/NATIVE
                     if (last_live_overrides_box_.has_value() && last_live_overrides_box_->contains(mouse)) {
@@ -1523,12 +1801,16 @@ void Visualizer::processEvents() {
                             (last_live_kl_enable_box_.has_value() && last_live_kl_enable_box_->contains(mouse)) ||
                             (last_live_lr_track_.has_value() && last_live_lr_track_->contains(mouse)) ||
                             (last_live_lr_thumb_.has_value() && last_live_lr_thumb_->contains(mouse)) ||
+                            (last_live_lr_value_box_.has_value() && last_live_lr_value_box_->contains(mouse)) ||
                             (last_live_lrwu_track_.has_value() && last_live_lrwu_track_->contains(mouse)) ||
                             (last_live_lrwu_thumb_.has_value() && last_live_lrwu_thumb_->contains(mouse)) ||
+                            (last_live_lrwu_value_box_.has_value() && last_live_lrwu_value_box_->contains(mouse)) ||
                             (last_live_klb_track_.has_value() && last_live_klb_track_->contains(mouse)) ||
                             (last_live_klb_thumb_.has_value() && last_live_klb_thumb_->contains(mouse)) ||
+                            (last_live_klb_value_box_.has_value() && last_live_klb_value_box_->contains(mouse)) ||
                             (last_live_klwu_track_.has_value() && last_live_klwu_track_->contains(mouse)) ||
-                            (last_live_klwu_thumb_.has_value() && last_live_klwu_thumb_->contains(mouse)))) {
+                            (last_live_klwu_thumb_.has_value() && last_live_klwu_thumb_->contains(mouse)) ||
+                            (last_live_klwu_value_box_.has_value() && last_live_klwu_value_box_->contains(mouse)))) {
                     setCursor(CursorKind::Hand);
                 } else if (hitTestPanelCloseButton(mouse).has_value()) {
                     setCursor(CursorKind::Cross);
@@ -1555,7 +1837,76 @@ void Visualizer::processEvents() {
                 // On peut clamp pendant un drag, pour éviter de perdre un panneau.
                 clampPanelsToWindow();
             }
+        } else if (event.type == sf::Event::TextEntered) {
+            if (live_input_target_ != LiveInputTarget::None) {
+                const uint32_t cp = event.text.unicode;
+                if (is_live_input_char(cp)) {
+                    live_input_buffer_.push_back(static_cast<char>(cp));
+                    live_input_error_until_ms_ = 0;
+                }
+                continue;
+            }
         } else if (event.type == sf::Event::KeyPressed) {
+            if (live_input_target_ != LiveInputTarget::None) {
+                auto commit_live = [&]() {
+                    live_overrides_enabled_.store(true, std::memory_order_relaxed);
+                    live_lr_.store(live_ui_lr_, std::memory_order_relaxed);
+                    live_lr_warmup_steps_.store(live_ui_lr_warmup_steps_, std::memory_order_relaxed);
+                    live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
+                    live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
+                    live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
+                    live_params_version_.fetch_add(1, std::memory_order_relaxed);
+                };
+
+                if (event.key.code == sf::Keyboard::BackSpace) {
+                    if (!live_input_buffer_.empty()) live_input_buffer_.pop_back();
+                    continue;
+                }
+                if (event.key.code == sf::Keyboard::Escape) {
+                    live_input_target_ = LiveInputTarget::None;
+                    live_input_buffer_.clear();
+                    live_input_error_until_ms_ = 0;
+                    continue;
+                }
+                if (event.key.code == sf::Keyboard::Enter || event.key.code == sf::Keyboard::Return) {
+                    bool ok = false;
+                    try {
+                        size_t pos = 0;
+                        const float v = std::stof(live_input_buffer_, &pos);
+                        if (pos == live_input_buffer_.size() && std::isfinite(v)) {
+                            if (live_input_target_ == LiveInputTarget::LR) {
+                                live_ui_lr_ = std::clamp(v, kLiveLRMin, kLiveLRMax);
+                                ok = true;
+                            } else if (live_input_target_ == LiveInputTarget::KLBeta) {
+                                live_ui_kl_beta_ = std::clamp(v, 0.0f, 1.0f);
+                                ok = true;
+                            } else if (live_input_target_ == LiveInputTarget::LRWarmup) {
+                                live_ui_lr_warmup_steps_ = std::clamp(static_cast<int>(std::lround(v)), 0, kLiveWarmupMax);
+                                ok = true;
+                            } else if (live_input_target_ == LiveInputTarget::KLWarmup) {
+                                live_ui_kl_warmup_steps_ = std::clamp(static_cast<int>(std::lround(v)), 0, kLiveWarmupMax);
+                                ok = true;
+                            }
+                        }
+                    } catch (...) {
+                        ok = false;
+                    }
+
+                    if (ok) {
+                        commit_live();
+                        live_input_target_ = LiveInputTarget::None;
+                        live_input_buffer_.clear();
+                        live_input_error_until_ms_ = 0;
+                    } else {
+                        live_input_error_until_ms_ = steady_now_ms() + 1500;
+                    }
+                    continue;
+                }
+
+                // Bloquer les raccourcis globaux tant qu'une cellule est en édition.
+                continue;
+            }
+
             const bool ctrl = event.key.control;
             const bool shift = event.key.shift;
 
@@ -1627,8 +1978,36 @@ void Visualizer::processEvents() {
                         std::swap(img.pixels, img.pixels_alt);
                         std::swap(img.channels, img.channels_alt);
                     }
+                    // En mode heatmap, recoloriser immédiatement les tips mono-canal
+                    // à partir de la source grise (pixels_alt après swap).
+                    if (heatmap_mode_ && img.channels == 1) {
+                        img.pixels_alt = img.pixels;
+                        img.channels_alt = 1;
+                        img.pixels = colorize_gray_heatmap_rgb(img.pixels_alt, static_cast<int>(heatmap_palette_));
+                        img.channels = 3;
+                    }
                 }
                 rebuildLayerBlockTextures();
+            }
+
+            // Changer la palette de heatmap (CLASSIC -> TURBO -> INFERNO -> VIRIDIS)
+            if (event.key.code == sf::Keyboard::K) {
+                const int pid = (static_cast<int>(heatmap_palette_) + 1) % 4;
+                heatmap_palette_ = static_cast<Visualizer::HeatmapPalette>(pid);
+
+                // Appliquer la nouvelle palette immédiatement sans attendre
+                // la prochaine update de step.
+                if (heatmap_mode_) {
+                    for (auto& img : layer_block_images) {
+                        if (img.channels_alt == 1 && !img.pixels_alt.empty()) {
+                            img.pixels = colorize_gray_heatmap_rgb(img.pixels_alt, static_cast<int>(heatmap_palette_));
+                            img.channels = 3;
+                        }
+                    }
+                }
+
+                rebuildLayerBlockTextures();
+                saveUILayoutToLast();
             }
 
             // Zoom overlay
@@ -1691,6 +2070,14 @@ void Visualizer::processEvents() {
                         if (event.key.code == sf::Keyboard::Left) focus_block_index_ = (focus_block_index_ - 1 + n) % n;
                         if (event.key.code == sf::Keyboard::Right) focus_block_index_ = (focus_block_index_ + 1) % n;
                     }
+                } else if (focus_target_ == FocusTarget::Generated &&
+                           (event.key.code == sf::Keyboard::Left || event.key.code == sf::Keyboard::Right)) {
+                    const int n = static_cast<int>(generated_images.size());
+                    if (n > 0) {
+                        focus_generated_index_ = std::clamp(focus_generated_index_, 0, n - 1);
+                        if (event.key.code == sf::Keyboard::Left) focus_generated_index_ = (focus_generated_index_ - 1 + n) % n;
+                        if (event.key.code == sf::Keyboard::Right) focus_generated_index_ = (focus_generated_index_ + 1) % n;
+                    }
                 }
             }
         }
@@ -1742,6 +2129,49 @@ Visualizer::LiveTrainParams Visualizer::liveTrainParamsSnapshot() const {
 void Visualizer::update() {
     if (!enabled) return;
     if (!window || !window->isOpen()) return;
+
+    // Robustesse: garantir que le contexte GL est actif dans le thread Viz avant
+    // toute reconstruction de texture ou tout rendu de frame.
+    window->setActive(true);
+
+    // Premier frame: re-synchroniser toutes les textures maintenant que le contexte
+    // SFML est garanti valide (évite un premier rendu sans textures visibles).
+    if (!first_texture_sync_done_) {
+        rebuildAllTextures();
+        first_texture_sync_done_ = true;
+    }
+
+    // Auto-réparation: si certains blocks ont encore une texture invalide,
+    // retenter un rebuild sans attendre une interaction clavier.
+    if (has_layer_blocks && !layer_block_images.empty()) {
+        bool has_invalid_block_tex = false;
+        for (const auto& img : layer_block_images) {
+            if (img.pixels.empty()) continue;
+            if (img.texture.getSize().x == 0 || img.texture.getSize().y == 0) {
+                has_invalid_block_tex = true;
+                break;
+            }
+        }
+        if (has_invalid_block_tex) {
+            rebuildLayerBlockTextures();
+        }
+
+        // Reset/recolorisation demandée: à chaque update, on reconstruit la vue
+        // heatmap à partir de la source grise de référence (pixels_alt).
+        if (heatmap_mode_) {
+            bool recolored = false;
+            for (auto& img : layer_block_images) {
+                if (img.channels_alt == 1 && !img.pixels_alt.empty()) {
+                    img.pixels = colorize_gray_heatmap_rgb(img.pixels_alt, static_cast<int>(heatmap_palette_));
+                    img.channels = 3;
+                    recolored = true;
+                }
+            }
+            if (recolored) {
+                rebuildLayerBlockTextures();
+            }
+        }
+    }
 
     // Refresh auto des textures (évite un reload UI)
     {
@@ -1974,6 +2404,7 @@ void Visualizer::renderHelpOverlay() {
     line("G : afficher/masquer le graph");
     line("A : activer/masquer le lissage des previews de blocks");
     line("M : basculer heatmap color\u00e9e / niveaux de gris naturels (Blocks/Layers)");
+    line("K : changer la palette heatmap (CLASSIC/TURBO/INFERNO/VIRIDIS)");
     line("P : afficher/masquer le texte du prompt");
     line("R : actualiser (rebuild textures + reload architecture)");
     line("S : sauvegarder la structure UI (layout last)");
@@ -2266,8 +2697,15 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
 
     for (const auto& f : frames) {
         if (f.w <= 0 || f.h <= 0) continue;
-        if (f.channels != 1 && f.channels != 3 && f.channels != 4) continue;
         if (f.pixels.empty()) continue;
+
+        // Inference robuste des canaux pour éviter les textures décalées
+        // quand les métadonnées (channels) ne collent pas au buffer.
+        const int heat_channels = infer_channels_from_buffer_size(f.pixels, f.w, f.h, f.channels);
+        const int real_channels = f.pixels_real.empty()
+            ? 0
+            : infer_channels_from_buffer_size(f.pixels_real, f.w, f.h, 1);
+        if (heat_channels != 1 && heat_channels != 3 && heat_channels != 4) continue;
 
         const auto p = parse_viz_label(f.label);
 
@@ -2292,6 +2730,13 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
             continue;
         }
 
+        // Les concat de packing final (ex: recon||z||logvar) ne sont pas des images
+        // stables à afficher: elles provoquent des artefacts visuels (répétitions/décalage).
+        if (p.layer_path.find("out_concat") != std::string::npos ||
+            p.layer_path.find("out_pack") != std::string::npos) {
+            continue;
+        }
+
         ImageData img;
         img.prompt = f.label;
         img.w = f.w;
@@ -2299,17 +2744,35 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
         img.display_size = 120;
 
         if (!heatmap_mode_ && !f.pixels_real.empty()) {
-            // Mode naturel actif : pixels actifs = niveaux de gris, heatmap en alt
-            img.pixels      = f.pixels_real;
-            img.channels    = 1;
-            img.pixels_alt  = f.pixels;
-            img.channels_alt = f.channels;
+            // Mode réel: respecter les canaux réellement présents dans pixels_real
+            // (certaines sources peuvent fournir du RGB/RGBA et pas uniquement du 1 canal).
+            if (real_channels == 1 || real_channels == 3 || real_channels == 4) {
+                img.pixels       = f.pixels_real;
+                img.channels     = real_channels;
+                img.pixels_alt   = f.pixels;
+                img.channels_alt = heat_channels;
+            } else {
+                // Buffer real invalide/incomplet: fallback heatmap pour éviter les artefacts.
+                img.pixels       = f.pixels;
+                img.channels     = heat_channels;
+                img.pixels_alt   = f.pixels_real;
+                img.channels_alt = (real_channels == 1 || real_channels == 3 || real_channels == 4) ? real_channels : 1;
+            }
         } else {
             // Mode heatmap (par défaut) ou pas de version naturelle
             img.pixels      = f.pixels;
-            img.channels    = f.channels;
+            img.channels    = heat_channels;
             img.pixels_alt  = f.pixels_real;
-            img.channels_alt = 1;
+            img.channels_alt = (real_channels == 1 || real_channels == 3 || real_channels == 4) ? real_channels : 1;
+
+            // En mode heatmap, éviter l'aspect noir/blanc sur les tips 1 canal:
+            // on colorise en RGB tout en conservant la version brute pour debug.
+            if (img.channels == 1) {
+                img.pixels_alt = img.pixels;
+                img.channels_alt = 1;
+                img.pixels = colorize_gray_heatmap_rgb(img.pixels, static_cast<int>(heatmap_palette_));
+                img.channels = 3;
+            }
         }
 
         createLayerBlockTexture(img, f.label);
@@ -2346,7 +2809,7 @@ void Visualizer::createLayerBlockTexture(ImageData& img, const std::string& labe
     createImageTexture(tmp, tmp.w, tmp.h, tmp.channels, tmp.display_size);
     img.texture = std::move(tmp.texture);
     img.sprite = tmp.sprite;
-    img.sprite.setTexture(img.texture);
+    img.sprite.setTexture(img.texture, true);
 }
 
 void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float mse,
@@ -2693,7 +3156,7 @@ void Visualizer::renderLayerBlocks() {
     const int cell_h = thumb + label_h + margin;
 
     // Focus rectangles doivent correspondre aux vrais blocks (index = layer_block_images idx).
-    last_block_rects_.reserve(static_cast<size_t>(std::max(0, blocks_count)));
+    last_block_rects_.assign(static_cast<size_t>(std::max(0, blocks_count)), sf::FloatRect(0.f, 0.f, 0.f, 0.f));
 
     // Clip au contenu du panneau (évite de dessiner en dehors de la zone visible pendant le scroll)
     const sf::View old_view = window->getView();
@@ -2779,62 +3242,102 @@ void Visualizer::renderLayerBlocks() {
         const std::string first = parts.empty() ? std::string() : parts.front();
         const std::string last = parts.empty() ? std::string() : parts.back();
 
-        auto any_part = [&](const std::function<bool(const std::string&)>& pred) {
-            return std::any_of(parts.begin(), parts.end(), pred);
-        };
-        auto has_exact = [&](std::initializer_list<const char*> names) {
-            for (const char* name : names) {
-                if (any_part([&](const std::string& part) { return part == name; })) return true;
-            }
-            return false;
-        };
-        auto has_prefix = [&](std::initializer_list<const char*> prefixes) {
-            for (const char* prefix : prefixes) {
-                if (any_part([&](const std::string& part) { return starts_with(part, prefix); })) return true;
-            }
-            return false;
-        };
-        auto has_substr = [&](std::initializer_list<const char*> needles) {
-            for (const char* needle : needles) {
-                if (any_part([&](const std::string& part) { return part.find(needle) != std::string::npos; })) return true;
-            }
-            return false;
-        };
+        bool has_latent_exact = false;
+        bool has_latent_prefix = false;
+        bool has_latent_substr = false;
 
-        const bool is_latent =
-            p.tag == "LAT" ||
-            has_exact({"mu", "logvar", "latent", "z"}) ||
-            has_prefix({"mu", "logvar", "latent", "reparam"}) ||
-            has_substr({"latent", "logvar", "reparam"});
-        const bool is_text_cond =
-            has_substr({"text", "token", "prompt", "context", "embed", "cond"}) ||
-            has_exact({"tok_emb", "meanpool", "pool", "add_pos", "text_proj"});
-        const bool is_input =
-            has_exact({"input", "in", "raw_in", "raw_z", "in_vec", "in_hwc", "in_chw", "init"}) ||
-            has_prefix({"input", "raw_", "in_"});
-        const bool is_encoder =
-            first == "enc" || has_exact({"encoder"}) || has_prefix({"enc", "encoder"});
-        const bool is_decoder =
-            first == "dec" || has_exact({"decoder"}) || has_prefix({"dec", "decoder"});
-        const bool is_down = has_prefix({"down"});
-        const bool is_up = has_prefix({"up"});
-        const bool is_bottleneck =
-            has_exact({"mid", "bottleneck", "bridge"}) ||
-            has_prefix({"mid", "bot", "bottleneck", "bridge"}) ||
-            has_substr({"bot_", "mid_"});
-        const bool is_backbone =
-            has_exact({"unet", "transformer", "transformer_block", "backbone", "trunk", "layers", "blocks"}) ||
-            has_prefix({"unet", "transformer", "block", "layer"});
-        const bool is_head =
-            has_exact({"head", "lm_head", "classifier", "proj", "out_proj", "text_proj"}) ||
-            has_prefix({"head", "proj", "final_"}) ||
-            has_substr({"_head", "_proj"});
-        const bool is_output =
-            p.tag == "OUT" ||
-            has_exact({"out", "output", "out_pack", "out_concat", "recon", "recon_chw", "recon_to_hwc", "out_to_hwc", "final"}) ||
-            has_prefix({"out", "output", "recon"}) ||
-            has_substr({"recon", "to_hwc", "out_concat", "out_pack"}) ||
-            last == "tanh";
+        bool has_text_substr = false;
+        bool has_text_exact = false;
+
+        bool has_input_exact = false;
+        bool has_input_prefix = false;
+
+        bool has_encoder_exact_or_prefix = false;
+        bool has_decoder_exact_or_prefix = false;
+        bool has_down_prefix = false;
+        bool has_up_prefix = false;
+
+        bool has_bottleneck_exact = false;
+        bool has_bottleneck_prefix = false;
+        bool has_bottleneck_substr = false;
+
+        bool has_backbone_exact = false;
+        bool has_backbone_prefix = false;
+
+        bool has_head_exact = false;
+        bool has_head_prefix = false;
+        bool has_head_substr = false;
+
+        bool has_output_exact = false;
+        bool has_output_prefix = false;
+        bool has_output_substr = false;
+
+        bool has_diff_exact = false;
+        bool has_diff_prefix = false;
+        bool has_diff_substr = false;
+
+        for (const auto& part : parts) {
+            if (part == "mu" || part == "logvar" || part == "latent" || part == "z") has_latent_exact = true;
+            if (starts_with(part, "mu") || starts_with(part, "logvar") || starts_with(part, "latent") || starts_with(part, "reparam")) has_latent_prefix = true;
+            if (part.find("latent") != std::string::npos || part.find("logvar") != std::string::npos || part.find("reparam") != std::string::npos) has_latent_substr = true;
+
+            if (part == "tok_emb" || part == "meanpool" || part == "pool" || part == "add_pos" || part == "text_proj") has_text_exact = true;
+            if (part.find("text") != std::string::npos || part.find("token") != std::string::npos || part.find("prompt") != std::string::npos ||
+                part.find("context") != std::string::npos || part.find("embed") != std::string::npos || part.find("cond") != std::string::npos) {
+                has_text_substr = true;
+            }
+
+            if (part == "input" || part == "in" || part == "raw_in" || part == "raw_z" || part == "in_vec" || part == "in_hwc" || part == "in_chw" || part == "init") has_input_exact = true;
+            if (starts_with(part, "input") || starts_with(part, "raw_") || starts_with(part, "in_")) has_input_prefix = true;
+
+            if (part == "encoder" || starts_with(part, "enc") || starts_with(part, "encoder")) has_encoder_exact_or_prefix = true;
+            if (part == "decoder" || starts_with(part, "dec") || starts_with(part, "decoder")) has_decoder_exact_or_prefix = true;
+            if (starts_with(part, "down")) has_down_prefix = true;
+            if (starts_with(part, "up")) has_up_prefix = true;
+
+            if (part == "mid" || part == "bottleneck" || part == "bridge") has_bottleneck_exact = true;
+            if (starts_with(part, "mid") || starts_with(part, "bot") || starts_with(part, "bottleneck") || starts_with(part, "bridge")) has_bottleneck_prefix = true;
+            if (part.find("bot_") != std::string::npos || part.find("mid_") != std::string::npos) has_bottleneck_substr = true;
+
+            if (part == "unet" || part == "transformer" || part == "transformer_block" || part == "backbone" || part == "trunk" || part == "layers" || part == "blocks") has_backbone_exact = true;
+            if (starts_with(part, "unet") || starts_with(part, "transformer") || starts_with(part, "block") || starts_with(part, "layer")) has_backbone_prefix = true;
+
+            if (part == "head" || part == "lm_head" || part == "classifier" || part == "proj" || part == "out_proj" || part == "text_proj") has_head_exact = true;
+            if (starts_with(part, "head") || starts_with(part, "proj") || starts_with(part, "final_")) has_head_prefix = true;
+            if (part.find("_head") != std::string::npos || part.find("_proj") != std::string::npos) has_head_substr = true;
+
+            if (part == "out" || part == "output" || part == "out_pack" || part == "out_concat" || part == "recon" ||
+                part == "recon_chw" || part == "recon_to_hwc" || part == "out_to_hwc" || part == "final") {
+                has_output_exact = true;
+            }
+            if (starts_with(part, "out") || starts_with(part, "output") || starts_with(part, "recon")) has_output_prefix = true;
+            if (part.find("recon") != std::string::npos || part.find("to_hwc") != std::string::npos || part.find("out_concat") != std::string::npos || part.find("out_pack") != std::string::npos) {
+                has_output_substr = true;
+            }
+
+            if (part == "diff" || part == "err" || part == "resdiff" || part == "resdiff_abs") {
+                has_diff_exact = true;
+            }
+            if (starts_with(part, "diff") || starts_with(part, "err") || starts_with(part, "resdiff")) {
+                has_diff_prefix = true;
+            }
+            if (part.find("diff") != std::string::npos || part.find("err") != std::string::npos) {
+                has_diff_substr = true;
+            }
+        }
+
+        const bool is_latent = p.tag == "LAT" || has_latent_exact || has_latent_prefix || has_latent_substr;
+        const bool is_text_cond = has_text_substr || has_text_exact;
+        const bool is_input = has_input_exact || has_input_prefix;
+        const bool is_encoder = first == "enc" || has_encoder_exact_or_prefix;
+        const bool is_decoder = first == "dec" || has_decoder_exact_or_prefix;
+        const bool is_down = has_down_prefix;
+        const bool is_up = has_up_prefix;
+        const bool is_bottleneck = has_bottleneck_exact || has_bottleneck_prefix || has_bottleneck_substr;
+        const bool is_backbone = has_backbone_exact || has_backbone_prefix;
+        const bool is_head = has_head_exact || has_head_prefix || has_head_substr;
+        const bool is_diff = has_diff_exact || has_diff_prefix || has_diff_substr;
+        const bool is_output = p.tag == "OUT" || has_output_exact || has_output_prefix || has_output_substr || is_diff || last == "tanh";
 
         if (is_latent) {
             return "Latent";
@@ -2911,6 +3414,70 @@ void Visualizer::renderLayerBlocks() {
         e.parsed = std::move(parsed);
         e.section = section;
         entries.push_back(std::move(e));
+    }
+
+    // Règle UX: si une vignette "diff" existe, placer une vignette "recon"
+    // immédiatement avant (dans la même section) pour comparaison visuelle directe.
+    auto to_lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return s;
+    };
+    auto entry_key = [&](const BlockPanelEntry& e) -> std::string {
+        return to_lower(e.parsed.layer_path + " " + e.parsed.path + " " + e.parsed.short_text + " " + e.text_override);
+    };
+    auto is_diff_entry = [&](const BlockPanelEntry& e) -> bool {
+        if (e.is_header) return false;
+        const std::string k = entry_key(e);
+        return k.find("resdiff") != std::string::npos ||
+               k.find("/diff") != std::string::npos ||
+               k.find("diff_") != std::string::npos ||
+               k.find(" err/") != std::string::npos;
+    };
+    auto is_recon_entry = [&](const BlockPanelEntry& e) -> bool {
+        if (e.is_header) return false;
+        const std::string k = entry_key(e);
+        return (k.find("recon") != std::string::npos) && (k.find("resdiff") == std::string::npos);
+    };
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (!is_diff_entry(entries[i])) continue;
+        const std::string section = entries[i].section;
+
+        // Déjà juste avant ?
+        if (i > 0 && !entries[i - 1].is_header && entries[i - 1].section == section && is_recon_entry(entries[i - 1])) {
+            continue;
+        }
+
+        // Chercher d'abord un recon dans la même section avant diff.
+        size_t recon_idx = entries.size();
+        for (size_t j = 0; j < i; ++j) {
+            if (entries[j].is_header) continue;
+            if (entries[j].section != section) continue;
+            if (is_recon_entry(entries[j])) recon_idx = j;
+        }
+
+        // Sinon, chercher après diff dans la même section.
+        if (recon_idx == entries.size()) {
+            for (size_t j = i + 1; j < entries.size(); ++j) {
+                if (entries[j].is_header) continue;
+                if (entries[j].section != section) continue;
+                if (is_recon_entry(entries[j])) {
+                    recon_idx = j;
+                    break;
+                }
+            }
+        }
+
+        if (recon_idx == entries.size() || recon_idx == i) continue;
+
+        BlockPanelEntry recon = std::move(entries[recon_idx]);
+        entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(recon_idx));
+        if (recon_idx < i) {
+            --i;
+        }
+        entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(i), std::move(recon));
     }
 
     if (entries.empty()) return;
@@ -3009,14 +3576,11 @@ void Visualizer::renderLayerBlocks() {
         if (!entry.is_extra) {
             const int bi = entry.block_index;
             if (bi >= 0 && bi < blocks_count) {
-                while ((int)last_block_rects_.size() < bi) {
-                    last_block_rects_.push_back(sf::FloatRect(0.f, 0.f, 0.f, 0.f));
-                }
-                if ((int)last_block_rects_.size() == bi) {
-                    last_block_rects_.push_back(sf::FloatRect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(thumb + 4), static_cast<float>(thumb + 4)));
-                } else {
-                    last_block_rects_[static_cast<size_t>(bi)] = sf::FloatRect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(thumb + 4), static_cast<float>(thumb + 4));
-                }
+                last_block_rects_[static_cast<size_t>(bi)] = sf::FloatRect(
+                    static_cast<float>(x - 2),
+                    static_cast<float>(y - 2),
+                    static_cast<float>(thumb + 4),
+                    static_cast<float>(thumb + 4));
             }
         }
 
@@ -3164,25 +3728,143 @@ void Visualizer::renderGeneratedImages() {
 
 void Visualizer::renderTrainingProgress() {
     const auto area = panelContentRect(PanelId::Training);
-    int bar_x = static_cast<int>(area.left);
-    int bar_y = static_cast<int>(area.top);
-    int bar_width = std::max(10, static_cast<int>(area.width));
-    int bar_height = std::min(30, std::max(10, static_cast<int>(area.height)));
+    const int bar_x = static_cast<int>(area.left);
+    const int bar_width = std::max(10, static_cast<int>(area.width));
+    const int global_h = std::clamp(static_cast<int>(area.height * 0.34f), 14, 24);
+    const int batch_h = std::clamp(static_cast<int>(area.height * 0.22f), 10, 16);
+    const int gap = 8;
+    const int stack_h = global_h + gap + batch_h;
+    const int global_y = static_cast<int>(area.top + std::max(0.0f, (area.height - static_cast<float>(stack_h)) * 0.5f));
+    const int batch_y = global_y + global_h + gap;
 
-    // Barre de progression epoch (simulée)
-    sf::RectangleShape progress_bg(sf::Vector2f(bar_width, bar_height));
-    progress_bg.setPosition(bar_x, bar_y);
-    progress_bg.setFillColor(sf::Color(50, 50, 60));
-    progress_bg.setOutlineColor(sf::Color(80, 80, 90));
-    progress_bg.setOutlineThickness(2);
+    const bool has_epoch_info = (current_total_epochs > 0);
+    const bool has_batch_info = (current_total_batches > 0);
+
+    const int total_epochs = std::max(1, current_total_epochs);
+    const int total_batches = std::max(1, current_total_batches);
+
+    const int epoch_index = std::clamp(current_epoch - 1, 0, std::max(0, total_epochs - 1));
+    const int batch_done = std::clamp(current_batch, 0, total_batches);
+
+    const float batch_target = has_batch_info
+        ? std::clamp(static_cast<float>(batch_done) / static_cast<float>(total_batches), 0.0f, 1.0f)
+        : 0.0f;
+    const float global_target = has_epoch_info
+        ? std::clamp((static_cast<float>(epoch_index) + batch_target) / static_cast<float>(total_epochs), 0.0f, 1.0f)
+        : 0.0f;
+
+    // Lissage visuel (monotone local) pour éviter les sauts d'affichage.
+    const auto smooth_to = [](float current, float target, float alpha) {
+        if (!std::isfinite(current)) current = target;
+        if (target + 0.25f < current) return target; // reset rapide si run repart de plus bas
+        const float v = current + (target - current) * alpha;
+        return (std::fabs(v - target) < 1e-4f) ? target : v;
+    };
+
+    progress_epoch_display_ = smooth_to(progress_epoch_display_, global_target, 0.24f);
+    progress_batch_display_ = smooth_to(progress_batch_display_, batch_target, 0.30f);
+
+    const auto batch_speed_color = [&](int batch_ms) -> sf::Color {
+        // 0 = rapide (vert), 1 = lent (rouge)
+        const float lo = 20.0f;
+        const float hi = 2000.0f;
+        const float t = std::clamp((static_cast<float>(std::max(0, batch_ms)) - lo) / (hi - lo), 0.0f, 1.0f);
+
+        const float fast_r = 124.0f, fast_g = 218.0f, fast_b = 120.0f;
+        const float slow_r = 226.0f, slow_g = 116.0f, slow_b = 92.0f;
+
+        const auto mix = [&](float a, float b) -> uint8_t {
+            return static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(a + (b - a) * t)), 0, 255));
+        };
+
+        return sf::Color(mix(fast_r, slow_r), mix(fast_g, slow_g), mix(fast_b, slow_b), 245);
+    };
+
+    // Barre globale (epochs)
+    sf::RectangleShape progress_bg(sf::Vector2f(static_cast<float>(bar_width), static_cast<float>(global_h)));
+    progress_bg.setPosition(static_cast<float>(bar_x), static_cast<float>(global_y));
+    progress_bg.setFillColor(sf::Color(50, 50, 60, 230));
+    progress_bg.setOutlineColor(sf::Color(88, 88, 102, 235));
+    progress_bg.setOutlineThickness(1.5f);
     window->draw(progress_bg);
 
-    // Barre remplie (exemple: 50% d'avancement)
-    float progress = std::min(1.0f, current_batch / 100.0f);
-    sf::RectangleShape progress_bar(sf::Vector2f(bar_width * progress, bar_height));
-    progress_bar.setPosition(bar_x, bar_y);
-    progress_bar.setFillColor(sf::Color(100, 180, 100));
-    window->draw(progress_bar);
+    const float epoch_w = static_cast<float>(bar_width) * progress_epoch_display_;
+    if (epoch_w > 0.0f) {
+        sf::RectangleShape progress_bar(sf::Vector2f(epoch_w, static_cast<float>(global_h)));
+        progress_bar.setPosition(static_cast<float>(bar_x), static_cast<float>(global_y));
+        progress_bar.setFillColor(sf::Color(96, 184, 112, 240));
+        window->draw(progress_bar);
+    }
+
+    // Barre batch (courant) sous la barre globale.
+    sf::RectangleShape batch_bg(sf::Vector2f(static_cast<float>(bar_width), static_cast<float>(batch_h)));
+    batch_bg.setPosition(static_cast<float>(bar_x), static_cast<float>(batch_y));
+    batch_bg.setFillColor(sf::Color(42, 42, 52, 230));
+    batch_bg.setOutlineColor(sf::Color(78, 78, 94, 220));
+    batch_bg.setOutlineThickness(1.0f);
+    window->draw(batch_bg);
+
+    if (has_batch_info) {
+        const float batch_w = static_cast<float>(bar_width) * progress_batch_display_;
+        if (batch_w > 0.0f) {
+            sf::RectangleShape batch_fg(sf::Vector2f(batch_w, static_cast<float>(batch_h)));
+            batch_fg.setPosition(static_cast<float>(bar_x), static_cast<float>(batch_y));
+            batch_fg.setFillColor(batch_speed_color(current_batch_time_ms));
+            window->draw(batch_fg);
+        }
+    }
+
+    // Fallback visuel si l'info d'epoch est absente: bande animée discrète.
+    if (!has_epoch_info) {
+        const uint64_t t = steady_now_ms();
+        const float phase = static_cast<float>((t % 1600ULL) / 1600.0);
+        const float seg_w = std::max(24.0f, static_cast<float>(bar_width) * 0.18f);
+        const float x = static_cast<float>(bar_x) + (static_cast<float>(bar_width) + seg_w) * phase - seg_w;
+        sf::RectangleShape ind(sf::Vector2f(seg_w, static_cast<float>(global_h)));
+        ind.setPosition(x, static_cast<float>(global_y));
+        ind.setFillColor(sf::Color(110, 165, 215, 120));
+        window->draw(ind);
+    }
+
+    if (font_loaded) {
+        int pct = static_cast<int>(std::lround(progress_epoch_display_ * 100.0f));
+        pct = std::clamp(pct, 0, 100);
+        std::string txt_global;
+        if (has_epoch_info) {
+            txt_global = std::to_string(pct) + "%";
+        } else {
+            txt_global = "running";
+        }
+
+        sf::Text tg;
+        tg.setFont(font);
+        tg.setCharacterSize(12);
+        tg.setFillColor(sf::Color(235, 235, 240));
+        tg.setString(sf::String::fromUtf8(txt_global.begin(), txt_global.end()));
+        const auto bg = tg.getLocalBounds();
+        const float txg = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bg.width) * 0.5f - bg.left;
+        const float tyg = static_cast<float>(global_y) + (static_cast<float>(global_h) - bg.height) * 0.5f - bg.top - 1.0f;
+        tg.setPosition(std::round(txg), std::round(tyg));
+        window->draw(tg);
+
+        std::string txt_batch;
+        if (has_batch_info) {
+            const int bpct = std::clamp(static_cast<int>(std::lround(progress_batch_display_ * 100.0f)), 0, 100);
+            txt_batch = "batch " + std::to_string(bpct) + "%";
+        } else {
+            txt_batch = "batch --";
+        }
+        sf::Text tb;
+        tb.setFont(font);
+        tb.setCharacterSize(11);
+        tb.setFillColor(sf::Color(220, 228, 210));
+        tb.setString(sf::String::fromUtf8(txt_batch.begin(), txt_batch.end()));
+        const auto bb = tb.getLocalBounds();
+        const float txb = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bb.width) * 0.5f - bb.left;
+        const float tyb = static_cast<float>(batch_y) + (static_cast<float>(batch_h) - bb.height) * 0.5f - bb.top - 1.0f;
+        tb.setPosition(std::round(txb), std::round(tyb));
+        window->draw(tb);
+    }
 }
 
 void Visualizer::renderLossGraph() {
@@ -3328,6 +4010,10 @@ void Visualizer::renderMetrics() {
     last_live_klb_thumb_.reset();
     last_live_klwu_track_.reset();
     last_live_klwu_thumb_.reset();
+    last_live_lr_value_box_.reset();
+    last_live_lrwu_value_box_.reset();
+    last_live_klb_value_box_.reset();
+    last_live_klwu_value_box_.reset();
     last_live_kl_enable_box_.reset();
     last_live_overrides_box_.reset();
 
@@ -3466,7 +4152,7 @@ void Visualizer::renderMetrics() {
         }
 
         const int live_y0 = line_height * 4 + 6;
-        const int live_row_h = 22;
+        const int live_row_h = 42;
         const int label_w = 82;
         const int value_w = 110;
         const float track_h = 10.f;
@@ -3478,8 +4164,12 @@ void Visualizer::renderMetrics() {
                                  const std::string& label,
                                  float t,
                                  const std::string& value,
+                                 LiveInputTarget input_target,
+                                 const std::string& min_label,
+                                 const std::string& max_label,
                                  std::optional<sf::FloatRect>& out_track,
-                                 std::optional<sf::FloatRect>& out_thumb) {
+                                 std::optional<sf::FloatRect>& out_thumb,
+                                 std::optional<sf::FloatRect>& out_value_box) {
             const float y = static_cast<float>(metrics_y + live_y0 + row * live_row_h);
             const float x0 = static_cast<float>(metrics_x + 6);
             const float x_track = static_cast<float>(metrics_x + label_w);
@@ -3512,6 +4202,34 @@ void Visualizer::renderMetrics() {
             fill.setFillColor(sf::Color(90, 140, 200, 220));
             window->draw(fill);
 
+            // Graduation: 5 repères visibles pour guider le réglage.
+            for (int gi = 0; gi <= 4; ++gi) {
+                const float gt = static_cast<float>(gi) / 4.0f;
+                const float gx = x_track + gt * w_track;
+                sf::RectangleShape tick(sf::Vector2f(1.0f, 5.0f));
+                tick.setPosition(gx, track_y + track_h + 1.0f);
+                tick.setFillColor(sf::Color(145, 145, 160, 210));
+                window->draw(tick);
+            }
+
+            if (font_loaded) {
+                sf::Text tmin;
+                tmin.setFont(font);
+                tmin.setCharacterSize(10);
+                tmin.setFillColor(sf::Color(178, 178, 190));
+                tmin.setPosition(x_track, track_y + track_h + 7.0f);
+                tmin.setString(sf::String::fromUtf8(min_label.begin(), min_label.end()));
+                window->draw(tmin);
+
+                sf::Text tmax;
+                tmax.setFont(font);
+                tmax.setCharacterSize(10);
+                tmax.setFillColor(sf::Color(178, 178, 190));
+                tmax.setPosition(x_track + w_track - 8.0f * static_cast<float>(max_label.size()), track_y + track_h + 7.0f);
+                tmax.setString(sf::String::fromUtf8(max_label.begin(), max_label.end()));
+                window->draw(tmax);
+            }
+
             const float thumb_x = x_track + w_track * tt - thumb_w * 0.5f;
             sf::RectangleShape thumb(sf::Vector2f(thumb_w, thumb_h));
             thumb.setPosition(thumb_x, track_y + track_h * 0.5f - thumb_h * 0.5f);
@@ -3523,14 +4241,31 @@ void Visualizer::renderMetrics() {
             out_track = sf::FloatRect(x_track, track_y, w_track, track_h);
             out_thumb = sf::FloatRect(thumb.getPosition().x, thumb.getPosition().y, thumb_w, thumb_h);
 
-            // Value string
+            // Cellule de saisie valeur (clic pour éditer)
             {
+                const bool editing = (live_input_target_ == input_target);
+                const bool invalid = editing && (live_input_error_until_ms_ > steady_now_ms());
+                const float vb_h = 18.0f;
+                const float vb_y = y + 1.0f;
+
+                sf::RectangleShape vb(sf::Vector2f(static_cast<float>(value_w), vb_h));
+                vb.setPosition(x_value, vb_y);
+                vb.setFillColor(editing ? sf::Color(44, 58, 74, 225) : sf::Color(34, 36, 44, 215));
+                vb.setOutlineColor(invalid ? sf::Color(230, 110, 110, 235) : sf::Color(98, 104, 120, 225));
+                vb.setOutlineThickness(1.0f);
+                window->draw(vb);
+
+                out_value_box = sf::FloatRect(x_value, vb_y, static_cast<float>(value_w), vb_h);
+
                 sf::Text tt;
                 tt.setFont(font);
                 tt.setCharacterSize(13);
                 tt.setFillColor(sf::Color(225, 225, 235));
-                tt.setPosition(x_value, y - 2.f);
-                tt.setString(sf::String::fromUtf8(value.begin(), value.end()));
+                tt.setPosition(x_value + 4.0f, y - 1.f);
+
+                std::string shown = editing ? live_input_buffer_ : value;
+                if (editing) shown += "_";
+                tt.setString(sf::String::fromUtf8(shown.begin(), shown.end()));
                 window->draw(tt);
             }
         };
@@ -3573,7 +4308,18 @@ void Visualizer::renderMetrics() {
         }
 
         // LR (log scale)
-        { drawSliderRow(0, "LR", t_from_lr(live_ui_lr_), format_decimal(live_ui_lr_, 10), last_live_lr_track_, last_live_lr_thumb_); }
+        {
+            drawSliderRow(0,
+                          "LR",
+                          t_from_lr(live_ui_lr_),
+                          format_decimal(live_ui_lr_, 10),
+                          LiveInputTarget::LR,
+                          "1e-7",
+                          "1e-3",
+                          last_live_lr_track_,
+                          last_live_lr_thumb_,
+                          last_live_lr_value_box_);
+        }
 
         // LR warmup
         {
@@ -3581,12 +4327,27 @@ void Visualizer::renderMetrics() {
                           "LR wu",
                           t_from_warmup(live_ui_lr_warmup_steps_),
                           std::to_string(live_ui_lr_warmup_steps_) + " steps",
+                          LiveInputTarget::LRWarmup,
+                          "0",
+                          "5e4",
                           last_live_lrwu_track_,
-                          last_live_lrwu_thumb_);
+                          last_live_lrwu_thumb_,
+                          last_live_lrwu_value_box_);
         }
 
         // KL beta
-        { drawSliderRow(2, "KL beta", t_from_klbeta(live_ui_kl_beta_), format_decimal(live_ui_kl_beta_, 8), last_live_klb_track_, last_live_klb_thumb_); }
+        {
+            drawSliderRow(2,
+                          "KL beta",
+                          t_from_klbeta(live_ui_kl_beta_),
+                          format_decimal(live_ui_kl_beta_, 8),
+                          LiveInputTarget::KLBeta,
+                          "0",
+                          "1",
+                          last_live_klb_track_,
+                          last_live_klb_thumb_,
+                          last_live_klb_value_box_);
+        }
 
         // KL warmup
         {
@@ -3594,8 +4355,12 @@ void Visualizer::renderMetrics() {
                           "KL wu",
                           t_from_warmup(live_ui_kl_warmup_steps_),
                           std::to_string(live_ui_kl_warmup_steps_) + " steps",
+                          LiveInputTarget::KLWarmup,
+                          "0",
+                          "5e4",
                           last_live_klwu_track_,
-                          last_live_klwu_thumb_);
+                          last_live_klwu_thumb_,
+                          last_live_klwu_value_box_);
         }
 
         // KL enabled checkbox
@@ -3717,6 +4482,11 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
     if (w <= 0 || h <= 0) return;
     if (channels != 1 && channels != 3 && channels != 4) return;
 
+    if (window && window->isOpen()) {
+        // Upload texture garanti avec contexte actif (évite textures noires selon WM/driver).
+        window->setActive(true);
+    }
+
     img_data.w = w;
     img_data.h = h;
     img_data.channels = channels;
@@ -3725,8 +4495,21 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
     sf::Image sfml_image;
     sfml_image.create(static_cast<unsigned>(w), static_cast<unsigned>(h));
 
+    // Si la taille ne colle pas exactement aux canaux annoncés, tenter une correction
+    // best-effort pour éviter des previews noires au premier rendu.
+    const size_t area = static_cast<size_t>(w) * static_cast<size_t>(h);
+    const size_t declared_stride = static_cast<size_t>(channels);
+    const size_t expected_declared = area * declared_stride;
+    if (img_data.pixels.size() != expected_declared) {
+        const size_t n = img_data.pixels.size();
+        if (n == area * 4ULL) channels = 4;
+        else if (n == area * 3ULL) channels = 3;
+        else if (n == area) channels = 1;
+        img_data.channels = channels;
+    }
+
     const size_t stride = static_cast<size_t>(channels);
-    const size_t expected = static_cast<size_t>(w) * static_cast<size_t>(h) * stride;
+    const size_t expected = area * stride;
     const size_t n = std::min(expected, img_data.pixels.size());
 
     auto at = [&](size_t idx) -> uint8_t {
@@ -3761,9 +4544,37 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
         }
     }
 
-    img_data.texture.loadFromImage(sfml_image);
+    bool loaded = img_data.texture.loadFromImage(sfml_image);
+    if (!loaded) {
+        // Fallback: downscale agressif puis retry (utile si la texture dépasse les limites GPU/driver).
+        const unsigned max_tex = sf::Texture::getMaximumSize();
+        const unsigned src_w = static_cast<unsigned>(std::max(1, w));
+        const unsigned src_h = static_cast<unsigned>(std::max(1, h));
+
+        const unsigned hard_cap = std::max(64u, std::min(1024u, max_tex > 0 ? max_tex : 1024u));
+        const unsigned dw = std::max(1u, std::min(src_w, hard_cap));
+        const unsigned dh = std::max(1u, std::min(src_h, hard_cap));
+
+        if (dw != src_w || dh != src_h) {
+            sf::Image down;
+            down.create(dw, dh);
+            for (unsigned yy = 0; yy < dh; ++yy) {
+                const unsigned sy = (yy * src_h) / dh;
+                for (unsigned xx = 0; xx < dw; ++xx) {
+                    const unsigned sx = (xx * src_w) / dw;
+                    down.setPixel(xx, yy, sfml_image.getPixel(sx, sy));
+                }
+            }
+            loaded = img_data.texture.loadFromImage(down);
+        }
+    }
+
+    if (!loaded) {
+        return;
+    }
+
     img_data.texture.setSmooth(true);
-    img_data.sprite.setTexture(img_data.texture);
+    img_data.sprite.setTexture(img_data.texture, true);
 
     // Mettre à l'échelle pour affichage (fit-to-square)
     const float sx = static_cast<float>(display_size) / static_cast<float>(w);

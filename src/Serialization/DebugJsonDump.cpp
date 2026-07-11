@@ -194,6 +194,13 @@ json DebugJsonDump::build_json(
     const SaveOptions& options
 ) {
     json root;
+
+    std::string tensor_dtype_tag = "F32";
+    try {
+        tensor_dtype_tag = dtype_to_string(string_to_dtype(model.getDefaultDType()));
+    } catch (...) {
+        tensor_dtype_tag = "F32";
+    }
     
     // Metadata
     root["format"] = "mimir_debug_dump";
@@ -257,7 +264,7 @@ json DebugJsonDump::build_json(
         
         json tensor_obj;
         tensor_obj["name"] = layer.name + "/weights";
-        tensor_obj["dtype"] = "F32";
+        tensor_obj["dtype"] = tensor_dtype_tag;
         
         tensor_obj["shape"] = json::array({size});
         tensor_obj["total_elements"] = size;
@@ -582,11 +589,12 @@ void DebugJsonDump::add_tensor_enhanced(
     const std::vector<size_t>& shape,
     const float* grad_data,
     size_t max_values,
-    bool include_grads
+    bool include_grads,
+    const std::string& dtype_tag
 ) {
     json tensor_obj;
     tensor_obj["name"] = name;
-    tensor_obj["dtype"] = "F32";
+    tensor_obj["dtype"] = dtype_tag;
     
     // Real shape (not just size)
     json shape_array = json::array();
@@ -841,6 +849,13 @@ void DebugJsonDump::add_tensor_info(
 
 json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptions& options) {
     json root;
+
+    std::string tensor_dtype_tag = "F32";
+    try {
+        tensor_dtype_tag = dtype_to_string(string_to_dtype(model.getDefaultDType()));
+    } catch (...) {
+        tensor_dtype_tag = "F32";
+    }
     
     // Version and format
     root["format"] = "mimir_debug_dump";
@@ -1022,7 +1037,8 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
                     weight_shape.empty() ? std::vector<size_t>{weight_count} : weight_shape,
                     grad_ptr,
                     options.max_values_per_tensor,
-                    options.include_gradients
+                    options.include_gradients,
+                    tensor_dtype_tag
                 );
 
                 if (options.include_checksums) {
@@ -1075,7 +1091,8 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
                     std::vector<size_t>{bias_count},
                     grad_bias_ptr,
                     options.max_values_per_tensor,
-                    options.include_gradients
+                    options.include_gradients,
+                    tensor_dtype_tag
                 );
 
                 if (options.include_checksums) {

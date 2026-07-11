@@ -2,6 +2,7 @@
 
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Serialization/Serialization.hpp"
+#include "DType.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -65,8 +66,12 @@ int main() {
     };
     const Case cases[] = {
         {"float32", "F32", 1e-6f},
+        {"f32", "F32", 1e-6f},
         {"float16", "F16", 5e-3f},
+        {"f16", "F16", 5e-3f},
+        {"fp16", "F16", 5e-3f},
         {"bfloat16", "BF16", 2e-2f},
+        {"bf16", "BF16", 2e-2f},
         {"float64", "F64", 1e-6f},
     };
 
@@ -136,8 +141,8 @@ int main() {
 
         TASSERT_TRUE(load_checkpoint(*modelB, dir.string(), lopts, &err));
 
-        // DType should be restored from checkpoint config metadata.
-        TASSERT_TRUE(modelB->getDefaultDType() == std::string(c.dtype));
+        // DType should be restored semantically (aliases allowed: f16/fp16/float16...).
+        TASSERT_TRUE(Mimir::parse_dtype(modelB->getDefaultDType()) == Mimir::parse_dtype(c.dtype));
 
         // Basic sanity: model config restored and embeddings present.
         TASSERT_TRUE(modelB->modelConfig.contains("type"));

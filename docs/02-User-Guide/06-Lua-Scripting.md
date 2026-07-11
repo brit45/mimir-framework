@@ -112,6 +112,28 @@ Ces modules ne sont pas “magiques” : ils sont juste là pour uniformiser les
 - `scripts/modules/help_cli.lua` : aide CLI commune (`--help`) pour scripts executables
 - `scripts/modules/checkpoint_resume.lua` : reprise automatique
 - `scripts/modules/base_tokenizer.lua` : base vocab stable
+- `scripts/modules/fs.lua` : helpers filesystem cross-plateforme
+
+### Filesystem cross-plateforme (obligatoire)
+
+Pour garantir la portabilité Linux/Windows, les scripts Lua doivent passer par `FS`:
+
+```lua
+local FS = dofile("scripts/modules/fs.lua")
+FS.mkdir_p("checkpoint/my_run")
+local arch = FS.join("checkpoint", "my_run", "model", "architecture.json")
+if FS.file_exists(arch) then
+  -- ...
+end
+```
+
+À éviter dans les scripts métier:
+
+- `os.execute("mkdir -p ...")`
+- `io.popen("ls ...")`
+- détection via `test -d`, `stat`, `find` shell
+
+Ces patterns sont non portables et doivent être remplacés par `FS.*`.
 
 ## 4) Conseils
 

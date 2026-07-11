@@ -1,6 +1,7 @@
 ---@diagnostic disable: undefined-global, undefined-field, inject-field
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
+local FS = dofile("scripts/modules/fs.lua")
 
 local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
 
@@ -107,7 +108,7 @@ local warmup_steps = opt_int("warmup-steps", opt_int("lr-warmup-steps", 0))
 -- explose sans clipping (gradient explosion -> loss ~1e13).
 local grad_clip_norm = opt_num("grad-clip-norm", opt_num("clip-norm", 1.0))
 
-os.execute("mkdir -p '" .. out_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+FS.mkdir_p(out_dir)
 
 log("=== Pretrain vgg16_feat ===")
 log(string.format("- dataset_root=%s", dataset_root))
@@ -212,7 +213,7 @@ if ok_train == false and tostring(err_train) == "STOP_REQUESTED" then
     last_dir = out_dir
   end
 
-  os.execute("mkdir -p '" .. tostring(last_dir):gsub("'", "'\\''") .. "' 2>/dev/null")
+  FS.mkdir_p(last_dir)
   local ok_save_stop, err_save_stop = Mimir.Serialization.save(last_dir, "raw_folder", {
     save_optimizer = true,
     include_checksums = true,
@@ -229,7 +230,7 @@ assert_ok(ok_train, err_train, "Model.train failed")
 -- Sauvegarde finale
 do
   local final_dir = out_dir .. "/final"
-  os.execute("mkdir -p '" .. final_dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+  FS.mkdir_p(final_dir)
   local ok_save, err_save = Mimir.Serialization.save(final_dir, "raw_folder", {
     save_optimizer = true,
     include_checksums = true,

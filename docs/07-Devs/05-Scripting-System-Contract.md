@@ -137,3 +137,13 @@ Pour toute evolution du contrat :
 2. Documenter la transition dans la doc dev.
 3. Fournir un test de compat backward.
 4. Eviter tout renommage silencieux des globals/aliases.
+
+## 10. Regle filesystem cross-plateforme
+
+Les scripts metier doivent utiliser `scripts/modules/fs.lua` pour les acces filesystem:
+
+- `FS.mkdir_p`, `FS.join`, `FS.dirname`, `FS.list_dir`, `FS.file_exists`, `FS.is_dir`.
+
+Ne pas introduire de shell Linux-specifique pour le filesystem (`mkdir -p`, `ls`, `find`, `test -d`, `stat`) dans les scripts applicatifs.
+
+Exception: les appels shell qui pilotent des processus externes (ex: ouvrir un navigateur, lancer un binaire tiers) peuvent rester en `os.execute`/`io.popen` si necessaire.

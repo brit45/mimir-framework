@@ -5,9 +5,12 @@
 #include "RawCheckpointReader.hpp"
 #include "DebugJsonDump.hpp"
 #include "../Model.hpp"
+#include "../DType.hpp"
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
+#include <algorithm>
+#include <cctype>
 
 namespace Mimir {
 namespace Serialization {
@@ -128,14 +131,35 @@ std::string dtype_to_string(DType dtype) {
 }
 
 DType string_to_dtype(const std::string& str) {
-    if (str == "F32" || str == "float32") return DType::Float32;
-    if (str == "F16" || str == "float16") return DType::Float16;
-    if (str == "BF16" || str == "bfloat16" || str == "bf16") return DType::BFloat16;
-    if (str == "F64" || str == "float64" || str == "f64" || str == "double") return DType::Float64;
-    if (str == "I32" || str == "int32") return DType::Int32;
-    if (str == "I16" || str == "int16") return DType::Int16;
-    if (str == "U16" || str == "uint16") return DType::Uint16;
-    if (str == "U8" || str == "uint8") return DType::Uint8;
+    // Accept all common aliases/cases used across Lua/config/runtime.
+    // Examples: f16, fp16, F16, float16, bf16, f32, float32, etc.
+    const Mimir::DType rt = Mimir::parse_dtype_safetensors(str);
+    switch (rt) {
+        case Mimir::DType::F32: return DType::Float32;
+        case Mimir::DType::F16: return DType::Float16;
+        case Mimir::DType::BF16: return DType::BFloat16;
+        case Mimir::DType::F64: return DType::Float64;
+        case Mimir::DType::I32: return DType::Int32;
+        case Mimir::DType::I16: return DType::Int16;
+        case Mimir::DType::U16: return DType::Uint16;
+        case Mimir::DType::U8: return DType::Uint8;
+        default: break;
+    }
+
+    // Last-resort case-insensitive fallback for serialized tags like "f32".
+    std::string s = str;
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    if (s == "F32") return DType::Float32;
+    if (s == "F16") return DType::Float16;
+    if (s == "BF16") return DType::BFloat16;
+    if (s == "F64") return DType::Float64;
+    if (s == "I32") return DType::Int32;
+    if (s == "I16") return DType::Int16;
+    if (s == "U16") return DType::Uint16;
+    if (s == "U8") return DType::Uint8;
+
     throw std::runtime_error("Unknown dtype string: " + str);
 }
 

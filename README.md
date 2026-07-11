@@ -1,4 +1,4 @@
-# Mímir Framework
+# Mímir AI Engine
 
 ![logo](./logo.png)
 
@@ -13,20 +13,20 @@
 | `main` | [![unit-tests main](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=main)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki main](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=main)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 | `develop` | [![unit-tests develop](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki develop](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 
-Version framework : **3.1.0**
+Version engine : **3.1.0**
 Révision documentation : **2026-07-01**
 
-**Mímir est un moteur C++ de conception, d'entraînement et d'analyse d'architectures d'intelligence artificielle, pilotable par Lua ou JSON, intégrant son propre runtime, son gestionnaire mémoire, son système de datasets, ses outils de visualisation et de sérialisation, avec une approche CPU-first orientée recherche et expérimentation.**
+**Mímir est un AI Engine C++ de conception, d'entraînement et d'analyse de systèmes IA, pilotable par Lua ou JSON, avec runtime, mémoire, dataset, visualisation et sérialisation intégrés, dans une approche CPU-first orientée recherche et expérimentation.**
 
 ---
 
 ## Vitrine (FR)
 
-Mímir est un framework de recherche IA **CPU-first** où tu conçois les architectures en **C++**, puis tu pilotes entraînement/inférence via **Lua** ou **JSON (`--conf`)**.
+Mímir est un **AI Engine de recherche IA CPU-first** où tu conçois les architectures en **C++**, puis tu pilotes entraînement/inférence via **Lua** ou **JSON (`--conf`)**.
 
 Points clés:
 
-- moteur de graphes IA autonome (runtime + mémoire + planner),
+- AI engine de graphes autonome (runtime + mémoire + planner),
 - registre central d'architectures (vision, NLP, diffusion),
 - outillage intégré (datasets, viz SFML, sérialisation, benchmarks),
 - approche orientée expérimentation et inspection interne des modèles.
@@ -35,12 +35,12 @@ Points clés:
 
 ## Showcase (EN)
 
-Mímir is a **CPU-first C++ AI architecture engine**.
-You define models in C++, then orchestrate training/inference with Lua scripts or JSON-driven runs.
+Mímir is a **CPU-first C++ AI Engine**.
+You define model architectures in C++, then orchestrate training/inference with Lua scripts or JSON-driven runs.
 
 Core strengths:
 
-- autonomous graph runtime with integrated memory management,
+- autonomous AI runtime and graph execution core,
 - architecture registry (vision, NLP, diffusion),
 - built-in tooling (datasets, visualization, serialization, benchmarking),
 - research-focused workflow for fast experimentation and deep inspection.
@@ -53,12 +53,12 @@ Core strengths:
 
 Mímir n'est pas un clone de PyTorch ou TensorFlow.
 
-Le projet est pensé comme un **moteur de graphes IA autonome** :
+Le projet est pensé comme un **AI Engine autonome** :
 
 - architecture des modèles en **C++**,
 - orchestration en **Lua**,
 - exécution reproductible via **JSON**,
-- runtime et outillage intégrés dans un seul framework.
+- runtime et outillage intégrés dans un seul engine.
 
 Philosophie:
 
@@ -84,7 +84,7 @@ Entraînement / Inférence / Analyse
             Lua / JSON / CLI
                     │
                     ▼
-            API publique Mímir
+            API Engine Mímir
                     │
                     ▼
         Registry d'architectures
@@ -136,13 +136,19 @@ Notes rapides sur `config.sh`:
 - Variables utiles: `BUILD_TYPE=Debug`, `ENABLE_VULKAN=0`, `ENABLE_OPENCL=0`, `ENABLE_SFML=0`, `ENABLE_LZ4=0`.
 - Voir la doc detaillee: `docs/01-Getting-Started/02-Installation.md`.
 
+Notes scripts Lua (cross-plateforme):
+
+- Les scripts doivent utiliser `scripts/modules/fs.lua` pour les opérations fichiers/répertoires (`mkdir_p`, `join`, `dirname`, `list_dir`, `file_exists`).
+- Éviter `os.execute("mkdir ...")`, `io.popen("ls ...")`, `test -d`, etc. dans les scripts métier.
+- Les appels shell restent réservés aux besoins process externes (ex: ouvrir navigateur, lancer un outil), pas au filesystem applicatif.
+
 ---
 
 ### Modes d'utilisation
 
 Mímir expose trois modes principaux:
 
-1. **C++** : définition d'architectures, runtime et couches bas niveau.
+1. **C++** : définition d'architectures, noyau runtime et couches bas niveau.
 2. **Lua** : pilotage des runs (train/inference/tools).
 3. **JSON (`--conf`)** : exécution reproductible et scénarios paramétrés.
 
@@ -222,7 +228,7 @@ Le registre inclut notamment:
 
 ---
 
-### Runtime et performances
+### Runtime engine et performances
 
 Capacités clés:
 
@@ -233,13 +239,13 @@ Capacités clés:
 - backends CUDA / ROCm (optionnels, en évolution)
 - accélération Vulkan/OpenCL sur certains chemins
 
-Le framework est **CPU-first** et optimisé pour les processeurs modernes.
+L'engine est **CPU-first** et optimisé pour les processeurs modernes.
 
 ---
 
-### Gestion mémoire
+### Gestion mémoire de l'engine
 
-Mímir intègre son propre système mémoire:
+Mímir intègre son propre système mémoire engine:
 
 - `MemoryGuard`
 - `DynamicTensorAllocator`
@@ -256,7 +262,7 @@ Objectifs:
 
 ---
 
-### Planner et exécution de graphe
+### Planner et exécution de graphe engine
 
 Le planner de graphes prend en charge:
 
@@ -294,6 +300,16 @@ Interface SFML temps réel pour:
 - reconstructions et activations,
 - heatmaps et latent,
 - progression d'entraînement.
+
+Nouveautés UI (v3.1.x):
+
+- rendu `Blocks / Layers` en mode `HEATMAP` ou `REEL` (`M`),
+- palettes heatmap cyclables au clavier (`K`) : `CLASSIC`, `TURBO`, `INFERNO`, `VIRIDIS`,
+- mise à jour immédiate de la palette (sans attendre la step suivante),
+- filtrage des tenseurs de packing final (`out_concat` / `out_pack`) pour éviter les faux aperçus,
+- ordre visuel forcé dans `Outputs`: `recon` affiché juste avant `diff/resdiff` quand les deux existent,
+- barre de progression globale (epochs) + barre dédiée batch courant (sous la globale),
+- couleur de la barre batch pilotée par `batch_time_ms` (rapide=vert, plus lent=orange/rouge).
 
 ### Sérialisation
 

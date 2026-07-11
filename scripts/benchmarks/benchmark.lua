@@ -1,6 +1,7 @@
 #!/usr/bin/env mimir --lua
 local Help = dofile("scripts/modules/help_cli.lua")
 Help.auto_exit_help()
+local FS = dofile("scripts/modules/fs.lua")
 
 -- ================================================================
 -- Mímir Benchmark Script - CPU Performance Tests
@@ -93,6 +94,21 @@ local function timer(name, func)
     local elapsed = os.clock() - start
     log("   ✓ Temps: " .. string.format("%.3f", elapsed) .. "s")
     return elapsed
+end
+
+local function file_size_bytes(path)
+    local f = io.open(path, "rb")
+    if not f then return 0 end
+    local s = f:seek("end")
+    f:close()
+    return s or 0
+end
+
+local function human_size(n)
+    if n < 1024 then return tostring(n) .. " B" end
+    if n < 1024 * 1024 then return string.format("%.1f KiB", n / 1024) end
+    if n < 1024 * 1024 * 1024 then return string.format("%.1f MiB", n / (1024 * 1024)) end
+    return string.format("%.2f GiB", n / (1024 * 1024 * 1024))
 end
 
 local Tokenizer = (Mimir and Mimir.Tokenizer) or tokenizer
@@ -280,13 +296,8 @@ timer("Save checkpoint", function()
     Mimir.Serialization.save(checkpoint_path_st, "safetensors")
 end)
 
-local size_cmd = "du -sh " .. checkpoint_path_st .. " 2>/dev/null | cut -f1"
-local handle = io.popen(size_cmd)
-if handle then
-    local out = handle:read("*a") or ""
-    handle:close()
-    local size = out:gsub("%s+", "")
-    if size ~= "" then log("   📦 Taille: " .. size) end
+if FS.file_exists(checkpoint_path_st) then
+    log("   📦 Taille: " .. human_size(file_size_bytes(checkpoint_path_st)))
 end
 
 timer("Load checkpoint", function()

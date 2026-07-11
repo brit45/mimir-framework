@@ -23,7 +23,16 @@ option(ENABLE_CUDA "Enable CUDA GPU compute (cuBLAS)" OFF)
 option(ENABLE_ROCM "Enable ROCm GPU compute (rocBLAS/HIP)" OFF)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
 option(ENABLE_SFML "Enable SFML visualization" ON)
+option(ENABLE_SCRIPTING_REST "Enable REST scripting bridge" OFF)
+option(ENABLE_SCRIPTING_RUST "Enable Rust scripting bridge" ON)
+option(ENABLE_SCRIPTING_JS "Enable JavaScript scripting bridge" ON)
+option(ENABLE_SCRIPTING_CSHARP "Enable C# scripting bridge" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
+
+if(ENABLE_SCRIPTING_REST)
+    message(WARNING "ENABLE_SCRIPTING_REST=ON demandé, mais aucun bridge REST natif n'est implémenté dans ce dépôt. Option forcée à OFF.")
+    set(ENABLE_SCRIPTING_REST OFF)
+endif()
 
 # Build d'un binaire statique (sans dépendances dynamiques) : nécessite les variantes *.a
 # des libs système (Lua, libstdc++, etc.). Sur certaines distros, un binaire 100% statique
@@ -77,19 +86,36 @@ endif()
 # ============================================================================
 
 # Flags communs
-add_compile_options(
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wno-unused-parameter
-    -Wno-unused-variable
-)
+if(MSVC)
+    add_compile_options(
+        /W4
+        /wd4100 # unreferenced formal parameter
+        /wd4101 # unreferenced local variable
+        /wd4996 # deprecated API warnings
+    )
+else()
+    add_compile_options(
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wno-unused-parameter
+        -Wno-unused-variable
+    )
+endif()
 
 # Flags de release
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native")
+if(MSVC)
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
+else()
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native")
+endif()
 
 # Flags de debug
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -DDEBUG")
+if(MSVC)
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Zi /Od /DDEBUG")
+else()
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -DDEBUG")
+endif()
 
 # ============================================================================
 # Recherche des dépendances
@@ -398,9 +424,6 @@ set(MIMIR_SOURCES
     src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp
     src/scriptings/Lua/luaScripting/LuaScriptingRuntimeAndViz.cpp
     src/scriptings/ScriptingBridgeCommon.cpp
-    src/scriptings/Rust/rustScripting/RustScripting.cpp
-    src/scriptings/CSharp/csharpScripting/CSharpScripting.cpp
-    src/scriptings/JavaScript/jsScripting/JSScripting.cpp
     src/ConfigOverrides.cpp
     src/Helpers.cpp
     src/stb_image_impl.cpp
@@ -451,9 +474,6 @@ set(MIMIR_HEADERS
     src/scriptings/ScriptingContext.hpp
     src/scriptings/ScriptingBridgeCommon.hpp
     src/scriptings/Lua/luaScripting/LuaScripting.hpp
-    src/scriptings/Rust/rustScripting/RustScripting.hpp
-    src/scriptings/CSharp/csharpScripting/CSharpScripting.hpp
-    src/scriptings/JavaScript/jsScripting/JSScripting.hpp
     src/Helpers.hpp
     src/Layers.hpp
     src/Autograd.hpp
@@ -509,6 +529,21 @@ set(MIMIR_HEADERS
     src/stb_image.h
 )
 
+if(ENABLE_SCRIPTING_RUST)
+    list(APPEND MIMIR_SOURCES src/scriptings/Rust/rustScripting/RustScripting.cpp)
+    list(APPEND MIMIR_HEADERS src/scriptings/Rust/rustScripting/RustScripting.hpp)
+endif()
+
+if(ENABLE_SCRIPTING_JS)
+    list(APPEND MIMIR_SOURCES src/scriptings/JavaScript/jsScripting/JSScripting.cpp)
+    list(APPEND MIMIR_HEADERS src/scriptings/JavaScript/jsScripting/JSScripting.hpp)
+endif()
+
+if(ENABLE_SCRIPTING_CSHARP)
+    list(APPEND MIMIR_SOURCES src/scriptings/CSharp/csharpScripting/CSharpScripting.cpp)
+    list(APPEND MIMIR_HEADERS src/scriptings/CSharp/csharpScripting/CSharpScripting.hpp)
+endif()
+
 if(ENABLE_CUDA AND CUDAToolkit_FOUND)
     list(APPEND MIMIR_SOURCES src/runtimes/cuda/CudaRuntime.cpp)
 endif()
@@ -557,6 +592,16 @@ target_include_directories(mimir_core PUBLIC
 )
 
 target_compile_definitions(mimir_core PUBLIC MIMIR_PROJECT_VERSION="${PROJECT_VERSION}")
+
+if(ENABLE_SCRIPTING_RUST)
+    target_compile_definitions(mimir_core PUBLIC MIMIR_ENABLE_SCRIPTING_RUST)
+endif()
+if(ENABLE_SCRIPTING_JS)
+    target_compile_definitions(mimir_core PUBLIC MIMIR_ENABLE_SCRIPTING_JS)
+endif()
+if(ENABLE_SCRIPTING_CSHARP)
+    target_compile_definitions(mimir_core PUBLIC MIMIR_ENABLE_SCRIPTING_CSHARP)
+endif()
 
 # 🛡️ Appliquer la macro MIMIR_ENABLE_LEGACY_PARAMS si activée
 if(MIMIR_ENABLE_LEGACY_PARAMS)
@@ -704,6 +749,16 @@ if(BUILD_MIMIR_STATIC)
 
     target_compile_definitions(mimir_core_static PUBLIC MIMIR_PROJECT_VERSION="${PROJECT_VERSION}")
 
+    if(ENABLE_SCRIPTING_RUST)
+        target_compile_definitions(mimir_core_static PUBLIC MIMIR_ENABLE_SCRIPTING_RUST)
+    endif()
+    if(ENABLE_SCRIPTING_JS)
+        target_compile_definitions(mimir_core_static PUBLIC MIMIR_ENABLE_SCRIPTING_JS)
+    endif()
+    if(ENABLE_SCRIPTING_CSHARP)
+        target_compile_definitions(mimir_core_static PUBLIC MIMIR_ENABLE_SCRIPTING_CSHARP)
+    endif()
+
     if(MIMIR_ENABLE_LEGACY_PARAMS)
         target_compile_definitions(mimir_core_static PRIVATE MIMIR_ENABLE_LEGACY_PARAMS)
     endif()
@@ -819,6 +874,10 @@ message(STATUS "  OpenCL Compute:    ${ENABLE_OPENCL}")
 message(STATUS "  CUDA Compute:      ${ENABLE_CUDA}")
 message(STATUS "  ROCm Compute:      ${ENABLE_ROCM}")
 message(STATUS "  LZ4 Compression:   ${ENABLE_LZ4}")
+message(STATUS "  REST Bridge:       ${ENABLE_SCRIPTING_REST}")
+message(STATUS "  Rust Bridge:       ${ENABLE_SCRIPTING_RUST}")
+message(STATUS "  JavaScript Bridge: ${ENABLE_SCRIPTING_JS}")
+message(STATUS "  C# Bridge:         ${ENABLE_SCRIPTING_CSHARP}")
 message(STATUS "")
 message(STATUS "Build options:")
 message(STATUS "  Examples:          ${BUILD_EXAMPLES}")

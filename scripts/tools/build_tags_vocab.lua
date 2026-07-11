@@ -17,6 +17,7 @@
 
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
+local FS = dofile("scripts/modules/fs.lua")
 
 local function opt_num(k, d)
   local v = opts[k]
@@ -46,16 +47,23 @@ local function opt_bool(k, d)
   return d
 end
 
-local function shell_quote(s)
-  if s == nil then return "''" end
-  s = tostring(s)
-  return "'" .. s:gsub("'", "'\\''") .. "'"
+local function ensure_parent_dir(filepath)
+  local dir = FS.dirname(filepath)
+  if dir and #dir > 0 then
+    FS.mkdir_p(dir)
+  end
 end
 
-local function ensure_parent_dir(filepath)
-  local dir = tostring(filepath):match("^(.*)/[^/]*$")
-  if dir and #dir > 0 then
-    os.execute("mkdir -p " .. shell_quote(dir) .. " >/dev/null 2>&1")
+local function collect_txt_files(root, out)
+  local entries = FS.list_dir(root)
+  table.sort(entries)
+  for _, name in ipairs(entries) do
+    local full = FS.join(root, name)
+    if FS.is_dir(full) then
+      collect_txt_files(full, out)
+    elseif name:match("%.txt$") then
+      out[#out + 1] = full
+    end
   end
 end
 
@@ -89,23 +97,13 @@ log("- out=" .. tostring(out_path))
 log("- lowercase=" .. tostring(lowercase))
 log("- min_freq=" .. tostring(min_freq) .. " top_k=" .. tostring(top_k) .. " max_files=" .. tostring(max_files))
 
--- Find txt files recursively (Linux).
-local find_cmd = "find " .. shell_quote(dataset_root) .. " -type f -name '*.txt' -print"
-local p = io.popen(find_cmd)
-if not p then
-  error("Impossible d'exécuter find pour lister les .txt")
-end
-
 local files = {}
-for line in p:lines() do
-  if line and #line > 0 then
-    table.insert(files, line)
-    if max_files > 0 and #files >= max_files then
-      break
-    end
-  end
+collect_txt_files(dataset_root, files)
+if max_files > 0 and #files > max_files then
+  local sliced = {}
+  for i = 1, max_files do sliced[i] = files[i] end
+  files = sliced
 end
-p:close()
 
 if #files == 0 then
   error("Aucun .txt trouvé sous dataset-root=" .. tostring(dataset_root))

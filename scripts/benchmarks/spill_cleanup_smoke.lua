@@ -1,6 +1,7 @@
 #!/usr/bin/env mimir --lua
 local Help = dofile("scripts/modules/help_cli.lua")
 Help.auto_exit_help()
+local FS = dofile("scripts/modules/fs.lua")
 
 -- Smoke test: force disk spill into .mimir-spill, then verify cleanup-on-exit.
 -- Goal: create spill files during execution (under memory pressure) then exit normally.
@@ -9,11 +10,8 @@ local function now_s() return os.clock() end
 local function fmt_s(s) return string.format("%.3f s", s) end
 
 local function count_spill_files()
-  local p = io.popen("ls -1 .mimir-spill 2>/dev/null | wc -l")
-  if not p then return -1 end
-  local out = p:read("*a")
-  p:close()
-  return tonumber(out) or -1
+  local entries = FS.list_dir(".mimir-spill")
+  return #entries
 end
 
 local function apply_dtype(cfg)

@@ -13,7 +13,70 @@
 #include <vector>
 #include <cerrno>
 #include <cstdio>
+#include <fstream>
 #include <fcntl.h>
+#if defined(_WIN32)
+#include <io.h>
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+#ifndef STDERR_FILENO
+#define STDERR_FILENO 2
+#endif
+#else
+#include <unistd.h>
+#endif
+
+static inline int mimir_os_open(const char* path, int flags) {
+#if defined(_WIN32)
+    return _open(path, flags);
+#else
+    return ::open(path, flags);
+#endif
+}
+
+static inline int mimir_os_dup(int fd) {
+#if defined(_WIN32)
+    return _dup(fd);
+#else
+    return ::dup(fd);
+#endif
+}
+
+static inline int mimir_os_dup2(int oldfd, int newfd) {
+#if defined(_WIN32)
+    return _dup2(oldfd, newfd);
+#else
+    return ::dup2(oldfd, newfd);
+#endif
+}
+
+static inline int mimir_os_close(int fd) {
+#if defined(_WIN32)
+    return _close(fd);
+#else
+    return ::close(fd);
+#endif
+}
+
+static inline int mimir_os_pipe(int fds[2]) {
+#if defined(_WIN32)
+    return _pipe(fds, 4096, _O_BINARY);
+#else
+    return ::pipe(fds);
+#endif
+}
+
+static inline int mimir_os_read(int fd, void* buf, unsigned int count) {
+#if defined(_WIN32)
+    return _read(fd, buf, count);
+#else
+    return static_cast<int>(::read(fd, buf, count));
+#endif
+}
 #include "HtopDisplay.hpp"
 #include "Visualizer.hpp"
 
@@ -101,10 +164,10 @@ public:
             // UI sur un fd dédié (tty) pour que stdout/stderr puissent être redirigés
             // sans casser le rendu.
             if (ui_fd_ < 0) {
-                ui_fd_ = ::open("/dev/tty", O_WRONLY | O_CLOEXEC);
+                ui_fd_ = mimir_os_open("/dev/tty", O_WRONLY | O_CLOEXEC);
                 if (ui_fd_ < 0) {
                     // fallback: dupliquer stdout AVANT redirection
-                    ui_fd_ = ::dup(STDOUT_FILENO);
+                    ui_fd_ = mimir_os_dup(STDOUT_FILENO);
                 }
             }
 
@@ -222,7 +285,7 @@ public:
         }
 
         if (ui_fd_ >= 0 && ui_fd_ != STDOUT_FILENO && ui_fd_ != STDERR_FILENO) {
-            ::close(ui_fd_);
+            mimir_os_close(ui_fd_);
         }
         ui_fd_ = -1;
 
@@ -425,18 +488,18 @@ private:
         if (!htop_) return;
 
         // Sauver stdout/stderr actuels.
-        saved_stdout_fd_ = ::dup(STDOUT_FILENO);
-        saved_stderr_fd_ = ::dup(STDERR_FILENO);
+        saved_stdout_fd_ = mimir_os_dup(STDOUT_FILENO);
+        saved_stderr_fd_ = mimir_os_dup(STDERR_FILENO);
         if (saved_stdout_fd_ < 0 || saved_stderr_fd_ < 0) {
             // Best-effort: si dup échoue, ne pas capturer.
-            if (saved_stdout_fd_ >= 0) { ::close(saved_stdout_fd_); saved_stdout_fd_ = -1; }
-            if (saved_stderr_fd_ >= 0) { ::close(saved_stderr_fd_); saved_stderr_fd_ = -1; }
+            if (saved_stdout_fd_ >= 0) { mimir_os_close(saved_stdout_fd_); saved_stdout_fd_ = -1; }
+            if (saved_stderr_fd_ >= 0) { mimir_os_close(saved_stderr_fd_); saved_stderr_fd_ = -1; }
             return;
         }
 
-        if (::pipe(pipe_fds_) != 0) {
-            ::close(saved_stdout_fd_);
-            ::close(saved_stderr_fd_);
+        if (mimir_os_pipe(pipe_fds_) != 0) {
+            mimir_os_close(saved_stdout_fd_);
+            mimir_os_close(saved_stderr_fd_);
             saved_stdout_fd_ = -1;
             saved_stderr_fd_ = -1;
             return;
@@ -445,8 +508,8 @@ private:
         // Rediriger stdout + stderr vers le pipe.
         ::fflush(stdout);
         ::fflush(stderr);
-        ::dup2(pipe_fds_[1], STDOUT_FILENO);
-        ::dup2(pipe_fds_[1], STDERR_FILENO);
+        mimir_os_dup2(pipe_fds_[1], STDOUT_FILENO);
+        mimir_os_dup2(pipe_fds_[1], STDERR_FILENO);
 
         capture_running_ = true;
         log_thread_ = std::thread([this]() {
@@ -455,7 +518,7 @@ private:
             std::vector<char> buf;
             buf.resize(4096);
             while (capture_running_.load()) {
-                const ssize_t n = ::read(pipe_fds_[0], buf.data(), buf.size());
+                const int n = mimir_os_read(pipe_fds_[0], buf.data(), static_cast<unsigned int>(buf.size()));
                 if (n > 0) {
                     if (htop_) {
                         htop_->appendLogChunk(std::string(buf.data(), (size_t)n));
@@ -475,10 +538,10 @@ private:
     {
         if (!capture_running_.load()) {
             // Même si capture inactive, s'assurer de fermer des fd restants.
-            if (pipe_fds_[0] >= 0) { ::close(pipe_fds_[0]); pipe_fds_[0] = -1; }
-            if (pipe_fds_[1] >= 0) { ::close(pipe_fds_[1]); pipe_fds_[1] = -1; }
-            if (saved_stdout_fd_ >= 0) { ::close(saved_stdout_fd_); saved_stdout_fd_ = -1; }
-            if (saved_stderr_fd_ >= 0) { ::close(saved_stderr_fd_); saved_stderr_fd_ = -1; }
+            if (pipe_fds_[0] >= 0) { mimir_os_close(pipe_fds_[0]); pipe_fds_[0] = -1; }
+            if (pipe_fds_[1] >= 0) { mimir_os_close(pipe_fds_[1]); pipe_fds_[1] = -1; }
+            if (saved_stdout_fd_ >= 0) { mimir_os_close(saved_stdout_fd_); saved_stdout_fd_ = -1; }
+            if (saved_stderr_fd_ >= 0) { mimir_os_close(saved_stderr_fd_); saved_stderr_fd_ = -1; }
             return;
         }
 
@@ -487,13 +550,13 @@ private:
 
         // Restaurer stdout/stderr (cela ferme implicitement les dup2 sur pipe_fds_[1]).
         if (saved_stdout_fd_ >= 0) {
-            ::dup2(saved_stdout_fd_, STDOUT_FILENO);
-            ::close(saved_stdout_fd_);
+            mimir_os_dup2(saved_stdout_fd_, STDOUT_FILENO);
+            mimir_os_close(saved_stdout_fd_);
             saved_stdout_fd_ = -1;
         }
         if (saved_stderr_fd_ >= 0) {
-            ::dup2(saved_stderr_fd_, STDERR_FILENO);
-            ::close(saved_stderr_fd_);
+            mimir_os_dup2(saved_stderr_fd_, STDERR_FILENO);
+            mimir_os_close(saved_stderr_fd_);
             saved_stderr_fd_ = -1;
         }
 
@@ -501,7 +564,7 @@ private:
 
         // Fermer l'écriture du pipe pour débloquer read().
         if (pipe_fds_[1] >= 0) {
-            ::close(pipe_fds_[1]);
+            mimir_os_close(pipe_fds_[1]);
             pipe_fds_[1] = -1;
         }
 
@@ -510,7 +573,7 @@ private:
         }
 
         if (pipe_fds_[0] >= 0) {
-            ::close(pipe_fds_[0]);
+            mimir_os_close(pipe_fds_[0]);
             pipe_fds_[0] = -1;
         }
     }

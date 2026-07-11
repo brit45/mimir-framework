@@ -70,6 +70,22 @@ int main() {
     TASSERT_TRUE(j["model_config"].contains("dtype"));
     TASSERT_TRUE(j["model_config"]["dtype"].get<std::string>() == "bfloat16");
 
+    // Tensor entries should reflect selected serialized dtype too.
+    TASSERT_TRUE(j.contains("layers"));
+    TASSERT_TRUE(j["layers"].is_array());
+    bool saw_tensor_dtype = false;
+    for (const auto& layer : j["layers"]) {
+        if (!layer.is_object() || !layer.contains("tensors") || !layer["tensors"].is_array()) continue;
+        for (const auto& t : layer["tensors"]) {
+            if (!t.is_object() || !t.contains("dtype")) continue;
+            TASSERT_TRUE(t["dtype"].get<std::string>() == "BF16");
+            saw_tensor_dtype = true;
+            break;
+        }
+        if (saw_tensor_dtype) break;
+    }
+    TASSERT_TRUE(saw_tensor_dtype);
+
     std::filesystem::remove(p);
     return 0;
 }

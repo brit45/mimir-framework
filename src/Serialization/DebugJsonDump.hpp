@@ -145,7 +145,8 @@ private:
         const std::vector<size_t>& shape,
         const float* grad_data,
         size_t max_values,
-        bool include_grads
+        bool include_grads,
+        const std::string& dtype_tag
     );
     
     // Weight snapshots for delta computation

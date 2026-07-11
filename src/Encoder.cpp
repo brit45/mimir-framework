@@ -359,3 +359,67 @@ void ConditioningEncoder::trainOnTextTokens(const std::vector<int> &token_ids, c
         }
     }
 }
+
+void ConditioningEncoder::fillImageVectorSingleModality(const std::vector<float>& image_feature,
+                                                        float lr,
+                                                        bool single_modality_training)
+{
+    if (!single_modality_training) return;
+    if (lr == 0.0f || static_cast<int>(image_feature.size()) != dim) return;
+
+    ensureSpecialEmbeddings();
+    if (mag_embedding.size() != static_cast<size_t>(dim)) return;
+
+    // Update ONLY mag_embedding in single-modality image training.
+    #pragma omp simd
+    for (int d = 0; d < dim; ++d) {
+        const size_t i = static_cast<size_t>(d);
+        mag_embedding[i] += lr * (image_feature[i] - mag_embedding[i]);
+    }
+}
+
+void ConditioningEncoder::fillTextVectorSingleModality(const std::vector<int>& token_ids,
+                                                       int pad_id,
+                                                       float lr,
+                                                       bool single_modality_training)
+{
+    if (!single_modality_training) return;
+    if (lr == 0.0f || token_ids.empty() || dim <= 0) return;
+
+    ensureSpecialEmbeddings();
+    if (seq_embedding.size() != static_cast<size_t>(dim)) return;
+
+    // Build a deterministic text signature from token ids (excluding PAD/specials),
+    // then update ONLY seq_embedding toward this signature.
+    std::vector<float> target(static_cast<size_t>(dim), 0.0f);
+    int valid = 0;
+    for (int id : token_ids) {
+        if (id <= 4) continue;
+        if (pad_id >= 0 && id == pad_id) continue;
+
+        const uint32_t h0 = static_cast<uint32_t>(id) * 0x9e3779b1u;
+        const int idx = static_cast<int>((h0 ^ (h0 >> 16)) % static_cast<uint32_t>(dim));
+        const float sgn = ((h0 >> 31) & 1u) ? 1.0f : -1.0f;
+        target[static_cast<size_t>(idx)] += sgn;
+        valid += 1;
+    }
+    if (valid <= 0) return;
+
+    const float inv = 1.0f / static_cast<float>(valid);
+    double ss = 0.0;
+    for (int d = 0; d < dim; ++d) {
+        target[static_cast<size_t>(d)] *= inv;
+        const double v = static_cast<double>(target[static_cast<size_t>(d)]);
+        ss += v * v;
+    }
+    const float norm = static_cast<float>(std::sqrt(std::max(1e-12, ss)));
+    for (int d = 0; d < dim; ++d) {
+        target[static_cast<size_t>(d)] /= norm;
+    }
+
+    #pragma omp simd
+    for (int d = 0; d < dim; ++d) {
+        const size_t i = static_cast<size_t>(d);
+        seq_embedding[i] += lr * (target[i] - seq_embedding[i]);
+    }
+}

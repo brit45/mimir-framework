@@ -23,6 +23,7 @@
 --     --out out_hf_vae.ppm
 
 local Args = dofile("scripts/modules/args.lua")
+local FS = dofile("scripts/modules/fs.lua")
 
 local function logf(fmt, ...)
   local msg = string.format(fmt, ...)
@@ -46,20 +47,12 @@ local function apply_dtype(cfg)
   return true
 end
 
-local function shell_quote(s)
-  s = tostring(s or "")
-  return "'" .. s:gsub("'", "'\\''") .. "'"
-end
-
 local function mkdir_p(path)
-  local dir = tostring(path or "")
-  if dir == "" then return end
-  os.execute("mkdir -p " .. shell_quote(dir) .. " >/dev/null 2>&1")
+  FS.mkdir_p(path)
 end
 
 local function dirname(path)
-  path = tostring(path or "")
-  return path:match("^(.*)/[^/]*$")
+  return FS.dirname(path)
 end
 
 local function write_ppm_rgb_u8(path, pixels, w, h)

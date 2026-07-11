@@ -1772,6 +1772,26 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
         throw std::runtime_error("Failed to convert VAE mu (CHW) to PonyXL latent (tokens HWC)");
     }
 
+    // ConditioningEncoder updates (best-effort):
+    // - image-only sample: fill only MAG vector
+    // - sample with text: align token embeddings toward image feature
+    try {
+        auto& enc = getMutableEncoder();
+        enc.ensureSpecialEmbeddings();
+
+        const bool has_text_signal = !used_prompt.empty();
+        const std::vector<float> img_emb = imageToEmbedding(rgb, W, H, enc.dim);
+
+        enc.fillImageVectorSingleModality(img_emb, 0.005f, !has_text_signal);
+
+        if (has_text_signal && !text_ids.empty()) {
+            enc.ensureVocabSize(getMutableTokenizer().getVocabSize());
+            enc.trainOnTextTokens(text_ids, img_emb, 0.01f);
+        }
+    } catch (...) {
+        // Never break diffusion training on auxiliary conditioning updates.
+    }
+
     // Keep generic taps enabled during the main forward/backward so the Viz
     // Blocks/Layers panel shows the actual PonyXL blocks like VAE_conv does.
     // Preview-only helper forwards below still disable taps temporarily to avoid
@@ -4032,9 +4052,30 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
             E->seq_len = text_len;
         }
 
-        // Encodeur texte: part directement de l'embedding sans injection mag/mod externe.
-        // Le conditionnement est fourni exclusivement par text_ids + timestep (DDPM pur).
-        std::string text = "ponyxl_sdxl/text_encoder/tok_emb_out";
+        // Injection ConditioningEncoder (mag/mod) sur le flux texte.
+        // Add supporte le broadcast (seq*d_model + d_model).
+        m.push("ponyxl_sdxl/text_encoder/mag_in", "Identity", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/mag_in")) {
+            L->inputs = {"mag"};
+            L->output = "ponyxl_sdxl/text_encoder/mag_vec";
+        }
+        m.push("ponyxl_sdxl/text_encoder/add_mag", "Add", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/add_mag")) {
+            L->inputs = {"ponyxl_sdxl/text_encoder/tok_emb_out", "ponyxl_sdxl/text_encoder/mag_vec"};
+            L->output = "ponyxl_sdxl/text_encoder/tok_plus_mag";
+        }
+        m.push("ponyxl_sdxl/text_encoder/mod_in", "Identity", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/mod_in")) {
+            L->inputs = {"mod"};
+            L->output = "ponyxl_sdxl/text_encoder/mod_vec";
+        }
+        m.push("ponyxl_sdxl/text_encoder/add_mod", "Add", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/add_mod")) {
+            L->inputs = {"ponyxl_sdxl/text_encoder/tok_plus_mag", "ponyxl_sdxl/text_encoder/mod_vec"};
+            L->output = "ponyxl_sdxl/text_encoder/tok_plus_mag_mod";
+        }
+
+        std::string text = "ponyxl_sdxl/text_encoder/tok_plus_mag_mod";
 
         const size_t text_attn_params = sat_mul(static_cast<size_t>(4), sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(d_model)));
         for (int i = 0; i < text_layers; ++i) {

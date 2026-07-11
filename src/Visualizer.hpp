@@ -166,6 +166,12 @@ private:
     enum class LiveDragTarget { None, LR, LRWarmup, KLBeta, KLWarmup };
     LiveDragTarget live_dragging_ = LiveDragTarget::None;
 
+    // Saisie clavier directe des sliders live.
+    enum class LiveInputTarget { None, LR, LRWarmup, KLBeta, KLWarmup };
+    LiveInputTarget live_input_target_ = LiveInputTarget::None;
+    std::string live_input_buffer_;
+    uint64_t live_input_error_until_ms_ = 0;
+
     // Rects des contrôles live (reset à chaque frame).
     std::optional<sf::FloatRect> last_live_overrides_box_;
     std::optional<sf::FloatRect> last_live_kl_enable_box_;
@@ -177,6 +183,10 @@ private:
     std::optional<sf::FloatRect> last_live_klb_thumb_;
     std::optional<sf::FloatRect> last_live_klwu_track_;
     std::optional<sf::FloatRect> last_live_klwu_thumb_;
+    std::optional<sf::FloatRect> last_live_lr_value_box_;
+    std::optional<sf::FloatRect> last_live_lrwu_value_box_;
+    std::optional<sf::FloatRect> last_live_klb_value_box_;
+    std::optional<sf::FloatRect> last_live_klwu_value_box_;
 
     // Label parsing / architecture hints
     bool hide_activation_blocks = false;
@@ -226,7 +236,7 @@ private:
             , texture(o.texture)
             , sprite(o.sprite)
         {
-            sprite.setTexture(texture, false);
+            sprite.setTexture(texture, true);
         }
 
         ImageData(ImageData&& o) noexcept
@@ -237,7 +247,7 @@ private:
             , texture(std::move(o.texture))
             , sprite(std::move(o.sprite))
         {
-            sprite.setTexture(texture, false);
+            sprite.setTexture(texture, true);
         }
 
         ImageData& operator=(const ImageData& o) {
@@ -247,7 +257,7 @@ private:
                 display_size = o.display_size;
                 texture = o.texture;
                 sprite = o.sprite;
-                sprite.setTexture(texture, false);
+                sprite.setTexture(texture, true);
             }
             return *this;
         }
@@ -260,7 +270,7 @@ private:
                 display_size = o.display_size;
                 texture = std::move(o.texture);
                 sprite = std::move(o.sprite);
-                sprite.setTexture(texture, false);
+                sprite.setTexture(texture, true);
             }
             return *this;
         }
@@ -343,6 +353,10 @@ private:
     float current_val_recon;
     float current_val_kl;
     float current_val_align;
+
+    // Lissage visuel des barres Training (évite les sauts brusques).
+    float progress_epoch_display_ = 0.0f;
+    float progress_batch_display_ = 0.0f;
     std::deque<float> loss_history;
 
     // Stats pour l'échelle du graph (évite un scan O(n) à chaque frame)
@@ -498,6 +512,7 @@ private:
 
     // Refresh auto textures (évite le reload UI)
     uint64_t last_auto_texture_refresh_ms_ = 0;
+    bool first_texture_sync_done_ = false;
     static constexpr uint64_t kAutoTextureRefreshPeriodMs = 2000;
 
     // Architecture awareness (optional)
@@ -517,7 +532,9 @@ private:
     bool save_chord_consumed_ = false;
 
     // Mode d'affichage des Blocks/Layers : true = heatmap colorée, false = couleurs naturelles
-    bool heatmap_mode_ = false;
+    bool heatmap_mode_ = true;
+    enum class HeatmapPalette { Classic = 0, Turbo = 1, Inferno = 2, Viridis = 3 };
+    HeatmapPalette heatmap_palette_ = HeatmapPalette::Classic;
     void rebuildLayerBlockTextures();
 
     std::stringstream log_history;

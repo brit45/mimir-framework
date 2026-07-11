@@ -235,6 +235,7 @@ bool VulkanRuntime::forwardLayer(
             const int k = std::max(1, layer.kernel_h > 0 ? layer.kernel_h : layer.get_kernel_h());
             const int stride = std::max(1, layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h());
             const int pad = std::max(0, layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h());
+            const int dilation = std::max(1, layer.dilation_h > 0 ? layer.dilation_h : 1);
 
             int in_h = std::max(1, layer.input_height);
             int in_w = std::max(1, layer.input_width);
@@ -264,8 +265,8 @@ bool VulkanRuntime::forwardLayer(
                 }
             }
 
-            const int out_h = (in_h - 1) * stride - 2 * pad + k;
-            const int out_w = (in_w - 1) * stride - 2 * pad + k;
+            const int out_h = (in_h - 1) * stride - 2 * pad + dilation * (k - 1) + 1;
+            const int out_w = (in_w - 1) * stride - 2 * pad + dilation * (k - 1) + 1;
             if (out_h <= 0 || out_w <= 0) return false;
 
             const long long ops = static_cast<long long>(out_c) * static_cast<long long>(in_c) * static_cast<long long>(k) * static_cast<long long>(k) * static_cast<long long>(in_h) * static_cast<long long>(in_w);
@@ -282,7 +283,7 @@ bool VulkanRuntime::forwardLayer(
 
             outputs.resize(1);
             outputs[0].assign(static_cast<size_t>(out_c) * static_cast<size_t>(out_h) * static_cast<size_t>(out_w), 0.0f);
-            return impl_->engine.convTranspose2dForward(x.data(), w, b, outputs[0].data(), in_h, in_w, in_c, out_c, k, stride, pad);
+            return impl_->engine.convTranspose2dForward(x.data(), w, b, outputs[0].data(), in_h, in_w, in_c, out_c, k, stride, pad, dilation);
         }
         case LayerType::Add: {
             if (inputs.size() < 2 || !inputs[0] || !inputs[1]) return false;

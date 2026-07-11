@@ -29,6 +29,7 @@ local function log(...)
 end
 
 local Args = dofile("scripts/modules/args.lua")
+local FS = dofile("scripts/modules/fs.lua")
 
 -- ---------------------------------------------------------------------------
 -- Couleurs ANSI (désactivées si NO_COLOR ou sortie non-TTY)
@@ -973,21 +974,16 @@ local function infer_export_format(path)
   return nil, "extension non supportée (utiliser .json, .safetensors ou un chemin finissant par /)"
 end
 
-local function shell_quote(s)
-  s = tostring(s or "")
-  return "'" .. s:gsub("'", "'\\''") .. "'"
-end
-
 local function ensure_parent_dir(path, fmt)
   path = tostring(path or "")
   if fmt == "raw_folder" and path:sub(-1) == "/" then
-    os.execute("mkdir -p " .. shell_quote(path) .. " >/dev/null 2>&1")
+    FS.mkdir_p(path)
     return
   end
 
-  local dir = path:match("^(.*)/[^/]+$")
+  local dir = FS.dirname(path)
   if dir and dir ~= "" then
-    os.execute("mkdir -p " .. shell_quote(dir) .. " >/dev/null 2>&1")
+    FS.mkdir_p(dir)
   end
 end
 

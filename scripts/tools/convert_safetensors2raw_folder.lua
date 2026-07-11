@@ -12,6 +12,7 @@
 ---@diagnostic disable: undefined-field, need-check-nil, param-type-mismatch
 
 local Args = dofile("scripts/modules/args.lua")
+local FS = dofile("scripts/modules/fs.lua")
 
 local function die(msg)
     io.stderr:write("[convert] " .. tostring(msg) .. "\n")
@@ -441,7 +442,7 @@ local ok_load, err_load = Mimir.Serialization.load(IN, "safetensors", {
 ok_or_die(ok_load, err_load, "Serialization.load")
 
 -- Assurer que le dossier existe
-os.execute("mkdir -p '" .. tostring(OUT_DIR):gsub("'", "'\\''") .. "' 2>/dev/null")
+FS.mkdir_p(OUT_DIR)
 
 log("[convert] save: " .. tostring(OUT_DIR) .. " (raw_folder)")
 local ok_save, err_save = Mimir.Serialization.save(OUT_DIR, "raw_folder", {

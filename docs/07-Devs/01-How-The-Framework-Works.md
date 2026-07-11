@@ -16,7 +16,6 @@ Comprendre le registre d'architectures et les conventions I/O.
 
 Tu peux livrer des évolutions compatibles avec la base existante.
 
-
 Ce chapitre decrit la boucle centrale du framework, du point de vue developpeur.
 
 ## 1. Vue d'ensemble
@@ -28,6 +27,30 @@ Le framework tourne autour de 5 blocs :
 3. Registre d'architectures : fabrique de modeles a partir d'un nom + config.
 4. Runtime backend : execution CPU/GPU des operations.
 5. Bridges scripting : exposition de l'API framework (Lua aujourd'hui, autres demain).
+
+## Role explicite de la Viz dans le framework
+
+La visualisation n'est pas un "widget UI" annexe. Dans Mimir, la Viz est une brique
+d'observabilite du runtime et de l'entrainement.
+
+Role fonctionnel:
+
+1. Rendre visibles les etats internes (tensors intermediaires, reconstructions, latent, diff).
+2. Permettre le diagnostic rapide des regressions de shape/layout/couleur.
+3. Exposer les metriques live de training sans bloquer la boucle de calcul.
+4. Servir de contrat operatoire entre modele, monitor asynchrone et interface SFML.
+
+Role architectural:
+
+- Le modele produit des "tips" (viz taps) pendant `forwardPass`.
+- `AsyncMonitor` transporte ces donnees vers la couche UI.
+- `Visualizer` transforme ces frames en textures, panels et controles interactifs.
+
+Consequence dev:
+
+- Toute modification de la Viz doit preserver la stabilite du chemin training/runtime.
+- Filtrer une preview ne doit jamais interrompre l'execution du layer (pas de `continue`
+  sur la boucle principale d'execution de `Model`).
 
 ## 2. Cycle de vie standard d'un modele
 
@@ -104,12 +127,12 @@ Exemple de config minimale:
 
 ```json
 {
-	"script": "scripts/templates/template_conf_load_and_train.lua",
-	"arch": "vae_conv",
-	"seed": 42,
-	"epochs": 1,
-	"batch_size": 2,
-	"dataset_path": "dataset_2"
+  "script": "scripts/templates/template_conf_load_and_train.lua",
+  "arch": "vae_conv",
+  "seed": 42,
+  "epochs": 1,
+  "batch_size": 2,
+  "dataset_path": "dataset_2"
 }
 ```
 

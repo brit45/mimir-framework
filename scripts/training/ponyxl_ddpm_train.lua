@@ -64,6 +64,7 @@ end
 -- ── Args ──────────────────────────────────────────────────────────────────────
 
 local Args = dofile("scripts/modules/args.lua")
+local FS = dofile("scripts/modules/fs.lua")
 local opts = Args.parse(arg) or {}
 
 local function opt_bool(k, d)
@@ -86,26 +87,12 @@ end
 
 -- ── Helpers ────────────────────────────────────────────────────────────────────
 
-local function shell_quote(s)
-  s = tostring(s or "")
-  return "'" .. s:gsub("'", "'\"'\"'") .. "'"
-end
-
 local function file_exists(path)
-  local f = io.open(path, "rb")
-  if f then f:close(); return true end
-  return false
+  return FS.file_exists(path)
 end
 
 local function list_dir_names(path)
-  local out = {}
-  local p = io.popen("ls -1 " .. shell_quote(path) .. " 2>/dev/null", "r")
-  if not p then return out end
-  for line in p:lines() do
-    if line and #line > 0 then out[#out + 1] = line end
-  end
-  p:close()
-  return out
+  return FS.list_dir(path)
 end
 
 local function resolve_checkpoint_dir(path_in)
@@ -548,7 +535,7 @@ end
 
 -- ── Sauvegarde finale ─────────────────────────────────────────────────────────
 
-os.execute("mkdir -p " .. shell_quote(OUT_DIR))
+FS.mkdir_p(OUT_DIR)
 local ok_save, err_save = Mimir.Serialization.save(OUT_DIR, "raw_folder", {
   save_optimizer          = true,
   save_tokenizer          = true,

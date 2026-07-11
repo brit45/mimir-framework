@@ -12,6 +12,7 @@
 ---@diagnostic disable: undefined-field, need-check-nil, param-type-mismatch
 
 local Args = dofile("scripts/modules/args.lua")
+local FS = dofile("scripts/modules/fs.lua")
 
 local function log(...)
     local out = {}
@@ -61,9 +62,7 @@ if OUT == "" then
 end
 
 local function file_exists(path)
-    local f = io.open(path, "rb")
-    if f then f:close() return true end
-    return false
+    return FS.file_exists(path)
 end
 
 local function merge_into(dst, src)
@@ -316,6 +315,72 @@ local function infer_model_type_from_arch(arch)
     return nil
 end
 
+local function normalize_name_key(s)
+    s = tostring(s or "")
+    s = s:lower()
+    -- Retire les séparateurs pour comparer des variantes proches.
+    s = s:gsub("[^%w]", "")
+    return s
+end
+
+local function resolve_model_type(candidate)
+    candidate = tostring(candidate or "")
+    if candidate == "" then return "" end
+
+    -- Alias explicites fréquents rencontrés dans les architecture.json legacy.
+    local alias = {
+        VAEConvModel = "vae_conv",
+        vaeconvmodel = "vae_conv",
+        VAETexteModel = "vae_text",
+        vaetextemodel = "vae_text",
+        VAETextModel = "vae_text",
+        vaetextmodel = "vae_text",
+        TransformerModel = "transformer",
+        transformermodel = "transformer",
+        UNetModel = "unet",
+        unetmodel = "unet",
+        DiffusionModel = "diffusion",
+        diffusionmodel = "diffusion",
+    }
+
+    if alias[candidate] then
+        return alias[candidate]
+    end
+    if alias[candidate:lower()] then
+        return alias[candidate:lower()]
+    end
+
+    -- Si déjà résoluble tel quel, on conserve.
+    if Mimir and Mimir.Architectures and Mimir.Architectures.default_config then
+        local cfg = Mimir.Architectures.default_config(candidate)
+        if type(cfg) == "table" then return candidate end
+    end
+
+    -- Essayer une résolution fuzzy contre la liste des archis disponibles.
+    local available = nil
+    if Mimir and Mimir.Architectures and Mimir.Architectures.available then
+        available = Mimir.Architectures.available()
+    end
+    if type(available) ~= "table" then
+        return candidate
+    end
+
+    local want = normalize_name_key(candidate)
+    if want == "" then return candidate end
+
+    -- Variantes tolérées (ex: suffixe "Model").
+    local want_nomodel = want:gsub("model$", "")
+    for _, name in ipairs(available) do
+        local n = tostring(name or "")
+        local key = normalize_name_key(n)
+        if key == want or key == want_nomodel then
+            return n
+        end
+    end
+
+    return candidate
+end
+
 local function infer_cfg_vae_conv_from_arch(arch)
     if type(arch) ~= "table" or type(arch.layers) ~= "table" then
         return nil, "arch.layers missing"
@@ -540,6 +605,12 @@ if model_type == "" then
 end
 if model_type == "" then
     die("impossible d'inférer le type de modèle. Passe `--model-type <...>` (ex: vae_conv)")
+end
+
+local resolved_model_type = resolve_model_type(model_type)
+if resolved_model_type ~= model_type then
+    log("[convert] model_type résolu: " .. tostring(model_type) .. " -> " .. tostring(resolved_model_type))
+    model_type = resolved_model_type
 end
 
 local cfg, cfg_err = build_model_config_from_arch(model_type, arch)

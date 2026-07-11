@@ -11,6 +11,7 @@
 --   cfg.vocab_size = BaseTok.vocab_size()  -- important pour Embedding
 
 local BaseTok = {}
+local FS = dofile("scripts/modules/fs.lua")
 
 local function env_str(k, d)
   local v = os.getenv(k)
@@ -27,25 +28,14 @@ local function env_bool(k, d)
   return d
 end
 
-local function shell_quote(s)
-  if s == nil then return "''" end
-  s = tostring(s)
-  return "'" .. s:gsub("'", "'\\''") .. "'"
-end
-
 local function file_exists(path)
-  if not path or #tostring(path) == 0 then return false end
-  local cmd = "test -f " .. shell_quote(path) .. " >/dev/null 2>&1"
-  local ok, why, code = os.execute(cmd)
-  if type(ok) == "number" then return ok == 0 end
-  if type(ok) == "boolean" then return ok end
-  return (why == "exit" and code == 0)
+  return FS.file_exists(path)
 end
 
 local function ensure_parent_dir(filepath)
-  local dir = tostring(filepath):match("^(.*)/[^/]*$")
+  local dir = FS.dirname(filepath)
   if dir and #dir > 0 then
-    os.execute("mkdir -p " .. shell_quote(dir) .. " >/dev/null 2>&1")
+    FS.mkdir_p(dir)
   end
 end
 

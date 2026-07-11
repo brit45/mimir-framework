@@ -16,7 +16,6 @@ Comprendre le registre d'architectures et les conventions I/O.
 
 Tu peux livrer des évolutions compatibles avec la base existante.
 
-
 Note de statut: Lua est le bridge de reference pour le scripting metier. Les bridges JS, C# et Rust existent, mais restent partiels tant que la parite n'est pas complete.
 
 Cette section est le point d'entree principal pour les developpeurs du framework.
@@ -41,6 +40,8 @@ Chaque chapitre contient des demos orientees contraintes metier : reproductibili
 - Config et registre : [docs/07-Devs/03-Config-And-Registry.md](03-Config-And-Registry.md)
 - Runtime (modifier / ajouter) : [docs/07-Devs/04-Runtime-Development.md](04-Runtime-Development.md)
 - Contrat API scripting : [docs/07-Devs/05-Scripting-System-Contract.md](05-Scripting-System-Contract.md)
+- Visualizer et tips (brancher/etendre) : [docs/07-Devs/06-Visualizer-Tips-And-Features.md](06-Visualizer-Tips-And-Features.md)
+- Runbook debug Viz (symptomes/corrections) : [docs/07-Devs/07-Visualizer-Debug-Runbook.md](07-Visualizer-Debug-Runbook.md)
 
 ## Sources code de reference
 

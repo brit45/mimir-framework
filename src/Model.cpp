@@ -141,6 +141,21 @@ static inline double pearson_corr_prefix(const std::vector<float>& a, size_t a_o
     return std::clamp(r, -1.0, 1.0);
 }
 
+static inline long long omp_work_threshold() {
+#ifdef _OPENMP
+    // Seuil adaptatif modéré: on amortit le runtime OpenMP sans basculer trop vite en séquentiel.
+    const int nt = std::max(1, omp_get_max_threads());
+    const long long base = 262144LL;
+    long long factor = 1LL;
+    if (nt >= 4) factor = 2LL;
+    if (nt >= 12) factor = 3LL;
+    if (nt >= 24) factor = 4LL;
+    return base * factor;
+#else
+    return 262144LL;
+#endif
+}
+
 static inline double mean_abs_adjacent_diff(const std::vector<float>& v) {
     if (v.size() < 2) return 0.0;
     double acc = 0.0;
@@ -1360,8 +1375,11 @@ Model::StepStats Model::trainStepNamed(
         stats.wasserstein = static_cast<float>(std::sqrt(std::max(0.0, w2)));
 
         // Entropie gaussienne: 0.5 * log(2πeσ²)
-        const double Hp = 0.5 * std::log(2.0 * M_PI * M_E * vp);
-        const double Ht = 0.5 * std::log(2.0 * M_PI * M_E * vt);
+        constexpr double pi = 3.14159265358979323846264338327950288;
+        constexpr double e = 2.71828182845904523536028747135266250;
+        const double two_pi_e = 2.0 * pi * e;
+        const double Hp = 0.5 * std::log(two_pi_e * vp);
+        const double Ht = 0.5 * std::log(two_pi_e * vt);
         stats.entropy_diff = static_cast<float>(Hp - Ht);
 
         // Mismatch de moments: skewness difference (|skew_p - skew_t|)
@@ -5663,7 +5681,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             auto wT_buf = allocator.get_scratchpad(w_need * sizeof(float), "conv_wT");
             float* wT = wT_buf.data();
-            #pragma omp parallel for if(static_cast<long long>(out_channels) * static_cast<long long>(K) > 262144) schedule(static)
+            #pragma omp parallel for if(static_cast<long long>(out_channels) * static_cast<long long>(K) > omp_work_threshold()) schedule(static)
             for (int oc = 0; oc < out_channels; ++oc) {
                 const float* __restrict__ w_oc = layer_weights + static_cast<size_t>(oc) * static_cast<size_t>(K);
                 for (int k = 0; k < K; ++k) {
@@ -5685,7 +5703,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 const int tm = m1 - m0;
 
                 // im2col: Xcol[tm x K]
-                #pragma omp parallel for if(static_cast<long long>(tm) * static_cast<long long>(K) > 262144) schedule(static)
+                #pragma omp parallel for if(static_cast<long long>(tm) * static_cast<long long>(K) > omp_work_threshold()) schedule(static)
                 for (int r = 0; r < tm; ++r) {
                     const int m = m0 + r;
                     const int oh = m / out_width;
@@ -5735,7 +5753,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 HardwareOpt::matmul_fma_saturated(Ctmp, Xcol, wT, static_cast<size_t>(tm), static_cast<size_t>(out_channels), static_cast<size_t>(K));
 
                 // Scatter vers layout output [out_c, out_h, out_w]
-                #pragma omp parallel for if(static_cast<long long>(tm) * static_cast<long long>(out_channels) > 262144) schedule(static)
+                #pragma omp parallel for if(static_cast<long long>(tm) * static_cast<long long>(out_channels) > omp_work_threshold()) schedule(static)
                 for (int r = 0; r < tm; ++r) {
                     const int m = m0 + r;
                     const size_t base_c = static_cast<size_t>(r) * static_cast<size_t>(out_channels);
@@ -5768,7 +5786,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     }
                 }
 
-                #pragma omp parallel for schedule(static) collapse(2) if(static_cast<long long>(out_channels) * in_channels * height * width * kernel_size * kernel_size > 262144)
+                #pragma omp parallel for schedule(static) collapse(2) if(static_cast<long long>(out_channels) * in_channels * height * width * kernel_size * kernel_size > omp_work_threshold())
                 for (int oc = 0; oc < out_channels; ++oc) {
                     for (int ic = 0; ic < in_channels; ++ic) {
                         for (int ih = 0; ih < height; ++ih) {
@@ -5802,7 +5820,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     }
                 }
             } else {
-                #pragma omp parallel for schedule(static) collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144)
+                #pragma omp parallel for schedule(static) collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > omp_work_threshold())
                 for (int oc = 0; oc < out_channels; ++oc) {
                     for (int oh = 0; oh < out_height; ++oh) {
                         for (int ow = 0; ow < out_width; ++ow) {
@@ -6619,7 +6637,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         RUNTIME_CHECK(static_cast<int>(Bm.size()) == B * K * N, "BatchMatMul: B size mismatch");
 
         layer_output.assign(static_cast<size_t>(B) * static_cast<size_t>(M) * static_cast<size_t>(N), 0.0f);
-        #pragma omp parallel for schedule(static) if(static_cast<long long>(B) * M * N * K > 262144)
+        #pragma omp parallel for schedule(static) if(static_cast<long long>(B) * M * N * K > omp_work_threshold())
         for (int b = 0; b < B; ++b) {
             const float* Ap = &A[static_cast<size_t>(b) * static_cast<size_t>(M) * static_cast<size_t>(K)];
             const float* Bp = &Bm[static_cast<size_t>(b) * static_cast<size_t>(K) * static_cast<size_t>(N)];
@@ -6728,7 +6746,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             // Projection locale QKV sur les nouveaux tokens de la requête.
             std::vector<float> qkv(static_cast<size_t>(query_len) * static_cast<size_t>(qkv_dim), 0.0f);
-            #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * qkv_dim * embed_dim > 262144)
+            #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * qkv_dim * embed_dim > omp_work_threshold())
             for (int m = 0; m < query_len; ++m) {
                 const float* xrow = &x[static_cast<size_t>(m) * static_cast<size_t>(embed_dim)];
                 float* qkv_row = &qkv[static_cast<size_t>(m) * static_cast<size_t>(qkv_dim)];
@@ -6822,7 +6840,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     }
                 }
 
-                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * key_len > 262144)
+                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * key_len > omp_work_threshold())
                 for (int qi = 0; qi < query_len; ++qi) {
                     float* row = &scores[static_cast<size_t>(qi) * static_cast<size_t>(key_len)];
                     float max_val = row[0];
@@ -6861,7 +6879,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                               static_cast<size_t>(embed_dim),
                                               static_cast<size_t>(embed_dim));
             if (!out_bias.empty()) {
-                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * embed_dim > 262144)
+                #pragma omp parallel for schedule(static) if(static_cast<long long>(query_len) * embed_dim > omp_work_threshold())
                 for (int i = 0; i < query_len; ++i) {
                     float* row = &layer_output[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
                     #pragma omp simd
@@ -7408,7 +7426,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 return model + "/blocks/" + path + "/" + type;
             };
 
-            if (is_viz_candidate_layer(layer.type_enum)) {
+            const bool is_packed_output_concat =
+                (layer.type_enum == LayerType::Concat) &&
+                (layer.name.find("out_concat") != std::string::npos ||
+                 layer.name.find("out_pack") != std::string::npos ||
+                 layer.output == "x");
+
+            if (is_viz_candidate_layer(layer.type_enum) && !is_packed_output_concat) {
+
                 auto viz_preview_prefers_chw = [&](const Layer& lyr) -> bool {
                     switch (lyr.type_enum) {
                         case LayerType::Conv2d:
@@ -7505,10 +7530,10 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                          lyr.type_enum == LayerType::UpsampleBilinear ||
                          lyr.type_enum == LayerType::UpsampleBicubic) && ok_derived_upsample()) return true;
 
-                    // 3) En dernier recours seulement: réutiliser les dims d'entrée.
-                    if (ok(lyr.input_width, lyr.input_height)) return true;
-
-                    // 4) Shapes connues (si elles matchent exactement la taille)
+                    // 3) Shapes connues (si elles matchent exactement la taille).
+                    // Priorité: ces shapes reflètent souvent les dimensions réelles
+                    // du tenseur, alors que input_width/input_height peut rester une
+                    // valeur de config (ex: 1024x1024) et fausser la première vignette.
                     auto try_shape = [&](const std::vector<int>& s) -> bool {
                         if (s.size() != 3) return false;
                         const int a = s[0];
@@ -7517,6 +7542,21 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         if (a <= 0 || b <= 0 || d <= 0) return false;
                         const size_t n = static_cast<size_t>(a) * static_cast<size_t>(b) * static_cast<size_t>(d);
                         if (n != out_size) return false;
+
+                        // Cas fréquent: Permute CHW->HWC avec shape stockée en CHW
+                        // (ex: recon_to_hwc avec shape={C,H,W}, permute={1,2,0}).
+                        // Ici la preview doit être interprétée en HWC: H=b, W=d, C=a.
+                        if (lyr.type_enum == LayerType::Permute &&
+                            lyr.permute_dims.size() == 3 &&
+                            lyr.permute_dims[0] == 1 &&
+                            lyr.permute_dims[1] == 2 &&
+                            lyr.permute_dims[2] == 0) {
+                            channels_first = false;
+                            c = a;
+                            ow = d;
+                            oh = b;
+                            return true;
+                        }
 
                         // Deux interprétations courantes: HWC (H=a,W=b,C=d) ou CHW (C=a,H=b,W=d).
                         const int out_c = lyr.out_channels;
@@ -7569,7 +7609,90 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     if (try_shape(lyr.shape)) return true;
                     if (try_shape(lyr.target_shape)) return true;
 
-                    // 5) Fallback: dernier HxW connu dans ce thread (souvent valable pour activations/norm)
+                    // 4) Heuristique auto-calibrée pour les entrées "raw" et tenseurs plats:
+                    // tenter de reconstruire HxW via la config image + canaux usuels.
+                    auto try_common_channels = [&](int w, int h, bool force_hwc = true) -> bool {
+                        if (w <= 0 || h <= 0) return false;
+                        const size_t spatial = static_cast<size_t>(w) * static_cast<size_t>(h);
+                        if (spatial == 0) return false;
+                        for (int cc : {3, 4, 1}) {
+                            if (out_size == spatial * static_cast<size_t>(cc)) {
+                                ow = w;
+                                oh = h;
+                                c = cc;
+                                if (force_hwc) channels_first = false;
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+
+                    auto cfg_int = [&](const char* k) -> int {
+                        if (!modelConfig.contains(k)) return 0;
+                        try {
+                            return std::max(0, modelConfig[k].get<int>());
+                        } catch (...) {
+                            return 0;
+                        }
+                    };
+
+                    const int cfg_w = std::max(cfg_int("image_w"), cfg_int("width"));
+                    const int cfg_h = std::max(cfg_int("image_h"), cfg_int("height"));
+
+                    // Cas idéal: largeur/hauteur connues dans la config dataset/modèle.
+                    if (try_common_channels(cfg_w, cfg_h, true)) return true;
+
+                    // Si une seule dimension est connue, inférer l'autre avec un canal usuel.
+                    if (cfg_w > 0) {
+                        for (int cc : {3, 4, 1}) {
+                            const size_t denom = static_cast<size_t>(cfg_w) * static_cast<size_t>(cc);
+                            if (denom > 0 && (out_size % denom) == 0) {
+                                const int h = static_cast<int>(out_size / denom);
+                                if (h > 0) {
+                                    ow = cfg_w;
+                                    oh = h;
+                                    c = cc;
+                                    channels_first = false;
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    if (cfg_h > 0) {
+                        for (int cc : {3, 4, 1}) {
+                            const size_t denom = static_cast<size_t>(cfg_h) * static_cast<size_t>(cc);
+                            if (denom > 0 && (out_size % denom) == 0) {
+                                const int w = static_cast<int>(out_size / denom);
+                                if (w > 0) {
+                                    ow = w;
+                                    oh = cfg_h;
+                                    c = cc;
+                                    channels_first = false;
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    // Dernière tentative stable: image carrée pour 3/4/1 canaux.
+                    for (int cc : {3, 4, 1}) {
+                        if ((out_size % static_cast<size_t>(cc)) != 0) continue;
+                        const size_t hw = out_size / static_cast<size_t>(cc);
+                        const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
+                        if (s > 0 && s * s == hw) {
+                            ow = static_cast<int>(s);
+                            oh = static_cast<int>(s);
+                            c = cc;
+                            channels_first = false;
+                            return true;
+                        }
+                    }
+
+                    // 5) En dernier recours: réutiliser les dims d'entrée déclarées.
+                    if (ok(lyr.input_width, lyr.input_height)) return true;
+
+                    // 6) Fallback final: dernier HxW connu dans ce thread
+                    // (souvent valable pour activations/norm).
                     if (ok(viz_last_w, viz_last_h)) return true;
 
                     return false;
@@ -7604,13 +7727,25 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             return (idx < layer_output.size()) ? layer_output[idx] : 0.0f;
                         };
 
+                        const bool name_input_like =
+                            layer.name.find("/in") != std::string::npos ||
+                            layer.name.find("input") != std::string::npos ||
+                            layer.name.find("raw") != std::string::npos ||
+                            layer.output.find("/in") != std::string::npos ||
+                            layer.output.find("input") != std::string::npos ||
+                            layer.output.find("raw") != std::string::npos;
+
                         const bool image_like_preview = (c == 3 || c == 4) &&
                             (layer.out_channels == 3 || layer.out_channels == 4 ||
+                             name_input_like ||
                              layer.name.find("recon") != std::string::npos ||
                              layer.name.find("/out") != std::string::npos ||
                              layer.name.find("output") != std::string::npos);
 
-                        const bool prefer_rgb_preview = image_like_preview || c > 4;
+                        // UX: toutes les vignettes de tips sont rendues en RGB.
+                        // - image_like_preview: rendu "naturel" (canaux image)
+                        // - sinon: rendu faux-couleur (signed mean / énergie)
+                        const bool prefer_rgb_preview = true;
 
                         if (prefer_rgb_preview) {
                             std::vector<float> map;
@@ -9801,7 +9936,7 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
             std::vector<float> dA(static_cast<size_t>(B) * static_cast<size_t>(M) * static_cast<size_t>(K), 0.0f);
             std::vector<float> dB(static_cast<size_t>(B) * static_cast<size_t>(K) * static_cast<size_t>(N), 0.0f);
-            #pragma omp parallel for schedule(static) if(static_cast<long long>(B) * M * N * K > 262144)
+            #pragma omp parallel for schedule(static) if(static_cast<long long>(B) * M * N * K > omp_work_threshold())
             for (int b = 0; b < B; ++b) {
                 const float* Ap = &A[static_cast<size_t>(b) * static_cast<size_t>(M) * static_cast<size_t>(K)];
                 const float* Bp = &Bm[static_cast<size_t>(b) * static_cast<size_t>(K) * static_cast<size_t>(N)];
@@ -10194,7 +10329,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 * static_cast<size_t>(height) * static_cast<size_t>(width);
             const size_t conv_input_work = static_cast<size_t>(in_channels)
                 * static_cast<size_t>(height) * static_cast<size_t>(width);
-            const bool do_parallel = (conv_weight_work >= 262144) || (conv_input_work >= 262144);
+            const long long work_thr = omp_work_threshold();
+            const bool do_parallel = (static_cast<long long>(conv_weight_work) >= work_thr) ||
+                                     (static_cast<long long>(conv_input_work) >= work_thr);
             if (do_parallel) {
                 #pragma omp parallel
                 {

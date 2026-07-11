@@ -53,5 +53,7 @@ int main() {
     TASSERT_TRUE(lua.executeScript(code));
     TASSERT_TRUE(lua.getBoolean("TEST_OK"));
 
+    LuaContext::getInstance().resetRuntimeState();
+
     return 0;
 }

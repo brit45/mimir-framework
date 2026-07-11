@@ -5,10 +5,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <algorithm>
 #include <vector>
+#if !defined(_WIN32)
 #include <sys/mman.h>   // madvise, HugePages
 #include <unistd.h>
+#endif
 
 // ===== FP16 STORAGE + F16C =====
 
@@ -329,6 +332,11 @@ public:
     static void* allocate_huge(size_t size) {
         // Round up to hugepage boundary
         size_t aligned_size = ((size + HUGEPAGE_SIZE - 1) / HUGEPAGE_SIZE) * HUGEPAGE_SIZE;
+
+#if defined(_WIN32)
+        // Windows fallback: standard heap allocation in cross-builds.
+        return std::malloc(aligned_size);
+#else
         
         void* ptr = mmap(nullptr, aligned_size,
                         PROT_READ | PROT_WRITE,
@@ -358,14 +366,20 @@ public:
         }
         
         return ptr;
+#endif
     }
     
     // Libérer
     static void deallocate_huge(void* ptr, size_t size) {
+#if defined(_WIN32)
+        (void)size;
+        std::free(ptr);
+#else
         if (ptr) {
             size_t aligned_size = ((size + HUGEPAGE_SIZE - 1) / HUGEPAGE_SIZE) * HUGEPAGE_SIZE;
             munmap(ptr, aligned_size);
         }
+#endif
     }
     
     // Allouer buffer avec HugePages

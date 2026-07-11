@@ -242,6 +242,43 @@ assert(Mimir.Model.train(50, 1e-4))
 
 > **Note :** si le processus reçoit `Ctrl+C` pendant l'entraînement, Mímir effectue un checkpoint d'interruption propre avant de terminer (si `cfg.checkpoint_dir` est défini).
 
+## Recon-Loss supportées (état actuel)
+
+Le paramètre `modelConfig.recon_loss` est interprété selon le chemin d'entraînement (VAE, diffusion, VAEText, etc.).
+
+### Noms supportés (généraux)
+
+| Valeur `recon_loss` | Alias | Disponibilité | Notes |
+| --- | --- | --- | --- |
+| `mse` | `l2` (PonyXL) | générale | défaut dans la plupart des chemins |
+| `mae` | `l1` | générale | erreur absolue moyenne |
+| `bce` | - | générale | binary cross-entropy |
+| `huber` | - | générale | `delta` configurable |
+| `smoothl1` | `smooth_l1` (PonyXL) | générale | équivalent Huber |
+| `charbonnier` | - | générale | robuste, `eps` configurable |
+| `gaussian_nll` | `nll_gaussian`, `gaussian-nll` (PonyXL) | générale | NLL gaussienne |
+
+### Noms supportés (spécifiques)
+
+| Valeur `recon_loss` | Disponibilité | Notes |
+| --- | --- | --- |
+| `ce` | VAEText | cross-entropy token-level |
+| `cross_entropy` | VAEText | alias de `ce` |
+| `xent` | VAEText | alias court |
+
+### Hyperparamètres associés
+
+Selon le type choisi, ces clés de config peuvent s'appliquer :
+
+- `huber_delta` (ou `smoothl1_delta`, `smoothl1_beta`)
+- `charbonnier_eps`
+- `nll_sigma` (ou `gaussian_nll_sigma`)
+
+### Important
+
+- Certains chemins internes publient `recon_loss_type` avec des valeurs comme `bce_logits` pour l'affichage/monitoring; ce label peut être émis même si la clé `recon_loss` n'est pas utilisée telle quelle dans la config.
+- Si une valeur n'est pas reconnue dans certains modèles (ex: PonyXL), un fallback explicite vers `mse` est appliqué.
+
 ---
 
 ## DType (précision des poids)
