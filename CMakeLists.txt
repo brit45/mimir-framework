@@ -73,19 +73,31 @@ endif()
 # ============================================================================
 
 # Flags communs
-add_compile_options(
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wno-unused-parameter
-    -Wno-unused-variable
-)
+if(MSVC)
+    add_compile_options(/W4 /wd4100 /wd4101)
+else()
+    add_compile_options(
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wno-unused-parameter
+        -Wno-unused-variable
+    )
+endif()
 
 # Flags de release
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native")
+if(MSVC)
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
+else()
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native")
+endif()
 
 # Flags de debug
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -DDEBUG")
+if(MSVC)
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Od /DDEBUG")
+else()
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -DDEBUG")
+endif()
 
 # ============================================================================
 # Recherche des dépendances
