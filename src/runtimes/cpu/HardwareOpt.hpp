@@ -17,6 +17,12 @@
 
 namespace HardwareOpt {
 
+#if defined(_MSC_VER)
+#define MIMIR_RESTRICT __restrict
+#else
+#define MIMIR_RESTRICT __restrict__
+#endif
+
 // Conversion FP32 -> FP16 avec F16C
 inline void fp32_to_fp16_f16c(uint16_t* dst, const float* src, size_t count) {
 #ifdef __F16C__
@@ -118,9 +124,9 @@ inline void bf16_to_fp32(float* dst, const uint16_t* src, size_t count) {
 
 // Matmul optimisé avec FMA complètement saturé
 // Pipeline: 3 accumulateurs indépendants pour saturer les 2 ports FMA
-inline void matmul_fma_saturated(float* __restrict__ C, 
-                                  const float* __restrict__ A,
-                                  const float* __restrict__ B,
+inline void matmul_fma_saturated(float* MIMIR_RESTRICT C,
+                                  const float* MIMIR_RESTRICT A,
+                                  const float* MIMIR_RESTRICT B,
                                   size_t M, size_t N, size_t K) {
     std::memset(C, 0, M * N * sizeof(float));
 
@@ -175,9 +181,9 @@ inline void matmul_fma_saturated(float* __restrict__ C,
 }
 
 // Convolution 2D avec FMA saturé
-inline void conv2d_fma_saturated(float* __restrict__ output,
-                                  const float* __restrict__ input,
-                                  const float* __restrict__ kernel,
+inline void conv2d_fma_saturated(float* MIMIR_RESTRICT output,
+                                  const float* MIMIR_RESTRICT input,
+                                  const float* MIMIR_RESTRICT kernel,
                                   int in_h, int in_w, int out_h, int out_w,
                                   int kernel_size, int stride, int padding) {
     std::memset(output, 0, out_h * out_w * sizeof(float));
@@ -442,5 +448,7 @@ public:
 };
 
 } // namespace HardwareOpt
+
+#undef MIMIR_RESTRICT
 
 #endif // __HARDWARE_OPT_HPP__

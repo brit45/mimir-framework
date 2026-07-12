@@ -285,21 +285,27 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
     const bool has_mod = (mod_embedding.size() == dim_t);
     const bool has_mag = (mag_embedding.size() == dim_t);
 
-    float* __restrict__ dst = out.data();
+    #if defined(_MSC_VER)
+    #define MIMIR_RESTRICT __restrict
+    #else
+    #define MIMIR_RESTRICT __restrict__
+    #endif
+
+    float* MIMIR_RESTRICT dst = out.data();
 
     if (tokens.empty()) {
         if (has_seq) {
-            const float* __restrict__ s = seq_embedding.data();
+            const float* MIMIR_RESTRICT s = seq_embedding.data();
             #pragma omp simd
             for (int d = 0; d < dim; ++d) dst[d] += s[d];
         }
         if (has_mod) {
-            const float* __restrict__ s = mod_embedding.data();
+            const float* MIMIR_RESTRICT s = mod_embedding.data();
             #pragma omp simd
             for (int d = 0; d < dim; ++d) dst[d] += s[d];
         }
         if (has_mag) {
-            const float* __restrict__ s = mag_embedding.data();
+            const float* MIMIR_RESTRICT s = mag_embedding.data();
             #pragma omp simd
             for (int d = 0; d < dim; ++d) dst[d] += s[d];
         }
@@ -314,7 +320,7 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
 
         const float w = (static_cast<int>(pos) < magik_prefix_count && magik_prefix_weight > 0.0f)
                         ? magik_prefix_weight : 1.0f;
-        const float* __restrict__ row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
+        const float* MIMIR_RESTRICT row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += row[d] * w;
         weight_sum += w;
@@ -327,17 +333,17 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
     }
 
     if (has_seq) {
-        const float* __restrict__ s = seq_embedding.data();
+        const float* MIMIR_RESTRICT s = seq_embedding.data();
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
     if (has_mod) {
-        const float* __restrict__ s = mod_embedding.data();
+        const float* MIMIR_RESTRICT s = mod_embedding.data();
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
     if (has_mag) {
-        const float* __restrict__ s = mag_embedding.data();
+        const float* MIMIR_RESTRICT s = mag_embedding.data();
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
@@ -347,11 +353,11 @@ void ConditioningEncoder::trainOnTextTokens(const std::vector<int> &token_ids, c
 {
     if (token_ids.empty() || static_cast<int>(target.size()) != dim || lr == 0.0f) return;
     const size_t dim_t = static_cast<size_t>(dim);
-    const float* __restrict__ tgt = target.data();
+    const float* MIMIR_RESTRICT tgt = target.data();
     for (int id : token_ids) {
         if (id <= 4) continue; // PAD(0), négatifs, tokens spéciaux (0-4)
         if (id >= vocab_size) continue;
-        float* __restrict__ row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
+        float* MIMIR_RESTRICT row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
         // SGD fusé : row += lr * (target - row)  =>  row = (1-lr)*row + lr*target
         #pragma omp simd
         for (int d = 0; d < dim; ++d) {
@@ -359,6 +365,8 @@ void ConditioningEncoder::trainOnTextTokens(const std::vector<int> &token_ids, c
         }
     }
 }
+
+#undef MIMIR_RESTRICT
 
 void ConditioningEncoder::fillImageVectorSingleModality(const std::vector<float>& image_feature,
                                                         float lr,

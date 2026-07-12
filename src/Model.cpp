@@ -165,6 +165,17 @@ static inline double mean_abs_adjacent_diff(const std::vector<float>& v) {
     return acc / static_cast<double>(v.size() - 1);
 }
 
+static inline double mean_abs_adjacent_diff_prefix(const std::vector<float>& v, size_t off, size_t count) {
+    if (off >= v.size() || count < 2) return 0.0;
+    const size_t n = std::min(count, v.size() - off);
+    if (n < 2) return 0.0;
+    double acc = 0.0;
+    for (size_t i = 1; i < n; ++i) {
+        acc += std::abs(static_cast<double>(v[off + i]) - static_cast<double>(v[off + i - 1]));
+    }
+    return acc / static_cast<double>(n - 1);
+}
+
 static inline double pearson_corr(const std::vector<float>& a, const std::vector<float>& b) {
     const size_t n = std::min(a.size(), b.size());
     if (n < 2) return 0.0;
@@ -195,10 +206,20 @@ static inline double pearson_corr(const std::vector<float>& a, const std::vector
 #include <cstring>
 #include <algorithm>
 #include <random>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
 #include <cpuid.h>
+#endif
 #include <atomic>
 #include <mutex>
 #include <unordered_set>
+
+#if defined(_MSC_VER)
+#define MIMIR_RESTRICT __restrict
+#else
+#define MIMIR_RESTRICT __restrict__
+#endif
 
 // ============================================================================
 // Registry centralisé (via LayerTypes.hpp)
@@ -215,23 +236,57 @@ using namespace LayerRegistry;
 // ============================================================================
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+static inline bool mimir_get_cpuid(unsigned int leaf, unsigned int* eax, unsigned int* ebx,
+                                   unsigned int* ecx, unsigned int* edx) {
+#if defined(_MSC_VER)
+    int regs[4] = {0, 0, 0, 0};
+    __cpuidex(regs, static_cast<int>(leaf), 0);
+    *eax = static_cast<unsigned int>(regs[0]);
+    *ebx = static_cast<unsigned int>(regs[1]);
+    *ecx = static_cast<unsigned int>(regs[2]);
+    *edx = static_cast<unsigned int>(regs[3]);
+    return true;
+#else
+    return __get_cpuid(leaf, eax, ebx, ecx, edx) != 0;
+#endif
+}
+
+static inline bool mimir_get_cpuid_count(unsigned int leaf, unsigned int subleaf, unsigned int* eax,
+                                         unsigned int* ebx, unsigned int* ecx, unsigned int* edx) {
+#if defined(_MSC_VER)
+    int regs[4] = {0, 0, 0, 0};
+    __cpuidex(regs, static_cast<int>(leaf), static_cast<int>(subleaf));
+    *eax = static_cast<unsigned int>(regs[0]);
+    *ebx = static_cast<unsigned int>(regs[1]);
+    *ecx = static_cast<unsigned int>(regs[2]);
+    *edx = static_cast<unsigned int>(regs[3]);
+    return true;
+#else
+    return __get_cpuid_count(leaf, subleaf, eax, ebx, ecx, edx) != 0;
+#endif
+}
+
 static inline bool mimir_os_supports_avx_state() {
     // Vérifie que l'OS a activé le sauvegarde/restauration XMM/YMM (AVX).
     // Nécessaire pour utiliser AVX/AVX2/FMA/F16C sans #UD.
     unsigned int eax, ebx, ecx, edx;
-    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
+    if (!mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
 
     const bool osxsave = (ecx & (1u << 27)) != 0;
     const bool avx_hw = (ecx & (1u << 28)) != 0;
     if (!osxsave || !avx_hw) return false;
 
     // XGETBV(0): bits 1 (XMM) et 2 (YMM) doivent être à 1
+#if defined(_MSC_VER)
+    const unsigned __int64 xcr0 = _xgetbv(0);
+    return (xcr0 & 0x6ull) == 0x6ull;
+#else
     uint32_t xcr0_lo = 0;
     uint32_t xcr0_hi = 0;
-    // GCC/Clang: xgetbv via asm
     __asm__ volatile ("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
     (void)xcr0_hi;
     return (xcr0_lo & 0x6u) == 0x6u;
+#endif
 }
 #endif
 
@@ -243,7 +298,7 @@ bool Model::hasAVX2() {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
             const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+            if (os_ok && mimir_get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
                 result = (ebx & (1u << 5)) != 0; // EBX bit 5 = AVX2
             } else {
                 result = false;
@@ -263,7 +318,7 @@ bool Model::hasFMA() {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
             const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && __get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+            if (os_ok && mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
                 result = (ecx & (1u << 12)) != 0; // ECX bit 12 = FMA
             } else {
                 result = false;
@@ -283,7 +338,7 @@ bool Model::hasF16C() {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
             const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && __get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+            if (os_ok && mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
                 result = (ecx & (1u << 29)) != 0; // ECX bit 29 = F16C
             } else {
                 result = false;
@@ -302,7 +357,7 @@ bool Model::hasBMI2() {
     if (!detected) {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
-            if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+            if (mimir_get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
                 result = (ebx & (1 << 8)) != 0; // EBX bit 8 = BMI2
             }
         #endif
@@ -1927,6 +1982,10 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
     const double vt = std::max(mt.var, 1e-12);
     const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
     const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+    const float spat = static_cast<float>(std::abs(
+        mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+        mean_abs_adjacent_diff_prefix(x, 0, static_cast<size_t>(recon_n))
+    ));
     const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
     const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
     // Distribution diagnostics: entropy difference (Gaussian approx) and skewness mismatch.
@@ -1988,7 +2047,10 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
     stats.grad_norm = grad_norm;
@@ -2130,6 +2192,10 @@ Model::VAEStepStats Model::backwardStepVAE(const std::vector<float>& x, Optimize
     const double vt = std::max(mt.var, 1e-12);
     const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
     const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+    const float spat = static_cast<float>(std::abs(
+        mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+        mean_abs_adjacent_diff_prefix(x, 0, static_cast<size_t>(recon_n))
+    ));
     const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
     const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
     const float entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
@@ -2192,7 +2258,10 @@ Model::VAEStepStats Model::backwardStepVAE(const std::vector<float>& x, Optimize
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
     stats.grad_norm = static_cast<float>(std::sqrt(sum_sq2));
@@ -2505,6 +2574,7 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     // Recon
     double recon = 0.0;
     float wass = 0.0f;
+    float spat = 0.0f;
     float temp = 0.0f;
     float entropy_diff_v = 0.0f;
     float moment_mismatch_v = 0.0f;
@@ -2568,6 +2638,10 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
         const double vt = std::max(mt.var, 1e-12);
         const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
         wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+        spat = static_cast<float>(std::abs(
+            mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+            mean_abs_adjacent_diff_prefix(*target, 0, static_cast<size_t>(recon_n))
+        ));
         temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
         const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
         entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
@@ -2778,7 +2852,10 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.align = align;
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
@@ -3033,6 +3110,7 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
     // Metrics (unscaled)
     double recon = 0.0;
     float wass = 0.0f;
+    float spat = 0.0f;
     float temp = 0.0f;
     float entropy_diff_v = 0.0f;
     float moment_mismatch_v = 0.0f;
@@ -3083,6 +3161,10 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
         const double vt = std::max(mt.var, 1e-12);
         const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
         wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+        spat = static_cast<float>(std::abs(
+            mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+            mean_abs_adjacent_diff_prefix(*target, 0, static_cast<size_t>(recon_n))
+        ));
         temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
         entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
         moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
@@ -3240,7 +3322,10 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.align = align;
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
@@ -5669,7 +5754,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             const float* bias_ptr = layer.use_bias ? (layer_weights + w_need) : nullptr;
 
             const bool dense_input = (x.size() == static_cast<size_t>(in_channels) * static_cast<size_t>(height) * static_cast<size_t>(width));
-            const float* __restrict__ xptr = dense_input ? x.data() : nullptr;
+            const float* MIMIR_RESTRICT xptr = dense_input ? x.data() : nullptr;
             const int HW = height * width;
 
             // Choix d'une tuile M pour limiter la mémoire (X_col et C_tile).
@@ -5683,7 +5768,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             float* wT = wT_buf.data();
             #pragma omp parallel for if(static_cast<long long>(out_channels) * static_cast<long long>(K) > omp_work_threshold()) schedule(static)
             for (int oc = 0; oc < out_channels; ++oc) {
-                const float* __restrict__ w_oc = layer_weights + static_cast<size_t>(oc) * static_cast<size_t>(K);
+                const float* MIMIR_RESTRICT w_oc = layer_weights + static_cast<size_t>(oc) * static_cast<size_t>(K);
                 for (int k = 0; k < K; ++k) {
                     wT[static_cast<size_t>(k) * static_cast<size_t>(out_channels) + static_cast<size_t>(oc)] = w_oc[static_cast<size_t>(k)];
                 }
@@ -5708,7 +5793,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     const int m = m0 + r;
                     const int oh = m / out_width;
                     const int ow = m - oh * out_width;
-                    float* __restrict__ row = Xcol + static_cast<size_t>(r) * static_cast<size_t>(K);
+                    float* MIMIR_RESTRICT row = Xcol + static_cast<size_t>(r) * static_cast<size_t>(K);
 
                     int col = 0;
                     if (dense_input) {
@@ -7434,6 +7519,38 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             if (is_viz_candidate_layer(layer.type_enum) && !is_packed_output_concat) {
 
+                auto resize_viz_frame_nearest = [&](VizFrame& vf, int target_w, int target_h) {
+                    if (target_w <= 0 || target_h <= 0) return;
+                    if (vf.w <= 0 || vf.h <= 0 || vf.channels <= 0) return;
+                    if (vf.w == target_w && vf.h == target_h) return;
+
+                    const int ch = vf.channels;
+                    const size_t expected = static_cast<size_t>(vf.w) * static_cast<size_t>(vf.h) * static_cast<size_t>(ch);
+                    if (vf.pixels.size() != expected) return;
+
+                    std::vector<uint8_t> up;
+                    up.resize(static_cast<size_t>(target_w) * static_cast<size_t>(target_h) * static_cast<size_t>(ch));
+                    for (int y = 0; y < target_h; ++y) {
+                        const int sy = (target_h > 1) ? ((y * vf.h) / target_h) : 0;
+                        for (int x = 0; x < target_w; ++x) {
+                            const int sx = (target_w > 1) ? ((x * vf.w) / target_w) : 0;
+                            const size_t src_base = (static_cast<size_t>(sy) * static_cast<size_t>(vf.w) + static_cast<size_t>(sx)) * static_cast<size_t>(ch);
+                            const size_t dst_base = (static_cast<size_t>(y) * static_cast<size_t>(target_w) + static_cast<size_t>(x)) * static_cast<size_t>(ch);
+                            for (int cidx = 0; cidx < ch; ++cidx) {
+                                up[dst_base + static_cast<size_t>(cidx)] = vf.pixels[src_base + static_cast<size_t>(cidx)];
+                            }
+                        }
+                    }
+
+                    vf.pixels = std::move(up);
+                    vf.w = target_w;
+                    vf.h = target_h;
+
+                    if (!vf.pixels_real.empty()) {
+                        vf.pixels_real.clear();
+                    }
+                };
+
                 auto viz_preview_prefers_chw = [&](const Layer& lyr) -> bool {
                     switch (lyr.type_enum) {
                         case LayerType::Conv2d:
@@ -7885,6 +8002,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             vf.w = vw;
                             vf.h = vh;
                             vf.channels = 1;
+                        }
+
+                        // UX: forcer toutes les vignettes tips en format carré XxX,
+                        // avec X = largeur courante de la preview.
+                        // Exemples: 32x3x3 -> 32x32x3, 128x36x3 -> 128x128x3.
+                        if (vf.w > 0 && vf.h != vf.w) {
+                            resize_viz_frame_nearest(vf, vf.w, vf.w);
                         }
 
                         const std::string block_label = block_label_for(layer);
