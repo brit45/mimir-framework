@@ -37,6 +37,7 @@ declare -a FEATURE_KEYS=(
   ENABLE_OPENCL
   ENABLE_CUDA
   ENABLE_ROCM
+  ENABLE_FFMPEG
   ENABLE_SFML
   ENABLE_LZ4
   ENABLE_SCRIPTING_REST
@@ -53,6 +54,7 @@ declare -A FEATURE_LABELS=(
   [ENABLE_OPENCL]="OpenCL Compute"
   [ENABLE_CUDA]="CUDA Compute"
   [ENABLE_ROCM]="ROCm Compute"
+  [ENABLE_FFMPEG]="FFmpeg (audio/vidéo)"
   [ENABLE_SFML]="Visualizer (SFML)"
   [ENABLE_LZ4]="Compression LZ4"
   [ENABLE_SCRIPTING_REST]="Bridge REST (placeholder)"
@@ -69,6 +71,7 @@ declare -A FEATURE_DEFAULTS=(
   [ENABLE_OPENCL]=1
   [ENABLE_CUDA]=0
   [ENABLE_ROCM]=0
+  [ENABLE_FFMPEG]=1
   [ENABLE_SFML]=1
   [ENABLE_LZ4]=1
   [ENABLE_SCRIPTING_REST]=0
@@ -248,6 +251,9 @@ if [[ "${FEATURE_VALUES[ENABLE_VULKAN]}" == "1" ]]; then
 fi
 if [[ "${FEATURE_VALUES[ENABLE_OPENCL]}" == "1" ]]; then
   OPTIONAL_PACKAGES+=(ocl-icd-opencl-dev clinfo)
+fi
+if [[ "${FEATURE_VALUES[ENABLE_FFMPEG]}" == "1" ]]; then
+  OPTIONAL_PACKAGES+=(ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev)
 fi
 if [[ "${FEATURE_VALUES[ENABLE_SFML]}" == "1" ]]; then
   OPTIONAL_PACKAGES+=(libsfml-dev)

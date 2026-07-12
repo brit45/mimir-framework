@@ -16,6 +16,10 @@ Avoir compile le binaire `mimir` et verifier que le smoketest passe.
 
 Tu sais choisir le bon niveau, suivre un plan concret, puis passer au niveau suivant.
 
+## Parcours complet
+
+- Vue guidee de tout le framework: [docs/08-Tuto/06-Parcours-Complet-Framework.md](06-Parcours-Complet-Framework.md)
+
 ## Parcours
 
 - Cours en 3 etapes : [docs/08-Tuto/01-Cours-Framework-3-Etapes.md](01-Cours-Framework-3-Etapes.md)

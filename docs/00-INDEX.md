@@ -3,7 +3,7 @@
 Version framework : **3.1.0**  
 Révision documentation : **2026-07-01**
 
-Cette documentation remplace l’ancienne doc (archivée dans [docs_archive/2026-02-14/](../docs_archive/2026-02-14/)).
+Cette documentation remplace l’ancienne doc (archivée dans [docs_archive/2026-02-14/](docs_archive/2026-02-14/)).
 
 Guide de style documentation : [docs/00-STYLE.md](00-STYLE.md)
 
@@ -43,6 +43,7 @@ Puis lis dans cet ordre :
 2. [Cycle de vie d'un modèle](02-User-Guide/02-Model-Lifecycle.md) (comprendre create/allocate/init/forward)
 3. [API Lua de base](03-API-Reference/19-Globals.md) (ce que le runtime injecte)
 4. [Contrat de scripting officiel](03-API-Reference/00-Scripting-Contract.md) (spec commune des bridges)
+5. [Parcours tutoriel complet](08-Tuto/06-Parcours-Complet-Framework.md) (vue guidée de tout le framework)
 
 ---
 

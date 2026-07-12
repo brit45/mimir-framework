@@ -22,6 +22,7 @@ option(ENABLE_OPENCL "Enable OpenCL GPU compute" ON)
 option(ENABLE_CUDA "Enable CUDA GPU compute (cuBLAS)" OFF)
 option(ENABLE_ROCM "Enable ROCm GPU compute (rocBLAS/HIP)" OFF)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
+option(ENABLE_FFMPEG "Enable FFmpeg-backed audio/video loading" ON)
 option(ENABLE_SFML "Enable SFML visualization" ON)
 option(ENABLE_SCRIPTING_REST "Enable REST scripting bridge" OFF)
 option(ENABLE_SCRIPTING_RUST "Enable Rust scripting bridge" ON)
@@ -315,6 +316,26 @@ if(ENABLE_LZ4)
     else()
         message(WARNING "LZ4 not found - compression disabled")
         set(ENABLE_LZ4 OFF)
+    endif()
+endif()
+
+# FFmpeg (audio/video decoding)
+if(ENABLE_FFMPEG)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
+            libavformat
+            libavcodec
+            libavutil
+            libswscale
+            libswresample
+        )
+    endif()
+
+    if(FFMPEG_FOUND)
+        message(STATUS "FFmpeg found: ${FFMPEG_VERSION}")
+    else()
+        message(WARNING "FFmpeg not found - audio/video loading will fall back to raw bytes")
     endif()
 endif()
 
@@ -657,6 +678,11 @@ if(ENABLE_LZ4 AND LZ4_LIBRARY)
     target_link_libraries(mimir_core PUBLIC ${LZ4_LIBRARY})
 endif()
 
+if(ENABLE_FFMPEG AND FFMPEG_FOUND)
+    target_compile_definitions(mimir_core PUBLIC MIMIR_ENABLE_FFMPEG)
+    target_link_libraries(mimir_core PUBLIC PkgConfig::FFMPEG)
+endif()
+
 # SFML (visualisation)
 if(ENABLE_SFML AND SFML_FOUND)
     target_link_libraries(mimir_core PUBLIC sfml-graphics sfml-window sfml-system)
@@ -761,6 +787,11 @@ if(BUILD_MIMIR_STATIC)
 
     if(MIMIR_ENABLE_LEGACY_PARAMS)
         target_compile_definitions(mimir_core_static PRIVATE MIMIR_ENABLE_LEGACY_PARAMS)
+    endif()
+
+    if(ENABLE_FFMPEG AND FFMPEG_FOUND)
+        target_compile_definitions(mimir_core_static PUBLIC MIMIR_ENABLE_FFMPEG)
+        target_link_libraries(mimir_core_static PUBLIC PkgConfig::FFMPEG)
     endif()
 
     if(LUA_STATIC_LIBRARY)

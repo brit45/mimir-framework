@@ -29,6 +29,318 @@ using json = nlohmann::json;
 
 #include "Sha256.hpp"
 
+#ifdef MIMIR_ENABLE_FFMPEG
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/samplefmt.h>
+#include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
+}
+
+static inline bool ffmpegDecodeAudioToPcm(const std::string &audio_file, std::vector<uint8_t> &out, std::string *err = nullptr)
+{
+    out.clear();
+
+    AVFormatContext *format = nullptr;
+    AVCodecContext *codec = nullptr;
+    SwrContext *swr = nullptr;
+    AVPacket *packet = av_packet_alloc();
+    AVFrame *frame = av_frame_alloc();
+    if (!packet || !frame) {
+        if (err) *err = "ffmpeg allocation failed";
+        if (packet) av_packet_free(&packet);
+        if (frame) av_frame_free(&frame);
+        return false;
+    }
+
+    auto cleanup = [&]() {
+        if (swr) swr_free(&swr);
+        if (codec) avcodec_free_context(&codec);
+        if (format) avformat_close_input(&format);
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+    };
+
+    if (avformat_open_input(&format, audio_file.c_str(), nullptr, nullptr) < 0) {
+        if (err) *err = "avformat_open_input failed";
+        cleanup();
+        return false;
+    }
+    if (avformat_find_stream_info(format, nullptr) < 0) {
+        if (err) *err = "avformat_find_stream_info failed";
+        cleanup();
+        return false;
+    }
+
+    const int stream_index = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    if (stream_index < 0) {
+        if (err) *err = "no audio stream found";
+        cleanup();
+        return false;
+    }
+
+    AVStream *stream = format->streams[stream_index];
+    const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+    if (!decoder) {
+        if (err) *err = "audio decoder not found";
+        cleanup();
+        return false;
+    }
+
+    codec = avcodec_alloc_context3(decoder);
+    if (!codec) {
+        if (err) *err = "avcodec_alloc_context3 failed";
+        cleanup();
+        return false;
+    }
+    if (avcodec_parameters_to_context(codec, stream->codecpar) < 0 || avcodec_open2(codec, decoder, nullptr) < 0) {
+        if (err) *err = "avcodec open failed";
+        cleanup();
+        return false;
+    }
+
+    const int64_t out_ch_layout = AV_CH_LAYOUT_STEREO;
+    const int64_t in_ch_layout = codec->channel_layout != 0
+        ? codec->channel_layout
+        : av_get_default_channel_layout(codec->channels > 0 ? codec->channels : 2);
+    swr = swr_alloc_set_opts(
+        nullptr,
+        out_ch_layout,
+        AV_SAMPLE_FMT_S16,
+        48000,
+        in_ch_layout,
+        codec->sample_fmt,
+        codec->sample_rate,
+        0,
+        nullptr
+    );
+    if (!swr || swr_init(swr) < 0) {
+        if (err) *err = "swr_init failed";
+        cleanup();
+        return false;
+    }
+
+    std::vector<uint8_t> pcm;
+    while (av_read_frame(format, packet) >= 0) {
+        if (packet->stream_index != stream_index) {
+            av_packet_unref(packet);
+            continue;
+        }
+        if (avcodec_send_packet(codec, packet) < 0) {
+            av_packet_unref(packet);
+            continue;
+        }
+        av_packet_unref(packet);
+
+        while (avcodec_receive_frame(codec, frame) == 0) {
+            const int out_samples = av_rescale_rnd(
+                swr_get_delay(swr, codec->sample_rate) + frame->nb_samples,
+                48000,
+                codec->sample_rate,
+                AV_ROUND_UP
+            );
+            std::vector<uint8_t> buffer((size_t)out_samples * 2ULL * sizeof(int16_t));
+            uint8_t *out_data[1] = { buffer.data() };
+            const int converted = swr_convert(
+                swr,
+                out_data,
+                out_samples,
+                (const uint8_t **)frame->extended_data,
+                frame->nb_samples
+            );
+            if (converted > 0) {
+                buffer.resize((size_t)converted * 2ULL * sizeof(int16_t));
+                pcm.insert(pcm.end(), buffer.begin(), buffer.end());
+            }
+        }
+    }
+
+    if (avcodec_send_packet(codec, nullptr) == 0) {
+        while (avcodec_receive_frame(codec, frame) == 0) {
+            const int out_samples = av_rescale_rnd(
+                swr_get_delay(swr, codec->sample_rate) + frame->nb_samples,
+                48000,
+                codec->sample_rate,
+                AV_ROUND_UP
+            );
+            std::vector<uint8_t> buffer((size_t)out_samples * 2ULL * sizeof(int16_t));
+            uint8_t *out_data[1] = { buffer.data() };
+            const int converted = swr_convert(
+                swr,
+                out_data,
+                out_samples,
+                (const uint8_t **)frame->extended_data,
+                frame->nb_samples
+            );
+            if (converted > 0) {
+                buffer.resize((size_t)converted * 2ULL * sizeof(int16_t));
+                pcm.insert(pcm.end(), buffer.begin(), buffer.end());
+            }
+        }
+    }
+
+    if (pcm.empty()) {
+        if (err) *err = "audio decode produced no samples";
+        cleanup();
+        return false;
+    }
+
+    out = std::move(pcm);
+    cleanup();
+    return true;
+}
+
+static inline bool ffmpegDecodeVideoToRgbFirstFrame(const std::string &video_file, std::vector<uint8_t> &out, int &out_w, int &out_h, std::string *err = nullptr)
+{
+    out.clear();
+    out_w = 0;
+    out_h = 0;
+
+    AVFormatContext *format = nullptr;
+    AVCodecContext *codec = nullptr;
+    SwsContext *sws = nullptr;
+    AVPacket *packet = av_packet_alloc();
+    AVFrame *frame = av_frame_alloc();
+    AVFrame *rgb = av_frame_alloc();
+    if (!packet || !frame || !rgb) {
+        if (err) *err = "ffmpeg allocation failed";
+        if (packet) av_packet_free(&packet);
+        if (frame) av_frame_free(&frame);
+        if (rgb) av_frame_free(&rgb);
+        return false;
+    }
+
+    auto cleanup = [&]() {
+        if (sws) sws_freeContext(sws);
+        if (codec) avcodec_free_context(&codec);
+        if (format) avformat_close_input(&format);
+        av_frame_free(&frame);
+        av_frame_free(&rgb);
+        av_packet_free(&packet);
+    };
+
+    if (avformat_open_input(&format, video_file.c_str(), nullptr, nullptr) < 0) {
+        if (err) *err = "avformat_open_input failed";
+        cleanup();
+        return false;
+    }
+    if (avformat_find_stream_info(format, nullptr) < 0) {
+        if (err) *err = "avformat_find_stream_info failed";
+        cleanup();
+        return false;
+    }
+
+    const int stream_index = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (stream_index < 0) {
+        if (err) *err = "no video stream found";
+        cleanup();
+        return false;
+    }
+
+    AVStream *stream = format->streams[stream_index];
+    const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+    if (!decoder) {
+        if (err) *err = "video decoder not found";
+        cleanup();
+        return false;
+    }
+
+    codec = avcodec_alloc_context3(decoder);
+    if (!codec) {
+        if (err) *err = "avcodec_alloc_context3 failed";
+        cleanup();
+        return false;
+    }
+    if (avcodec_parameters_to_context(codec, stream->codecpar) < 0 || avcodec_open2(codec, decoder, nullptr) < 0) {
+        if (err) *err = "avcodec open failed";
+        cleanup();
+        return false;
+    }
+
+    out_w = codec->width > 0 ? codec->width : stream->codecpar->width;
+    out_h = codec->height > 0 ? codec->height : stream->codecpar->height;
+    if (out_w <= 0 || out_h <= 0) {
+        if (err) *err = "invalid video dimensions";
+        cleanup();
+        return false;
+    }
+
+    rgb->format = AV_PIX_FMT_RGB24;
+    rgb->width = out_w;
+    rgb->height = out_h;
+    if (av_frame_get_buffer(rgb, 32) < 0) {
+        if (err) *err = "av_frame_get_buffer failed";
+        cleanup();
+        return false;
+    }
+
+    sws = sws_getContext(
+        out_w,
+        out_h,
+        codec->pix_fmt,
+        out_w,
+        out_h,
+        AV_PIX_FMT_RGB24,
+        SWS_BICUBIC,
+        nullptr,
+        nullptr,
+        nullptr
+    );
+    if (!sws) {
+        if (err) *err = "sws_getContext failed";
+        cleanup();
+        return false;
+    }
+
+    while (av_read_frame(format, packet) >= 0) {
+        if (packet->stream_index != stream_index) {
+            av_packet_unref(packet);
+            continue;
+        }
+        if (avcodec_send_packet(codec, packet) < 0) {
+            av_packet_unref(packet);
+            continue;
+        }
+        av_packet_unref(packet);
+
+        if (avcodec_receive_frame(codec, frame) == 0) {
+            if (av_frame_make_writable(rgb) < 0) {
+                if (err) *err = "av_frame_make_writable failed";
+                cleanup();
+                return false;
+            }
+
+            sws_scale(
+                sws,
+                frame->data,
+                frame->linesize,
+                0,
+                out_h,
+                rgb->data,
+                rgb->linesize
+            );
+
+            const int row_bytes = out_w * 3;
+            out.resize((size_t)out_w * (size_t)out_h * 3ULL);
+            for (int y = 0; y < out_h; ++y) {
+                const uint8_t *row = rgb->data[0] + (size_t)y * (size_t)rgb->linesize[0];
+                std::memcpy(out.data() + (size_t)y * (size_t)row_bytes, row, (size_t)row_bytes);
+            }
+            cleanup();
+            return true;
+        }
+    }
+
+    if (err) *err = "video decode produced no frame";
+    cleanup();
+    return false;
+}
+
+#endif
+
 // NOTE: STB_IMAGE_IMPLEMENTATION is defined in src/stb_image_impl.cpp
 // Do NOT define it here to avoid multiple definition errors
 #include "stb_image.h"
@@ -755,6 +1067,25 @@ struct DatasetItem {
             return true;
         }
         if (audio_file.empty()) return false;
+
+#ifdef MIMIR_ENABLE_FFMPEG
+        {
+            std::vector<uint8_t> decoded_audio;
+            std::string ffmpeg_err;
+            if (ffmpegDecodeAudioToPcm(audio_file, decoded_audio, &ffmpeg_err)) {
+                auto& mgr = DatasetMemoryManager::instance();
+                if (!mgr.canAllocate(decoded_audio.size())) {
+                    return false;
+                }
+                audio_bytes = std::move(decoded_audio);
+                audio_loaded = true;
+                mgr.trackAllocation((void*)audio_bytes.data(), audio_bytes.size());
+                estimated_ram_usage += audio_bytes.size();
+                touch();
+                return true;
+            }
+        }
+#endif
         
         auto& mgr = DatasetMemoryManager::instance();
         
@@ -791,6 +1122,31 @@ struct DatasetItem {
             return true;
         }
         if (video_file.empty()) return false;
+
+#ifdef MIMIR_ENABLE_FFMPEG
+        {
+            std::vector<uint8_t> decoded_video;
+            int decoded_w = 0;
+            int decoded_h = 0;
+            std::string ffmpeg_err;
+            if (ffmpegDecodeVideoToRgbFirstFrame(video_file, decoded_video, decoded_w, decoded_h, &ffmpeg_err)) {
+                auto& mgr = DatasetMemoryManager::instance();
+                if (!mgr.canAllocate(decoded_video.size())) {
+                    return false;
+                }
+
+                video_bytes = std::move(decoded_video);
+                video_loaded = true;
+                mgr.trackAllocation((void*)video_bytes.data(), video_bytes.size());
+                estimated_ram_usage += video_bytes.size();
+                w = decoded_w;
+                h = decoded_h;
+                img_c = 3;
+                touch();
+                return true;
+            }
+        }
+#endif
         
         auto& mgr = DatasetMemoryManager::instance();
         
@@ -890,6 +1246,18 @@ public:
             
             if (!item.text_file.empty() && !item.text.has_value()) {
                 if (!item.loadText()) {
+                    all_loaded = false;
+                }
+            }
+
+            if (!item.audio_file.empty() && !item.audio_loaded) {
+                if (!item.loadAudio()) {
+                    all_loaded = false;
+                }
+            }
+
+            if (!item.video_file.empty() && !item.video_loaded) {
+                if (!item.loadVideo()) {
                     all_loaded = false;
                 }
             }
