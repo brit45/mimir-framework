@@ -101,6 +101,9 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install CMake dependencies (Lua/LZ4) with vcpkg
         shell: pwsh
         run: |
@@ -131,8 +134,7 @@ jobs:
         shell: pwsh
         run: |
           cmake -S . -B build `
-            -G "Visual Studio 17 2022" `
-            -A x64 `
+            -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:RUNNER_TEMP/vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
@@ -145,13 +147,13 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --parallel
 
       - name: Run unit tests (CTest)
         shell: pwsh
         run: |
           $env:PATH = "$HOME/.dotnet/tools;$HOME/.cargo/bin;" + $env:PATH
-          ctest --test-dir build -C Release --output-on-failure --timeout 180
+          ctest --test-dir build --output-on-failure --timeout 180
 
       - name: Upload CTest logs
         if: always()
