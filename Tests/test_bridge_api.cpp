@@ -158,12 +158,13 @@ static int testBridgeDirectCommands() {
     }
 
     // Utiliser un contexte runtime disponible comme contexte generique.
+    ScriptingContext* ctx = nullptr;
 #if defined(MIMIR_ENABLE_SCRIPTING_JS)
-    JSContext& ctx = JSContext::getInstance();
+    ctx = &JSContext::getInstance();
 #elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
-    CSharpContext& ctx = CSharpContext::getInstance();
+    ctx = &CSharpContext::getInstance();
 #elif defined(MIMIR_ENABLE_SCRIPTING_RUST)
-    RustContext& ctx = RustContext::getInstance();
+    ctx = &RustContext::getInstance();
 #else
     std::cerr << "[SKIP] BridgeTest.Direct: aucun bridge script activé\n";
     {
@@ -172,17 +173,17 @@ static int testBridgeDirectCommands() {
     }
     return 0;
 #endif
-    ctx.resetRuntimeState();
+    ctx->resetRuntimeState();
 
-    const bool ok = ScriptingBridgeCommon::processBridgeCommands(ctx, cmd_file, "[test]");
+    const bool ok = ScriptingBridgeCommon::processBridgeCommands(*ctx, cmd_file, "[test]");
     std::error_code ec;
     fs::remove(cmd_file, ec);
 
     MIMIR_ASSERT(ok, "processBridgeCommands a retourne false");
-    if (!assertModelCreated(ctx, "bridge direct")) return 1;
-    if (!assertParamsAllocated(ctx, "bridge direct")) return 1;
+    if (!assertModelCreated(*ctx, "bridge direct")) return 1;
+    if (!assertParamsAllocated(*ctx, "bridge direct")) return 1;
 
-    ctx.resetRuntimeState();
+    ctx->resetRuntimeState();
     return 0;
 }
 
@@ -324,12 +325,13 @@ static int testBridgeCreateWithConfig() {
         f << "Model.allocate_params\n";
     }
 
+    ScriptingContext* ctx = nullptr;
 #if defined(MIMIR_ENABLE_SCRIPTING_JS)
-    JSContext& ctx = JSContext::getInstance();
+    ctx = &JSContext::getInstance();
 #elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
-    CSharpContext& ctx = CSharpContext::getInstance();
+    ctx = &CSharpContext::getInstance();
 #elif defined(MIMIR_ENABLE_SCRIPTING_RUST)
-    RustContext& ctx = RustContext::getInstance();
+    ctx = &RustContext::getInstance();
 #else
     std::cerr << "[SKIP] BridgeTest.CreateWithConfig: aucun bridge script activé\n";
     {
@@ -338,16 +340,16 @@ static int testBridgeCreateWithConfig() {
     }
     return 0;
 #endif
-    ctx.resetRuntimeState();
+    ctx->resetRuntimeState();
 
-    const bool ok = ScriptingBridgeCommon::processBridgeCommands(ctx, cmd_file, "[test-cfg]");
+    const bool ok = ScriptingBridgeCommon::processBridgeCommands(*ctx, cmd_file, "[test-cfg]");
     std::error_code ec;
     fs::remove(cmd_file, ec);
 
     MIMIR_ASSERT(ok, "bridge create+cfg a echoue");
-    if (!assertModelCreated(ctx, "bridge create+cfg")) return 1;
+    if (!assertModelCreated(*ctx, "bridge create+cfg")) return 1;
 
-    ctx.resetRuntimeState();
+    ctx->resetRuntimeState();
     return 0;
 }
 
