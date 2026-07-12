@@ -41,16 +41,12 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
 
     const bool stochastic_latent = cfg.stochastic_latent;
 
-    // ===== Modèle PUREMENT CONVOLUTIONNEL =====
-    // Aucune SelfAttention ni couche dense/texte : l'autoencodeur est 100% conv
-    // (Conv2d / ConvTranspose2d / GroupNorm|LayerNorm / SiLU / résidus Add /
-    //  UpsampleNearest|ConvTranspose2d / Reparameterize). Les seuls layers non
-    // "calcul" sont les adaptateurs de disposition (Reshape/Permute) requis pour
-    // l'I/O en vecteur plat. Les blocs ResNet (conv3x3->SiLU->conv3x3 + skip)
-    // restent disponibles via `cfg.use_attention` (nom historique).
-    // Les options d'attention/texte du Config sont ignorées (conservées pour
-    // compatibilité de plomberie JSON/Lua uniquement).
+    // ===== Modèle convolutionnel avec blocs optionnels =====
+    // Le cœur reste convolutionnel (Conv2d / ConvTranspose2d / SiLU / Add /
+    // UpsampleNearest / Reparameterize). On peut en plus activer des blocs
+    // ResNet et SelfAttention spatiale (H*W tokens, embed_dim=channels).
     const bool use_resnet       = cfg.use_attention;
+    const bool use_attn         = cfg.use_attn;
     const bool use_skip_conn    = cfg.use_skip_connections;
     const bool use_enc_prior    = cfg.use_encoder_prior;
     // Modèle PUREMENT CONVOLUTIONNEL : aucune normalisation (GroupNorm/LayerNorm)
@@ -62,11 +58,19 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     const int dec_gn_groups_val    = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
     const int resnet_max_tok       = cfg.resnet_max_tokens;  // 0 = no gate
+    const int attn_max_tok         = cfg.attn_max_tokens;    // 0 = no gate
+    int attn_heads                 = std::max(1, cfg.attn_heads);
 
     auto resnet_gate = [&](int h, int w) -> bool {
         if (!use_resnet) return false;
         if (resnet_max_tok <= 0) return true;
         return (h * w) <= resnet_max_tok;
+    };
+
+    auto attn_gate = [&](int h, int w) -> bool {
+        if (!use_attn) return false;
+        if (attn_max_tok <= 0) return true;
+        return (h * w) <= attn_max_tok;
     };
 
     check_divisible(H, LH, "VAEConvModel: image_h must be divisible by latent_h");
@@ -113,6 +117,9 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["use_skip_connections"] = use_skip_conn;
     model.modelConfig["use_encoder_prior"] = use_enc_prior;
     model.modelConfig["use_attention"] = use_resnet;
+    model.modelConfig["use_attn"] = use_attn;
+    model.modelConfig["attn_heads"] = attn_heads;
+    model.modelConfig["attn_max_tokens"] = attn_max_tok;
     model.modelConfig["resnet_max_tokens"] = resnet_max_tok;
     if (cfg.d_model > 0) model.modelConfig["d_model"] = cfg.d_model;
     model.modelConfig["output_dim"] = image_dim + 2 * latent_dim;
@@ -309,7 +316,47 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         return in;
     };
 
-    // NOTE: pas de SelfAttention ni d'encodeur texte : graphe purement convolutionnel.
+    // SelfAttention spatiale (CHW -> HWC -> SelfAttention -> CHW) + résiduel.
+    auto self_attn = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
+        int heads = std::max(1, std::min(attn_heads, ch));
+        while (heads > 1 && (ch % heads) != 0) --heads;
+
+        model.push(prefix + "/to_hwc", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_hwc")) {
+            P->inputs = {in};
+            P->output = prefix + "/hwc";
+            P->shape = {ch, h, w};
+            P->permute_dims = {1, 2, 0};
+        }
+
+        const size_t attn_params = sat_mul(static_cast<size_t>(ch), sat_mul(static_cast<size_t>(ch), static_cast<size_t>(4)));
+        model.push(prefix + "/attn", "SelfAttention", attn_params);
+        if (auto* A = model.getLayerByName(prefix + "/attn")) {
+            A->inputs = {prefix + "/hwc"};
+            A->output = prefix + "/attn_out";
+            A->seq_len = h * w;
+            A->embed_dim = ch;
+            A->num_heads = heads;
+            A->causal = false;
+        }
+
+        model.push(prefix + "/to_chw", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_chw")) {
+            P->inputs = {prefix + "/attn_out"};
+            P->output = prefix + "/attn_chw";
+            P->shape = {h, w, ch};
+            P->permute_dims = {2, 0, 1};
+        }
+
+        model.push(prefix + "/add", "Add", 0);
+        if (auto* A = model.getLayerByName(prefix + "/add")) {
+            A->inputs = {in, prefix + "/attn_chw"};
+            A->output = prefix + "/out";
+        }
+        return prefix + "/out";
+    };
+
+    // NOTE: pas d'encodeur texte dans ce graphe (branche texte externe).
     // Skip connections (style U-Net) : enc_skips[i] est la feature map de l'encodeur
     // à la résolution H/2^i × W/2^i, sauvegardée avant le downsampling du niveau i.
     std::vector<std::string> enc_skips;
@@ -350,6 +397,9 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         x = add_enc_norm("vae_conv/enc/n0", x, cur_c, cur_h, cur_w);
         x = resblock("vae_conv/enc/res0", x, cur_c, cur_h, cur_w);
     }
+    if (attn_gate(cur_h, cur_w)) {
+        x = self_attn("vae_conv/enc/attn0", x, cur_c, cur_h, cur_w);
+    }
 
     for (int i = 0; i < downsamples; ++i) {
         // Sauvegarde du skip avant downsampling (résolution H/2^i × W/2^i)
@@ -366,14 +416,20 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
             x = add_enc_norm(b + "/n", x, cur_c, cur_h, cur_w);
             x = resblock(b + "/res", x, cur_c, cur_h, cur_w);
         }
+        if (attn_gate(cur_h, cur_w)) {
+            x = self_attn(b + "/attn", x, cur_c, cur_h, cur_w);
+        }
     }
 
     // Project to mu/logvar at latent resolution
     x = conv2d("vae_conv/enc/proj", x, "vae_conv/enc/h", cur_c, cur_c, cur_h, cur_w, 3, 1, 1, true);
-    // Bottleneck : ResNet convolutionnel optionnel (plus aucune SelfAttention)
+    // Bottleneck : ResNet et/ou SelfAttention optionnels
     if (resnet_gate(cur_h, cur_w)) {
         x = add_enc_norm("vae_conv/enc/bot_n", x, cur_c, cur_h, cur_w);
         x = resblock("vae_conv/enc/bot_res", x, cur_c, cur_h, cur_w);
+    }
+    if (attn_gate(cur_h, cur_w)) {
+        x = self_attn("vae_conv/enc/bot_attn", x, cur_c, cur_h, cur_w);
     }
     model.push("vae_conv/enc/mu", "Conv2d",
                sat_mul(static_cast<size_t>(LC), sat_mul(static_cast<size_t>(cur_c), sat_mul(static_cast<size_t>(1), static_cast<size_t>(1)))));
@@ -449,10 +505,13 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     dy_c = base;
     y = add_dec_norm("vae_conv/dec/n0", y, dy_c, dy_h, dy_w);
 
-    // Bottleneck décodeur : ResNet convolutionnel optionnel (plus aucune SelfAttention)
+    // Bottleneck décodeur : ResNet et/ou SelfAttention optionnels
     if (resnet_gate(dy_h, dy_w)) {
         y = add_dec_norm("vae_conv/dec/bot_n", y, dy_c, dy_h, dy_w);
         y = resblock("vae_conv/dec/bot_res", y, dy_c, dy_h, dy_w);
+    }
+    if (attn_gate(dy_h, dy_w)) {
+        y = self_attn("vae_conv/dec/bot_attn", y, dy_c, dy_h, dy_w);
     }
 
     for (int i = downsamples - 1; i >= 0; --i) {
@@ -484,6 +543,9 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         y = add_dec_norm(b + "/n", y, dy_c, dy_h, dy_w);
         if (resnet_gate(dy_h, dy_w)) {
             y = resblock(b + "/res", y, dy_c, dy_h, dy_w);
+        }
+        if (attn_gate(dy_h, dy_w)) {
+            y = self_attn(b + "/attn", y, dy_c, dy_h, dy_w);
         }
     }
 
@@ -551,7 +613,7 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     const int image_dim = W * H * C;
     const int latent_dim = LH * LW * LC;
     const int base = std::max(8, cfg.base_channels);
-    // Décodeur purement convolutionnel : pas de normalisation émise.
+    // Décodeur convolutionnel avec blocs optionnels (ResNet + SelfAttention).
     const std::string dec_norm_str = "none";
     const int dec_gn_groups_val = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
@@ -684,9 +746,12 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         return y;
     };
 
-    // Options blocs optionnels (purement convolutionnel : ResNet seulement)
+    // Options blocs optionnels
     const bool use_resnet_dec  = cfg.use_attention;
     const int resnet_max_dec   = cfg.resnet_max_tokens;
+    const bool use_attn_dec    = cfg.use_attn;
+    const int attn_max_dec     = cfg.attn_max_tokens;
+    int attn_heads_dec         = std::max(1, cfg.attn_heads);
     // Skip connections : si le checkpoint a été entraîné avec use_skip_connections=true,
     // on reconstruit le même graphe décodeur mais l'encodeur skip est remplacé par un
     // tenseur zéro (Constant non présent dans le checkpoint → initialisé à 0).
@@ -696,11 +761,19 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     // Stocker dans modelConfig pour que PonyXL puisse reconstruire une architecture identique.
     model.modelConfig["use_attention"] = use_resnet_dec;
     model.modelConfig["resnet_max_tokens"] = resnet_max_dec;
+    model.modelConfig["use_attn"] = use_attn_dec;
+    model.modelConfig["attn_heads"] = attn_heads_dec;
+    model.modelConfig["attn_max_tokens"] = attn_max_dec;
     model.modelConfig["use_skip_connections"] = use_skip_dec;
 
     auto resnet_gate_dec = [&](int h, int w) -> bool {
         if (!use_resnet_dec) return false;
         return resnet_max_dec <= 0 || (h * w) <= resnet_max_dec;
+    };
+
+    auto attn_gate_dec = [&](int h, int w) -> bool {
+        if (!use_attn_dec) return false;
+        return attn_max_dec <= 0 || (h * w) <= attn_max_dec;
     };
 
     auto resblock_dec = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
@@ -756,6 +829,45 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         return in;
     };
 
+    auto self_attn_dec = [&](const std::string& prefix, const std::string& in, int ch, int h, int w) -> std::string {
+        int heads = std::max(1, std::min(attn_heads_dec, ch));
+        while (heads > 1 && (ch % heads) != 0) --heads;
+
+        model.push(prefix + "/to_hwc", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_hwc")) {
+            P->inputs = {in};
+            P->output = prefix + "/hwc";
+            P->shape = {ch, h, w};
+            P->permute_dims = {1, 2, 0};
+        }
+
+        const size_t attn_params = sat_mul(static_cast<size_t>(ch), sat_mul(static_cast<size_t>(ch), static_cast<size_t>(4)));
+        model.push(prefix + "/attn", "SelfAttention", attn_params);
+        if (auto* A = model.getLayerByName(prefix + "/attn")) {
+            A->inputs = {prefix + "/hwc"};
+            A->output = prefix + "/attn_out";
+            A->seq_len = h * w;
+            A->embed_dim = ch;
+            A->num_heads = heads;
+            A->causal = false;
+        }
+
+        model.push(prefix + "/to_chw", "Permute", 0);
+        if (auto* P = model.getLayerByName(prefix + "/to_chw")) {
+            P->inputs = {prefix + "/attn_out"};
+            P->output = prefix + "/attn_chw";
+            P->shape = {h, w, ch};
+            P->permute_dims = {2, 0, 1};
+        }
+
+        model.push(prefix + "/add", "Add", 0);
+        if (auto* A = model.getLayerByName(prefix + "/add")) {
+            A->inputs = {in, prefix + "/attn_chw"};
+            A->output = prefix + "/out";
+        }
+        return prefix + "/out";
+    };
+
     // Input latent vector -> vae_conv/z
     model.push("vae_conv/raw_z", "Identity", 0);
     if (auto* L = model.getLayerByName("vae_conv/raw_z")) {
@@ -772,10 +884,13 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     dy_c = base;
     y = add_dec_norm("vae_conv/dec/n0", y, dy_c, dy_h, dy_w);
 
-    // Bottleneck décodeur (purement convolutionnel : ResNet seulement)
+    // Bottleneck décodeur : ResNet et/ou SelfAttention
     if (resnet_gate_dec(dy_h, dy_w)) {
         y = add_dec_norm("vae_conv/dec/bot_n", y, dy_c, dy_h, dy_w);
         y = resblock_dec("vae_conv/dec/bot_res", y, dy_c, dy_h, dy_w);
+    }
+    if (attn_gate_dec(dy_h, dy_w)) {
+        y = self_attn_dec("vae_conv/dec/bot_attn", y, dy_c, dy_h, dy_w);
     }
 
     for (int i = downsamples - 1; i >= 0; --i) {
@@ -821,6 +936,9 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         y = add_dec_norm(b + "/n", y, dy_c, dy_h, dy_w);
         if (resnet_gate_dec(dy_h, dy_w)) {
             y = resblock_dec(b + "/res", y, dy_c, dy_h, dy_w);
+        }
+        if (attn_gate_dec(dy_h, dy_w)) {
+            y = self_attn_dec(b + "/attn", y, dy_c, dy_h, dy_w);
         }
     }
 

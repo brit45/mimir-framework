@@ -39,6 +39,38 @@ bool _mimir_live_params_overrides_enabled(const T& p) {
     return true;
 }
 
+static std::vector<float> latentChunkToEmbedding(const std::vector<float>& packed,
+                                                 int image_dim,
+                                                 int latent_dim,
+                                                 int target_dim) {
+    if (target_dim <= 0 || image_dim < 0 || latent_dim <= 0) return {};
+    const size_t off = static_cast<size_t>(image_dim);
+    if (packed.size() < off + static_cast<size_t>(latent_dim)) return {};
+
+    std::vector<float> out(static_cast<size_t>(target_dim), 0.0f);
+    for (int d = 0; d < target_dim; ++d) {
+        const int lo = (d * latent_dim) / target_dim;
+        int hi = ((d + 1) * latent_dim) / target_dim;
+        if (hi <= lo) hi = lo + 1;
+        const int hi_clamped = std::min(latent_dim, hi);
+        float acc = 0.0f;
+        int cnt = 0;
+        for (int i = lo; i < hi_clamped; ++i) {
+            acc += packed[off + static_cast<size_t>(i)];
+            ++cnt;
+        }
+        out[static_cast<size_t>(d)] = (cnt > 0) ? (acc / static_cast<float>(cnt)) : 0.0f;
+    }
+
+    double n2 = 0.0;
+    for (float v : out) n2 += static_cast<double>(v) * static_cast<double>(v);
+    if (n2 > 1e-12) {
+        const float inv = static_cast<float>(1.0 / std::sqrt(n2));
+        for (float& v : out) v *= inv;
+    }
+    return out;
+}
+
 static void mergeLuaConfigIntoModelConfig(Model& model, const json& cfg) {
     if (!cfg.is_object()) return;
 
@@ -738,7 +770,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             m.kl = st.kl;
             m.kl_beta_effective = st.kl_beta_effective;
             m.wass = st.wass;
+            m.spat = st.spatial_coherence;
             m.temp = st.temp;
+            m.timestep = st.timestep;
             m.grad_norm = st.grad_norm;
             m.grad_max = st.grad_max_abs;
             m.ent = st.entropy_diff;
@@ -1056,8 +1090,28 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                                 const bool single_modality_sample = (item.countModalities() <= 1);
 
-                                // Cible image simple en espace embedding.
-                                const std::vector<float> img_emb = imageToEmbedding(item.img, image_w, image_h, enc.dim);
+                                // Cible "image" en espace embedding:
+                                // priorité au latent packé [recon | z | logvar] du VAE.
+                                // Quand use_encoder_prior=true, ce chunk correspond à z_biased
+                                // (z + prior), donc mag_embedding capture aussi ce signal.
+                                std::vector<float> img_emb;
+                                try {
+                                    const std::vector<float>& packed = ctx.currentModel->forwardPassView(x, false);
+                                    int latent_for_pack = std::max(0, st.latent_dim);
+                                    const int image_dim_for_pack = static_cast<int>(expected_u8);
+                                    const int packed_n = static_cast<int>(packed.size());
+                                    if (latent_for_pack <= 0 && packed_n > image_dim_for_pack + 2 && ((packed_n - image_dim_for_pack) % 2) == 0) {
+                                        latent_for_pack = std::max(1, (packed_n - image_dim_for_pack) / 2);
+                                    }
+                                    if (latent_for_pack > 0) {
+                                        img_emb = latentChunkToEmbedding(packed, image_dim_for_pack, latent_for_pack, enc.dim);
+                                    }
+                                } catch (...) {
+                                    // fallback ci-dessous
+                                }
+                                if (img_emb.empty()) {
+                                    img_emb = imageToEmbedding(item.img, image_w, image_h, enc.dim);
+                                }
 
                                 // En mono-modalité image: remplir uniquement le vecteur image (mag).
                                 enc.fillImageVectorSingleModality(img_emb, text_special_lr, single_modality_sample);

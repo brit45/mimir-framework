@@ -188,8 +188,13 @@ private:
     std::optional<sf::FloatRect> last_live_klb_value_box_;
     std::optional<sf::FloatRect> last_live_klwu_value_box_;
 
+    // Toggles UI (panneau Blocks/Layers)
+    std::optional<sf::FloatRect> last_blocks_hide_act_box_;
+    std::optional<sf::FloatRect> last_blocks_hide_norm_box_;
+
     // Label parsing / architecture hints
     bool hide_activation_blocks = false;
+    bool hide_normalisation_blocks = false;
     std::string architecture_path;
     bool architecture_loaded = false;
     std::unordered_set<std::string> arch_layer_names;

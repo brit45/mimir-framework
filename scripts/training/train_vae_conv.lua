@@ -447,13 +447,13 @@ end
 cfg.recon_loss = opt_str("recon-loss", cfg.recon_loss or "charbonnier")
 
 -- Losses additionnelles (optionnelles)
-cfg.ssim_weight = opt_num("ssim-weight", cfg.ssim_weight or 0.01)
-cfg.ssim_mode = opt_str("ssim-mode", cfg.ssim_mode or "ms_ssim") -- "ssim" ou "ms_ssim"
+cfg.ssim_weight = opt_num("ssim-weight", cfg.ssim_weight or 0.0001)
+cfg.ssim_mode = opt_str("ssim-mode", cfg.ssim_mode or "ssim") -- "ssim" ou "ms_ssim"
 cfg.ssim_k1 = opt_num("ssim-k1", cfg.ssim_k1 or 0.01)
 cfg.ssim_k2 = opt_num("ssim-k2", cfg.ssim_k2 or 0.03)
 cfg.ssim_L = opt_num("ssim-L", cfg.ssim_L or 1.2)
 
-cfg.spectral_weight = opt_num("spectral-weight", cfg.spectral_weight or 0.05)
+cfg.spectral_weight = opt_num("spectral-weight", cfg.spectral_weight or 0.0005)
 cfg.spectral_scales = opt_int("spectral-scales", cfg.spectral_scales or 1)
 
 -- Perceptual loss: désactivée par défaut (coûteuse et peut compliquer le debug).
@@ -748,12 +748,85 @@ if ok_train == false and tostring(err_train) == "STOP_REQUESTED" then
   })
   assert_ok(ok_save_stop, err_save_stop, "Serialization.save(stop) failed")
   log("✓ Checkpoint STOP écrit: " .. tostring(last_dir))
+
+  -- Snapshot debug JSON de fin d'entraînement (cas STOP).
+  do
+    local endtrain_path = last_dir .. "/endtrain.json"
+    local ok_dbg_end, err_dbg_end = Mimir.Serialization.save(endtrain_path, "debug_json", {
+      save_optimizer = true,
+      save_tokenizer = true,
+      save_encoder = true,
+      include_checksums = true,
+      include_git_info = true,
+      include_gradients = true,
+      include_activations = true,
+      include_optimizer_state = true,
+      include_weight_deltas = true,
+    })
+    assert_ok(ok_dbg_end, err_dbg_end, "Serialization.save(endtrain.json, debug_json) failed")
+    log("✓ Debug JSON écrit: " .. endtrain_path)
+  end
+
+  -- Export SafeTensors de fin d'entraînement (cas STOP).
+  do
+    local st_path = last_dir .. "/model.safetensors"
+    local ok_st, err_st = Mimir.Serialization.save(st_path, "safetensors", {
+      save_optimizer = true,
+      save_tokenizer = true,
+      save_encoder = true,
+      include_checksums = true,
+      include_git_info = true,
+      include_gradients = true,
+      include_activations = true,
+      include_optimizer_state = true,
+      include_weight_deltas = true,
+    })
+    assert_ok(ok_st, err_st, "Serialization.save(model.safetensors) failed")
+    log("✓ SafeTensors écrit: " .. st_path)
+  end
   return
 end
 assert_ok(ok_train, err_train, "Model.train failed")
 
 -- Sauvegarde
 FS.mkdir_p(save_out_dir)
+
+-- Snapshot debug JSON de fin d'entraînement (run normal).
+do
+  local endtrain_path = save_out_dir .. "/endtrain.json"
+  local ok_dbg_end, err_dbg_end = Mimir.Serialization.save(endtrain_path, "debug_json", {
+    save_optimizer = true,
+    save_tokenizer = true,
+    save_encoder = true,
+    include_checksums = true,
+    include_git_info = true,
+    include_gradients = true,
+    include_activations = true,
+    include_optimizer_state = true,
+    include_weight_deltas = true,
+  })
+  assert_ok(ok_dbg_end, err_dbg_end, "Serialization.save(endtrain.json, debug_json) failed")
+  log("✓ Debug JSON écrit: " .. endtrain_path)
+end
+
+-- Export SafeTensors de fin d'entraînement (run normal).
+do
+  local st_path = save_out_dir .. "/model.safetensors"
+  local ok_st, err_st = Mimir.Serialization.save(st_path, "safetensors", {
+    save_optimizer = true,
+    save_tokenizer = true,
+    save_encoder = true,
+    include_checksums = true,
+    include_git_info = true,
+    include_gradients = true,
+    include_activations = true,
+    include_optimizer_state = true,
+    include_weight_deltas = true,
+  })
+  assert_ok(ok_st, err_st, "Serialization.save(model.safetensors) failed")
+  log("✓ SafeTensors écrit: " .. st_path)
+end
+
 local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
   save_optimizer = true,
   save_tokenizer = true,

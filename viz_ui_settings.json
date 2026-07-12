@@ -1,6 +1,9 @@
 {
+  "browser": "google-chrome",
   "last": {
     "heatmap_palette": 1,
+    "hide_activation_blocks": true,
+    "hide_normalisation_blocks": true,
     "panels": [
       {
         "allow_drag": true,
@@ -34,23 +37,23 @@
       },
       {
         "allow_drag": true,
-        "h": 290.0000305175781,
+        "h": 140.0,
         "id": 3,
         "title": "Training",
         "visible": true,
-        "w": 516.0,
+        "w": 519.0,
         "x": 1268.0,
         "y": 5.0
       },
       {
         "allow_drag": true,
-        "h": 669.0,
+        "h": 810.0001220703125,
         "id": 4,
         "title": "Metrics",
         "visible": true,
-        "w": 529.0,
-        "x": 1259.0,
-        "y": 301.0001220703125
+        "w": 521.0,
+        "x": 1267.0,
+        "y": 152.00006103515625
       },
       {
         "allow_drag": true,
@@ -70,6 +73,11 @@
     "version": 2,
     "window_height": 976,
     "window_width": 1792
+  },
+  "showgraph": {
+    "n_dataset": "250",
+    "validate_every_steps": "200",
+    "validate_items": "64"
   },
   "slots": {
     "0": {

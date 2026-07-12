@@ -1534,7 +1534,7 @@ local function render_layers(info, opts)
 
     local columns = {
         { key = "idx", title = "#", align = "right", max = 6, color = C.gray },
-        { key = "name", title = "Layer", align = "left", max = 72, color = C.yellow },
+        { key = "name", title = "Layer", align = "left", max = 4096, color = C.yellow },
         { key = "type", title = "Type", align = "left", max = 20, color = C.cyan },
         { key = "params", title = "Params", align = "right", max = 14, color = C.green },
         { key = "weights", title = "Weights", align = "right", max = 14, color = C.magenta },
@@ -1637,10 +1637,10 @@ local function render_graph(info, opts)
 
     local columns = {
         { key = "idx", title = "#", align = "right", max = 6, color = C.gray },
-        { key = "name", title = "Layer", align = "left", max = 72, color = C.yellow },
+        { key = "name", title = "Layer", align = "left", max = 4096, color = C.yellow },
         { key = "type", title = "Type", align = "left", max = 20, color = C.cyan },
-        { key = "ins", title = "Inputs", align = "left", max = 46, color = C.magenta },
-        { key = "out", title = "Output", align = "left", max = 18, color = C.green },
+        { key = "ins", title = "Inputs", align = "left", max = 4096, color = C.magenta },
+        { key = "out", title = "Output", align = "left", max = 4096, color = C.green },
     }
 
     local table_str = make_table(columns, rows)
@@ -1687,12 +1687,11 @@ local function render_graph_blocks(info, opts)
     max_layers = clamp(max_layers, 0, #arch.layers)
 
     -- Largeurs max des blocs (inner), avec caps (évite des lignes énormes)
-    local cap_in = tonumber(opts.graph_in_width) or 28
-    local cap_layer = tonumber(opts.graph_layer_width) or 48
+    local cap_in = tonumber(opts.graph_in_width) or 4096
     local cap_out = tonumber(opts.graph_out_width) or 18
-    cap_in = clamp(math.floor(cap_in), 8, 120)
-    cap_layer = clamp(math.floor(cap_layer), 12, 160)
-    cap_out = clamp(math.floor(cap_out), 6, 60)
+    cap_in = clamp(math.floor(cap_in), 8, 4096)
+    cap_out = tonumber(opts.graph_out_width) or 4096
+    cap_out = clamp(math.floor(cap_out), 6, 4096)
 
     local produced = {}
     local consumed = {}
@@ -1722,7 +1721,7 @@ local function render_graph_blocks(info, opts)
             if ltype ~= "" then layer = layer .. " | " .. ltype end
 
             local ins_t = trunc(ins, cap_in)
-            local layer_t = trunc(layer, cap_layer)
+            local layer_t = layer
             local out_t = trunc(out, cap_out)
 
             local iw = utf8_len_safe(ins_t)

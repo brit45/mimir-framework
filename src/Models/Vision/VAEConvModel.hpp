@@ -6,9 +6,11 @@
 
 // VAEConvModel:
 // - VAE PUREMENT CONVOLUTIONNEL (downsample -> mu/logvar -> reparameterize -> upsample)
-// - Aucune SelfAttention ni couche dense/texte : uniquement Conv2d /
-//   ConvTranspose2d / GroupNorm|LayerNorm / SiLU / résidus Add / UpsampleNearest
-//   / Reparameterize (+ adaptateurs de disposition Reshape/Permute pour l'I/O).
+// - Architecture majoritairement convolutionnelle, avec blocs optionnels
+//   SelfAttention spatiale et ResNet.
+// - Couches principales: Conv2d / ConvTranspose2d / GroupNorm|LayerNorm /
+//   SiLU / résidus Add / UpsampleNearest / Reparameterize (+ adaptateurs de
+//   disposition Reshape/Permute pour l'I/O).
 // - Output packs: [recon(image_dim), mu(latent_dim), logvar(latent_dim)]
 // - Latent is spatial: latent_dim = latent_h * latent_w * latent_c (CHW)
 
@@ -36,9 +38,8 @@ public:
         // Entièrement convolutionnels. Activé via --resnet / cfg.use_attention.
         bool use_attention = true;
 
-        // [DÉPRÉCIÉ / IGNORÉ] Le modèle est désormais purement convolutionnel :
-        // la SelfAttention spatiale n'est plus émise dans le graphe. Conservé
-        // uniquement pour compatibilité de configuration (JSON/Lua).
+        // Active la SelfAttention spatiale optionnelle (H*W tokens, embed_dim=channels)
+        // sur certains blocs encodeur/décodeur.
         bool use_attn = false;
 
         // Normalisation dans l'encodeur : "none" | "groupnorm" | "layernorm"
@@ -58,14 +59,15 @@ public:
         // Upsampling du décodeur : "conv_transpose" | "nearest_conv".
         std::string decoder_upsample = "conv_transpose";
 
-        // [DÉPRÉCIÉ / IGNORÉ] Têtes d'attention (plus d'attention dans le graphe).
+        // Nombre de têtes SelfAttention (sera clampé à un diviseur valide de channels).
         int attn_heads = 4;
 
         // Garde-fou ResNet : bloc ResNet injecté seulement si h*w <= resnet_max_tokens.
         // 0 = pas de garde-fou (toujours injecté).
         int resnet_max_tokens = 0;
 
-        // [DÉPRÉCIÉ / IGNORÉ] Garde-fou SelfAttention (plus d'attention dans le graphe).
+        // Garde-fou SelfAttention : injectée seulement si h*w <= attn_max_tokens.
+        // 0 = pas de garde-fou (toujours injectée quand use_attn=true).
         int attn_max_tokens = 0;
 
         // Skip connections encodeur→décodeur (style U-Net).

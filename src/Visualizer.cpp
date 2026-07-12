@@ -783,6 +783,7 @@ Visualizer::Visualizer(const json& config)
         loss_log_file = viz.value("loss_log_file", loss_log_file);
 
         hide_activation_blocks = viz.value("hide_activation_blocks", false);
+        hide_normalisation_blocks = viz.value("hide_normalisation_blocks", false);
         architecture_path = viz.value("architecture_path", std::string());
     }
 }
@@ -953,6 +954,8 @@ json Visualizer::serializeUILayout() const {
     out["show_loss_graph"] = show_loss_graph;
     out["show_prompt_text"] = show_prompt_text_;
     out["heatmap_palette"] = static_cast<int>(heatmap_palette_);
+    out["hide_activation_blocks"] = hide_activation_blocks;
+    out["hide_normalisation_blocks"] = hide_normalisation_blocks;
 
     // Taille de fenêtre (utile pour restaurer un slot de layout)
     out["window_width"] = window_width;
@@ -985,6 +988,8 @@ bool Visualizer::applyUILayout(const json& layout) {
         if (layout.contains("show_training_progress")) show_training_progress = layout["show_training_progress"].get<bool>();
         if (layout.contains("show_loss_graph")) show_loss_graph = layout["show_loss_graph"].get<bool>();
         if (layout.contains("show_prompt_text")) show_prompt_text_ = layout["show_prompt_text"].get<bool>();
+        if (layout.contains("hide_activation_blocks")) hide_activation_blocks = layout["hide_activation_blocks"].get<bool>();
+        if (layout.contains("hide_normalisation_blocks")) hide_normalisation_blocks = layout["hide_normalisation_blocks"].get<bool>();
         if (layout.contains("heatmap_palette")) {
             const int pid = std::clamp(layout["heatmap_palette"].get<int>(), 0, 3);
             heatmap_palette_ = static_cast<Visualizer::HeatmapPalette>(pid);
@@ -1609,6 +1614,20 @@ void Visualizer::processEvents() {
                     if (start_drag(LiveDragTarget::LRWarmup, last_live_lrwu_track_, last_live_lrwu_thumb_)) continue;
                     if (start_drag(LiveDragTarget::KLBeta, last_live_klb_track_, last_live_klb_thumb_)) continue;
                     if (start_drag(LiveDragTarget::KLWarmup, last_live_klwu_track_, last_live_klwu_thumb_)) continue;
+                }
+
+                // Toggles du panneau Blocks/Layers
+                if (isPanelVisible(PanelId::Blocks) && !zoom_active_) {
+                    if (last_blocks_hide_act_box_.has_value() && last_blocks_hide_act_box_->contains(mouse)) {
+                        hide_activation_blocks = !hide_activation_blocks;
+                        saveUILayoutToLast();
+                        continue;
+                    }
+                    if (last_blocks_hide_norm_box_.has_value() && last_blocks_hide_norm_box_->contains(mouse)) {
+                        hide_normalisation_blocks = !hide_normalisation_blocks;
+                        saveUILayoutToLast();
+                        continue;
+                    }
                 }
 
                 // Le zoom overlay est modal: on bloque les interactions de layout,
@@ -2716,6 +2735,19 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
             }
         }
 
+        // PS (user): ne pas afficher les blocs de normalisation.
+        if (hide_normalisation_blocks) {
+            if (p.tag == "N" || p.headline == "Norm" ||
+                f.label.find("/norm") != std::string::npos ||
+                f.label.find("/gn") != std::string::npos ||
+                f.label.find("/ln") != std::string::npos ||
+                f.label.find("/bn") != std::string::npos ||
+                f.label.find("/in") != std::string::npos ||
+                f.label.find("/rms") != std::string::npos) {
+                continue;
+            }
+        }
+
         // PS (user): ne pas afficher la validation dans Blocks/Layers.
         // Best-effort: tag heuristique + substring explicite.
         if (p.tag == "VAL" || f.label.find("/validation") != std::string::npos || f.label.find("/val/") != std::string::npos) {
@@ -3147,13 +3179,18 @@ void Visualizer::renderLayerBlocks() {
     const int margin = 14;
     const auto area = panelContentRect(PanelId::Blocks);
     const int start_x = static_cast<int>(area.left);
-    const int start_y = static_cast<int>(area.top);
+    const int controls_h = 22;
+    const int controls_gap = 6;
+    const int start_y = static_cast<int>(area.top) + controls_h + controls_gap;
 
     const int label_h = 18;
     const int section_h = 22;
     const int section_gap = 8;
     const int max_cols = std::max(1, static_cast<int>(area.width) / (thumb + margin));
     const int cell_h = thumb + label_h + margin;
+
+    last_blocks_hide_act_box_.reset();
+    last_blocks_hide_norm_box_.reset();
 
     // Focus rectangles doivent correspondre aux vrais blocks (index = layer_block_images idx).
     last_block_rects_.assign(static_cast<size_t>(std::max(0, blocks_count)), sf::FloatRect(0.f, 0.f, 0.f, 0.f));
@@ -3177,6 +3214,49 @@ void Visualizer::renderLayerBlocks() {
             v.setViewport(sf::FloatRect(left / ww, top / hh, w / ww, h / hh));
             window->setView(v);
         }
+    }
+
+    // Barre d'options (toggles filtres) en haut du panneau Blocks/Layers.
+    if (font_loaded) {
+        const float bx = area.left;
+        const float by = area.top;
+        const float bw = std::max(80.0f, area.width - 4.0f);
+        sf::RectangleShape bar(sf::Vector2f(bw, static_cast<float>(controls_h)));
+        bar.setPosition(bx, by);
+        bar.setFillColor(sf::Color(36, 38, 46, 210));
+        bar.setOutlineColor(sf::Color(70, 74, 88, 220));
+        bar.setOutlineThickness(1.0f);
+        window->draw(bar);
+
+        auto draw_toggle = [&](float x, const std::string& text, bool enabled, std::optional<sf::FloatRect>& out_rect) -> float {
+            const float h = static_cast<float>(controls_h - 6);
+            const float y = by + 3.0f;
+            const float wbtn = 18.0f;
+            sf::RectangleShape box(sf::Vector2f(wbtn, h));
+            box.setPosition(x, y);
+            box.setFillColor(enabled ? sf::Color(92, 166, 112, 230) : sf::Color(76, 80, 95, 220));
+            box.setOutlineColor(sf::Color(140, 145, 165, 220));
+            box.setOutlineThickness(1.0f);
+            window->draw(box);
+
+            sf::Text t;
+            t.setFont(font);
+            t.setCharacterSize(12);
+            t.setFillColor(sf::Color(232, 232, 238));
+            t.setPosition(x + wbtn + 6.0f, y + 1.0f);
+            t.setString(sf::String::fromUtf8(text.begin(), text.end()));
+            window->draw(t);
+
+            const sf::FloatRect tb = t.getLocalBounds();
+            const float tw = std::max(1.0f, tb.width + 10.0f);
+            const float total_w = wbtn + 6.0f + tw;
+            out_rect = sf::FloatRect(x, y, total_w, h);
+            return x + total_w + 12.0f;
+        };
+
+        float cx = bx + 8.0f;
+        cx = draw_toggle(cx, "Hide ACT", hide_activation_blocks, last_blocks_hide_act_box_);
+        (void)draw_toggle(cx, "Hide NORM", hide_normalisation_blocks, last_blocks_hide_norm_box_);
     }
 
     auto apply_arch_hint = [&](ParsedVizLabel& p) {

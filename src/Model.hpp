@@ -263,7 +263,9 @@ public:
         float kl = 0.0f;
         // Monitoring/marker metrics computed on recon vs target image.
         float wass = 0.0f;
+        float spatial_coherence = 0.0f;
         float temp = 0.0f;
+        float timestep = 0.0f;
         float align = 0.0f; // loss d'alignement image/texte (si activé)
         float kl_beta_effective = 0.0f;
         int latent_dim = 0;

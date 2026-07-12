@@ -102,6 +102,9 @@ local function maybe_start_htop(opts)
   local hide = as_bool(opts["viz-hide-activation-blocks"])
   if hide ~= nil then cfg.viz_config.visualization.hide_activation_blocks = hide end
 
+  local hide_norm = as_bool(opts["viz-hide-normalisation-blocks"])
+  if hide_norm ~= nil then cfg.viz_config.visualization.hide_normalisation_blocks = hide_norm end
+
   if opts.csv ~= nil then cfg.csv = opts.csv end
   if opts["csv-enabled"] ~= nil then cfg.csv_enabled = opts["csv-enabled"] end
   if opts["csv-path"] ~= nil then cfg.csv_path = tostring(opts["csv-path"]) end
