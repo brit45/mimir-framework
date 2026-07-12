@@ -102,22 +102,21 @@ static inline bool ffmpegDecodeAudioToPcm(const std::string &audio_file, std::ve
         return false;
     }
 
-    const int64_t out_ch_layout = AV_CH_LAYOUT_STEREO;
-    const int64_t in_ch_layout = codec->channel_layout != 0
-        ? codec->channel_layout
-        : av_get_default_channel_layout(codec->channels > 0 ? codec->channels : 2);
-    swr = swr_alloc_set_opts(
-        nullptr,
-        out_ch_layout,
-        AV_SAMPLE_FMT_S16,
-        48000,
-        in_ch_layout,
-        codec->sample_fmt,
-        codec->sample_rate,
-        0,
-        nullptr
-    );
-    if (!swr || swr_init(swr) < 0) {
+    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+    AVChannelLayout in_ch_layout = codec->ch_layout;
+    if (in_ch_layout.nb_channels <= 0) {
+        av_channel_layout_default(&in_ch_layout, 2);
+    }
+    if (swr_alloc_set_opts2(
+            &swr,
+            &out_ch_layout,
+            AV_SAMPLE_FMT_S16,
+            48000,
+            &in_ch_layout,
+            codec->sample_fmt,
+            codec->sample_rate,
+            0,
+            nullptr) < 0 || !swr || swr_init(swr) < 0) {
         if (err) *err = "swr_init failed";
         cleanup();
         return false;
