@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iomanip>
 #include <ctime>
+#include <iostream>
 
 namespace Mimir {
 namespace Serialization {
@@ -24,8 +25,15 @@ bool SafeTensorsWriter::save(
     std::string* error
 ) {
     try {
+        const uint16_t endian_probe = 1;
+        if (*reinterpret_cast<const uint8_t*>(&endian_probe) != 1) {
+            if (error) *error = "SafeTensors serialization requires little-endian host support";
+            return false;
+        }
         // Collect all tensors
         std::vector<TensorData> tensors = collect_tensors(model, options);
+        std::cerr << "[serialization] safetensors save path=" << path
+                  << " tensors=" << tensors.size() << std::endl;
         
         if (tensors.empty()) {
             if (error) {
@@ -119,6 +127,12 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
         arch["total_params"] = model.totalParamCount();
         arch["num_layers"] = layers.size();
         arch["model_config"] = model.modelConfig;
+        try {
+            if (model.modelConfig.contains("type") && model.modelConfig["type"].is_string()) {
+                arch["model_type"] = model.modelConfig["type"].get<std::string>();
+            }
+        } catch (...) {
+        }
         arch["model_config"]["dtype"] = dtype_to_string(float_storage);
 
         json layers_array = json::array();
@@ -127,6 +141,7 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
             layer_obj["name"] = layer.name;
             layer_obj["type"] = layer.type;
             layer_obj["params_count"] = layer.params_count;
+            layer_obj["trainable_parameter"] = layer.trainable_parameter;
             layer_obj["inputs"] = layer.inputs;
             layer_obj["output"] = layer.output;
             // Common shape fields
@@ -308,18 +323,19 @@ json SafeTensorsWriter::build_header(
     
     // Timestamp
     auto now = std::time(nullptr);
-    metadata["created_at"] = static_cast<long long>(now);
+    metadata["created_at"] = std::to_string(static_cast<long long>(now));
     
     // Total size
-    metadata["total_size"] = current_offset;
+    metadata["total_size"] = std::to_string(current_offset);
     
     // Custom metadata
     if (!options.custom_metadata.empty()) {
         try {
-            json custom = json::parse(options.custom_metadata);
-            metadata["custom"] = custom;
-        } catch (...) {
-            // Ignore invalid JSON
+            // SafeTensors requires __metadata__ to be string-to-string.
+            // Keep structured user metadata as a canonical JSON string.
+            metadata["custom"] = json::parse(options.custom_metadata).dump();
+        } catch (const std::exception& e) {
+            throw std::runtime_error(std::string("Invalid custom_metadata JSON: ") + e.what());
         }
     }
     
@@ -337,6 +353,8 @@ bool SafeTensorsWriter::write_file(
     try {
         // Ensure directory exists
         fs::path file_path(path);
+        std::cerr << "[serialization] safetensors write_file path=" << file_path.string()
+                  << " tensors=" << tensors.size() << std::endl;
         if (file_path.has_parent_path()) {
             fs::create_directories(file_path.parent_path());
         }
@@ -352,6 +370,10 @@ bool SafeTensorsWriter::write_file(
         
         // Serialize header to JSON string
         std::string header_str = header.dump();
+        // Padding is part of N and must consist solely of ASCII spaces.
+        // Aligning the data section to 8 bytes matches the reference writers.
+        const size_t padding = (8 - (header_str.size() % 8)) % 8;
+        header_str.append(padding, ' ');
         uint64_t header_len = static_cast<uint64_t>(header_str.size());
         
         // Write header length (8 bytes, little-endian)
@@ -368,15 +390,17 @@ bool SafeTensorsWriter::write_file(
         
         // Write tensor data in order
         for (const auto& tensor : tensors) {
-            if (tensor.data_ptr == nullptr || tensor.byte_size == 0) {
+            if (tensor.byte_size > 0 && tensor.data_ptr == nullptr) {
                 if (error) {
                     *error = "Invalid tensor data for: " + tensor.name;
                 }
                 return false;
             }
             
-            // Write raw bytes (already in little-endian on x86/ARM)
-            file.write(static_cast<const char*>(tensor.data_ptr), tensor.byte_size);
+            if (tensor.byte_size > 0) {
+                // Numeric payloads are emitted little-endian on supported hosts.
+                file.write(static_cast<const char*>(tensor.data_ptr), tensor.byte_size);
+            }
             if (!file) {
                 if (error) {
                     *error = "Failed to write tensor data: " + tensor.name;

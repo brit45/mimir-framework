@@ -405,35 +405,113 @@ end
 -- CSV PARSER
 -- ══════════════════════════════════════════════════════════════
 
+local function trim(s)
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
 local function parse_csv(path)
-  local f = io.open(path, "r")
+  local f = io.open(path, "rb")
   if not f then return nil, "Fichier introuvable: " .. path end
-  local first = f:read("*l")
-  if not first then f:close(); return nil, "CSV vide" end
-
-  local headers = {}
-  for col in (first .. ","):gmatch("([^,]*),") do
-    headers[#headers+1] = col:match("^%s*(.-)%s*$")
-  end
-
-  local df = {}
-  for _, h in ipairs(headers) do df[h] = {} end
+  local headers = nil
+  local df = nil
   local n = 0
 
-  for line in f:lines() do
-    if line:match("[^%s,]") then
-      n = n + 1
-      local ci = 0
-      for val in (line .. ","):gmatch("([^,]*),") do
-        ci = ci + 1
-        if headers[ci] then
-          local v = val:match("^%s*(.-)%s*$")
-          df[headers[ci]][n] = tonumber(v) or v
+  local row, field = {}, {}
+  local in_quotes = false
+  local data_started = false
+
+  local function push_field()
+    row[#row + 1] = table.concat(field)
+    field = {}
+  end
+
+  local function row_has_content()
+    for i = 1, #row do
+      if row[i]:match("[^%s]") then return true end
+    end
+    return false
+  end
+
+  local function ensure_headers()
+    headers = {}
+    for i = 1, #row do
+      local h = trim(row[i])
+      if i == 1 then
+        h = h:gsub("^\239\187\191", "")
+      end
+      headers[#headers + 1] = h
+    end
+    df = {}
+    for _, h in ipairs(headers) do df[h] = {} end
+    row = {}
+  end
+
+  local function commit_row()
+    if not row_has_content() then
+      row = {}
+      return
+    end
+    if not headers then
+      ensure_headers()
+      return
+    end
+
+    n = n + 1
+    for ci, h in ipairs(headers) do
+      local v = row[ci]
+      if v ~= nil then
+        v = trim(v)
+        if v ~= "" then
+          df[h][n] = tonumber(v) or v
         end
       end
     end
+    row = {}
+    data_started = true
   end
+
+  local chunk_size = 64 * 1024
+  while true do
+    local chunk = f:read(chunk_size)
+    if not chunk then break end
+    local i = 1
+    while i <= #chunk do
+      local c = chunk:sub(i, i)
+      if in_quotes then
+        if c == '"' then
+          local next_c = chunk:sub(i + 1, i + 1)
+          if next_c == '"' then
+            field[#field + 1] = '"'
+            i = i + 1
+          else
+            in_quotes = false
+          end
+        else
+          field[#field + 1] = c
+        end
+      else
+        if c == '"' then
+          in_quotes = true
+        elseif c == ',' then
+          push_field()
+        elseif c == '\n' then
+          push_field()
+          commit_row()
+        elseif c ~= '\r' then
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  if in_quotes or #field > 0 or #row > 0 then
+    push_field()
+    commit_row()
+  end
+
   f:close()
+  if not headers then return nil, "CSV vide" end
   return { headers = headers, df = df, n = n }
 end
 

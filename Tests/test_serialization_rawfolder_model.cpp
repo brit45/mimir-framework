@@ -84,7 +84,7 @@ int main() {
 
         auto modelA = ModelArchitectures::create("basic_mlp", cfgA);
         TASSERT_TRUE(modelA != nullptr);
-        TASSERT_TRUE(modelA->getDefaultDType() == std::string(c.dtype));
+        TASSERT_TRUE(Mimir::parse_dtype(modelA->getDefaultDType()) == Mimir::parse_dtype(c.dtype));
         modelA->allocateParams();
         modelA->initializeWeights("xavier", 321u);
 

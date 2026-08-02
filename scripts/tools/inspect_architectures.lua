@@ -177,7 +177,11 @@ local function make_table(columns, rows)
       else
         cell = pad_right(s, widths[ci])
       end
-      if col.color then cell = colorize(cell, col.color) end
+      local cell_color = col.color
+      if type(cell_color) == "function" then
+        cell_color = cell_color(row, s)
+      end
+      if cell_color then cell = colorize(cell, cell_color) end
       parts[#parts + 1] = " " .. cell .. " "
       parts[#parts + 1] = bar
     end
@@ -370,14 +374,25 @@ local function list_archs()
       name = tostring(entry.name),
       dtype = arch_default_dtype(entry),
       description = (type(entry.description) == "string") and entry.description or "",
+      origin = tostring(entry.origin or "native"),
     }
   end
   local columns = {
-    { key = "name", title = "Architecture", align = "left", color = C.cyan, max = 32 },
+    {
+      key = "name",
+      title = "Architecture",
+      align = "left",
+      color = function(row)
+        return row.origin == "mpk" and C.magenta or C.cyan
+      end,
+      max = 32,
+    },
     { key = "dtype", title = "dtype défaut", align = "left", color = C.green, max = 12 },
     { key = "description", title = "Description", align = "left", color = nil, max = 72 },
   }
   log(make_table(columns, rows))
+  log("  " .. colorize("native", C.cyan) .. " · " ..
+      colorize("MPK", C.magenta))
   return entries
 end
 
@@ -1097,6 +1112,8 @@ local function export_json()
     registry[#registry + 1] = {
       name         = entry.name,
       description  = entry.description,
+      origin       = entry.origin or "native",
+      source_path  = entry.source_path,
       dtype        = arch_default_dtype(entry),
       config       = entry.config,
       total_params = ok_inst and total or nil,

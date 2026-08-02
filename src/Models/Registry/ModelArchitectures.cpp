@@ -4,6 +4,7 @@
 #include "Models/NLP/HFCLIPTextEncoder1Model.hpp"
 #include "Models/NLP/HFCLIPTextEncoder2Model.hpp"
 #include "Models/NLP/TransformerModel.hpp"
+#include "Models/NLP/CausalLMModel.hpp"
 #include "Models/NLP/VAETextModel.hpp"
 #include "Models/External/ExternalSafeTensorsModel.hpp"
 #include "Models/Vision/HFVaeDecoderModel.hpp"
@@ -25,6 +26,7 @@
 #include "Models/Vision/PatchDiscriminatorModel.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 
@@ -242,6 +244,35 @@ static json transformerDefaultConfigJson() {
     return json{{"seq_len", d.seq_len}, {"d_model", d.d_model}, {"vocab_size", d.vocab_size}, {"padding_idx", d.padding_idx}, {"num_layers", d.num_layers}, {"num_heads", d.num_heads}, {"mlp_hidden", d.mlp_hidden}, {"output_dim", d.output_dim}, {"causal", d.causal}};
 }
 
+static CausalLMModel::Config causalLMCfgFromJson(const json& cfg) {
+    CausalLMModel::Config out;
+    out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
+    out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.num_layers = jget<int>(cfg, "num_layers", out.num_layers);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.num_kv_heads = jget<int>(cfg, "num_kv_heads", out.num_kv_heads);
+    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+    out.padding_idx = jget<int>(cfg, "padding_idx", out.padding_idx);
+    out.norm_eps = jget<float>(cfg, "norm_eps", out.norm_eps);
+    out.rope_theta = jget<float>(cfg, "rope_theta", out.rope_theta);
+    return out;
+}
+
+static json causalLMDefaultConfigJson() {
+    CausalLMModel::Config d;
+    return json{{"vocab_size", d.vocab_size},
+                {"seq_len", d.seq_len},
+                {"d_model", d.d_model},
+                {"num_layers", d.num_layers},
+                {"num_heads", d.num_heads},
+                {"num_kv_heads", d.num_kv_heads},
+                {"mlp_hidden", d.mlp_hidden},
+                {"padding_idx", d.padding_idx},
+                {"norm_eps", d.norm_eps},
+                {"rope_theta", d.rope_theta}};
+}
+
 static VAETextModel::Config vaeTextCfgFromJson(const json& cfg) {
     VAETextModel::Config out;
     out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
@@ -367,6 +398,8 @@ static PonyXLDDPMModel::Config ponyxlDdpmCfgFromJson(const json& cfg) {
     out.max_vocab = jget<int>(cfg, "max_vocab", out.max_vocab);
     out.text_ctx_len = jget<int>(cfg, "text_ctx_len", out.text_ctx_len);
     out.text_bottleneck_meanpool = jget<bool>(cfg, "text_bottleneck_meanpool", out.text_bottleneck_meanpool);
+    out.text_norm = jget<std::string>(cfg, "text_norm", out.text_norm);
+    out.text_mlp_geglu = jget<bool>(cfg, "text_mlp_geglu", out.text_mlp_geglu);
 
     out.latent_seq_len = jget<int>(cfg, "latent_seq_len", out.latent_seq_len);
     out.latent_in_dim = jget<int>(cfg, "latent_in_dim", out.latent_in_dim);
@@ -380,6 +413,7 @@ static PonyXLDDPMModel::Config ponyxlDdpmCfgFromJson(const json& cfg) {
     out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
     out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
     out.unet_depth = jget<int>(cfg, "unet_depth", out.unet_depth);
+    out.unet_upsample = jget<std::string>(cfg, "unet_upsample", out.unet_upsample);
 
     out.image_w = jget<int>(cfg, "image_w", out.image_w);
     out.image_h = jget<int>(cfg, "image_h", out.image_h);
@@ -453,6 +487,8 @@ static json ponyxlDdpmDefaultConfigJson() {
         {"max_vocab", d.max_vocab},
         {"text_ctx_len", d.text_ctx_len},
         {"text_bottleneck_meanpool", d.text_bottleneck_meanpool},
+        {"text_norm", d.text_norm},
+        {"text_mlp_geglu", d.text_mlp_geglu},
 
         {"latent_seq_len", d.latent_seq_len},
         {"latent_in_dim", d.latent_in_dim},
@@ -466,6 +502,7 @@ static json ponyxlDdpmDefaultConfigJson() {
         {"latent_h", d.latent_h},
         {"latent_w", d.latent_w},
         {"unet_depth", d.unet_depth},
+        {"unet_upsample", d.unet_upsample},
 
         {"image_w", d.image_w},
         {"image_h", d.image_h},
@@ -738,12 +775,13 @@ static VGG16Model::Config vgg16CfgFromJson(const json& cfg) {
     out.base_channels = jget<int>(cfg, "base_channels", out.base_channels);
     out.num_classes = jget<int>(cfg, "num_classes", out.num_classes);
     out.fc_hidden = jget<int>(cfg, "fc_hidden", out.fc_hidden);
+    out.dropout = jget<float>(cfg, "dropout", out.dropout);
     return out;
 }
 
 static json vgg16DefaultConfigJson() {
     VGG16Model::Config d;
-    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}, {"num_classes", d.num_classes}, {"fc_hidden", d.fc_hidden}};
+    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}, {"num_classes", d.num_classes}, {"fc_hidden", d.fc_hidden}, {"dropout", d.dropout}};
 }
 
 static VGG19Model::Config vgg19CfgFromJson(const json& cfg) {
@@ -754,12 +792,13 @@ static VGG19Model::Config vgg19CfgFromJson(const json& cfg) {
     out.base_channels = jget<int>(cfg, "base_channels", out.base_channels);
     out.num_classes = jget<int>(cfg, "num_classes", out.num_classes);
     out.fc_hidden = jget<int>(cfg, "fc_hidden", out.fc_hidden);
+    out.dropout = jget<float>(cfg, "dropout", out.dropout);
     return out;
 }
 
 static json vgg19DefaultConfigJson() {
     VGG19Model::Config d;
-    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}, {"num_classes", d.num_classes}, {"fc_hidden", d.fc_hidden}};
+    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}, {"num_classes", d.num_classes}, {"fc_hidden", d.fc_hidden}, {"dropout", d.dropout}};
 }
 
 static VGG16FeatModel::Config vgg16FeatCfgFromJson(const json& cfg) {
@@ -768,12 +807,16 @@ static VGG16FeatModel::Config vgg16FeatCfgFromJson(const json& cfg) {
     out.image_h = jget<int>(cfg, "image_h", out.image_h);
     out.image_c = jget<int>(cfg, "image_c", out.image_c);
     out.base_channels = jget<int>(cfg, "base_channels", out.base_channels);
+    out.enc_norm = jget<std::string>(cfg, "enc_norm", out.enc_norm);
+    out.enc_gn_groups = jget<int>(cfg, "enc_gn_groups", out.enc_gn_groups);
     return out;
 }
 
 static json vgg16FeatDefaultConfigJson() {
     VGG16FeatModel::Config d;
-    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c}, {"base_channels", d.base_channels}};
+    return json{{"image_w", d.image_w}, {"image_h", d.image_h}, {"image_c", d.image_c},
+                {"base_channels", d.base_channels}, {"enc_norm", d.enc_norm},
+                {"enc_gn_groups", d.enc_gn_groups}};
 }
 
 static PatchDiscriminatorModel::Config patchDiscCfgFromJson(const json& cfg) {
@@ -1001,6 +1044,14 @@ std::shared_ptr<Model> Registry::create(const std::string& name, const json& con
         throw std::runtime_error("ModelArchitectures::create: unknown architecture: " + name);
     }
 
+    if (config.is_object() && !config.empty()) {
+        std::cerr << "[registry] create name=" << key
+                  << " config_dtype=" << config.value("dtype", std::string("float32"))
+                  << std::endl;
+    } else {
+        std::cerr << "[registry] create name=" << key << std::endl;
+    }
+
     json cfg = it->second.default_config;
     if (config.is_object() && !config.empty()) {
         mergeInto(cfg, config);
@@ -1024,6 +1075,11 @@ std::shared_ptr<Model> Registry::create(const std::string& name, const json& con
     if (it_dtype != cfg.end() && it_dtype->is_string()) {
         // setDefaultDType validates the value and throws on unknown dtype.
         model->setDefaultDType(it_dtype->get<std::string>());
+    }
+    if (!Model::frameworkLogsSuppressed()) {
+        std::cerr << "[registry] create done name=" << key
+                  << " layers=" << model->getLayers().size()
+                  << " params=" << model->totalParamCount() << std::endl;
     }
     return model;
 }
@@ -1053,6 +1109,20 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<TransformerModel>();
                     m->buildFromConfig(transformerCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "causal_lm",
+            Entry{
+                "causal_lm",
+                "Decoder-only causal language model (native Mimir layers)",
+                causalLMDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<CausalLMModel>();
+                    m->buildFromConfig(causalLMCfgFromJson(cfg));
                     return m;
                 },
             }

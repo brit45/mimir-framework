@@ -1,4 +1,4 @@
-# Scripting Contract
+# Contrat du système de scripting
 
 ## Statut
 
@@ -75,3 +75,9 @@ train()
 1. Lua reste la reference fonctionnelle.
 2. Les autres bridges doivent converger vers ce contrat.
 3. Toute divergence doit etre consideree comme un ecart a documenter ou a corriger.
+
+## Étapes suivantes
+
+- [Page précédente : API Lua - vue d’ensemble](00-API-Overview.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Layers](01-Layers.md)

@@ -1,20 +1,25 @@
-# Backends hardware : CPU / CUDA / ROCm / Vulkan / OpenCL
-
-## Pour qui
-
-Développeur avancé qui modifie le moteur C/C++.
-
-## Objectif
+# Backends matériels
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
-## Avant de commencer
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Connaître les bases C++ et la structure du dépôt.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
-## Résultat attendu
+## Sur cette page
 
-Tu peux modifier le code interne en limitant les régressions.
+- [Diagrammes d'explication](#diagrammes-dexplication)
+- [Architecture générale](#architecture-générale)
+- [RuntimeConfig — configuration commune](#runtimeconfig-configuration-commune)
+- [Backend CUDA (cuBLAS)](#backend-cuda-cublas)
+- [Backend ROCm (rocBLAS)](#backend-rocm-rocblas)
+- [Backend CPU](#backend-cpu)
+- [Backends Vulkan / OpenCL](#backends-vulkan-opencl)
+- [Tableau de synthèse](#tableau-de-synthèse)
+- [Voir aussi](#voir-aussi)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Diagrammes d'explication
 
@@ -72,8 +77,8 @@ La sélection des opérations dans les runtimes suit une convention explicite : 
 Le forward s'appuie sur le `RuntimeRouter`, qui parcourt les backends initialisés par ordre de priorité et appelle `forwardLayer(...)`.
 
 ```
-1. CUDA (si compilé, initialisé et activé)
-2. ROCm (si compilé, initialisé et activé)
+1. ROCm (si compilé, initialisé et activé)
+2. CUDA (si compilé, initialisé et activé)
 3. Vulkan (si compilé, initialisé et activé)
 4. OpenCL (si compilé, initialisé et activé)
 5. CPU (fallback universel)
@@ -255,9 +260,9 @@ Le code est conditionnel via `#ifdef ENABLE_ROCM` / `#endif`. Les variables d'en
 
 ## Backend CPU
 
-Le backend CPU est toujours actif. Il n'a pas de seuils ni de configuration : il traite tous les layers que les runtimes GPU ont refusés.
+Le backend CPU est le fallback général lorsqu’il est activé. Il peut être désactivé par `MIMIR_DISABLE_CPU=1`, mais cette option n’est utile que pour diagnostiquer la couverture des autres runtimes : un graphe contenant une opération non couverte échouera alors au lieu de retomber sur CPU.
 
-Implémenté via `RuntimeLayerDispatch::cpu_forward_layer`, qui délègue aux fonctions dans `src/LayerOps.hpp` et `src/LayerOpsExt.hpp`.
+Implémenté via `RuntimeLayerDispatch::cpu_forward_layer`, qui délègue aux fonctions dans `src/runtimes/cpu/LayerOps.hpp` et `src/runtimes/cpu/LayerOpsExt.hpp`.
 
 **Optimisations CPU disponibles :**
 
@@ -278,13 +283,16 @@ Ces backends sont exposés via runtimes dédiés (`VulkanRuntime` / `OpenCLRunti
 
 En pratique:
 
-- Vulkan couvre `Linear`, `MatMul`, `BatchMatMul`, `Add`, `Multiply`, `ReLU` (forward).
-- OpenCL couvre `Linear`, `MatMul`, `BatchMatMul` (forward).
+- Vulkan déclare le forward pour `Linear`, `MatMul`, `BatchMatMul`, `Conv2d`,
+  `ConvTranspose2d`, les quatre opérations binaires et plusieurs activations.
+- OpenCL déclare le forward pour `Linear`, `MatMul`, `BatchMatMul`, les opérations
+  binaires et plusieurs activations. Son backward couvre aussi ces familles et
+  plusieurs poolings.
 
 | Backend | Build flag | Scope | Variables |
 |---|---|---|---|
-| Vulkan | `ENABLE_VULKAN` | Linear + MatMul/BatchMatMul + Add/Multiply/ReLU (forward) | `MIMIR_VULKAN_LINEAR_SPV`, `MIMIR_VULKAN_LINEAR` |
-| OpenCL | `ENABLE_OPENCL` | Linear + MatMul/BatchMatMul (inférence) | `MIMIR_OPENCL_LINEAR` |
+| Vulkan | `ENABLE_VULKAN` | Dense, convolutions, binaires et activations (forward, selon shaders/config) | `MIMIR_VULKAN_LINEAR_SPV`, `MIMIR_VULKAN_LINEAR`, `MIMIR_VULKAN_CONV` |
+| OpenCL | `ENABLE_OPENCL` | Dense, binaires, activations ; backward partiel | `MIMIR_OPENCL_LINEAR` |
 
 ---
 
@@ -293,7 +301,8 @@ En pratique:
 | Layer | CPU | CUDA | ROCm | Vulkan |
 |---|---|---|---|---|
 | `Linear` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter |
-| `Conv2d` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
+| `Conv2d` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✓ forward si activé |
+| `ConvTranspose2d` | ✓ ref | fallback partagé | fallback partagé | ✓ forward si activé |
 | `LayerNorm` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
 | `RMSNorm` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
 | `GroupNorm` | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
@@ -301,12 +310,16 @@ En pratique:
 | `SelfAttention` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
 | `MultiHeadAttention` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
 | `CrossAttention` | ✓ ref | ✓ routé via RuntimeRouter | ✓ routé via RuntimeRouter | ✗ |
-| `Add` | ✓ ref | ✗ fallback | ✗ fallback | ✓ routé via RuntimeRouter |
-| `Multiply` | ✓ ref | ✗ fallback | ✗ fallback | ✓ routé via RuntimeRouter |
-| `ReLU` | ✓ ref | ✗ fallback | ✗ fallback | ✓ routé via RuntimeRouter |
+| `Add` | ✓ ref | ✓ GPU ou fallback partagé | ✓ GPU ou fallback partagé | ✓ routé via RuntimeRouter |
+| `Multiply` | ✓ ref | ✓ GPU ou fallback partagé | ✓ GPU ou fallback partagé | ✓ routé via RuntimeRouter |
+| `ReLU` | ✓ ref | ✓ GPU ou fallback partagé | ✓ GPU ou fallback partagé | ✓ routé via RuntimeRouter |
 | Tous les autres | ✓ ref | ✗ fallback | ✗ fallback | ✗ |
 
-> **Note explicite :** le forward principal route via `RuntimeRouter`; les runtimes peuvent refuser une op et laisser le fallback CPU prendre le relais.
+> **Note explicite :** la présence d’un type dans `supportsForwardLayerType()` est un
+> vote de routage, pas la garantie qu’un kernel GPU sera utilisé. Les seuils,
+> dimensions, flags, mode training et erreurs de backend peuvent faire refuser le
+> fast-path. CUDA et ROCm disposent aussi de chemins partagés vers
+> `RuntimeLayerDispatch`; utilise les traces runtime pour connaître le chemin réel.
 
 ---
 
@@ -315,3 +328,9 @@ En pratique:
 - [Guide utilisateur GPU](../05-Advanced/05-GPU-Acceleration.md) — activer et configurer l'accélération
 - [GPU Runtimes — internals](./21-GPU-Runtimes.md) — guide pour étendre les runtimes
 - [Planning](./22-Planning.md) — analyse statique du graphe, fusions et scratchpads
+
+## Étapes suivantes
+
+- [Page précédente : Internals - mémoire](02-Memory.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Internals: Monitoring (HtopDisplay / Visualizer / AsyncMonitor)](04-Monitoring-Htop-Visualizer.md)

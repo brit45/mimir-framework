@@ -1,9 +1,13 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
+#include <unordered_map>
 #include <vector>
 
 #include "runtimes/AbstractRuntime.hpp"
+
+struct Layer;
 
 class RuntimeRouter {
 public:
@@ -30,6 +34,18 @@ public:
 
     void activateAvailableRuntimes() const;
 
+    // Prépare une route map forward par layer avant exécution.
+    // La map est ensuite réutilisée pendant le forward.
+    void planForwardLayerRoutes(const std::vector<Layer>& layers) const;
+
+    // Indique si une route runtime exploitable existe pour ce layer.
+    bool hasForwardRouteForLayer(const Layer& layer) const;
+
+    // Vote de support agrégé (sans calcul): true si au moins un runtime
+    // configuré prend en charge ce LayerType.
+    bool voteForwardLayerType(LayerType type) const;
+    bool voteBackwardLayerType(LayerType type) const;
+
     bool dispatchForwardLayer(
         const std::vector<const std::vector<float>*>& inputs,
         std::vector<std::vector<float>>& outputs,
@@ -50,7 +66,20 @@ public:
 private:
     RuntimeRouter() = default;
 
+    static size_t layerTypeIndex(LayerType type);
+    void composeRoutes() const;
+    void ensureActivatedAndComposed() const;
+    std::vector<AbstractRuntime*> buildForwardRouteForLayer(const Layer& layer) const;
+    std::vector<AbstractRuntime*> buildBackwardRouteForLayer(const Layer& layer) const;
+
     std::vector<AbstractRuntime*> runtime_priority_;
+    mutable std::vector<uint8_t> forward_vote_;
+    mutable std::vector<uint8_t> backward_vote_;
+    mutable std::vector<std::vector<AbstractRuntime*>> forward_routes_;
+    mutable std::vector<std::vector<AbstractRuntime*>> backward_routes_;
+    mutable std::unordered_map<const Layer*, std::vector<AbstractRuntime*>> forward_layer_routes_;
+    mutable std::unordered_map<const Layer*, std::vector<AbstractRuntime*>> backward_layer_routes_;
+    mutable bool runtimes_activated_ = false;
     std::function<bool()> activate_rocm_;
     std::function<bool()> activate_cuda_;
     std::function<bool()> activate_vulkan_;

@@ -821,6 +821,7 @@ struct DatasetItem {
     
     // Chemins (toujours présents - négligeable en RAM)
     std::string text_file;
+    std::string text_inline;
     std::string image_file;
     std::string audio_file;
     std::string video_file;
@@ -879,10 +880,13 @@ struct DatasetItem {
     size_t estimateRAMNeeded() const {
         size_t total = 0;
         
-        if (!text_file.empty() && !text.has_value()) {
+        if ((!text_file.empty() || !text_inline.empty()) && !text.has_value()) {
             try {
-                auto fsize = fs::file_size(text_file);
-                total += fsize * 2; // UTF-8 peut doubler
+                if (!text_inline.empty()) total += text_inline.size() * 2;
+                else {
+                    auto fsize = fs::file_size(text_file);
+                    total += fsize * 2; // UTF-8 peut doubler
+                }
             } catch (...) {}
         }
         
@@ -919,13 +923,13 @@ struct DatasetItem {
             touch();
             return true;
         }
-        if (text_file.empty()) return false;
+        if (text_file.empty() && text_inline.empty()) return false;
         
         auto& mgr = DatasetMemoryManager::instance();
         
         try {
             // Estimer la taille
-            size_t file_size = fs::file_size(text_file);
+            size_t file_size = !text_inline.empty() ? text_inline.size() : fs::file_size(text_file);
             size_t needed = file_size * 2; // Sécurité UTF-8
             
             // Vérifier si on peut allouer
@@ -933,12 +937,16 @@ struct DatasetItem {
                 return false; // Pas assez de RAM
             }
             
-            std::ifstream f(text_file);
-            if (!f) return false;
-            std::ostringstream ss;
-            ss << f.rdbuf();
-            
-            std::string loaded = sanitize_utf8(ss.str());
+            std::string loaded;
+            if (!text_inline.empty()) {
+                loaded = sanitize_utf8(text_inline);
+            } else {
+                std::ifstream f(text_file);
+                if (!f) return false;
+                std::ostringstream ss;
+                ss << f.rdbuf();
+                loaded = sanitize_utf8(ss.str());
+            }
             size_t actual_size = loaded.size();
             
             text = std::move(loaded);
@@ -1179,7 +1187,7 @@ struct DatasetItem {
     // Helper: compte les modalités disponibles
     int countModalities() const {
         int count = 0;
-        if (!text_file.empty()) count++;
+        if (!text_file.empty() || !text_inline.empty()) count++;
         if (!image_file.empty()) count++;
         if (!audio_file.empty()) count++;
         if (!video_file.empty()) count++;
@@ -1316,6 +1324,127 @@ public:
 
 // implémentation de loadDataset (parcours récursif, indexation des linkables)
 // Version optimisée RAM : ne charge PAS les données, seulement les métadonnées
+static inline bool loadCocoCaptionsDataset(const std::string &root_dir,
+                                           int target_w,
+                                           int target_h,
+                                           int min_modalities,
+                                           std::vector<DatasetItem>& items)
+{
+    items.clear();
+    const fs::path root(root_dir);
+    const fs::path annotations_dir = root / "annotations";
+    if (!fs::exists(annotations_dir) || !fs::is_directory(annotations_dir)) return false;
+
+    std::vector<fs::path> caption_files;
+    for (const char* name : {"captions_train2017.json", "captions_val2017.json", "captions_train2014.json", "captions_val2014.json"}) {
+        const fs::path p = annotations_dir / name;
+        if (fs::exists(p) && fs::is_regular_file(p)) caption_files.push_back(p);
+    }
+    if (caption_files.empty()) return false;
+
+    auto resolve_coco_image = [&](const std::string& file_name) -> std::string {
+        const std::vector<fs::path> candidates = {
+            root / file_name,
+            root / "train2017" / file_name,
+            root / "val2017" / file_name,
+            root / "test2017" / file_name,
+            root / "train2014" / file_name,
+            root / "val2014" / file_name,
+            root / "images" / file_name,
+            root / "images" / "train2017" / file_name,
+            root / "images" / "val2017" / file_name,
+            root / "images" / "train2014" / file_name,
+            root / "images" / "val2014" / file_name
+        };
+        for (const auto& c : candidates) {
+            if (fs::exists(c) && fs::is_regular_file(c)) return c.string();
+        }
+        return std::string();
+    };
+
+    size_t total_items = 0;
+    for (const auto& ann_path : caption_files) {
+        try {
+            std::ifstream f(ann_path);
+            if (!f) continue;
+            json doc;
+            f >> doc;
+            if (!doc.is_object() || !doc.contains("images") || !doc.contains("annotations")) continue;
+            if (!doc["images"].is_array() || !doc["annotations"].is_array()) continue;
+
+            struct CocoImageRef {
+                std::string file_name;
+                std::string resolved_path;
+            };
+
+            std::unordered_map<long long, CocoImageRef> images_by_id;
+            images_by_id.reserve(doc["images"].size());
+            for (const auto& img : doc["images"]) {
+                if (!img.is_object() || !img.contains("id") || !img.contains("file_name")) continue;
+                long long id = 0;
+                try { id = img["id"].get<long long>(); } catch (...) { continue; }
+                std::string file_name;
+                try { file_name = img["file_name"].get<std::string>(); } catch (...) { continue; }
+                CocoImageRef ref;
+                ref.file_name = file_name;
+                ref.resolved_path = resolve_coco_image(file_name);
+                if (!ref.resolved_path.empty()) images_by_id.emplace(id, std::move(ref));
+            }
+            if (images_by_id.empty()) continue;
+
+            std::unordered_map<long long, std::vector<std::string>> captions_by_image;
+            captions_by_image.reserve(images_by_id.size());
+            for (const auto& ann : doc["annotations"]) {
+                if (!ann.is_object() || !ann.contains("image_id") || !ann.contains("caption")) continue;
+                long long image_id = 0;
+                try { image_id = ann["image_id"].get<long long>(); } catch (...) { continue; }
+                auto it_img = images_by_id.find(image_id);
+                if (it_img == images_by_id.end()) continue;
+                std::string caption;
+                try { caption = ann["caption"].get<std::string>(); } catch (...) { continue; }
+                caption = sanitize_utf8(caption);
+                if (!caption.empty()) captions_by_image[image_id].push_back(std::move(caption));
+            }
+
+            for (const auto& kv : captions_by_image) {
+                const auto it_img = images_by_id.find(kv.first);
+                if (it_img == images_by_id.end() || it_img->second.resolved_path.empty()) continue;
+
+                std::string joined_text;
+                for (size_t i = 0; i < kv.second.size(); ++i) {
+                    if (i > 0) joined_text += " / ";
+                    joined_text += kv.second[i];
+                }
+                if (joined_text.empty()) continue;
+
+                DatasetItem item;
+                item.name = fs::path(it_img->second.file_name).replace_extension("").generic_string();
+                item.is_linked = true;
+                item.image_file = it_img->second.resolved_path;
+                item.text_inline = json{{"text", joined_text}}.dump();
+                item.text_file = ann_path.string() + "#image_id=" + std::to_string(kv.first);
+                item.w = target_w;
+                item.h = target_h;
+
+                if (item.countModalities() >= min_modalities) {
+                    items.push_back(std::move(item));
+                    total_items++;
+                }
+            }
+        } catch (...) {
+            continue;
+        }
+    }
+
+    if (items.empty()) return false;
+
+    std::cerr << "\n📂 COCO captions dataset détecté" << std::endl;
+    std::cerr << "   Items indexés:      " << total_items << std::endl;
+    std::cerr << "   Mode texte:         inline captions JSON" << std::endl;
+    std::cerr << "   Seuil modalités:    " << min_modalities << std::endl;
+    return true;
+}
+
 static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, int target_w = 64, int target_h = 64, int min_modalities = 1)
 {
     static const std::regex re_image(R"(\.(png|jpg|jpeg|bmp|tiff|webp)$)", std::regex::icase);
@@ -1325,6 +1454,12 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     
     std::vector<DatasetItem> items;
     if (root_dir.empty()) return items;
+
+    if (loadCocoCaptionsDataset(root_dir, target_w, target_h, min_modalities, items)) {
+        std::cerr << "\n   ⚡ Mode: Lazy loading (images) + inline text captions" << std::endl;
+        std::cerr << "   💾 RAM utilisée:    0 MB (métadonnées uniquement)" << std::endl;
+        return items;
+    }
 
     std::cerr << "\n📂 Indexation du dataset (lazy loading activé)..." << std::endl;
 
@@ -1500,6 +1635,7 @@ struct DatasetCache {
                 ji["name"] = item.name;
                 ji["is_linked"] = item.is_linked;
                 ji["text_file"] = item.text_file;
+                ji["text_inline"] = item.text_inline;
                 ji["image_file"] = item.image_file;
                 ji["audio_file"] = item.audio_file;
                 ji["video_file"] = item.video_file;
@@ -1548,6 +1684,7 @@ struct DatasetCache {
                 item.name = ji.value("name", "");
                 item.is_linked = ji.value("is_linked", false);
                 item.text_file = ji.value("text_file", "");
+                item.text_inline = ji.value("text_inline", "");
                 item.image_file = ji.value("image_file", "");
                 item.audio_file = ji.value("audio_file", "");
                 item.video_file = ji.value("video_file", "");

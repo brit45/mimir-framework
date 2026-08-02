@@ -1,5 +1,6 @@
 #include "runtimes/cuda/CudaRuntime.hpp"
 
+#include "runtimes/LayerOps.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
 
 #ifdef ENABLE_CUDA
@@ -175,20 +176,20 @@ __global__ static void cuda_unary_kernel(const float* in, float* out, int n, int
             break;
         }
         case static_cast<int>(CudaUnaryOp::Softplus):
-            out[i] = log1pf(expf(x));
+            out[i] = x > 20.0f ? x : log1pf(expf(x));
             break;
         case static_cast<int>(CudaUnaryOp::Mish): {
-            const float sp = log1pf(expf(x));
+            const float sp = x > 20.0f ? x : log1pf(expf(x));
             out[i] = x * tanhf(sp);
             break;
         }
         case static_cast<int>(CudaUnaryOp::HardSigmoid): {
-            const float hs = x * 0.2f + 0.5f;
+            const float hs = (x + 3.0f) / 6.0f;
             out[i] = fminf(1.0f, fmaxf(0.0f, hs));
             break;
         }
         case static_cast<int>(CudaUnaryOp::HardSwish): {
-            const float hs = fminf(1.0f, fmaxf(0.0f, x * 0.2f + 0.5f));
+            const float hs = fminf(1.0f, fmaxf(0.0f, (x + 3.0f) / 6.0f));
             out[i] = x * hs;
             break;
         }
@@ -342,30 +343,27 @@ __global__ static void cuda_unary_backward_kernel(
             const float u = c * (x + 0.044715f * x3);
             const float t = tanhf(u);
             const float sech2 = 1.0f - t * t;
-            (void)training;
             const float du = c * (1.0f + 0.134145f * x2);
             d = 0.5f * (1.0f + t) + 0.5f * x * sech2 * du;
-            if (!impl_ || !impl_->handle) return false;
-            if (inputs.empty() || !inputs[0] || grad_outputs.empty() || !grad_outputs[0]) return false;
             break;
         }
         case static_cast<int>(CudaUnaryOp::Softplus):
             d = 1.0f / (1.0f + expf(-x));
             break;
         case static_cast<int>(CudaUnaryOp::Mish): {
-            const float sp = log1pf(expf(x));
+            const float sp = x > 20.0f ? x : log1pf(expf(x));
             const float t = tanhf(sp);
             const float s = 1.0f / (1.0f + expf(-x));
             d = t + x * s * (1.0f - t * t);
             break;
         }
         case static_cast<int>(CudaUnaryOp::HardSigmoid):
-            d = (x > -2.5f && x < 2.5f) ? 0.2f : 0.0f;
+            d = (x > -3.0f && x < 3.0f) ? (1.0f / 6.0f) : 0.0f;
             break;
         case static_cast<int>(CudaUnaryOp::HardSwish):
-            if (x <= -2.5f) d = 0.0f;
-            else if (x >= 2.5f) d = 1.0f;
-            else d = 0.4f * x + 0.5f;
+            if (x <= -3.0f) d = 0.0f;
+            else if (x >= 3.0f) d = 1.0f;
+            else d = x / 3.0f + 0.5f;
             break;
         default:
             d = 1.0f;
@@ -585,6 +583,38 @@ bool CudaRuntime::isInitialized() const {
     return impl_ && impl_->initialized;
 }
 
+bool CudaRuntime::supportsForwardLayerType(const LayerType type) const {
+    switch (config_.disabled) {
+        case true:
+            return false;
+        case false:
+            break;
+    }
+
+    switch (type) {
+        case LayerType::UNKNOWN:
+            return false;
+        default:
+            return RuntimeLayerDispatch::cpu_supports_forward_layer_type(type);
+    }
+}
+
+bool CudaRuntime::supportsBackwardLayerType(const LayerType type) const {
+    switch (config_.disabled) {
+        case true:
+            return false;
+        case false:
+            break;
+    }
+
+    switch (type) {
+        case LayerType::UNKNOWN:
+            return false;
+        default:
+            return RuntimeLayerDispatch::cpu_supports_backward_layer_type(type);
+    }
+}
+
 bool CudaRuntime::linearForward(
     const float* input,
     const float* weights,
@@ -691,6 +721,7 @@ bool CudaRuntime::forwardLayer(
     (void)training;
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
+    if (!supportsForwardLayerType(layer.type_enum)) return false;
 
     switch (layer.type_enum) {
         case LayerType::Linear:
@@ -1016,10 +1047,6 @@ bool CudaRuntime::forwardLayer(
             return true;
             } while (false);
             break;
-        default:
-            break;
-    }
-
 
         case LayerType::RMSNorm:
             if (!config_.norm_enabled) break;
@@ -1106,17 +1133,14 @@ bool CudaRuntime::forwardLayer(
             if (a.empty() || a.size() != b.size()) break;
             if (static_cast<long long>(a.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
 
-            CudaBinaryOp op = CudaBinaryOp::Add;
-            if (layer.type_enum == LayerType::Subtract) {
-                op = CudaBinaryOp::Subtract;
-            } else if (layer.type_enum == LayerType::Multiply) {
-                op = CudaBinaryOp::Multiply;
-            } else if (layer.type_enum == LayerType::Divide) {
-                op = CudaBinaryOp::Divide;
-            }
+            int op_code = 0;
+            if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op_code)) break;
+            const CudaBinaryOp op = static_cast<CudaBinaryOp>(op_code);
 
             outputs.resize(1);
-            if (!cuda_run_binary(a, b, outputs[0], op)) break;
+            if (!cuda_run_binary(a, b, outputs[0], op)) {
+                RuntimeLayerOps::binaryForwardHost(a, b, outputs[0], op_code);
+            }
             return true;
             } while (false);
             break;
@@ -1138,34 +1162,25 @@ bool CudaRuntime::forwardLayer(
             if (in.empty()) break;
             if (static_cast<long long>(in.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
 
-            CudaUnaryOp op = CudaUnaryOp::ReLU;
+            int op_code = 0;
             float alpha = 0.01f;
-            if (layer.type_enum == LayerType::LeakyReLU) {
-                op = CudaUnaryOp::LeakyReLU;
-                alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
-            } else if (layer.type_enum == LayerType::Sigmoid) {
-                op = CudaUnaryOp::Sigmoid;
-            } else if (layer.type_enum == LayerType::Tanh) {
-                op = CudaUnaryOp::Tanh;
-            } else if (layer.type_enum == LayerType::SiLU) {
-                op = CudaUnaryOp::SiLU;
-            } else if (layer.type_enum == LayerType::GELU) {
-                op = CudaUnaryOp::GELU;
-            } else if (layer.type_enum == LayerType::Softplus) {
-                op = CudaUnaryOp::Softplus;
-            } else if (layer.type_enum == LayerType::Mish) {
-                op = CudaUnaryOp::Mish;
-            } else if (layer.type_enum == LayerType::HardSigmoid) {
-                op = CudaUnaryOp::HardSigmoid;
-            } else if (layer.type_enum == LayerType::HardSwish) {
-                op = CudaUnaryOp::HardSwish;
-            }
+            if (!RuntimeLayerOps::resolveUnaryOp(layer.type_enum, layer, op_code, alpha)) break;
+            const CudaUnaryOp op = static_cast<CudaUnaryOp>(op_code);
 
             outputs.resize(1);
-            if (!cuda_run_unary(in, outputs[0], op, alpha)) break;
+            if (!cuda_run_unary(in, outputs[0], op, alpha)) {
+                RuntimeLayerOps::unaryForwardHost(in, outputs[0], op_code, alpha);
+            }
             return true;
             } while (false);
             break;
+
+            case LayerType::SelfAttention:
+            case LayerType::MultiHeadAttention:
+                if (!config_.attention_enabled) break;
+                do {
+                if (inputs.empty() || !inputs[0]) break;
+
     // ─────────────────────────────────────────────────────────────────────────
             const std::vector<float>& xa = *inputs[0];
 
@@ -1467,6 +1482,7 @@ bool CudaRuntime::backwardLayer(
     (void)training;
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
+    if (!supportsBackwardLayerType(layer.type_enum)) return false;
     if (!impl_ || !impl_->handle) return false;
     if (inputs.empty() || !inputs[0] || grad_outputs.empty() || !grad_outputs[0]) return false;
 
@@ -1630,10 +1646,9 @@ bool CudaRuntime::backwardLayer(
             const std::vector<float>& go = *grad_outputs[0];
             if (a.empty() || a.size() != b.size() || go.size() != a.size()) return false;
 
-            CudaBinaryOp op = CudaBinaryOp::Add;
-            if (layer.type_enum == LayerType::Subtract) op = CudaBinaryOp::Subtract;
-            else if (layer.type_enum == LayerType::Multiply) op = CudaBinaryOp::Multiply;
-            else if (layer.type_enum == LayerType::Divide) op = CudaBinaryOp::Divide;
+            int op_code = 0;
+            if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op_code)) return false;
+            const CudaBinaryOp op = static_cast<CudaBinaryOp>(op_code);
 
             grad_inputs.resize(2);
             return cuda_run_binary_backward(a, b, go, grad_inputs[0], grad_inputs[1], op);
@@ -1654,28 +1669,10 @@ bool CudaRuntime::backwardLayer(
             const std::vector<float>& go = *grad_outputs[0];
             if (in.empty() || go.size() != in.size()) return false;
 
-            CudaUnaryOp op = CudaUnaryOp::ReLU;
+            int op_code = 0;
             float alpha = 0.01f;
-            if (layer.type_enum == LayerType::LeakyReLU) {
-                op = CudaUnaryOp::LeakyReLU;
-                alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
-            } else if (layer.type_enum == LayerType::Sigmoid) {
-                op = CudaUnaryOp::Sigmoid;
-            } else if (layer.type_enum == LayerType::Tanh) {
-                op = CudaUnaryOp::Tanh;
-            } else if (layer.type_enum == LayerType::SiLU) {
-                op = CudaUnaryOp::SiLU;
-            } else if (layer.type_enum == LayerType::GELU) {
-                op = CudaUnaryOp::GELU;
-            } else if (layer.type_enum == LayerType::Softplus) {
-                op = CudaUnaryOp::Softplus;
-            } else if (layer.type_enum == LayerType::Mish) {
-                op = CudaUnaryOp::Mish;
-            } else if (layer.type_enum == LayerType::HardSigmoid) {
-                op = CudaUnaryOp::HardSigmoid;
-            } else if (layer.type_enum == LayerType::HardSwish) {
-                op = CudaUnaryOp::HardSwish;
-            }
+            if (!RuntimeLayerOps::resolveUnaryOp(layer.type_enum, layer, op_code, alpha)) return false;
+            const CudaUnaryOp op = static_cast<CudaUnaryOp>(op_code);
 
             grad_inputs.resize(1);
             return cuda_run_unary_backward(in, go, grad_inputs[0], op, alpha);
@@ -1692,6 +1689,13 @@ bool CudaRuntime::backwardLayer(
         case LayerType::MultiHeadAttention:
         case LayerType::CrossAttention:
             if (!config_.attention_enabled) return false;
+            break;
+        case LayerType::MaxPool2d:
+        case LayerType::MaxPool1d:
+        case LayerType::AvgPool2d:
+        case LayerType::AvgPool1d:
+        case LayerType::GlobalAvgPool2d:
+        case LayerType::AdaptiveAvgPool2d:
             break;
         default:
             return false;

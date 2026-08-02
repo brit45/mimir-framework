@@ -1,6 +1,7 @@
 {
   "browser": "google-chrome",
   "last": {
+    "blocks_tips_visible_limit": 400,
     "heatmap_palette": 1,
     "hide_activation_blocks": true,
     "hide_normalisation_blocks": true,
@@ -75,9 +76,9 @@
     "window_width": 1792
   },
   "showgraph": {
-    "n_dataset": "250",
-    "validate_every_steps": "200",
-    "validate_items": "64"
+    "n_dataset": "55849",
+    "validate_every_steps": "100",
+    "validate_items": "100"
   },
   "slots": {
     "0": {
@@ -223,6 +224,10 @@
       "window_width": 1792
     },
     "2": {
+      "blocks_tips_visible_limit": 400,
+      "heatmap_palette": 1,
+      "hide_activation_blocks": false,
+      "hide_normalisation_blocks": false,
       "panels": [
         {
           "allow_drag": true,
@@ -230,17 +235,17 @@
           "id": 0,
           "title": "Context",
           "visible": true,
-          "w": 399.0000305175781,
+          "w": 731.0001220703125,
           "x": 4.0,
           "y": 4.0
         },
         {
           "allow_drag": true,
-          "h": 356.9999084472656,
+          "h": 666.9998779296875,
           "id": 1,
           "title": "Blocks / Layers",
           "visible": true,
-          "w": 1251.0,
+          "w": 731.0001220703125,
           "x": 6.99993896484375,
           "y": 303.0
         },
@@ -249,7 +254,7 @@
           "h": 291.00006103515625,
           "id": 2,
           "title": "Generated",
-          "visible": true,
+          "visible": false,
           "w": 844.0,
           "x": 415.0,
           "y": 4.000091552734375
@@ -259,38 +264,38 @@
           "h": 140.0,
           "id": 3,
           "title": "Training",
-          "visible": true,
-          "w": 520.0,
+          "visible": false,
+          "w": 519.0,
           "x": 1268.0,
           "y": 5.0
         },
         {
           "allow_drag": true,
-          "h": 574.0,
+          "h": 964.0001831054688,
           "id": 4,
           "title": "Metrics",
           "visible": true,
-          "w": 517.0,
-          "x": 1268.0,
-          "y": 85.0
+          "w": 1044.0001220703125,
+          "x": 743.9999389648438,
+          "y": 5.9998779296875
         },
         {
           "allow_drag": true,
-          "h": 238.0,
+          "h": 291.0,
           "id": 5,
           "title": "Loss",
-          "visible": true,
-          "w": 1783.9998779296875,
-          "x": 4.0,
-          "y": 668.0
+          "visible": false,
+          "w": 918.9999389648438,
+          "x": 337.00006103515625,
+          "y": 4.0
         }
       ],
-      "show_generated_images": true,
-      "show_loss_graph": true,
+      "show_generated_images": false,
+      "show_loss_graph": false,
       "show_prompt_text": true,
-      "show_training_progress": true,
+      "show_training_progress": false,
       "version": 2,
-      "window_height": 912,
+      "window_height": 976,
       "window_width": 1792
     },
     "3": {
@@ -721,26 +726,30 @@
       "window_width": 1792
     },
     "9": {
+      "blocks_tips_visible_limit": 400,
+      "heatmap_palette": 1,
+      "hide_activation_blocks": true,
+      "hide_normalisation_blocks": true,
       "panels": [
         {
           "allow_drag": true,
-          "h": 349.0000305175781,
+          "h": 357.0000305175781,
           "id": 0,
           "title": "Context",
           "visible": true,
-          "w": 264.0,
-          "x": 4.0,
-          "y": 4.0
+          "w": 545.0,
+          "x": 1371.0,
+          "y": 679.0
         },
         {
           "allow_drag": true,
-          "h": 538.0000610351563,
+          "h": 1019.0000610351563,
           "id": 1,
           "title": "Blocks / Layers",
           "visible": true,
-          "w": 1777.9998779296875,
-          "x": 7.0,
-          "y": 360.9999694824219
+          "w": 1355.9998779296875,
+          "x": 4.0,
+          "y": 4.0
         },
         {
           "allow_drag": true,
@@ -757,39 +766,39 @@
           "h": 140.0,
           "id": 3,
           "title": "Training",
-          "visible": true,
+          "visible": false,
           "w": 520.0,
-          "x": 275.0000915527344,
-          "y": 4.000030517578125
+          "x": 1131.0001220703125,
+          "y": 45.00006103515625
         },
         {
           "allow_drag": true,
-          "h": 271.9999694824219,
+          "h": 669.0,
           "id": 4,
           "title": "Metrics",
           "visible": true,
-          "w": 519.0001831054688,
-          "x": 275.9998779296875,
-          "y": 80.99993896484375
+          "w": 544.9999389648438,
+          "x": 1371.0,
+          "y": 4.0
         },
         {
           "allow_drag": true,
           "h": 350.0,
           "id": 5,
           "title": "Loss",
-          "visible": true,
+          "visible": false,
           "w": 982.9999389648438,
           "x": 803.0000610351563,
           "y": 4.0
         }
       ],
       "show_generated_images": false,
-      "show_loss_graph": true,
+      "show_loss_graph": false,
       "show_prompt_text": true,
-      "show_training_progress": true,
+      "show_training_progress": false,
       "version": 2,
-      "window_height": 912,
-      "window_width": 1792
+      "window_height": 1040,
+      "window_width": 1920
     }
   },
   "version": 1

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 function(mimir_add_test test_name src_file)
-    add_executable(${test_name} ${src_file})
+    add_executable(${test_name} ${src_file} test_log_stub.cpp)
     target_compile_features(${test_name} PRIVATE cxx_std_17)
     target_link_libraries(${test_name} PRIVATE mimir_core)
     add_test(NAME ${test_name} COMMAND ${test_name})
@@ -25,10 +25,22 @@ mimir_add_test(FrameworkTest.MemoryGuard          test_memory_guard.cpp)
 mimir_add_test(FrameworkTest.OverrideParsing      test_override_parsing.cpp)
 mimir_add_test(RegistryTest.Aliases               test_registry_aliases.cpp)
 mimir_add_test(LuaTest.ApiBasics                  test_lua_api_basics.cpp)
+set_tests_properties(LuaTest.ApiBasics PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
 mimir_add_test(LuaTest.ModelDType                 test_lua_dtype_api.cpp)
 mimir_add_test(LuaTest.CreateFromConfigErrors     test_lua_create_from_config_errors.cpp)
+add_test(
+    NAME LuaTest.CausalLMTokenizer
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_causal_lm_tokenizer_bootstrap.lua
+)
+set_tests_properties(LuaTest.CausalLMTokenizer PROPERTIES
+    TIMEOUT 15
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
 
 mimir_add_test(SerializationTest.SafeTensorsModel test_serialization_safetensors_model.cpp)
+mimir_add_test(SerializationTest.SafeTensorsCompliance test_safetensors_compliance.cpp)
 mimir_add_test(SerializationTest.RawFolderModel   test_serialization_rawfolder_model.cpp)
 mimir_add_test(SerializationTest.DebugJsonModel    test_serialization_debug_json_model.cpp)
 mimir_add_test(SerializationTest.StrictMissingAssets test_serialization_strict_missing_assets.cpp)
@@ -55,3 +67,7 @@ mimir_add_test(RuntimeTest.MathLinear      test_runtime_math_linear.cpp)
 mimir_add_test(RuntimeTest.MathConv2d     test_runtime_math_conv2d.cpp)
 mimir_add_test(RuntimeTest.MathNorms      test_runtime_math_norms.cpp)
 mimir_add_test(RuntimeTest.MathAttention  test_runtime_math_attention.cpp)
+mimir_add_test(RuntimeTest.NMS            test_runtime_nms.cpp)
+mimir_add_test(AutogradTest.Numerical     test_autograd_numerical.cpp)
+mimir_add_test(ModelTest.VAEConvContract  test_vae_conv_contract.cpp)
+mimir_add_test(ModelTest.VGG16FeatEncNorm test_vgg16_feat_enc_norm.cpp)

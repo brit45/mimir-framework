@@ -11,6 +11,7 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <cstdlib>
 #include <cerrno>
 #include <cstdio>
 #include <fstream>
@@ -156,6 +157,7 @@ public:
                const json& viz_config = json()) {
         // NOTE: start() doit être idempotent.
         // On autorise le cas "htop déjà démarré" puis "activation de la viz" plus tard.
+        std::cerr << "[monitor] start htop=" << enable_htop << " viz=" << enable_viz << std::endl;
         if (!running_) {
             running_ = true;
         }
@@ -187,6 +189,7 @@ public:
             // IMPORTANT: capturer stdout/stderr vers un buffer de logs quand le TUI est actif.
             // Cela évite que des printf cassent le rendu et permet de les afficher dans l'UI.
             startOutputCapture();
+            std::cerr << "[monitor] output capture enabled" << std::endl;
 
             htop_thread_ = std::thread([this]() {
                 htopLoop();
@@ -194,13 +197,21 @@ public:
         }
 
         if (enable_viz && !viz_) {
-            viz_ = std::make_shared<Visualizer>(viz_config);
+            json effective_viz_config = viz_config;
+            // Si la Viz est explicitement demandée (enable_viz=true), on force
+            // le flag d'activation même si le JSON fourni n'a pas ce champ.
+            if (!effective_viz_config.contains("visualization") || !effective_viz_config["visualization"].is_object()) {
+                effective_viz_config["visualization"] = json::object();
+            }
+            effective_viz_config["visualization"]["enabled"] = true;
+
+            viz_ = std::make_shared<Visualizer>(effective_viz_config);
 
             // Best-effort: permettre de configurer la cadence Viz depuis config.
             // Exemple: {"visualization": {"update_interval_ms": 16}}
             try {
-                if (viz_config.contains("visualization")) {
-                    const auto& v = viz_config["visualization"];
+                if (effective_viz_config.contains("visualization")) {
+                    const auto& v = effective_viz_config["visualization"];
                     const int ms = v.value("update_interval_ms", static_cast<int>(viz_update_interval_ms_.load()));
                     if (ms > 0) {
                         viz_update_interval_ms_ = ms;
@@ -224,10 +235,28 @@ public:
                 bool ok = false;
                 std::string err;
                 try {
-                    ok = (viz_ && viz_->initialize());
-                    if (!ok) {
-                        err = "Visualizer::initialize() a échoué";
+#if !defined(ENABLE_SFML)
+                    ok = false;
+                    err = "Visualizer indisponible (ENABLE_SFML inactif ou SFML non detecte au configure CMake)";
+#else
+#if !defined(_WIN32)
+                    const char* display = std::getenv("DISPLAY");
+                    const char* wayland = std::getenv("WAYLAND_DISPLAY");
+                    const bool has_display =
+                        (display != nullptr && *display != '\0') ||
+                        (wayland != nullptr && *wayland != '\0');
+                    if (!has_display) {
+                        ok = false;
+                        err = "Aucun display graphique (DISPLAY/WAYLAND_DISPLAY absent)";
+                    } else
+#endif
+                    {
+                        ok = (viz_ && viz_->initialize());
+                        if (!ok) {
+                            err = "Visualizer::initialize() a échoué";
+                        }
                     }
+#endif
                 } catch (const std::exception& e) {
                     ok = false;
                     err = e.what();
@@ -400,6 +429,7 @@ public:
         int channels,
         const std::string& label,
         const std::string& raw_text,
+        const std::string& tags,
         const std::string& tokenized,
         const std::string& encoded
     ) {
@@ -410,15 +440,15 @@ public:
         std::lock_guard<std::mutex> lock(viz_mutex_);
         PendingDatasetSample s;
         s.frame = PendingFrame{pixels, w, h, channels, label};
-        s.text = PendingText{raw_text, tokenized, encoded};
+        s.text = PendingText{raw_text, tags, tokenized, encoded};
         pending_dataset_sample_ = std::move(s);
     }
 
     // Définir le texte associé à l'item dataset (si modèle texte)
-    void setDatasetText(const std::string& raw_text, const std::string& tokenized, const std::string& encoded) {
+    void setDatasetText(const std::string& raw_text, const std::string& tags, const std::string& tokenized, const std::string& encoded) {
         if (!viz_) return;
         std::lock_guard<std::mutex> lock(viz_mutex_);
-        pending_dataset_text_ = PendingText{raw_text, tokenized, encoded};
+        pending_dataset_text_ = PendingText{raw_text, tags, tokenized, encoded};
     }
 
     // Définir l'image de projection (souvent une heatmap)
@@ -695,7 +725,7 @@ private:
                 if (pending_dataset_sample_.has_value()) {
                     const auto& s = pending_dataset_sample_.value();
                     viz_->setDatasetImage(s.frame.pixels, s.frame.w, s.frame.h, s.frame.channels, s.frame.label);
-                    viz_->setDatasetText(s.text.raw, s.text.tokens, s.text.encoded);
+                    viz_->setDatasetText(s.text.raw, s.text.tags, s.text.tokens, s.text.encoded);
                     pending_dataset_sample_.reset();
                     pending_dataset_image_.reset();
                     pending_dataset_text_.reset();
@@ -709,7 +739,7 @@ private:
 
                 if (pending_dataset_text_.has_value()) {
                     const auto& t = pending_dataset_text_.value();
-                    viz_->setDatasetText(t.raw, t.tokens, t.encoded);
+                    viz_->setDatasetText(t.raw, t.tags, t.tokens, t.encoded);
                     pending_dataset_text_.reset();
                 }
                 if (pending_projection_image_.has_value()) {
@@ -789,6 +819,7 @@ private:
     std::optional<PendingFrame> pending_dataset_image_;
     struct PendingText {
         std::string raw;
+        std::string tags;
         std::string tokens;
         std::string encoded;
     };

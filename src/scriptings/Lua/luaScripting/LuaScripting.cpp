@@ -177,6 +177,9 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_createModel);
     lua_setfield(L, -2, "create");
 
+    lua_pushcfunction(L, lua_createEmptyModel);
+    lua_setfield(L, -2, "create_empty");
+
     lua_pushcfunction(L, lua_createModelFromConfig);
     lua_setfield(L, -2, "create_from_config");
     
@@ -207,6 +210,9 @@ void LuaScripting::registerAPI() {
 
     lua_pushcfunction(L, lua_getModelLayers);
     lua_setfield(L, -2, "get_layers");
+
+    lua_pushcfunction(L, lua_clearModelLayers);
+    lua_setfield(L, -2, "clear_layers");
     
     lua_pushcfunction(L, lua_pushLayer);
     lua_setfield(L, -2, "push_layer");

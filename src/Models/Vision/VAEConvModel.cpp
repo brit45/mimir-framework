@@ -8,6 +8,90 @@ VAEConvModel::VAEConvModel() {
     setHasEncoder(false);
 }
 
+bool VAEConvModel::InitVizTips() {
+    clearVizTipsRegistry();
+    clearVizTaps();
+
+    registerVizTip("vae_conv/raw_in", "Dataset/raw");
+    registerVizTip("vae_conv/in_reshape", "Preprocess/reshape");
+    registerVizTip("vae_conv/in_to_chw", "Preprocess/chw");
+    registerVizTip("vae_conv/enc/conv_in", "Encoder/in");
+    registerVizTip("vae_conv/enc/proj", "Encoder/proj");
+    registerVizTip("vae_conv/enc/mu", "Latent/mu");
+    registerVizTip("vae_conv/enc/logvar", "Latent/logvar");
+    registerVizTip("vae_conv/reparam", "Latent/sample");
+    registerVizTip("vae_conv/z_prior_add", "Latent/prior_add");
+    registerVizTip("vae_conv/dec/conv_in", "Decoder/in");
+    registerVizTip("vae_conv/dec/tanh", "Output/tanh");
+    registerVizTip("vae_conv/recon_to_hwc", "Output/recon_hwc");
+    registerVizTip("vae_conv/out_concat", "Output/pack");
+    registerVizTip("vae_conv/img_proj", "Txt/img_proj");
+    registerVizTip("vae_conv/txt/tok_emb", "Txt/tok_emb");
+    registerVizTip("vae_conv/txt/pool", "Txt/pool");
+    registerVizTip("vae_conv/txt_proj", "Txt/txt_proj");
+
+    return true;
+}
+
+bool VAEConvModel::UpdateVizTips(const Layer& layer, VizFrame& frame) {
+
+    if (Model::UpdateVizTips(layer, frame)) return true;
+
+    if (layer.name.empty()) return false;
+
+    auto attach_tip = [&](const std::string& tip) {
+        if (tip.empty()) return false;
+        if (frame.label.empty()) frame.label = tip;
+        else frame.label += " | " + tip;
+        return true;
+    };
+
+    const std::string& name = layer.name;
+    if (name.find("/enc/conv_in") != std::string::npos) return attach_tip("Encoder/in");
+    if (name.find("/enc/proj") != std::string::npos) return attach_tip("Encoder/proj");
+    if (name.find("/enc/down") != std::string::npos) {
+        if (name.find("/conv") != std::string::npos) return attach_tip("Encoder/down/conv");
+        if (name.find("/res") != std::string::npos) return attach_tip("Encoder/down/res");
+        if (name.find("/attn") != std::string::npos) return attach_tip("Encoder/down/attn");
+        return attach_tip("Encoder/down");
+    }
+    if (name.find("/enc/bot") != std::string::npos) {
+        if (name.find("/attn") != std::string::npos) return attach_tip("Encoder/bottleneck/attn");
+        if (name.find("/res") != std::string::npos) return attach_tip("Encoder/bottleneck/res");
+        return attach_tip("Encoder/bottleneck");
+    }
+    if (name.find("/dec/conv_in") != std::string::npos) return attach_tip("Decoder/in");
+    if (name.find("/dec/up") != std::string::npos) {
+        if (name.find("/skip_cat") != std::string::npos) return attach_tip("Decoder/up/skip_concat");
+        if (name.find("/skip_proj") != std::string::npos) return attach_tip("Decoder/up/skip_projection");
+        if (name.find("/conv") != std::string::npos) return attach_tip("Decoder/up/conv");
+        if (name.find("/res") != std::string::npos) return attach_tip("Decoder/up/res");
+        if (name.find("/attn") != std::string::npos) return attach_tip("Decoder/up/attn");
+        if (name.size() >= 3 && name.compare(name.size() - 3, 3, "/up") == 0) return attach_tip("Decoder/up/sample");
+        return attach_tip("Decoder/up");
+    }
+    if (name.find("/dec/bot") != std::string::npos) {
+        if (name.find("/attn") != std::string::npos) return attach_tip("Decoder/bottleneck/attn");
+        if (name.find("/res") != std::string::npos) return attach_tip("Decoder/bottleneck/res");
+        return attach_tip("Decoder/bottleneck");
+    }
+    if (name.find("/skip") != std::string::npos) {
+        return attach_tip("Skip/fusion");
+    }
+
+    if (name.find("/txt/") != std::string::npos ||
+        name.find("/txt_") != std::string::npos ||
+        name.find("/img_proj") != std::string::npos) {
+        if (name.find("/tok_emb") != std::string::npos) return attach_tip("Txt/tok_emb");
+        if (name.find("/pool") != std::string::npos) return attach_tip("Txt/pool");
+        if (name.find("/img_proj") != std::string::npos) return attach_tip("Txt/img_proj");
+        if (name.find("/txt_proj") != std::string::npos) return attach_tip("Txt/txt_proj");
+        return attach_tip("Txt");
+    }
+
+    return false;
+}
+
 void VAEConvModel::buildFromConfig(const Config& cfg) {
     cfg_ = cfg;
     buildInto(*this, cfg_);
@@ -40,6 +124,11 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     const int LC = std::max(1, cfg.latent_c);
 
     const bool stochastic_latent = cfg.stochastic_latent;
+    const bool text_cond = cfg.text_cond;
+    const int vocab_size = std::max(2, cfg.vocab_size);
+    const int seq_len = std::max(1, cfg.seq_len);
+    const int text_d_model = std::max(1, cfg.text_d_model);
+    const int proj_dim = std::max(1, cfg.proj_dim);
 
     // ===== Modèle convolutionnel avec blocs optionnels =====
     // Le cœur reste convolutionnel (Conv2d / ConvTranspose2d / SiLU / Add /
@@ -49,12 +138,11 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     const bool use_attn         = cfg.use_attn;
     const bool use_skip_conn    = cfg.use_skip_connections;
     const bool use_enc_prior    = cfg.use_encoder_prior;
-    // Modèle PUREMENT CONVOLUTIONNEL : aucune normalisation (GroupNorm/LayerNorm)
-    // n'est émise dans le graphe. Les champs enc_norm/dec_norm/*_gn_groups restent
-    // dans la config pour compat plomberie mais sont forcés à "none".
-    const std::string enc_norm_str = "none";
+    // Normalisation configurable. Le décodeur reprend la normalisation encodeur
+    // lorsque dec_norm est vide.
+    const std::string enc_norm_str = cfg.enc_norm.empty() ? "none" : cfg.enc_norm;
     const int enc_gn_groups_val    = std::max(1, cfg.enc_gn_groups);
-    const std::string dec_norm_str = "none";
+    const std::string dec_norm_str = cfg.dec_norm.empty() ? enc_norm_str : cfg.dec_norm;
     const int dec_gn_groups_val    = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
     const int resnet_max_tok       = cfg.resnet_max_tokens;  // 0 = no gate
@@ -107,7 +195,12 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["input_dim"] = image_dim;
     // Recon loss: avoid MSE for VAEConv (better behaved on images in [-1,1]).
     model.modelConfig["recon_loss"] = "l1";
-    model.modelConfig["text_cond"] = false;
+    model.modelConfig["text_cond"] = text_cond;
+    model.modelConfig["vocab_size"] = vocab_size;
+    model.modelConfig["seq_len"] = seq_len;
+    model.modelConfig["text_d_model"] = text_d_model;
+    model.modelConfig["proj_dim"] = proj_dim;
+    model.modelConfig["padding_idx"] = 0;
     model.modelConfig["stochastic_latent"] = stochastic_latent;
     model.modelConfig["enc_norm"] = enc_norm_str;
     model.modelConfig["enc_gn_groups"] = enc_gn_groups_val;
@@ -122,7 +215,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["attn_max_tokens"] = attn_max_tok;
     model.modelConfig["resnet_max_tokens"] = resnet_max_tok;
     if (cfg.d_model > 0) model.modelConfig["d_model"] = cfg.d_model;
-    model.modelConfig["output_dim"] = image_dim + 2 * latent_dim;
+    model.modelConfig["output_dim"] = image_dim + 2 * latent_dim + (text_cond ? 2 * proj_dim : 0);
 
     auto sat_mul = [](size_t a, size_t b) -> size_t {
         if (a == 0 || b == 0) return 0;
@@ -356,7 +449,6 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         return prefix + "/out";
     };
 
-    // NOTE: pas d'encodeur texte dans ce graphe (branche texte externe).
     // Skip connections (style U-Net) : enc_skips[i] est la feature map de l'encodeur
     // à la résolution H/2^i × W/2^i, sauvegardée avant le downsampling du niveau i.
     std::vector<std::string> enc_skips;
@@ -482,6 +574,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         if (auto* L = model.getLayerByName("vae_conv/z_prior_bias")) {
             L->inputs  = {};
             L->output  = "vae_conv/prior_bias_out";
+            L->trainable_parameter = true;
             L->in_channels  = LC;
             L->out_channels = LC;
             L->input_height = LH;
@@ -568,20 +661,65 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         P->permute_dims = {1, 2, 0};
     }
 
-    // Pack output recon || z_biased || logvar
-    // z_in = vae_conv/z_biased (si use_enc_prior) ou vae_conv/z (sinon).
-    // On encode le z réellement passé au décodeur (reparam + prior) plutôt que
-    // mu brut, ce qui permet au mode --encode de lire directement le vecteur
-    // latent opérationnel sans recalcul côté Lua.
+    // Projections multi-modales optionnelles pour trainStepVAEText.
+    if (text_cond) {
+        model.push("vae_conv/txt/tok_emb", "Embedding",
+                   static_cast<size_t>(vocab_size) * static_cast<size_t>(text_d_model));
+        if (auto* E = model.getLayerByName("vae_conv/txt/tok_emb")) {
+            E->inputs = {"text_ids"};
+            E->output = "vae_conv/txt/tok_emb_out";
+            E->vocab_size = vocab_size;
+            E->embed_dim = text_d_model;
+            E->padding_idx = 0;
+            E->seq_len = seq_len;
+        }
+
+        model.push("vae_conv/txt/pool", "TokenMeanPool", 0);
+        if (auto* P = model.getLayerByName("vae_conv/txt/pool")) {
+            P->inputs = {"vae_conv/txt/tok_emb_out"};
+            P->output = "vae_conv/txt/pooled";
+            P->seq_len = seq_len;
+            P->embed_dim = text_d_model;
+        }
+
+        model.push("vae_conv/img_proj", "Linear",
+                   static_cast<size_t>(latent_dim) * static_cast<size_t>(proj_dim) + static_cast<size_t>(proj_dim));
+        if (auto* L = model.getLayerByName("vae_conv/img_proj")) {
+            L->inputs = {z_in};
+            L->output = "vae_conv/img_proj";
+            L->in_features = latent_dim;
+            L->out_features = proj_dim;
+            L->use_bias = true;
+        }
+
+        model.push("vae_conv/txt_proj", "Linear",
+                   static_cast<size_t>(text_d_model) * static_cast<size_t>(proj_dim) + static_cast<size_t>(proj_dim));
+        if (auto* L = model.getLayerByName("vae_conv/txt_proj")) {
+            L->inputs = {"vae_conv/txt/pooled"};
+            L->output = "vae_conv/txt_proj";
+            L->in_features = text_d_model;
+            L->out_features = proj_dim;
+            L->use_bias = true;
+        }
+    }
+
+    // Contrat VAE: recon || mu || logvar || img_proj || txt_proj (optionnel).
+    // z_in reste le latent opérationnel passé au décodeur et à img_proj, mais la
+    // loss KL doit impérativement recevoir la moyenne de q(z|x), pas un sample.
     model.push("vae_conv/out_concat", "Concat", 0);
     if (auto* L = model.getLayerByName("vae_conv/out_concat")) {
-        L->inputs = {"vae_conv/recon", z_in, "vae_conv/logvar"};
+        L->inputs = {"vae_conv/recon", "vae_conv/mu", "vae_conv/logvar"};
+        if (text_cond) {
+            L->inputs.push_back("vae_conv/img_proj");
+            L->inputs.push_back("vae_conv/txt_proj");
+        }
         L->output = "x";
         L->concat_axis = 0;
     }
 }
 
 void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
+
     model.getMutableLayers().clear();
     model.setModelName("VAEConvModel");
     model.modelConfig["type"] = "vae_conv_decode";
@@ -614,7 +752,8 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     const int latent_dim = LH * LW * LC;
     const int base = std::max(8, cfg.base_channels);
     // Décodeur convolutionnel avec blocs optionnels (ResNet + SelfAttention).
-    const std::string dec_norm_str = "none";
+    const std::string dec_norm_str =
+        cfg.dec_norm.empty() ? (cfg.enc_norm.empty() ? "none" : cfg.enc_norm) : cfg.dec_norm;
     const int dec_gn_groups_val = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
 

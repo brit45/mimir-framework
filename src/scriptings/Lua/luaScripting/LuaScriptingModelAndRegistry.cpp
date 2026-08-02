@@ -8,6 +8,7 @@
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
 #include "Models/Diffusion/PonyXLDDPMModel.hpp"
+#include "VizTextPayload.hpp"
 #include "Helpers.hpp"
 #include <fstream>
 #include <sstream>
@@ -18,11 +19,202 @@
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
+#include <numeric>
 #include <unordered_set>
 #include <type_traits>
 #include <utility>
 
 namespace {
+
+static bool _mimir_ends_with(const std::string& value, const std::string& suffix) {
+    if (value.size() < suffix.size()) return false;
+    return std::equal(suffix.rbegin(), suffix.rend(), value.rbegin());
+}
+
+static bool _mimir_load_mpk_full_config(lua_State* L,
+                                        const std::string& mpk_path,
+                                        std::string* out_err) {
+    const int stack_top = lua_gettop(L);
+    auto cleanup = [&]() { lua_settop(L, stack_top); };
+
+    lua_getglobal(L, "dofile");
+    if (!lua_isfunction(L, -1)) {
+        cleanup();
+        if (out_err) *out_err = "dofile unavailable";
+        return false;
+    }
+
+    lua_pushstring(L, "scripts/modules/mpk.lua");
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        if (out_err) *out_err = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        cleanup();
+        return false;
+    }
+
+    if (!lua_istable(L, -1)) {
+        if (out_err) *out_err = "MPK module did not return a table";
+        cleanup();
+        return false;
+    }
+
+    const int mpk_mod = lua_gettop(L);
+
+    lua_getfield(L, mpk_mod, "read");
+    if (!lua_isfunction(L, -1)) {
+        if (out_err) *out_err = "MPK.read unavailable";
+        cleanup();
+        return false;
+    }
+    lua_pushstring(L, mpk_path.c_str());
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        if (out_err) *out_err = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        cleanup();
+        return false;
+    }
+    if (!lua_istable(L, -1)) {
+        if (out_err) *out_err = "MPK.read did not return a package table";
+        cleanup();
+        return false;
+    }
+    const int pkg_idx = lua_gettop(L);
+
+    lua_getfield(L, mpk_mod, "to_registry_full_config");
+    if (!lua_isfunction(L, -1)) {
+        if (out_err) *out_err = "MPK.to_registry_full_config unavailable";
+        cleanup();
+        return false;
+    }
+    lua_pushvalue(L, pkg_idx);
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        if (out_err) *out_err = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        cleanup();
+        return false;
+    }
+    if (!lua_istable(L, -1)) {
+        if (out_err) *out_err = "MPK.to_registry_full_config did not return a table";
+        cleanup();
+        return false;
+    }
+
+    lua_replace(L, stack_top + 1);
+    lua_settop(L, stack_top + 1);
+    return true;
+}
+
+}  // namespace
+
+std::size_t LuaScripting::autoRegisterMpkArchitectures(
+    const std::string& project_root,
+    std::vector<std::string>* warnings) {
+    const std::filesystem::path arch_dir =
+        std::filesystem::path(project_root) / "_archi";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(arch_dir, ec) || ec) {
+        return 0;
+    }
+
+    std::vector<std::filesystem::path> files;
+    for (std::filesystem::directory_iterator it(arch_dir, ec), end;
+         !ec && it != end;
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec) || ec) continue;
+        std::string filename = it->path().filename().string();
+        std::transform(filename.begin(), filename.end(), filename.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (_mimir_ends_with(filename, ".mpk") ||
+            _mimir_ends_with(filename, ".mpk.bin")) {
+            files.push_back(it->path());
+        }
+    }
+    if (ec) {
+        if (warnings) warnings->push_back("lecture de _archi impossible: " + ec.message());
+        return 0;
+    }
+    std::sort(files.begin(), files.end());
+    if (files.empty()) return 0;
+
+    lua_State* loader = luaL_newstate();
+    if (!loader) {
+        if (warnings) warnings->push_back("initialisation Lua impossible pour charger _archi");
+        return 0;
+    }
+    luaL_openlibs(loader);
+
+    std::size_t loaded = 0;
+    auto& registry = ModelArchitectures::Registry::instance();
+    for (const auto& path : files) {
+        const std::string filename = path.filename().string();
+        std::string file_alias = filename;
+        std::string file_alias_lower = file_alias;
+        std::transform(file_alias_lower.begin(), file_alias_lower.end(), file_alias_lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const std::size_t suffix_size =
+            _mimir_ends_with(file_alias_lower, ".mpk.bin") ? 8u : 4u;
+        file_alias.resize(file_alias.size() - suffix_size);
+
+        std::string err;
+        if (!_mimir_load_mpk_full_config(loader, path.string(), &err)) {
+            if (warnings) warnings->push_back(path.filename().string() + ": " + err);
+            continue;
+        }
+
+        json full_cfg;
+        try {
+            full_cfg = LuaScripting::luaTableToJson(loader, -1);
+        } catch (const std::exception& e) {
+            lua_pop(loader, 1);
+            if (warnings) warnings->push_back(path.filename().string() + ": " + e.what());
+            continue;
+        }
+        lua_pop(loader, 1);
+
+        const std::string base_arch = full_cfg.value("architecture", std::string());
+        const json model_cfg = full_cfg.value("model", json::object());
+        const json mpk_meta = full_cfg.value("mpk", json::object());
+        std::string registry_name = mpk_meta.value("name", file_alias);
+        const std::string description =
+            mpk_meta.value("description", std::string("Architecture MPK: ") + path.filename().string());
+
+        if (registry_name.empty() || base_arch.empty() || !model_cfg.is_object()) {
+            if (warnings) warnings->push_back(path.filename().string() + ": métadonnées de registre incomplètes");
+            continue;
+        }
+        if (registry.find(base_arch) == nullptr) {
+            if (warnings) warnings->push_back(
+                path.filename().string() + ": architecture de base inconnue: " + base_arch);
+            continue;
+        }
+
+        // Ne jamais remplacer silencieusement une architecture native. Un MPK
+        // portant le même nom devient accessible sous le nom de son fichier.
+        if (registry.find(registry_name) != nullptr) {
+            registry_name = file_alias;
+        }
+        if (registry_name.empty() || registry.find(registry_name) != nullptr) {
+            if (warnings) warnings->push_back(
+                path.filename().string() + ": nom déjà présent dans le registre");
+            continue;
+        }
+
+        ModelArchitectures::Entry entry;
+        entry.name = registry_name;
+        entry.description = description + " [MPK: " + path.string() + "]";
+        entry.default_config = model_cfg;
+        entry.create = [base_arch](const json& cfg) {
+            return ModelArchitectures::create(base_arch, cfg);
+        };
+        entry.origin = "mpk";
+        entry.source_path = path.string();
+        registry.registerArchitecture(std::move(entry));
+        ++loaded;
+    }
+
+    lua_close(loader);
+    return loaded;
+}
 
 template <typename T, typename = void>
 struct _mimir_has_overrides_enabled : std::false_type {};
@@ -79,7 +271,8 @@ static void mergeLuaConfigIntoModelConfig(Model& model, const json& cfg) {
         "marker_wass_scale", "marker_temp_scale", "marker_scale_max", "marker_warmup_steps",
         "logvar_clip_min", "logvar_clip_max", "ssim_weight", "ssim_mode", "ssim_k1", "ssim_k2",
         "ssim_L", "spectral_weight", "spectral_scales", "perceptual_weight", "perceptual_arch",
-        "perceptual_checkpoint", "perceptual_base_channels", "huber_delta", "smoothl1_delta",
+        "perceptual_checkpoint", "perceptual_base_channels", "perceptual_prior_momentum",
+        "perceptual_prior_scale", "huber_delta", "smoothl1_delta",
         "smoothl1_beta", "charbonnier_eps", "nll_sigma", "gaussian_nll_sigma", "align_weight",
         "grad_clip_norm", "clip_norm", "frozen_layer_prefixes",
     };
@@ -97,12 +290,59 @@ static void mergeLuaConfigIntoModelConfig(Model& model, const json& cfg) {
     }
 }
 
-}  // namespace
 int LuaScripting::lua_createModel(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
     // Argument: type de modèle (string)
     const char* model_type = luaL_checkstring(L, 1);
+    const std::string model_type_str = model_type ? std::string(model_type) : std::string();
+
+    if (_mimir_ends_with(model_type_str, ".mpk") ||
+        _mimir_ends_with(model_type_str, ".mpk.bin")) {
+        const std::filesystem::path mpk_path(model_type_str);
+        std::error_code ec;
+        if (std::filesystem::exists(mpk_path, ec) && !ec) {
+            std::string err;
+            if (!_mimir_load_mpk_full_config(L, model_type_str, &err)) {
+                ctx.addLog("Erreur chargement MPK pour create(path): " + err);
+                lua_pushboolean(L, false);
+                lua_pushstring(L, err.c_str());
+                return 2;
+            }
+
+            json full_cfg = LuaScripting::luaTableToJson(L, -1);
+            lua_pop(L, 1);
+
+            try {
+                std::string arch;
+                json cfg;
+                ctx.currentModel = ModelArchitectures::createFromConfig(full_cfg, &cfg, &arch);
+
+                if (ctx.currentModel) {
+                    mergeLuaConfigIntoModelConfig(*ctx.currentModel, cfg);
+                }
+                if (ctx.currentTokenizer) {
+                    ctx.currentModel->setTokenizer(*ctx.currentTokenizer);
+                }
+                if (ctx.currentEncoder) {
+                    ctx.currentModel->setEncoder(*ctx.currentEncoder);
+                }
+
+                ctx.currentConfig = full_cfg;
+                ctx.modelType = arch;
+                ctx.modelConfig = cfg;
+
+                ctx.addLog("Modèle créé depuis MPK: " + model_type_str);
+                lua_pushboolean(L, true);
+                return 1;
+            } catch (const std::exception& e) {
+                ctx.addLog("Erreur création modèle depuis MPK: " + std::string(e.what()));
+                lua_pushboolean(L, false);
+                lua_pushstring(L, e.what());
+                return 2;
+            }
+        }
+    }
     
     // Argument optionnel: config (table). Si absent: defaultConfig(model_type)
     json config;
@@ -162,6 +402,51 @@ int LuaScripting::lua_createModel(lua_State* L) {
     }
     
     return 1;
+}
+
+int LuaScripting::lua_createEmptyModel(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+
+    const char* model_type = lua_isstring(L, 1) ? lua_tostring(L, 1) : "custom_graph";
+
+    json config = json::object();
+    if (lua_istable(L, 2)) {
+        config = luaTableToJson(L, 2);
+        if (!config.is_object()) config = json::object();
+    }
+
+    try {
+        ctx.currentModel = std::make_shared<Model>();
+        if (!ctx.currentModel) {
+            lua_pushboolean(L, false);
+            lua_pushstring(L, "Echec creation modele vide");
+            return 2;
+        }
+
+        const std::string name(model_type ? model_type : "custom_graph");
+        ctx.currentModel->setModelName(name);
+
+        ctx.modelType = name;
+        ctx.modelConfig = config;
+        ctx.currentModel->modelConfig = config;
+        ctx.currentModel->modelConfig["type"] = name;
+
+        if (ctx.currentTokenizer) {
+            ctx.currentModel->setTokenizer(*ctx.currentTokenizer);
+        }
+        if (ctx.currentEncoder) {
+            ctx.currentModel->setEncoder(*ctx.currentEncoder);
+        }
+
+        ctx.addLog("Modele vide cree: " + name);
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        ctx.addLog("Erreur create_empty: " + std::string(e.what()));
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
 }
 
 int LuaScripting::lua_createModelFromConfig(lua_State* L) {
@@ -516,6 +801,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             std::error_code ec;
             std::filesystem::create_directories(out, ec);
 
+            // Le tokenizer est enrichi pendant l'entraînement (tokenizeEnsure).
+            // Le resynchroniser juste avant save garantit que le checkpoint contient
+            // le vocabulaire effectivement composé avec le dataset.
+            if (ctx.currentTokenizer) {
+                ctx.currentModel->setTokenizer(*ctx.currentTokenizer);
+            }
+
             // Important: synchroniser l'état optimiseur dans le modèle avant la sauvegarde.
             // (train utilise un Optimizer local, la sérialisation lit l'état du modèle)
             if (ctx.currentModel) {
@@ -802,10 +1094,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             bool requested_text_cond = false;
             bool text_cond_runtime = false;
             bool text_pipeline_enabled = false;
+            bool semantic_label_study = false;
             int seq_len = 64;
             int pad_id = 0;
             float text_encoder_lr = 0.01f;
             float text_special_lr = 0.005f;
+            int semantic_label_topk = 6;
+            int semantic_label_min_df = 2;
             try {
                 if (ctx.modelConfig.contains("image_w")) image_w = ctx.modelConfig["image_w"].get<int>();
                 if (ctx.modelConfig.contains("image_h")) image_h = ctx.modelConfig["image_h"].get<int>();
@@ -821,11 +1116,17 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 if (ctx.modelConfig.contains("seq_len")) seq_len = ctx.modelConfig["seq_len"].get<int>();
                 if (ctx.modelConfig.contains("text_encoder_lr")) text_encoder_lr = ctx.modelConfig["text_encoder_lr"].get<float>();
                 if (ctx.modelConfig.contains("text_special_lr")) text_special_lr = ctx.modelConfig["text_special_lr"].get<float>();
+                if (ctx.modelConfig.contains("semantic_label_study")) semantic_label_study = ctx.modelConfig["semantic_label_study"].get<bool>();
+                if (ctx.modelConfig.contains("semantic_label_topk")) semantic_label_topk = ctx.modelConfig["semantic_label_topk"].get<int>();
+                if (ctx.modelConfig.contains("semantic_label_min_df")) semantic_label_min_df = ctx.modelConfig["semantic_label_min_df"].get<int>();
             } catch (...) {
             }
 
             text_cond_runtime = (!graph_text_cond && requested_text_cond);
             text_pipeline_enabled = (graph_text_cond || text_cond_runtime);
+            if (text_pipeline_enabled && !ctx.modelConfig.contains("semantic_label_study")) {
+                semantic_label_study = true;
+            }
 
             if (image_w <= 0 || image_h <= 0) {
                 // fallback: dataset config
@@ -843,6 +1144,110 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             seq_len = std::max(1, seq_len);
             text_encoder_lr = std::max(0.0f, text_encoder_lr);
             text_special_lr = std::max(0.0f, text_special_lr);
+            semantic_label_topk = std::clamp(semantic_label_topk, 1, 32);
+            semantic_label_min_df = std::max(1, semantic_label_min_df);
+
+            auto extract_label_terms = [](const std::string& raw) -> std::vector<std::string> {
+                std::string norm;
+                norm.reserve(raw.size());
+                bool last_space = true;
+                for (char ch : raw) {
+                    const unsigned char uc = static_cast<unsigned char>(ch);
+                    bool sep = false;
+                    switch (ch) {
+                        case '.': case ',': case ';': case ':': case '|':
+                        case '/': case '\\': case '_': case '-':
+                        case '(': case ')': case '[': case ']':
+                        case '{': case '}': case '"': case '\'':
+                        case '\t': case '\n': case '\r':
+                            sep = true;
+                            break;
+                        default:
+                            sep = false;
+                            break;
+                    }
+                    if (sep) {
+                        if (!last_space) {
+                            norm.push_back(' ');
+                            last_space = true;
+                        }
+                        continue;
+                    }
+                    char outc = ch;
+                    if (uc < 128) outc = static_cast<char>(std::tolower(uc));
+                    if (std::isspace(static_cast<unsigned char>(outc))) {
+                        if (!last_space) {
+                            norm.push_back(' ');
+                            last_space = true;
+                        }
+                    } else {
+                        norm.push_back(outc);
+                        last_space = false;
+                    }
+                }
+                if (!norm.empty() && norm.back() == ' ') norm.pop_back();
+
+                std::vector<std::string> terms;
+                std::string cur;
+                for (char c : norm) {
+                    if (c == ' ') {
+                        if (!cur.empty()) {
+                            terms.push_back(cur);
+                            cur.clear();
+                        }
+                    } else {
+                        cur.push_back(c);
+                    }
+                }
+                if (!cur.empty()) terms.push_back(cur);
+
+                // Dedup en conservant l'ordre.
+                std::unordered_set<std::string> seen;
+                std::vector<std::string> uniq;
+                uniq.reserve(terms.size());
+                for (const auto& t : terms) {
+                    if (t.empty()) continue;
+                    if (seen.insert(t).second) uniq.push_back(t);
+                }
+                return uniq;
+            };
+
+            std::unordered_map<std::string, int> semantic_df;
+
+            auto enrich_prompt_semantic = [&](const std::string& raw) -> std::string {
+                if (!semantic_label_study) return raw;
+                auto terms = extract_label_terms(raw);
+                if (terms.empty()) return raw;
+
+                struct TermSc {
+                    std::string t;
+                    int df;
+                };
+                std::vector<TermSc> scored;
+                scored.reserve(terms.size());
+                for (const auto& t : terms) {
+                    auto it = semantic_df.find(t);
+                    const int df = (it == semantic_df.end()) ? 1 : std::max(1, it->second);
+                    if (df >= semantic_label_min_df) scored.push_back({t, df});
+                }
+                if (scored.empty()) {
+                    for (const auto& t : terms) scored.push_back({t, 1});
+                }
+
+                std::stable_sort(scored.begin(), scored.end(), [](const TermSc& a, const TermSc& b) {
+                    if (a.df != b.df) return a.df > b.df;
+                    return a.t.size() > b.t.size();
+                });
+
+                std::string suffix;
+                const int k = std::min<int>((int)scored.size(), semantic_label_topk);
+                for (int i = 0; i < k; ++i) {
+                    if (!suffix.empty()) suffix.push_back(' ');
+                    suffix += scored[(size_t)i].t;
+                }
+                if (suffix.empty()) return raw;
+                return raw + " ; semantic " + suffix;
+            };
 
             if (text_pipeline_enabled) {
                 if (!ctx.currentTokenizer) {
@@ -934,6 +1339,63 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             }
             std::shuffle(indices.begin(), indices.end(), rng);
             if (max_items > 0 && (int)indices.size() > max_items) indices.resize((size_t)max_items);
+
+            // Composer explicitement le tokenizer avec le dataset complet
+            // avant l'entraînement, pour tout pipeline textuel.
+            if (text_pipeline_enabled && ctx.currentTokenizer) {
+                int composed_items = 0;
+                for (size_t di = 0; di < ctx.currentDataset.size(); ++di) {
+                    DatasetItem& ditem = ctx.currentDataset[di];
+                    if (!ditem.text_file.empty() && !ditem.text.has_value()) {
+                        ditem.loadText();
+                    }
+                    const std::string dprompt = ditem.text.has_value() ? ditem.text.value() : std::string();
+                    if (!dprompt.empty()) {
+                        if (semantic_label_study) {
+                            const auto terms = extract_label_terms(dprompt);
+                            std::unordered_set<std::string> seen_doc;
+                            for (const auto& t : terms) {
+                                if (seen_doc.insert(t).second) semantic_df[t] += 1;
+                            }
+                        }
+                        (void)ctx.currentTokenizer->tokenizeEnsure(dprompt);
+                        ++composed_items;
+                    }
+                }
+
+                if (semantic_label_study) {
+                    ctx.addLog("ℹ️  Semantic label study actif: concepts=" + std::to_string((int)semantic_df.size()) +
+                               " topk=" + std::to_string(semantic_label_topk) +
+                               " min_df=" + std::to_string(semantic_label_min_df));
+                }
+
+                if (ctx.currentModel) {
+                    ctx.currentModel->setTokenizer(*ctx.currentTokenizer);
+                }
+
+                if (!checkpoint_dir.empty()) {
+                    try {
+                        namespace fs = std::filesystem;
+                        const fs::path tok_path = fs::path(checkpoint_dir) / "tokenizer" / "tokenizer.json";
+                        std::error_code ec_tok;
+                        fs::create_directories(tok_path.parent_path(), ec_tok);
+
+                        std::ofstream tok_out(tok_path);
+                        if (tok_out.is_open()) {
+                            const json jtok = ctx.currentTokenizer->to_json();
+                            tok_out << jtok.dump(2);
+                            tok_out.close();
+                            ctx.addLog("✓ Tokenizer sauvegardé après composition complète dataset: " + tok_path.string() +
+                                       " (items=" + std::to_string(composed_items) +
+                                       ", vocab=" + std::to_string(ctx.currentTokenizer->getVocabSize()) + ")");
+                        } else {
+                            ctx.addLog("⚠️  Échec ouverture fichier tokenizer après composition complète dataset: " + tok_path.string());
+                        }
+                    } catch (...) {
+                        ctx.addLog("⚠️  Échec sauvegarde tokenizer après composition complète dataset");
+                    }
+                }
+            }
 
             // Split train/val (holdout) only if validation is enabled.
             std::vector<int> train_indices = indices;
@@ -1036,6 +1498,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             const std::string step_prefix = "[" + model_type + "]";
             bool stopped_by_ui = false;
+            int trained_steps_total = 0;
 
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(train_indices.begin(), train_indices.end(), rng);
@@ -1043,6 +1506,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                            " (" + model_type + ") items=" + std::to_string(use_n));
 
                 bool stop_requested = false;
+                int trained_steps_epoch = 0;
 
                 for (int k = 0; k < use_n; ++k) {
                     DatasetItem& item = ctx.currentDataset[(size_t)train_indices[(size_t)k]];
@@ -1064,10 +1528,11 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     if (text_pipeline_enabled) {
                         if (!item.text_file.empty() && !item.text.has_value()) item.loadText();
                         prompt = item.text.has_value() ? item.text.value() : std::string();
+                        const std::string prompt_for_model = enrich_prompt_semantic(prompt);
                         if (text_cond_runtime) {
-                            ids = ctx.currentTokenizer->tokenizeEnsure(prompt);
+                            ids = ctx.currentTokenizer->tokenizeEnsure(prompt_for_model);
                         } else {
-                            ids = ctx.currentTokenizer->tokenize(prompt);
+                            ids = ctx.currentTokenizer->tokenize(prompt_for_model);
                         }
                         if ((int)ids.size() < seq_len) ids.resize((size_t)seq_len, pad_id);
                         else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
@@ -1165,6 +1630,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
 
                     global_step += 1;
+                    trained_steps_epoch += 1;
+                    trained_steps_total += 1;
                     log_step(global_step, st, step_prefix.c_str());
                     monitor_step(epoch + 1, k + 1, use_n, st);
 
@@ -1225,7 +1692,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                             if (text_pipeline_enabled) {
                                 if (!vitem.text_file.empty() && !vitem.text.has_value()) vitem.loadText();
                                 vprompt = vitem.text.has_value() ? vitem.text.value() : std::string();
-                                ids = ctx.currentTokenizer->tokenize(vprompt);
+                                const std::string vprompt_for_model = enrich_prompt_semantic(vprompt);
+                                ids = ctx.currentTokenizer->tokenize(vprompt_for_model);
                                 if ((int)ids.size() < seq_len) ids.resize((size_t)seq_len, pad_id);
                                 else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
 
@@ -1385,15 +1853,25 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         std::string label = "vae_conv/input/dataset/rgb";
                         label += "/i=" + std::to_string(train_indices[(size_t)k]);
 
+                        const std::vector<int>* ids_ptr = (text_pipeline_enabled && !ids.empty()) ? &ids : nullptr;
+                        const auto viz_payload = VizTextPayload::buildDatasetTextPayload(
+                            ctx.currentModel.get(),
+                            ctx.currentTokenizer.get(),
+                            prompt,
+                            ids_ptr,
+                            text_pipeline_enabled ? pad_id : -1
+                        );
+
                         ctx.asyncMonitor->setDatasetSample(
                             item.img,
                             image_w,
                             image_h,
                             image_c,
                             label,
-                            prompt,
-                            std::string(),
-                            std::string()
+                            viz_payload.prompt,
+                            viz_payload.tags,
+                            viz_payload.tokens,
+                            viz_payload.encoding
                         );
 
                         // Important UX:
@@ -1469,6 +1947,21 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
                     break;
                 }
+
+                ctx.addLog("Epoch stats: trained_steps=" + std::to_string(trained_steps_epoch) +
+                           "/" + std::to_string(use_n) +
+                           " global_step=" + std::to_string(global_step));
+
+                if (trained_steps_epoch == 0) {
+                    ctx.addLog("⚠ Aucun batch entraine sur cette epoch (0/" + std::to_string(use_n) + ") - images invalides/inaccessibles ou dataset non charge correctement.");
+                    break;
+                }
+            }
+
+            if (trained_steps_total == 0) {
+                lua_pushboolean(L, false);
+                lua_pushstring(L, "Aucun batch n'a ete entraine (0 step). Verifiez dataset_root, acces fichiers image, et preload/caching des images.");
+                return 2;
             }
 
             ctx.currentModel->setSerializedOptimizer(std::move(opt));
@@ -1774,6 +2267,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             int viz_taps_every_steps = 0;
             bool lowercase_tags = true;
             float bce_pos_weight = 1.0f;
+            std::vector<float> class_pos_weights;
 
             // Validation (optional)
             int validate_every_steps = 0;
@@ -1794,6 +2288,18 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                 if (ctx.modelConfig.contains("pos_weight")) bce_pos_weight = ctx.modelConfig["pos_weight"].get<float>();
                 else if (ctx.modelConfig.contains("bce_pos_weight")) bce_pos_weight = ctx.modelConfig["bce_pos_weight"].get<float>();
+
+                if (ctx.modelConfig.contains("class_pos_weights") && ctx.modelConfig["class_pos_weights"].is_array()) {
+                    const auto& arr = ctx.modelConfig["class_pos_weights"];
+                    class_pos_weights.reserve(arr.size());
+                    for (const auto& v : arr) {
+                        try {
+                            class_pos_weights.push_back(std::max(0.0f, v.get<float>()));
+                        } catch (...) {
+                            class_pos_weights.push_back(0.0f);
+                        }
+                    }
+                }
 
                 if (ctx.modelConfig.contains("validate_every_steps")) validate_every_steps = std::max(0, ctx.modelConfig["validate_every_steps"].get<int>());
                 else if (ctx.modelConfig.contains("validate_every")) validate_every_steps = std::max(0, ctx.modelConfig["validate_every"].get<int>());
@@ -1840,6 +2346,11 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             if (num_classes <= 0) {
                 lua_pushboolean(L, false);
                 lua_pushstring(L, "vgg16/vgg19 multi-label: cfg.tags_vocab vide");
+                return 2;
+            }
+            if (!class_pos_weights.empty() && (int)class_pos_weights.size() != num_classes) {
+                lua_pushboolean(L, false);
+                lua_pushstring(L, "vgg16/vgg19 multi-label: cfg.class_pos_weights doit matcher cfg.tags_vocab");
                 return 2;
             }
 
@@ -1935,12 +2446,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             indices.reserve(ctx.currentDataset.size());
             for (size_t i = 0; i < ctx.currentDataset.size(); ++i) {
                 const auto& it = ctx.currentDataset[i];
-                // Note: text is often lazy-loaded. Require a text_file path instead.
-                if (!it.image_file.empty() && !it.text_file.empty()) indices.push_back((int)i);
+                if (!it.image_file.empty() && (!it.text_file.empty() || !it.text_inline.empty() || it.text.has_value())) {
+                    indices.push_back((int)i);
+                }
             }
             if (indices.empty()) {
                 lua_pushboolean(L, false);
-                lua_pushstring(L, "Dataset: aucun item avec image_file + text_file (requis pour vgg16/vgg19 multi-label)");
+                lua_pushstring(L, "Dataset: aucun item avec image_file + texte exploitable (text_file ou text_inline) pour vgg16/vgg19 multi-label");
                 return 2;
             }
             std::shuffle(indices.begin(), indices.end(), rng);
@@ -1988,68 +2500,15 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             x_chw.resize(expected_u8);
             std::vector<float> y;
             y.resize((size_t)num_classes);
-
-            auto find_icase = [](const std::string& haystack, const std::string& needle) -> size_t {
-                if (needle.empty()) return 0;
-                if (haystack.size() < needle.size()) return std::string::npos;
-                for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
-                    bool ok = true;
-                    for (size_t j = 0; j < needle.size(); ++j) {
-                        const unsigned char a = (unsigned char)haystack[i + j];
-                        const unsigned char b = (unsigned char)needle[j];
-                        if ((char)std::tolower(a) != (char)std::tolower(b)) { ok = false; break; }
-                    }
-                    if (ok) return i;
-                }
-                return std::string::npos;
-            };
-
-            auto extract_tags_section = [&](const std::string& txt) -> std::string {
-                // Supporte un format de caption type:
-                // --- TAGS ---\n tag1.tag2 ... \n--- DESCRIPTION ---\n ...
-                const std::string kTags = "--- TAGS ---";
-                const std::string kDesc = "--- DESCRIPTION ---";
-                size_t a = find_icase(txt, kTags);
-                if (a == std::string::npos) return txt;
-                a += kTags.size();
-                size_t b = find_icase(txt, kDesc);
-                if (b == std::string::npos || b < a) {
-                    return txt.substr(a);
-                }
-                return txt.substr(a, b - a);
-            };
+            double running_loss_sum = 0.0;
+            int running_loss_count = 0;
 
             auto split_tags = [&](const std::string& txt0) {
-                std::vector<std::string> out;
-                out.reserve(16);
-
-                const std::string txt = extract_tags_section(txt0);
-                std::string cur;
-                cur.reserve(txt.size());
-                for (char ch : txt) {
-                    const bool is_sep = (ch == '.' || ch == ',' || ch == ';' || ch == '\n' || ch == '\r' || ch == '\t' || ch == '|');
-                    if (!is_sep) {
-                        cur.push_back(ch);
-                        continue;
-                    }
-
-                    trim_punct(cur);
-                    if (!cur.empty()) {
-                        if (lowercase_tags) {
-                            for (char& c : cur) c = (char)std::tolower((unsigned char)c);
-                        }
-                        out.push_back(cur);
-                    }
-                    cur.clear();
-                }
-
-                trim_punct(cur);
-                if (!cur.empty()) {
-                    if (lowercase_tags) {
-                        for (char& c : cur) c = (char)std::tolower((unsigned char)c);
-                    }
-                    out.push_back(cur);
-                }
+                auto out = PromptParsing::extractLabelCandidates(txt0, lowercase_tags);
+                for (auto& s : out) trim_punct(s);
+                out.erase(std::remove_if(out.begin(), out.end(), [](const std::string& s) {
+                    return s.empty();
+                }), out.end());
                 return out;
             };
 
@@ -2073,6 +2532,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             };
 
             std::mt19937 val_rng((uint32_t)validate_seed);
+            auto pos_weight_for_class = [&](int class_id) -> double {
+                if (class_id >= 0 && class_id < (int)class_pos_weights.size()) {
+                    const double w = (double)class_pos_weights[(size_t)class_id];
+                    if (w > 0.0) return w;
+                }
+                return (double)bce_pos_weight;
+            };
 
             auto run_validation = [&](int step, int epoch_1based) -> ValStats {
                 ValStats st;
@@ -2095,7 +2561,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 int done = 0;
                 for (int j = 0; j < (int)work.size() && done < want; ++j) {
                     DatasetItem& item = ctx.currentDataset[(size_t)work[(size_t)j]];
-                    if (item.image_file.empty() || item.text_file.empty()) continue;
+                    if (item.image_file.empty() || (!item.text.has_value() && item.text_file.empty() && item.text_inline.empty())) continue;
                     if (!item.loadText() || !item.text.has_value()) continue;
 
                     item.loadImageRGB(image_w, image_h);
@@ -2109,7 +2575,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         if (it != tag_to_id.end()) {
                             const int id = it->second;
                             if (id >= 0 && id < num_classes) {
-                                y[(size_t)id] = 1.0f;
+                                if (y[(size_t)id] < 0.5f) y[(size_t)id] = 1.0f;
                             }
                         }
                     }
@@ -2135,7 +2601,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         const double yi = (double)y[(size_t)i];
                         const double sp_pos = std::max(0.0, z) + std::log1p(std::exp(-std::fabs(z)));
                         const double sp_neg = std::max(0.0, -z) + std::log1p(std::exp(-std::fabs(z)));
-                        const double wpos = (yi >= 0.5) ? (double)bce_pos_weight : 1.0;
+                        const double wpos = (yi >= 0.5) ? pos_weight_for_class(i) : 1.0;
                         loss += (1.0 - yi) * sp_pos + yi * wpos * sp_neg;
 
                         const double p = sigmoid(z);
@@ -2180,8 +2646,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     vm.total_epochs = total_epochs_display;
                     vm.batch = 0;
                     vm.total_batches = use_n;
-                    vm.loss = 0.0f;
-                    vm.avg_loss = 0.0f;
+                    vm.loss = (float)st.loss;
+                    vm.avg_loss = (float)st.loss;
                     vm.lr = opt.getCurrentLR();
                     vm.params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
                     vm.recon_loss_type = "bce_logits";
@@ -2250,7 +2716,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                 for (int k = 0; k < use_n; ++k) {
                     DatasetItem& item = ctx.currentDataset[(size_t)train_indices[(size_t)k]];
-                    if (item.image_file.empty() || item.text_file.empty()) continue;
+                    if (item.image_file.empty() || (!item.text.has_value() && item.text_file.empty() && item.text_inline.empty())) continue;
 
                     // Lazy-load text on demand (uses DatasetMemoryManager).
                     if (!item.loadText() || !item.text.has_value()) {
@@ -2265,14 +2731,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     // Build labels (multi-hot)
                     std::fill(y.begin(), y.end(), 0.0f);
                     const std::vector<std::string> tags = split_tags(item.text.value());
-                    int matched_tags = 0;
+                    int active_labels = 0;
                     for (const auto& t : tags) {
                         auto it = tag_to_id.find(t);
                         if (it != tag_to_id.end()) {
                             const int id = it->second;
                             if (id >= 0 && id < num_classes) {
-                                y[(size_t)id] = 1.0f;
-                                matched_tags++;
+                                if (y[(size_t)id] < 0.5f) {
+                                    y[(size_t)id] = 1.0f;
+                                    active_labels++;
+                                }
                             }
                         }
                     }
@@ -2314,10 +2782,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         const double yi = (double)y[(size_t)i];
                         const double sp_pos = std::max(0.0, z) + std::log1p(std::exp(-std::fabs(z)));
                         const double sp_neg = std::max(0.0, -z) + std::log1p(std::exp(-std::fabs(z)));
-                        const double wpos = (yi >= 0.5) ? (double)bce_pos_weight : 1.0;
+                        const double wpos = (yi >= 0.5) ? pos_weight_for_class(i) : 1.0;
                         loss += (1.0 - yi) * sp_pos + yi * wpos * sp_neg;
                         const double p = sigmoid(z);
-                        const double gw = (yi >= 0.5) ? (double)bce_pos_weight : 1.0;
+                        const double gw = (yi >= 0.5) ? pos_weight_for_class(i) : 1.0;
                         grad[(size_t)i] = (float)((p - yi) * gw * inv);
 
                         prob_sum += p;
@@ -2334,8 +2802,37 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     ctx.currentModel->backwardPass(grad);
                     poll_viz_live_params();
                     ctx.currentModel->optimizerStep(opt, step_learning_rate(), nullptr);
+                    running_loss_sum += loss;
+                    running_loss_count += 1;
 
                     global_step += 1;
+
+                    if (viz_active && ctx.asyncMonitor && ctx.asyncMonitor->getViz() != nullptr &&
+                        viz_taps_every_steps > 0 && ((global_step % viz_taps_every_steps) == 0)) {
+                        std::string label = std::string(model_type) + "/input/dataset/rgb";
+                        label += "/i=" + std::to_string(train_indices[(size_t)k]);
+                        const auto viz_payload = VizTextPayload::buildDatasetTextPayload(
+                            ctx.currentModel.get(),
+                            ctx.currentTokenizer.get(),
+                            item.text.value(),
+                            nullptr,
+                            -1,
+                            false,
+                            true,
+                            true
+                        );
+                        ctx.asyncMonitor->setDatasetSample(
+                            item.img,
+                            image_w,
+                            image_h,
+                            image_c,
+                            label,
+                            viz_payload.prompt,
+                            viz_payload.tags,
+                            viz_payload.tokens,
+                            viz_payload.encoding
+                        );
+                    }
 
                     if (validation_enabled && validate_every_steps > 0 && (global_step % validate_every_steps) == 0) {
                         const auto vs = run_validation(global_step, (epoch + 1));
@@ -2353,19 +2850,21 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         const double avg_prob = denom > 0.0 ? prob_sum / denom : 0.0;
                         const double f1_den = (2.0 * (double)tp + (double)fp + (double)fn);
                         const double f1_micro = (f1_den > 0.0) ? (2.0 * (double)tp) / f1_den : 0.0;
+                        const double avg_loss = (running_loss_count > 0) ? (running_loss_sum / (double)running_loss_count) : loss;
                         ctx.addLog("step=" + std::to_string(global_step) +
                                    " loss=" + std::to_string((float)loss) +
+                                   " avg_loss=" + std::to_string((float)avg_loss) +
                                    " lr=" + std::to_string(opt.getCurrentLR()) +
                                    " pos_true=" + std::to_string((float)pos_true_rate) +
                                    " pos_pred=" + std::to_string((float)pos_pred_rate) +
                                    " f1_micro=" + std::to_string((float)f1_micro) +
-                                   " matched_tags=" + std::to_string(matched_tags) +
-                                   " parsed_tags=" + std::to_string((int)tags.size()));
+                                   " active_labels=" + std::to_string(active_labels) +
+                                   " label_candidates=" + std::to_string((int)tags.size()));
 
-                        if (!warned_no_vocab_match && ((int)tags.size() > 0) && matched_tags == 0) {
+                        if (!warned_no_vocab_match && ((int)tags.size() > 0) && active_labels == 0) {
                             warned_no_vocab_match = true;
-                            ctx.addLog("⚠️  Aucun tag ne matche tags_vocab (matched_tags=0). "
-                                       "Parsing supporté: ., , ; | et nouvelles lignes + section '--- TAGS ---'.");
+                            ctx.addLog("⚠️  Aucun label ne matche tags_vocab (active_labels=0). "
+                                       "Parsing supporté: JSON standard (`tags`/`keywords`/`tokens`) puis fallback séparateurs `.,;|` et nouvelles lignes.");
                         }
                     }
                     if (ctx.asyncMonitor) {
@@ -2375,9 +2874,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         m.batch = k + 1;
                         m.total_batches = use_n;
                         m.loss = (float)loss;
-                        m.avg_loss = (float)loss;
+                        m.avg_loss = (float)((running_loss_count > 0) ? (running_loss_sum / (double)running_loss_count) : loss);
                         m.lr = opt.getCurrentLR();
-                        m.mse = (float)loss;
+                        m.mse = 0.0f;
                         m.grad_norm = 0.0f;
                         m.grad_max = 0.0f;
                         m.params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
@@ -2843,15 +3342,28 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                             if (is_viz_active() && ctx.asyncMonitor && ctx.currentModel && ctx.asyncMonitor->getViz() != nullptr) {
                                 std::string label = "ponyxl_ddpm/val/input/dataset/rgb";
                                 label += "/i=" + std::to_string(val_pick[(size_t)vi]);
+
+                                const auto viz_payload = VizTextPayload::buildDatasetTextPayload(
+                                    ctx.currentModel.get(),
+                                    ctx.currentTokenizer.get(),
+                                    vprompt,
+                                    nullptr,
+                                    -1,
+                                    true,
+                                    true,
+                                    true
+                                );
+
                                 ctx.asyncMonitor->setDatasetSample(
                                     vitem.img,
                                     image_w,
                                     image_h,
                                     3,
                                     label,
-                                    vprompt,
-                                    std::string(),
-                                    std::string()
+                                    viz_payload.prompt,
+                                    viz_payload.tags,
+                                    viz_payload.tokens,
+                                    viz_payload.encoding
                                 );
 
                                 auto taps = ctx.currentModel->consumeVizTaps();
@@ -2902,15 +3414,27 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         std::string label = "ponyxl_ddpm/input/dataset/rgb";
                         label += "/i=" + std::to_string(train_indices[(size_t)k]);
 
+                        const auto viz_payload = VizTextPayload::buildDatasetTextPayload(
+                            ctx.currentModel.get(),
+                            ctx.currentTokenizer.get(),
+                            prompt,
+                            nullptr,
+                            -1,
+                            true,
+                            true,
+                            true
+                        );
+
                         ctx.asyncMonitor->setDatasetSample(
                             item.img,
                             image_w,
                             image_h,
                             3,
                             label,
-                            prompt,
-                            std::string(),
-                            std::string()
+                            viz_payload.prompt,
+                            viz_payload.tags,
+                            viz_payload.tokens,
+                            viz_payload.encoding
                         );
 
                         auto taps = ctx.currentModel->consumeVizTaps();
@@ -3168,7 +3692,8 @@ int LuaScripting::lua_archDefaultConfig(lua_State* L) {
 // Renvoie toutes les infos présentes dans le registry pour une architecture.
 // Sans argument: renvoie un tableau (liste) d'entrées complètes pour toutes
 // les architectures. Avec un nom: renvoie l'entrée correspondante.
-// Chaque entrée est une table { name=..., description=..., config={...} }.
+// Chaque entrée contient aussi origin="native"|"mpk" et, pour un MPK,
+// source_path=<fichier chargé>.
 int LuaScripting::lua_archInfo(lua_State* L) {
     auto pushEntry = [L](const ModelArchitectures::Entry& e) {
         lua_newtable(L);
@@ -3176,6 +3701,12 @@ int LuaScripting::lua_archInfo(lua_State* L) {
         lua_setfield(L, -2, "name");
         lua_pushstring(L, e.description.c_str());
         lua_setfield(L, -2, "description");
+        lua_pushstring(L, e.origin.c_str());
+        lua_setfield(L, -2, "origin");
+        if (!e.source_path.empty()) {
+            lua_pushstring(L, e.source_path.c_str());
+            lua_setfield(L, -2, "source_path");
+        }
         jsonToLuaTable(L, e.default_config);
         lua_setfield(L, -2, "config");
     };
@@ -3567,6 +4098,16 @@ int LuaScripting::lua_loadCheckpoint(lua_State* L) {
     bool success = Mimir::Serialization::load_checkpoint(*ctx.currentModel, path, options, &error);
 
     if (success) {
+        // En mode reprise, la sérialisation hydrate les assets dans le modèle.
+        // On resynchronise le contexte Lua pour que l'entraînement utilise bien
+        // le tokenizer/encoder du checkpoint (et non un asset précédemment chargé).
+        if (options.load_tokenizer && ctx.currentModel) {
+            ctx.currentTokenizer = std::make_shared<Tokenizer>(ctx.currentModel->getTokenizer());
+        }
+        if (options.load_encoder && ctx.currentModel) {
+            ctx.currentEncoder = std::make_shared<ConditioningEncoder>(ctx.currentModel->getEncoder());
+        }
+
         ctx.addLog("Checkpoint chargé: " + std::string(path));
         lua_pushboolean(L, true);
         return 1;
@@ -3698,4 +4239,3 @@ int LuaScripting::lua_saveEnhancedDebugJson(lua_State* L) {
         return 2;
     }
 }
-

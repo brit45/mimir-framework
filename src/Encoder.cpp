@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <iostream>
 #include <omp.h>
 json ConditioningEncoder::to_json() const {
     json j;
@@ -79,6 +80,7 @@ ConditioningEncoder::ConditioningEncoder(int d, int Size_Vo)
     if (dim <= 0) dim = 64;
     if (Size_Vo > 0) token_embeddings.reserve(static_cast<size_t>(Size_Vo) * static_cast<size_t>(dim));
     // leave vocab_size == 0 until ensureVocabSize is called
+    std::cerr << "[encoder] create dim=" << dim << " reserve_vocab=" << Size_Vo << std::endl;
 }
 
 ConditioningEncoder::~ConditioningEncoder() = default;
@@ -158,6 +160,8 @@ void ConditioningEncoder::sgdUpdateSpecialEmbeddings(const std::vector<float>& g
 void ConditioningEncoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
 {
     if (new_vocab_size <= static_cast<size_t>(vocab_size)) return;
+    std::cerr << "[encoder] resize_vocab old=" << vocab_size << " new=" << new_vocab_size
+              << " dim=" << dim << " seed=" << seed << std::endl;
     const size_t old   = static_cast<size_t>(vocab_size);
     const size_t dim_t = static_cast<size_t>(dim);
     token_embeddings.resize(new_vocab_size * dim_t);
@@ -269,6 +273,7 @@ void ConditioningEncoder::setMagEmbedding(const std::vector<float> &v)
 
 std::vector<float> ConditioningEncoder::encode(const std::vector<int> &tokens, uint32_t /*seed*/) const
 {
+    std::cerr << "[encoder] encode tokens=" << tokens.size() << " dim=" << dim << std::endl;
     std::vector<float> out(static_cast<size_t>(dim), 0.0f);
     encodeInto(out, tokens);
     return out;
@@ -352,6 +357,8 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
 void ConditioningEncoder::trainOnTextTokens(const std::vector<int> &token_ids, const std::vector<float> &target, float lr)
 {
     if (token_ids.empty() || static_cast<int>(target.size()) != dim || lr == 0.0f) return;
+    std::cerr << "[encoder] train_text tokens=" << token_ids.size() << " dim=" << dim
+              << " lr=" << lr << std::endl;
     const size_t dim_t = static_cast<size_t>(dim);
     const float* MIMIR_RESTRICT tgt = target.data();
     for (int id : token_ids) {

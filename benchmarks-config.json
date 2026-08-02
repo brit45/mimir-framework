@@ -1,0 +1,100 @@
+{
+  "$schema": "./configs/conf.schema.json",
+  "description": "Lance les benchmarks Mimir dans l'ordre recommandé et dans des processus isolés.",
+
+  "_doc": {
+    "usage": "./bin/mimir --conf benchmarks-config.json [--run <suite>]",
+    "suites": {
+      "all": "Tous les benchmarks, du contrôle API au stress test (par défaut).",
+      "smoke": "Contrôles rapides de l'API, du spill mémoire et de NMS.",
+      "core": "Benchmarks spécialisés et globaux, sans stress test.",
+      "stress": "Stress test uniquement."
+    },
+    "ordre": [
+      "Contrôles API et mémoire",
+      "Micro-benchmarks NMS et attention",
+      "Entraînement convolutionnel",
+      "Benchmarks général, complet et officiel",
+      "Stress test en dernier"
+    ],
+    "isolation": "Chaque benchmark est lancé dans un processus Mimir distinct afin de réinitialiser le modèle, les runtimes et l'allocateur.",
+    "notes": [
+      "Les données utilisées sont synthétiques; aucun dataset n'est lu.",
+      "La suite complète peut consommer plusieurs gigaoctets de RAM.",
+      "MIMIR_BIN peut désigner un autre exécutable Mimir.",
+      "La section env est documentaire et n'exporte pas les variables."
+    ]
+  },
+
+  "env": {
+    "MIMIR_ACCEL_VERBOSE": 0,
+    "MIMIR_PLANNER_TRACE": 0,
+    "MIMIR_PLANNER_DUMP": 0,
+    "OMP_NUM_THREADS": 10
+  },
+
+  "visualization": {
+    "enabled": false
+  },
+
+  "logging": {
+    "show_htop_display": false,
+    "show_viz_display": false
+  },
+
+  "lua": {
+    "scripts": [
+      {
+        "script": "scripts/benchmarks/run_suite.lua",
+        "args": ["--suite", "all", "--keep-going"]
+      }
+    ]
+  },
+
+  "tasks": {
+    "all": {
+      "description": "Exécute tous les benchmarks dans l'ordre recommandé.",
+      "lua": {
+        "scripts": [
+          {
+            "script": "scripts/benchmarks/run_suite.lua",
+            "args": ["--suite", "all", "--keep-going"]
+          }
+        ]
+      }
+    },
+    "smoke": {
+      "description": "Exécute les contrôles rapides dans des processus isolés.",
+      "lua": {
+        "scripts": [
+          {
+            "script": "scripts/benchmarks/run_suite.lua",
+            "args": ["--suite", "smoke"]
+          }
+        ]
+      }
+    },
+    "core": {
+      "description": "Exécute les benchmarks principaux sans le stress test.",
+      "lua": {
+        "scripts": [
+          {
+            "script": "scripts/benchmarks/run_suite.lua",
+            "args": ["--suite", "core", "--keep-going"]
+          }
+        ]
+      }
+    },
+    "stress": {
+      "description": "Exécute uniquement le benchmark de stress.",
+      "lua": {
+        "scripts": [
+          {
+            "script": "scripts/benchmarks/run_suite.lua",
+            "args": ["--suite", "stress"]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -558,10 +558,10 @@ __kernel void unary_forward(
         case 3: y = tanh(x); break;                                    // Tanh
         case 4: { float s = 1.0f / (1.0f + exp(-x)); y = x * s; } break; // SiLU
         case 5: { float c = 0.7978845608f; float x3 = x*x*x; y = 0.5f * x * (1.0f + tanh(c * (x + 0.044715f * x3))); } break; // GELU
-        case 6: y = log(1.0f + exp(x)); break;                         // Softplus
-        case 7: { float sp = log(1.0f + exp(x)); y = x * tanh(sp); } break; // Mish
-        case 8: { float hs = x * 0.2f + 0.5f; y = clamp(hs, 0.0f, 1.0f); } break; // HardSigmoid
-        case 9: { float hs = clamp(x * 0.2f + 0.5f, 0.0f, 1.0f); y = x * hs; } break; // HardSwish
+        case 6: y = x > 20.0f ? x : log(1.0f + exp(x)); break;        // Softplus
+        case 7: { float sp = x > 20.0f ? x : log(1.0f + exp(x)); y = x * tanh(sp); } break; // Mish
+        case 8: { float hs = (x + 3.0f) / 6.0f; y = clamp(hs, 0.0f, 1.0f); } break; // HardSigmoid
+        case 9: { float hs = clamp((x + 3.0f) / 6.0f, 0.0f, 1.0f); y = x * hs; } break; // HardSwish
         default: break;
     }
     out[i] = y;

@@ -1,20 +1,12 @@
-# Framework Philosophy
-
-## Pour qui
-
-Toute personne qui veut comprendre l'ADN du projet en 30 secondes.
-
-## Objectif
+# Philosophie du framework
 
 Expliquer pourquoi Mímir prend ces choix techniques, sans entrer dans les détails d'implémentation.
 
-## Avant de commencer
+**Public concerné :** Toute personne qui veut comprendre l'ADN du projet en 30 secondes.
 
-Rien. Cette page est volontairement très courte.
-
-## Résultat attendu
-
-Tu sais pourquoi le projet existe tel qu'il est.
+> **Prérequis**
+>
+> Rien. Cette page est volontairement très courte.
 
 ## Diagrammes d'explication
 
@@ -34,3 +26,9 @@ Tu sais pourquoi le projet existe tel qu'il est.
 - Pourquoi un Planner ? Pour separer l'intention metier de l'execution effective.
 - Pourquoi un Runtime independant ? Pour pouvoir changer la couche d'execution sans casser le modele.
 - Pourquoi les architectures sont compilees ? Pour lier les graphs au code, eviter les surprises au runtime et garder des builds deterministes.
+
+## Étapes suivantes
+
+- Consultez l'[index de la documentation](00-INDEX.md).
+- Découvrez les [concepts essentiels](02-User-Guide/01-Core-Concepts.md).
+- Étudiez la [vue d'ensemble du moteur](04-Architecture-Internals/01-Engine-Overview.md).

@@ -6,7 +6,8 @@ Help.auto_exit_help()
 --  TEMPLATE SCRIPT - Mímir Framework v2.4.0
 --  Utilisez ce template pour créer vos propres modèles
 --  
---  📚 Synchronisé avec l'API Lua exposée par src/LuaScripting.cpp
+--  📚 Synchronisé avec l'API enregistrée dans
+--     src/scriptings/Lua/luaScripting/LuaScripting.cpp
 -- ══════════════════════════════════════════════════════════════
 
 ---@type string Tag de run (sert aux chemins de sauvegarde, logs, etc.)

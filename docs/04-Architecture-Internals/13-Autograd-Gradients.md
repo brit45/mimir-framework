@@ -1,20 +1,12 @@
-# Internals : Autograd + gradients + backward (C++)
-
-## Pour qui
-
-Développeur avancé qui modifie le moteur C/C++.
-
-## Objectif
+# Autograd, gradients et passe arrière
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
-## Avant de commencer
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Connaître les bases C++ et la structure du dépôt.
-
-## Résultat attendu
-
-Tu peux modifier le code interne en limitant les régressions.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
 
 Cette page documente le système de gradients et le backward pass dans Mímir.
@@ -24,9 +16,23 @@ L’objectif est pragmatique : expliquer ce qui est *vraiment* supporté, commen
 Source de vérité :
 
 - Déclarations : `src/Model.hpp` (API training/gradients/optimizer)
-- Backward runtime : `src/Model.cpp` (`Model::backwardPass`, `zeroGradients`, `getGradients`)
+- Backward principal : `src/Model.cpp` (`Model::backwardPass`, `zeroGradients`, `getGradients`)
+- Dispatch CPU partagé : `src/runtimes/cpu/RuntimeLayerDispatch.hpp`
 - Helpers autograd : `src/Autograd.hpp`
-- Layout poids & champs layer : `src/Layers.hpp` + `src/LayerOps.hpp`
+- Layout poids & champs layer : `src/Layers.hpp`
+- Primitives mathématiques : `src/runtimes/LayerOps.hpp`, `src/runtimes/cpu/LayerOps.hpp` et `src/runtimes/cpu/LayerOpsExt.hpp`
+
+## Sur cette page
+
+- [1) Vue rapide (Lua → C++)](#1-vue-rapide-lua-c)
+- [2) Deux notions à distinguer](#2-deux-notions-à-distinguer)
+- [3) “Forward state” : pourquoi il faut snapshot](#3-forward-state-pourquoi-il-faut-snapshot)
+- [4) Routing des gradients : gradstore (par nom)](#4-routing-des-gradients-gradstore-par-nom)
+- [5) Ce qui est supporté (exemples concrets)](#5-ce-qui-est-supporté-exemples-concrets)
+- [6) Invariants et garde-fous](#6-invariants-et-garde-fous)
+- [7) Autograd.hpp : ce que c’est (et ce que ce n’est pas)](#7-autogradhpp-ce-que-cest-et-ce-que-ce-nest-pas)
+- [8) Debug : comment vérifier que le backward “fait quelque chose”](#8-debug-comment-vérifier-que-le-backward-fait-quelque-chose)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## 1) Vue rapide (Lua → C++)
 
@@ -121,6 +127,40 @@ Accumulation = somme, avec vérification de taille.
 
 Une partie du backward attention est implémentée dans `Model.cpp` (fonction(s) locales). Les poids sont layoutés en blocs (`Wqkv`, `Wout`) et les gradients sont écrits dans `grad_weights`.
 
+### Réparamétrisation VAE
+
+`Reparameterize` utilise deux entrées, `mu` et `logvar`. En entraînement stochastique, le forward calcule :
+
+```text
+z = mu + exp(0.5 * clamp(logvar, -20, 20)) * epsilon
+```
+
+Le forward state conserve `z`. Le backward principal reconstruit ensuite :
+
+```text
+epsilon = (z - mu) / exp(0.5 * clamp(logvar, -20, 20))
+```
+
+puis calcule :
+
+```text
+grad_mu     = grad_z
+grad_logvar = grad_z * 0.5 * epsilon * exp(0.5 * logvar)
+```
+
+Le facteur de clamp vaut zéro hors de `[-20,20]`. Sans snapshot exploitable, le fallback déterministe propage uniquement `grad_mu`.
+
+### Paramètres sans entrée (`Constant`)
+
+Une `Constant` est fixe par défaut. Le champ `Layer::trainable_parameter` permet d’en faire explicitement un paramètre appris :
+
+- son output est son bloc de poids ;
+- elle n’a aucun gradient d’entrée ;
+- son gradient de poids est exactement le gradient amont ;
+- l’optimizer step la traite comme les autres blocs paramétrés.
+
+Cette distinction est utilisée par `vae_conv/z_prior_bias`. Elle évite de rendre apprenables toutes les constantes structurelles du graphe.
+
 ## 6) Invariants et garde-fous
 
 - Si `Model::freezeParameters(true)` :
@@ -142,8 +182,22 @@ Dans le runtime actuel :
 
 ## 8) Debug : comment vérifier que le backward “fait quelque chose”
 
-- Exécuter un script de test : `scripts/tests/test_gradients.lua` ou `scripts/tests/test_params.lua`.
+- Exécuter les tests numériques et de contrat :
+
+```bash
+ctest --test-dir build --output-on-failure \
+  -R 'AutogradTest.Numerical|ModelTest.VAEConvContract|RuntimeTest.Math'
+```
+
 - Vérifier :
   - `zeroGradients()` est appelé avant le step,
   - après backward, certains `grad_weights` ne sont pas tous zéro,
   - l’optimizer step change effectivement les poids.
+
+Pour VAEConv, `ModelTest.VAEConvContract` vérifie aussi qu’un gradient de reconstruction traverse le décodeur et atteint le prior appris.
+
+## Étapes suivantes
+
+- [Page précédente : Internals : stockage `tensor` + allocation dynamique (C++)](12-Tensor-Storage.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Internals : layers, `LayerType`, `LayerOps` et layouts de poids (C++)](14-Layers-And-Ops.md)

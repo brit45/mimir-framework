@@ -1,6 +1,7 @@
 #include "PonyXLDDPMModel.hpp"
 
 #include "Models/Registry/ModelArchitectures.hpp"
+#include "PromptParsing.hpp"
 #include "Serialization/Serialization.hpp"
 
 #include "Helpers.hpp"
@@ -62,14 +63,6 @@ static std::string strip_trailing_slashes(std::string s) {
     return s;
 }
 
-static inline std::string trim_ws(const std::string& s) {
-    size_t a = 0;
-    while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
-    size_t b = s.size();
-    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
-    return s.substr(a, b - a);
-}
-
 static inline bool starts_with(const std::string& s, const char* lit) {
     if (!lit) return false;
     const size_t n = std::char_traits<char>::length(lit);
@@ -77,381 +70,12 @@ static inline bool starts_with(const std::string& s, const char* lit) {
     return std::equal(s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n), lit);
 }
 
-static inline bool ends_with(const std::string& s, const char* lit) {
-    if (!lit) return false;
-    const size_t n = std::char_traits<char>::length(lit);
-    if (s.size() < n) return false;
-    return std::equal(s.end() - static_cast<std::ptrdiff_t>(n), s.end(), lit);
-}
-
-static inline std::string to_upper_ascii(std::string s) {
-    for (char& ch : s) {
-        const unsigned char c = static_cast<unsigned char>(ch);
-        if (c >= 'a' && c <= 'z') ch = static_cast<char>(c - ('a' - 'A'));
-    }
-    return s;
-}
-
-static inline void split_lines(const std::string& s, std::vector<std::string>& out) {
-    out.clear();
-    std::string cur;
-    cur.reserve(std::min<size_t>(s.size(), 256));
-    for (char ch : s) {
-        if (ch == '\r') continue;
-        if (ch == '\n') {
-            out.push_back(cur);
-            cur.clear();
-        } else {
-            cur.push_back(ch);
-        }
-    }
-    out.push_back(cur);
-}
-
-static inline std::string normalize_spaces(std::string s) {
-    // Convert any whitespace runs to a single space.
-    std::string out;
-    out.reserve(s.size());
-    bool prev_ws = false;
-    for (char ch : s) {
-        const unsigned char c = static_cast<unsigned char>(ch);
-        const bool ws = std::isspace(c) != 0;
-        if (ws) {
-            if (!prev_ws) out.push_back(' ');
-            prev_ws = true;
-        } else {
-            out.push_back(ch);
-            prev_ws = false;
-        }
-    }
-    return trim_ws(out);
-}
-
-static inline std::string normalize_tags_block(const std::string& s) {
-    // Split on common separators (incl. '.' used by some captioners), trim, and join with ", ".
-    std::string tmp;
-    tmp.reserve(s.size());
-    for (char ch : s) {
-        if (ch == '\r') continue;
-        const bool sep = (ch == '\n' || ch == ';' || ch == '.' || ch == '|' || ch == '\t');
-        if (sep) tmp.push_back(',');
-        else tmp.push_back(ch);
-    }
-
-    std::vector<std::string> parts;
-    std::string cur;
-    for (char ch : tmp) {
-        if (ch == ',') {
-            const std::string t = trim_ws(cur);
-            if (!t.empty()) parts.push_back(t);
-            cur.clear();
-        } else {
-            cur.push_back(ch);
-        }
-    }
-    {
-        const std::string t = trim_ws(cur);
-        if (!t.empty()) parts.push_back(t);
-    }
-
-    std::string out;
-    for (size_t i = 0; i < parts.size(); ++i) {
-        if (i) out += ", ";
-        out += parts[i];
-    }
-    return out;
-}
-
-// ---------------------------------------------------------------------------
-// Captions key/value: caption/theme/keywords/tokens
-// ---------------------------------------------------------------------------
-
-struct KvCaption {
-    bool has_any = false;
-    std::string caption;
-    std::string theme;
-    std::string keywords;
-    std::string tokens;
-};
-
 static inline std::string to_lower_ascii(std::string s) {
     for (char& ch : s) {
         const unsigned char c = static_cast<unsigned char>(ch);
         if (c >= 'A' && c <= 'Z') ch = static_cast<char>(c + ('a' - 'A'));
     }
     return s;
-}
-
-static inline bool parse_kv_line(const std::string& line_in, std::string& out_key_lc, std::string& out_value) {
-    // Format: key: value
-    const std::string line = trim_ws(line_in);
-    if (line.empty()) return false;
-    const size_t colon = line.find(':');
-    if (colon == std::string::npos) return false;
-    if (colon == 0) return false;
-
-    std::string key = trim_ws(line.substr(0, colon));
-    std::string val = trim_ws(line.substr(colon + 1));
-    if (key.empty()) return false;
-    out_key_lc = to_lower_ascii(key);
-    out_value = val;
-    return true;
-}
-
-static inline std::string normalize_kv_list_as_spaces(const std::string& s) {
-    // Convert separators (comma/semicolon/newlines/tabs) to spaces and normalize.
-    std::string tmp;
-    tmp.reserve(s.size());
-    for (char ch : s) {
-        if (ch == '\r') continue;
-        if (ch == ',' || ch == ';' || ch == '\n' || ch == '\t') tmp.push_back(' ');
-        else tmp.push_back(ch);
-    }
-    return normalize_spaces(tmp);
-}
-
-static inline KvCaption parse_kv_caption(const std::string& caption) {
-    KvCaption out;
-    std::vector<std::string> lines;
-    split_lines(caption, lines);
-    for (const std::string& raw : lines) {
-        std::string k, v;
-        if (!parse_kv_line(raw, k, v)) continue;
-        if (k == "caption") {
-            out.caption = v;
-            out.has_any = true;
-        } else if (k == "theme") {
-            out.theme = v;
-            out.has_any = true;
-        } else if (k == "keywords") {
-            out.keywords = v;
-            out.has_any = true;
-        } else if (k == "tokens") {
-            out.tokens = v;
-            out.has_any = true;
-        }
-    }
-
-    // Normalize lists.
-    out.keywords = normalize_kv_list_as_spaces(out.keywords);
-    out.tokens = normalize_kv_list_as_spaces(out.tokens);
-    out.caption = normalize_spaces(out.caption);
-    out.theme = normalize_spaces(out.theme);
-    return out;
-}
-
-static inline std::string compose_kv_caption_prompt(const KvCaption& kv) {
-    // Compact form aimed at conditioning (no explicit "caption:" labels).
-    std::string out;
-    auto add_part = [&](const std::string& p) {
-        if (p.empty()) return;
-        if (!out.empty()) out += " | ";
-        out += p;
-    };
-    add_part(kv.caption);
-    add_part(kv.theme);
-    add_part(kv.keywords);
-    add_part(kv.tokens);
-    return normalize_spaces(out);
-}
-
-static inline std::vector<std::string> split_terms_simple(const std::string& s) {
-    // Split on common separators + whitespace. Intended for `tokens:`/`keywords:`.
-    std::vector<std::string> out;
-    std::string cur;
-    cur.reserve(32);
-    auto flush = [&]() {
-        std::string t = trim_ws(cur);
-        if (!t.empty()) out.push_back(t);
-        cur.clear();
-    };
-    for (char ch : s) {
-        if (ch == '\r') continue;
-        const unsigned char c = static_cast<unsigned char>(ch);
-        const bool sep = (ch == ',' || ch == ';' || ch == '\n' || ch == '\t' || std::isspace(c));
-        if (sep) {
-            flush();
-        } else {
-            cur.push_back(ch);
-        }
-    }
-    flush();
-    return out;
-}
-
-struct StructuredCaption {
-    bool has_any_header = false;
-    std::string tags;
-    std::string contexte;
-    std::string mentalite;
-    std::string texte;
-    // Unknown sections in order of appearance.
-    std::vector<std::pair<std::string, std::string>> extras;
-};
-
-static inline bool parse_section_header(const std::string& line_in, std::string& out_name_upper) {
-    // Format: --- NAME --- (NAME may include parentheses)
-    std::string line = trim_ws(line_in);
-    if (!starts_with(line, "---")) return false;
-    if (!ends_with(line, "---")) return false;
-    if (line.size() < 6) return false;
-
-    // Remove leading/trailing '---'
-    std::string inner = line.substr(3, line.size() - 6);
-    inner = trim_ws(inner);
-    if (inner.empty()) return false;
-
-    // Cut at '(' to accept "TEXTE (langue ...)".
-    const size_t paren = inner.find('(');
-    if (paren != std::string::npos) {
-        inner = trim_ws(inner.substr(0, paren));
-    }
-    if (inner.empty()) return false;
-    out_name_upper = to_upper_ascii(inner);
-    return true;
-}
-
-static inline StructuredCaption parse_structured_caption(const std::string& caption) {
-    StructuredCaption out;
-    std::vector<std::string> lines;
-    split_lines(caption, lines);
-
-    enum class Sec { None, Tags, Contexte, Mentalite, Texte, Extra };
-    Sec cur = Sec::None;
-    int extra_idx = -1;
-
-    for (const std::string& raw_line : lines) {
-        std::string name;
-        if (parse_section_header(raw_line, name)) {
-            out.has_any_header = true;
-
-            // Map header to known sections.
-            if (starts_with(name, "TAGS") || starts_with(name, "TAG")) {
-                cur = Sec::Tags;
-                extra_idx = -1;
-            } else if (starts_with(name, "CONTEXTE") || starts_with(name, "CONTEXT")) {
-                cur = Sec::Contexte;
-                extra_idx = -1;
-            } else if (starts_with(name, "MENTALIT")) {
-                cur = Sec::Mentalite;
-                extra_idx = -1;
-            } else if (starts_with(name, "TEXTE") || starts_with(name, "TEXT") || starts_with(name, "DESCRIPTION") || starts_with(name, "DESC")) {
-                cur = Sec::Texte;
-                extra_idx = -1;
-            } else {
-                cur = Sec::Extra;
-                extra_idx = static_cast<int>(out.extras.size());
-                out.extras.emplace_back(name, std::string());
-            }
-            continue;
-        }
-
-        // Content line.
-        const std::string line = raw_line;
-        auto append_line = [&](std::string& dst) {
-            dst.append(line);
-            dst.push_back('\n');
-        };
-
-        switch (cur) {
-            case Sec::Tags: append_line(out.tags); break;
-            case Sec::Contexte: append_line(out.contexte); break;
-            case Sec::Mentalite: append_line(out.mentalite); break;
-            case Sec::Texte: append_line(out.texte); break;
-            case Sec::Extra:
-                if (extra_idx >= 0 && extra_idx < static_cast<int>(out.extras.size())) {
-                    out.extras[static_cast<size_t>(extra_idx)].second.append(line);
-                    out.extras[static_cast<size_t>(extra_idx)].second.push_back('\n');
-                } else {
-                    append_line(out.contexte);
-                }
-                break;
-            case Sec::None:
-            default:
-                // If no header yet, treat as contexte.
-                append_line(out.contexte);
-                break;
-        }
-    }
-
-    // Normalize blocks.
-    out.tags = normalize_tags_block(out.tags);
-    out.contexte = normalize_spaces(out.contexte);
-    out.mentalite = normalize_spaces(out.mentalite);
-
-    // "Texte": keep some structure but avoid hard newlines.
-    {
-        std::string t;
-        t.reserve(out.texte.size());
-        for (char ch : out.texte) {
-            if (ch == '\r') continue;
-            if (ch == '\n') t.append(" / ");
-            else t.push_back(ch);
-        }
-        out.texte = normalize_spaces(t);
-    }
-
-    for (auto& kv : out.extras) {
-        kv.second = normalize_spaces(kv.second);
-    }
-    return out;
-}
-
-static inline std::string compose_structured_caption(const StructuredCaption& c, bool canonicalize) {
-    if (!c.has_any_header) {
-        // Not structured -> nothing to compose.
-        return std::string();
-    }
-
-    auto add_line = [](std::string& out, const std::string& k, const std::string& v) {
-        if (v.empty()) return;
-        if (!out.empty()) out.push_back('\n');
-        out += k;
-        out += ": ";
-        out += v;
-    };
-
-    if (canonicalize) {
-        std::string out;
-        add_line(out, "TAGS", c.tags);
-        add_line(out, "CONTEXTE", c.contexte);
-        add_line(out, "MENTALITE", c.mentalite);
-        add_line(out, "TEXTE", c.texte);
-        for (const auto& kv : c.extras) {
-            if (kv.first.empty() || kv.second.empty()) continue;
-            add_line(out, kv.first, kv.second);
-        }
-        return out;
-    }
-
-    // Raw-ish: keep explicit header blocks.
-    auto add_block = [](std::string& out, const std::string& header, const std::string& body) {
-        if (body.empty()) return;
-        if (!out.empty()) out.push_back('\n');
-        out += "--- ";
-        out += header;
-        out += " ---\n";
-        out += body;
-    };
-
-    std::string out;
-    add_block(out, "TAGS", c.tags);
-    add_block(out, "CONTEXTE", c.contexte);
-    add_block(out, "MENTALITE", c.mentalite);
-    add_block(out, "TEXTE", c.texte);
-    for (const auto& kv : c.extras) {
-        if (kv.first.empty() || kv.second.empty()) continue;
-        add_block(out, kv.first, kv.second);
-    }
-    return out;
-}
-
-static inline void apply_structured_dropout(StructuredCaption& c, std::mt19937& rng, float p_tags, float p_ctx, float p_ment, float p_txt) {
-    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-    if (p_tags > 0.0f && u01(rng) < p_tags) c.tags.clear();
-    if (p_ctx > 0.0f && u01(rng) < p_ctx) c.contexte.clear();
-    if (p_ment > 0.0f && u01(rng) < p_ment) c.mentalite.clear();
-    if (p_txt > 0.0f && u01(rng) < p_txt) c.texte.clear();
 }
 
 static std::string resolve_checkpoint_dir_for_loading(const std::string& ckpt_path_in) {
@@ -956,17 +580,42 @@ static fs::path resolve_latest_epoch_dir(const fs::path& base) {
     try {
         if (!fs::exists(base) || !fs::is_directory(base)) return base;
         int best_epoch = -1;
+        bool best_is_final = false;
         fs::path best;
         for (const auto& it : fs::directory_iterator(base)) {
             if (!it.is_directory()) continue;
             const auto name = it.path().filename().string();
             if (name.rfind("epoch_", 0) != 0) continue;
-            const auto num = name.substr(std::string("epoch_").size());
+            const auto tail = name.substr(std::string("epoch_").size());
             int e = -1;
-            try { e = std::stoi(num); } catch (...) { e = -1; }
+            try {
+                size_t n_digits = 0;
+                while (n_digits < tail.size() && std::isdigit(static_cast<unsigned char>(tail[n_digits])) != 0) {
+                    ++n_digits;
+                }
+                if (n_digits == 0) {
+                    e = -1;
+                } else {
+                    e = std::stoi(tail.substr(0, n_digits));
+                }
+            } catch (...) { e = -1; }
+            if (e < 0) continue;
+
+            const std::string lname = to_lower_ascii(name);
+            const bool is_final = (lname.find("stop") != std::string::npos) ||
+                                  (lname.find("final") != std::string::npos);
+
             if (e > best_epoch) {
                 best_epoch = e;
                 best = it.path();
+                best_is_final = is_final;
+            } else if (e == best_epoch) {
+                // Prefer explicit final/stop folders, then lexicographically latest name.
+                if ((!best_is_final && is_final) ||
+                    (best_is_final == is_final && name > best.filename().string())) {
+                    best = it.path();
+                    best_is_final = is_final;
+                }
             }
         }
         if (best_epoch >= 0) return best;
@@ -1029,6 +678,10 @@ static void apply_vae_autodims_from_arch(PonyXLDDPMModel::Config& cfg, const nlo
     lc = jgeti(mc, "latent_c");
     base_channels = jgeti(mc, "base_channels");
 
+    // Fallback top-level dimensions for older architecture dumps.
+    if (img_w <= 0) img_w = jgeti(&arch, "image_width");
+    if (img_h <= 0) img_h = jgeti(&arch, "image_height");
+
     // Fallback: some dumps store partial information in layers.
     if (lc <= 0 && arch.contains("layers") && arch["layers"].is_array()) {
         try {
@@ -1037,6 +690,12 @@ static void apply_vae_autodims_from_arch(PonyXLDDPMModel::Config& cfg, const nlo
                 if (L.contains("name") && L["name"].is_string() && L["name"].get<std::string>() == "vae_conv/enc/mu") {
                     if (L.contains("out_channels")) {
                         lc = L["out_channels"].get<int>();
+                    }
+                    if (lh <= 0 && L.contains("input_height")) {
+                        lh = L["input_height"].get<int>();
+                    }
+                    if (lw <= 0 && L.contains("input_width")) {
+                        lw = L["input_width"].get<int>();
                     }
                 }
                 if (base_channels <= 0 && L.contains("name") && L["name"].is_string() && L["name"].get<std::string>() == "vae_conv/enc/conv_in") {
@@ -1082,6 +741,107 @@ static void apply_vae_autodims_from_arch(PonyXLDDPMModel::Config& cfg, const nlo
         cfg.vae_base_channels = base_channels;
     }
 }
+
+static nlohmann::json extract_vae_model_cfg_from_arch(const nlohmann::json& arch) {
+    nlohmann::json out;
+    const nlohmann::json* mc = nullptr;
+    if (arch.contains("model_config") && arch["model_config"].is_object()) mc = &arch["model_config"];
+    if (!mc && arch.contains("modelConfig") && arch["modelConfig"].is_object()) mc = &arch["modelConfig"];
+    if (mc && !mc->empty()) out = *mc;
+
+    auto set_if_missing = [&](const char* k, const nlohmann::json& v) {
+        if (!out.contains(k)) out[k] = v;
+    };
+
+    auto get_int = [](const nlohmann::json& j, const char* k, int fallback = 0) -> int {
+        try {
+            if (j.contains(k) && j[k].is_number_integer()) return j[k].get<int>();
+        } catch (...) {
+        }
+        return fallback;
+    };
+
+    if (get_int(out, "image_w") <= 0 && arch.contains("image_width") && arch["image_width"].is_number_integer()) {
+        set_if_missing("image_w", arch["image_width"]);
+    }
+    if (get_int(out, "image_h") <= 0 && arch.contains("image_height") && arch["image_height"].is_number_integer()) {
+        set_if_missing("image_h", arch["image_height"]);
+    }
+    if (get_int(out, "image_c") <= 0) {
+        // VAE image space is RGB in this project.
+        set_if_missing("image_c", 3);
+    }
+
+    bool found_skip = false;
+    bool found_prior = false;
+    bool found_resnet = false;
+    bool found_attn = false;
+    bool found_dec_deconv = false;
+    bool found_dec_nearest = false;
+
+    int latent_h = get_int(out, "latent_h");
+    int latent_w = get_int(out, "latent_w");
+    int latent_c = get_int(out, "latent_c");
+    int base_channels = get_int(out, "base_channels");
+
+    if (arch.contains("layers") && arch["layers"].is_array()) {
+        for (const auto& L : arch["layers"]) {
+            if (!L.is_object()) continue;
+            std::string name;
+            std::string type;
+            try {
+                if (L.contains("name") && L["name"].is_string()) name = L["name"].get<std::string>();
+                if (L.contains("type") && L["type"].is_string()) type = L["type"].get<std::string>();
+            } catch (...) {
+            }
+
+            const std::string lname = to_lower_ascii(name);
+            if (lname.find("/skip_cat") != std::string::npos || lname.find("/skip_proj") != std::string::npos) found_skip = true;
+            if (lname.find("z_prior") != std::string::npos || lname.find("z_biased") != std::string::npos) found_prior = true;
+            if (lname.find("/res") != std::string::npos) found_resnet = true;
+            if (lname.find("/attn") != std::string::npos) found_attn = true;
+            if (lname.find("vae_conv/dec/up") != std::string::npos) {
+                if (type == "ConvTranspose2d") found_dec_deconv = true;
+                if (type == "UpsampleNearest") found_dec_nearest = true;
+            }
+
+            if (name == "vae_conv/enc/mu") {
+                try {
+                    if (latent_c <= 0 && L.contains("out_channels") && L["out_channels"].is_number_integer()) latent_c = L["out_channels"].get<int>();
+                    if (latent_h <= 0 && L.contains("input_height") && L["input_height"].is_number_integer()) latent_h = L["input_height"].get<int>();
+                    if (latent_w <= 0 && L.contains("input_width") && L["input_width"].is_number_integer()) latent_w = L["input_width"].get<int>();
+                } catch (...) {
+                }
+            } else if (name == "vae_conv/enc/conv_in") {
+                try {
+                    if (base_channels <= 0 && L.contains("out_channels") && L["out_channels"].is_number_integer()) base_channels = L["out_channels"].get<int>();
+                } catch (...) {
+                }
+            }
+        }
+    }
+
+    if (latent_h > 0) set_if_missing("latent_h", latent_h);
+    if (latent_w > 0) set_if_missing("latent_w", latent_w);
+    if (latent_c > 0) set_if_missing("latent_c", latent_c);
+    if (base_channels > 0) set_if_missing("base_channels", base_channels);
+
+    set_if_missing("use_skip_connections", found_skip);
+    set_if_missing("use_encoder_prior", found_prior);
+    set_if_missing("use_attention", found_resnet);
+    set_if_missing("use_attn", found_attn);
+
+    if (found_dec_deconv) {
+        set_if_missing("decoder_upsample", "conv_transpose");
+    } else if (found_dec_nearest) {
+        set_if_missing("decoder_upsample", "nearest_conv");
+    }
+
+    // PonyXL side always forces deterministic encode path anyway,
+    // but keep explicit value if missing for consistency.
+    set_if_missing("stochastic_latent", false);
+    return out;
+}
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +863,18 @@ static nlohmann::json make_vae_base_cfg(const std::string& arch_name,
     // uppercase ("F32", "F16"…) non reconnu par parse_dtype/setDefaultDType.
     // On le retire ici : la dtype est gérée par apply_dtype côté Lua, pas par ce chemin.
     cfg.erase("dtype");
+
+    // PonyXL latent diffusion s'appuie sur VAEConv comme backbone latent externe.
+    // On force les flags VAE modernes pour homogénéiser encode/decode avec les checkpoints
+    // récents (skip connections + prior latent), sans dépendre d'un dump incomplet.
+    const bool is_vae_family = (arch_name == "vae_conv" || arch_name == "vae_conv_decode");
+    if (is_vae_family) {
+        cfg["use_skip_connections"] = true;
+        cfg["use_encoder_prior"] = true;
+        if (!cfg.contains("decoder_upsample") || !cfg["decoder_upsample"].is_string()) {
+            cfg["decoder_upsample"] = "conv_transpose";
+        }
+    }
     return cfg;
 }
 
@@ -1110,6 +882,58 @@ PonyXLDDPMModel::PonyXLDDPMModel() {
     setModelName("PonyXLSDXL");
     // SDXL-like: l'encoder est dans le graphe (tok_emb + blocks), pas l'ConditioningEncoder externe.
     setHasEncoder(true);
+}
+
+bool PonyXLDDPMModel::InitVizTips() {
+    clearVizTipsRegistry();
+    clearVizTaps();
+
+    registerVizTip("ponyxl/raw_in", "Dataset/raw");
+    registerVizTip("ponyxl/timestep", "Diffusion/timestep");
+    registerVizTip("ponyxl/noise", "Diffusion/noise");
+    registerVizTip("ponyxl/text/tok_emb", "Text/tok_emb");
+    registerVizTip("ponyxl/text/pool", "Text/pool");
+    registerVizTip("ponyxl/out", "Output/eps_pred");
+
+    return true;
+}
+
+bool PonyXLDDPMModel::UpdateVizTips(const Layer& layer, VizFrame& frame) {
+    if (Model::UpdateVizTips(layer, frame)) return true;
+    if (layer.name.empty()) return false;
+
+    auto attach_tip = [&](const std::string& tip) {
+        if (tip.empty()) return false;
+        frame.label = tip + "|" + frame.label;
+        return true;
+    };
+
+    const std::string& n = layer.name;
+    if (n.find("/unet/down") != std::string::npos) {
+        if (n.find("attn") != std::string::npos) return attach_tip("UNet/down/attn");
+        if (n.find("res") != std::string::npos) return attach_tip("UNet/down/res");
+        return attach_tip("UNet/down");
+    }
+    if (n.find("/unet/up") != std::string::npos) {
+        if (n.find("attn") != std::string::npos) return attach_tip("UNet/up/attn");
+        if (n.find("res") != std::string::npos) return attach_tip("UNet/up/res");
+        return attach_tip("UNet/up");
+    }
+    if (n.find("/unet/mid") != std::string::npos) {
+        if (n.find("attn") != std::string::npos) return attach_tip("UNet/mid/attn");
+        return attach_tip("UNet/mid");
+    }
+    if (n.find("/text/") != std::string::npos) {
+        if (n.find("tok_emb") != std::string::npos) return attach_tip("Text/tok_emb");
+        if (n.find("pool") != std::string::npos) return attach_tip("Text/pool");
+        if (n.find("attn") != std::string::npos) return attach_tip("Text/attn");
+        return attach_tip("Text/encoder");
+    }
+    if (n.find("attn") != std::string::npos) return attach_tip("Attention");
+    if (n.find("reparam") != std::string::npos) return attach_tip("Latent/reparam");
+    if (n.find("vae") != std::string::npos) return attach_tip("VAE/path");
+
+    return false;
 }
 
 void PonyXLDDPMModel::setLiveKL(float kl_beta, int kl_warmup_steps) {
@@ -1139,6 +963,23 @@ static std::string normalize_output_activation(std::string s) {
     if (s == "tanh") return "tanh";
     if (s == "linear") return "linear";
     return s;
+}
+
+static std::string normalize_text_norm(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (s.empty()) return "layernorm";
+    if (s == "ln") return "layernorm";
+    if (s == "rms" || s == "rms_norm") return "rmsnorm";
+    if (s == "layernorm" || s == "rmsnorm") return s;
+    return "layernorm";
+}
+
+static std::string normalize_unet_upsample(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (s.empty()) return "nearest";
+    if (s == "nearest_conv" || s == "nearest") return "nearest";
+    if (s == "convtranspose" || s == "deconv" || s == "conv_transpose") return "conv_transpose";
+    return "nearest";
 }
 } // namespace
 
@@ -1174,6 +1015,9 @@ void PonyXLDDPMModel::buildFromConfig(const Config& cfg) {
         cfg_.output_activation = "linear";
     }
 
+    cfg_.text_norm = normalize_text_norm(cfg_.text_norm);
+    cfg_.unet_upsample = normalize_unet_upsample(cfg_.unet_upsample);
+
     // Auto-align dims from VAE checkpoint when available (RawFolder architecture.json).
     // This keeps PonyXL perfectly compatible with the VAEConv checkpoint without modifying the VAE.
     const std::string vae_ckpt_resolved = resolve_checkpoint_dir_for_loading(cfg_.vae_checkpoint);
@@ -1181,14 +1025,11 @@ void PonyXLDDPMModel::buildFromConfig(const Config& cfg) {
         nlohmann::json arch;
         if (load_vae_architecture_json(vae_ckpt_resolved, &arch)) {
             apply_vae_autodims_from_arch(cfg_, arch);
-            // Stocker le model_config complet du VAE pour les lazy-loads : garantit que
-            // use_attention, use_skip_connections, use_encoder_prior, decoder_upsample,
-            // resnet_max_tokens, etc. correspondent exactement au checkpoint pré-entraîné.
-            const nlohmann::json* mc = nullptr;
-            if (arch.contains("model_config") && arch["model_config"].is_object()) mc = &arch["model_config"];
-            if (!mc && arch.contains("modelConfig") && arch["modelConfig"].is_object()) mc = &arch["modelConfig"];
-            if (mc && !mc->empty()) {
-                vae_ckpt_cfg_ = *mc;
+            // Stocker une config VAE complète pour les lazy-loads : si model_config est absent
+            // (anciens dumps), on infère les flags architecturaux depuis les layers.
+            const nlohmann::json inferred_cfg = extract_vae_model_cfg_from_arch(arch);
+            if (inferred_cfg.is_object() && !inferred_cfg.empty()) {
+                vae_ckpt_cfg_ = inferred_cfg;
             }
         }
     }
@@ -1414,11 +1255,11 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
 
     // Support format key/value (caption/theme/keywords/tokens) si activé.
     // On l'applique tôt pour pouvoir compter les termes fréquents sans pré-charger le dataset.
-    KvCaption kv;
+    PromptParsing::KvCaption kv;
     if (cfg_.caption_kv_enable) {
-        kv = parse_kv_caption(used_prompt);
+        kv = PromptParsing::parseKvCaption(used_prompt);
         if (kv.has_any) {
-            used_prompt = compose_kv_caption_prompt(kv);
+            used_prompt = PromptParsing::composeKvCaptionPrompt(kv);
             if (cfg_.max_text_chars > 0 && used_prompt.size() > static_cast<size_t>(cfg_.max_text_chars)) {
                 used_prompt = truncate_utf8_safe(used_prompt, static_cast<size_t>(cfg_.max_text_chars));
             }
@@ -1426,9 +1267,9 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
     }
 
     if (cfg_.caption_structured_enable) {
-        StructuredCaption cap = parse_structured_caption(used_prompt);
+        PromptParsing::StructuredPrompt cap = PromptParsing::parseStructuredPrompt(used_prompt);
         if (cap.has_any_header) {
-            apply_structured_dropout(
+            PromptParsing::applyStructuredDropout(
                 cap,
                 rng_,
                 std::clamp(cfg_.caption_tags_dropout_prob, 0.0f, 1.0f),
@@ -1437,7 +1278,7 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
                 std::clamp(cfg_.caption_texte_dropout_prob, 0.0f, 1.0f)
             );
 
-            const std::string composed = compose_structured_caption(cap, cfg_.caption_structured_canonicalize);
+            const std::string composed = PromptParsing::composeStructuredPrompt(cap, cfg_.caption_structured_canonicalize);
             if (!composed.empty()) {
                 used_prompt = composed;
                 if (cfg_.max_text_chars > 0 && used_prompt.size() > static_cast<size_t>(cfg_.max_text_chars)) {
@@ -1454,11 +1295,11 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
         std::vector<std::string> terms;
         if (kv.has_any) {
             if (cfg_.term_freq_boost_use_tokens && !kv.tokens.empty()) {
-                const auto t = split_terms_simple(kv.tokens);
+                const auto t = PromptParsing::splitTerms(kv.tokens);
                 terms.insert(terms.end(), t.begin(), t.end());
             }
             if (cfg_.term_freq_boost_use_keywords && !kv.keywords.empty()) {
-                const auto t = split_terms_simple(kv.keywords);
+                const auto t = PromptParsing::splitTerms(kv.keywords);
                 terms.insert(terms.end(), t.begin(), t.end());
             }
         }
@@ -1792,6 +1633,26 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
         // Never break diffusion training on auxiliary conditioning updates.
     }
 
+    // Conditioning inputs consumed by PonyXL graph:
+    // - mag: image embedding
+    // - mod: text embedding (trained toward image correspondence)
+    std::vector<float> cond_mag(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    std::vector<float> cond_mod(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    try {
+        auto& enc = getMutableEncoder();
+        enc.ensureDim(std::max(1, cfg_.d_model));
+        cond_mag = imageToEmbedding(rgb, W, H, enc.dim);
+        cond_mod = enc.encode(text_ids);
+        if (cond_mag.size() != static_cast<size_t>(enc.dim)) {
+            cond_mag.assign(static_cast<size_t>(enc.dim), 0.0f);
+        }
+        if (cond_mod.size() != static_cast<size_t>(enc.dim)) {
+            cond_mod.assign(static_cast<size_t>(enc.dim), 0.0f);
+        }
+    } catch (...) {
+        // Best-effort only.
+    }
+
     // Keep generic taps enabled during the main forward/backward so the Viz
     // Blocks/Layers panel shows the actual PonyXL blocks like VAE_conv does.
     // Preview-only helper forwards below still disable taps temporarily to avoid
@@ -1907,6 +1768,8 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
         std::unordered_map<std::string, std::vector<float>> fin;
         std::unordered_map<std::string, std::vector<int>> iin;
         fin.emplace("latent", std::move(x_t));
+        fin.emplace("mag", cond_mag);
+        fin.emplace("mod", cond_mod);
         iin.emplace("text_ids", text_ids);
         if (cfg_.sdxl_time_cond) {
             fin.emplace("timestep", std::vector<float>{compute_time_cond_value(cfg_, t_norm, alpha_bar)});
@@ -2008,6 +1871,8 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
                         lopts.validate_checksums = false;
                         std::string err;
                         if (Mimir::Serialization::load_checkpoint(*mdec, vae_ckpt, lopts, &err)) {
+                            // PonyXL training uses VAEConv as a frozen backbone.
+                            mdec->freezeParameters(true);
                             vae_decode_ = std::move(mdec);
                         }
                     }
@@ -2056,11 +1921,12 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
                             for (float& g : g_img) g *= gscale;
                         }
 
-                        const bool was_frozen = vae_decode_->parametersFrozen();
-                        if (was_frozen) vae_decode_->freezeParameters(false);
+                        // Keep VAEConv frozen in PonyXL: never unfreeze decoder weights.
+                        if (!vae_decode_->parametersFrozen()) {
+                            vae_decode_->freezeParameters(true);
+                        }
                         vae_decode_->zeroGradients();
                         vae_decode_->backwardPass(g_img);
-                        if (was_frozen) vae_decode_->freezeParameters(true);
 
                         if (vae_decode_->hasLastInputGradient()) {
                             const std::vector<float>& g_hat_chw = vae_decode_->getLastInputGradient();
@@ -2217,10 +2083,67 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
             if (!vf.pixels.empty()) addVizTapFrame(std::move(vf));
         };
 
+        // Tips complémentaires (namespace dédié) pour faciliter le diagnostic Viz,
+        // sans modifier les tips historiques existants.
+        auto add_tip_scalar = [&](const std::string& name, double value, double scale = 1.0) {
+            Model::VizFrame vf;
+            vf.w = 1;
+            vf.h = 1;
+            vf.channels = 1;
+
+            double t01 = 0.0;
+            if (std::isfinite(value)) {
+                const double s = (scale > 0.0) ? scale : 1.0;
+                t01 = std::tanh(std::abs(value) / s);
+            }
+            const int p = static_cast<int>(std::lround(std::clamp(t01, 0.0, 1.0) * 255.0));
+            vf.pixels = { static_cast<uint8_t>(std::clamp(p, 0, 255)) };
+
+            std::ostringstream ss;
+            ss.setf(std::ios::scientific);
+            ss << std::setprecision(6) << value;
+            vf.label = "ponyxl_sdxl/viz/tips/" + name + " | value=" + ss.str();
+            addVizTapFrame(std::move(vf));
+        };
+
+        auto add_tip_marker = [&](const std::string& name, const std::string& info) {
+            Model::VizFrame vf;
+            vf.w = 1;
+            vf.h = 1;
+            vf.channels = 1;
+            vf.pixels = { 200 };
+            vf.label = "ponyxl_sdxl/viz/tips/" + name + " | " + info;
+            addVizTapFrame(std::move(vf));
+        };
+
+        auto tip_rms = [&](const std::vector<float>& v) -> double {
+            if (v.empty()) return 0.0;
+            double ss = 0.0;
+            size_t n = 0;
+            for (float x : v) {
+                if (!std::isfinite(x)) continue;
+                ss += static_cast<double>(x) * static_cast<double>(x);
+                ++n;
+            }
+            if (n == 0) return 0.0;
+            return std::sqrt(ss / static_cast<double>(n));
+        };
+
         // Latent previews
+        add_img_frame("ponyxl_sdxl/viz/image/input_rgb", img_f);
+        add_latent_frame("ponyxl_sdxl/viz/latent/x0", viz_x0);
         add_latent_frame("ponyxl_sdxl/viz/latent/x0_mu", viz_x0);
         add_latent_frame("ponyxl_sdxl/viz/latent/x_t_noised", viz_x_t);
         add_latent_frame("ponyxl_sdxl/viz/latent/eps_true", viz_eps);
+
+        add_tip_marker(
+            "meta/latent_shape",
+            "h=" + std::to_string(lat_h) + " w=" + std::to_string(lat_w) + " c=" + std::to_string(latent_in_dim)
+        );
+        add_tip_marker(
+            "meta/vae_bridge",
+            "enc=vae_conv/mu dec=vae_conv_decode/raw_z"
+        );
 
         // Stats taps (useful when the preview looks uniform)
         add_stats_frame("eps_true_stats", viz_eps);
@@ -2233,6 +2156,7 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
             {
                 add_latent_frame("ponyxl_sdxl/viz/latent/eps_pred", eps_pred);
             }
+            add_tip_scalar("train/eps_pred_rms", tip_rms(eps_pred), 1.0);
             // x0_hat (denoised reconstruction in latent space)
             std::vector<float> x0_hat(static_cast<size_t>(latent_raw_dim), 0.0f);
             for (int i = 0; i < latent_raw_dim; ++i) {
@@ -2249,6 +2173,7 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
                     r[static_cast<size_t>(i)] = x0_hat[static_cast<size_t>(i)] - viz_x0[static_cast<size_t>(i)];
                 }
                 add_latent_frame("ponyxl_sdxl/viz/latent/residual_x0", r);
+                add_tip_scalar("train/residual_x0_rms", tip_rms(r), 1.0);
             }
 
             // Image-space recon previews via VAE decoder (best-effort)
@@ -2301,6 +2226,12 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
                     add_img_frame("ponyxl_sdxl/viz/image/recon_mu", img_mu);
                     add_img_frame("ponyxl_sdxl/viz/image/recon_denoised", img_hat);
 
+                    std::vector<float> xt_chw_one;
+                    if (latent_tokens_hwc_to_chw_scaled(xt_chw_one, viz_x_t.data(), lat_h, lat_w, latent_in_dim, inv_scale)) {
+                        const std::vector<float> img_xt = vae_decode_->forwardPass(xt_chw_one, false);
+                        add_img_frame("ponyxl_sdxl/viz/image/diffusion_step/x_t_noised", img_xt);
+                    }
+
                     // Optional: DDPM sequence preview (multiple timesteps), throttled.
                     const int every = std::max(0, cfg_.viz_ddpm_every_steps);
                     const int nsteps = std::clamp(cfg_.viz_ddpm_num_steps, 1, 12);
@@ -2329,6 +2260,8 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
                             std::unordered_map<std::string, std::vector<float>> fin_seq;
                             std::unordered_map<std::string, std::vector<int>> iin_seq;
                             fin_seq.emplace("latent", x_t_seq);
+                            fin_seq.emplace("mag", cond_mag);
+                            fin_seq.emplace("mod", cond_mod);
                             iin_seq.emplace("text_ids", text_ids);
                             if (cfg_.sdxl_time_cond) {
                                 fin_seq.emplace("timestep", std::vector<float>{compute_time_cond_value(cfg_, t_norm, alpha_bar)});
@@ -2376,6 +2309,11 @@ PonyXLDDPMModel::StepStats PonyXLDDPMModel::trainStepSdxlLatentDiffusion(
             // Keep Blocks / Layers focused on actual activations and spatial previews.
             // Training metrics already go through AsyncMonitor, so duplicating them here
             // only hides the real PonyXL layers.
+
+            add_tip_scalar("train/loss", static_cast<double>(loss_sum / static_cast<double>(steps_per_image)), 1.0);
+            add_tip_scalar("train/grad_norm", grad_sum, 10.0);
+            add_tip_scalar("train/grad_max_abs", grad_max, 1.0);
+            add_tip_scalar("train/lr", static_cast<double>(opt.getCurrentLR()), 1e-3);
 
         // Restore the previous taps state in case one of the preview helpers changed it.
         setVizTapsEnabled(prev_viz_taps_enabled);
@@ -2454,36 +2392,15 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
             used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
         }
 
-        if (cfg_.caption_kv_enable) {
-            KvCaption kv = parse_kv_caption(used);
-            if (kv.has_any) {
-                used = compose_kv_caption_prompt(kv);
-                if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
-                    used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
-                }
-            }
-        }
-
-        if (cfg_.caption_kv_enable) {
-            KvCaption kv = parse_kv_caption(used);
-            if (kv.has_any) {
-                used = compose_kv_caption_prompt(kv);
-                if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
-                    used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
-                }
-            }
-        }
-
-        if (cfg_.caption_structured_enable) {
-            StructuredCaption cap = parse_structured_caption(used);
-            if (cap.has_any_header) {
-                const std::string composed = compose_structured_caption(cap, cfg_.caption_structured_canonicalize);
-                if (!composed.empty()) {
-                    used = composed;
-                    if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
-                        used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
-                    }
-                }
+        PromptParsing::ParseOptions prompt_options;
+        prompt_options.kv_enable = cfg_.caption_kv_enable;
+        prompt_options.structured_enable = cfg_.caption_structured_enable;
+        prompt_options.structured_canonicalize = cfg_.caption_structured_canonicalize;
+        const PromptParsing::PromptAnalysis analysis = PromptParsing::analyzePrompt(used, prompt_options);
+        if (!analysis.normalized_prompt.empty()) {
+            used = analysis.normalized_prompt;
+            if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
+                used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
             }
         }
 
@@ -2710,16 +2627,33 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
         x_t[static_cast<size_t>(i)] = sqrt_ab * x0[static_cast<size_t>(i)] + sqrt_1mab * e;
     }
 
+    std::vector<float> cond_mag(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    std::vector<float> cond_mod_text(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    std::vector<float> cond_mod_wrong(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    try {
+        auto& enc = getMutableEncoder();
+        enc.ensureDim(std::max(1, cfg_.d_model));
+        cond_mag = imageToEmbedding(rgb, W, H, enc.dim);
+        cond_mod_text = enc.encode(text_ids);
+        cond_mod_wrong = enc.encode(wrong_ids);
+        if (cond_mag.size() != static_cast<size_t>(enc.dim)) cond_mag.assign(static_cast<size_t>(enc.dim), 0.0f);
+        if (cond_mod_text.size() != static_cast<size_t>(enc.dim)) cond_mod_text.assign(static_cast<size_t>(enc.dim), 0.0f);
+        if (cond_mod_wrong.size() != static_cast<size_t>(enc.dim)) cond_mod_wrong.assign(static_cast<size_t>(enc.dim), 0.0f);
+    } catch (...) {
+    }
+
     // Viz taps: avoid generic activation spam during validation forwards.
     const bool prev_viz_taps_enabled = isVizTapsEnabled();
     if (prev_viz_taps_enabled) {
         setVizTapsEnabled(false);
     }
 
-    auto run_pred = [&](const std::vector<int>& ids) -> std::vector<float> {
+    auto run_pred = [&](const std::vector<int>& ids, const std::vector<float>& mod_vec) -> std::vector<float> {
         std::unordered_map<std::string, std::vector<float>> fin;
         std::unordered_map<std::string, std::vector<int>> iin;
         fin["latent"] = x_t;
+        fin["mag"] = cond_mag;
+        fin["mod"] = mod_vec;
         iin["text_ids"] = ids;
         if (cfg_.sdxl_time_cond) {
             fin["timestep"] = std::vector<float>{compute_time_cond_value(cfg_, t_norm, alpha_bar)};
@@ -2727,8 +2661,8 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
         return forwardPassNamed(fin, iin, false);
     };
 
-    const std::vector<float> pred = run_pred(text_ids);
-    const std::vector<float> pred_wrong = run_pred(wrong_ids);
+    const std::vector<float> pred = run_pred(text_ids, cond_mod_text);
+    const std::vector<float> pred_wrong = run_pred(wrong_ids, cond_mod_wrong);
 
     const int n = std::min<int>(latent_raw_dim, static_cast<int>(pred.size()));
     const int nw = std::min<int>(latent_raw_dim, static_cast<int>(pred_wrong.size()));
@@ -2750,6 +2684,7 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
     out.assoc_margin = out.eps_mse_wrong - out.eps_mse;
 
     // x0_hat from eps_pred
+    std::vector<float> img_hat_viz;
     if (n > 0) {
         std::vector<float> x0_hat(static_cast<size_t>(n), 0.0f);
         for (int i = 0; i < n; ++i) {
@@ -2810,6 +2745,7 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
                 std::vector<float> hat_chw;
                 if (latent_tokens_hwc_to_chw_scaled(hat_chw, x0_hat.data(), vae_lh, vae_lw, latent_in_dim, inv_scale)) {
                     const std::vector<float> img_hat = vae_decode_->forwardPass(hat_chw, false);
+                    img_hat_viz = img_hat;
                     const int im_n = std::min<int>((int)img_hat.size(), (int)img_f.size());
                     if (im_n > 0) {
                         out.img_mse = mse(img_hat, img_f, im_n);
@@ -2833,6 +2769,19 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
                 vf.w = std::max(1, ww / std::max(1, sx));
                 vf.h = std::max(1, hh / std::max(1, sy));
                 vf.channels = (cc >= 3) ? 3 : 1;
+                vf.label = label;
+                if (!vf.pixels.empty()) addVizTapFrame(std::move(vf));
+            };
+
+            auto add_img = [&](const std::string& label, const std::vector<float>& img) {
+                if (img.empty()) return;
+                Model::VizFrame vf;
+                vf.pixels = to_rgb_preview_image(img, W, H, ms);
+                const int sx = (W > ms) ? static_cast<int>((W + ms - 1) / ms) : 1;
+                const int sy = (H > ms) ? static_cast<int>((H + ms - 1) / ms) : 1;
+                vf.w = std::max(1, W / std::max(1, sx));
+                vf.h = std::max(1, H / std::max(1, sy));
+                vf.channels = 3;
                 vf.label = label;
                 if (!vf.pixels.empty()) addVizTapFrame(std::move(vf));
             };
@@ -2901,9 +2850,20 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
             };
 
             // Denoise signals at timestep t
+            add_img("ponyxl_sdxl/viz/val/image/input_rgb", img_f);
             add_lat("ponyxl_sdxl/viz/val/latent/x_t_noised", x_t, lat_h, lat_w, latent_in_dim);
             add_lat("ponyxl_sdxl/viz/val/latent/eps_true", eps, lat_h, lat_w, latent_in_dim);
             add_stats("eps_true_stats", eps.data(), eps.size());
+            {
+                Model::VizFrame vf;
+                vf.w = 1;
+                vf.h = 1;
+                vf.channels = 1;
+                vf.pixels = { 200 };
+                vf.label = "ponyxl_sdxl/viz/tips/val/meta/latent_shape | h=" + std::to_string(lat_h) +
+                           " w=" + std::to_string(lat_w) + " c=" + std::to_string(latent_in_dim);
+                addVizTapFrame(std::move(vf));
+            }
             if (n > 0) {
                 // pred/pred_wrong are flat, but we know they contain at least latent_raw_dim.
                 add_lat("ponyxl_sdxl/viz/val/latent/eps_pred", pred, lat_h, lat_w, latent_in_dim);
@@ -2913,6 +2873,7 @@ PonyXLDDPMModel::ValStats PonyXLDDPMModel::validateStepSdxlLatentDiffusion(
                 add_lat("ponyxl_sdxl/viz/val/latent/eps_pred_wrong", pred_wrong, lat_h, lat_w, latent_in_dim);
                 add_stats("eps_pred_wrong_stats", pred_wrong.data(), static_cast<size_t>(std::max(0, nw)));
             }
+            add_img("ponyxl_sdxl/viz/val/image/output_denoised", img_hat_viz);
 
             // Text influence map: per-token norm(|eps_pred - eps_pred_wrong|)
             if (n > 0 && nw > 0 && (lat_h * lat_w) == latent_len) {
@@ -3047,16 +3008,15 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::reconstructPreviewSdxlLatentDiffu
             used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
         }
 
-        if (cfg_.caption_structured_enable) {
-            StructuredCaption cap = parse_structured_caption(used);
-            if (cap.has_any_header) {
-                const std::string composed = compose_structured_caption(cap, cfg_.caption_structured_canonicalize);
-                if (!composed.empty()) {
-                    used = composed;
-                    if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
-                        used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
-                    }
-                }
+        PromptParsing::ParseOptions prompt_options;
+        prompt_options.kv_enable = cfg_.caption_kv_enable;
+        prompt_options.structured_enable = cfg_.caption_structured_enable;
+        prompt_options.structured_canonicalize = cfg_.caption_structured_canonicalize;
+        const PromptParsing::PromptAnalysis analysis = PromptParsing::analyzePrompt(used, prompt_options);
+        if (!analysis.normalized_prompt.empty()) {
+            used = analysis.normalized_prompt;
+            if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
+                used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
             }
         }
 
@@ -3320,20 +3280,44 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::reconstructPreviewSdxlLatentDiffu
         x_t[static_cast<size_t>(i)] = sqrt_ab * x0[static_cast<size_t>(i)] + sqrt_1mab * e;
     }
 
+    std::vector<float> cond_mag(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    std::vector<float> cond_mod(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    try {
+        auto& enc = getMutableEncoder();
+        enc.ensureDim(std::max(1, cfg_.d_model));
+        cond_mag = imageToEmbedding(rgb, W, H, enc.dim);
+        cond_mod = enc.encode(text_ids);
+        if (cond_mag.size() != static_cast<size_t>(enc.dim)) cond_mag.assign(static_cast<size_t>(enc.dim), 0.0f);
+        if (cond_mod.size() != static_cast<size_t>(enc.dim)) cond_mod.assign(static_cast<size_t>(enc.dim), 0.0f);
+    } catch (...) {
+    }
+
     std::unordered_map<std::string, std::vector<float>> fin;
     std::unordered_map<std::string, std::vector<int>> iin;
     fin["latent"] = x_t;
+    fin["mag"] = cond_mag;
+    fin["mod"] = cond_mod;
     iin["text_ids"] = text_ids;
     if (cfg_.sdxl_time_cond) {
         fin["timestep"] = std::vector<float>{compute_time_cond_value(cfg_, t_norm, alpha_bar)};
     }
     const std::vector<float> pred = forwardPassNamed(fin, iin, false);
-    if (static_cast<int>(pred.size()) < latent_raw_dim) {
-        throw std::runtime_error("eps_pred size too small during reconstruction preview");
+    const int pred_dim = static_cast<int>(pred.size());
+    const int n_pred = std::min(latent_raw_dim, pred_dim);
+    if (pred_dim <= 0) {
+        std::cerr << "[PonyXLDDPM] WARN: reconstruction preview got empty eps_pred (pred_dim="
+                  << pred_dim << ", expected=" << latent_raw_dim
+                  << "); falling back to encoded latent x0" << std::endl;
+    } else if (pred_dim < latent_raw_dim) {
+        std::cerr << "[PonyXLDDPM] WARN: reconstruction preview got partial eps_pred (pred_dim="
+                  << pred_dim << ", expected=" << latent_raw_dim
+                  << "); falling back to encoded latent for missing tail dims" << std::endl;
     }
 
-    std::vector<float> x0_hat(static_cast<size_t>(latent_raw_dim), 0.0f);
-    for (int i = 0; i < latent_raw_dim; ++i) {
+    // Start from encoded latent x0 and overwrite only the predicted prefix.
+    // This keeps preview robust if a checkpoint outputs fewer dims than expected.
+    std::vector<float> x0_hat = x0;
+    for (int i = 0; i < n_pred; ++i) {
         const float ehat = pred[static_cast<size_t>(i)];
         x0_hat[static_cast<size_t>(i)] = (x_t[static_cast<size_t>(i)] - sqrt_1mab * ehat) / std::max(1e-6f, sqrt_ab);
     }
@@ -3385,16 +3369,15 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::text2imgSdxlLatentDiffusion(
             used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
         }
 
-        if (cfg_.caption_structured_enable) {
-            StructuredCaption cap = parse_structured_caption(used);
-            if (cap.has_any_header) {
-                const std::string composed = compose_structured_caption(cap, cfg_.caption_structured_canonicalize);
-                if (!composed.empty()) {
-                    used = composed;
-                    if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
-                        used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
-                    }
-                }
+        PromptParsing::ParseOptions prompt_options;
+        prompt_options.kv_enable = cfg_.caption_kv_enable;
+        prompt_options.structured_enable = cfg_.caption_structured_enable;
+        prompt_options.structured_canonicalize = cfg_.caption_structured_canonicalize;
+        const PromptParsing::PromptAnalysis analysis = PromptParsing::analyzePrompt(used, prompt_options);
+        if (!analysis.normalized_prompt.empty()) {
+            used = analysis.normalized_prompt;
+            if (cfg_.max_text_chars > 0 && used.size() > static_cast<size_t>(cfg_.max_text_chars)) {
+                used = truncate_utf8_safe(used, static_cast<size_t>(cfg_.max_text_chars));
             }
         }
 
@@ -3587,10 +3570,35 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::text2imgSdxlLatentDiffusion(
         x_t[static_cast<size_t>(i)] = n01(rng);
     }
 
-    auto run_pred = [&](const std::vector<int>& ids, int t, float t_norm, float alpha_bar) -> std::vector<float> {
+    std::vector<float> cond_mag(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    std::vector<float> cond_mod(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    std::vector<float> uncond_mod(static_cast<size_t>(std::max(1, cfg_.d_model)), 0.0f);
+    try {
+        auto& enc = getMutableEncoder();
+        enc.ensureDim(std::max(1, cfg_.d_model));
+        const auto& mag_ref = enc.getMagEmbedding();
+        if (mag_ref.size() == static_cast<size_t>(enc.dim)) {
+            cond_mag = mag_ref;
+        } else {
+            cond_mag.assign(static_cast<size_t>(enc.dim), 0.0f);
+        }
+        cond_mod = enc.encode(text_ids);
+        uncond_mod = enc.encode(uncond_ids);
+        if (cond_mod.size() != static_cast<size_t>(enc.dim)) cond_mod.assign(static_cast<size_t>(enc.dim), 0.0f);
+        if (uncond_mod.size() != static_cast<size_t>(enc.dim)) uncond_mod.assign(static_cast<size_t>(enc.dim), 0.0f);
+    } catch (...) {
+    }
+
+    auto run_pred = [&](const std::vector<int>& ids,
+                        const std::vector<float>& mod_vec,
+                        int t,
+                        float t_norm,
+                        float alpha_bar) -> std::vector<float> {
         std::unordered_map<std::string, std::vector<float>> fin;
         std::unordered_map<std::string, std::vector<int>> iin;
         fin["latent"] = x_t;
+        fin["mag"] = cond_mag;
+        fin["mod"] = mod_vec;
         iin["text_ids"] = ids;
         if (cfg_.sdxl_time_cond) {
             fin["timestep"] = std::vector<float>{compute_time_cond_value(cfg_, t_norm, alpha_bar)};
@@ -3612,14 +3620,14 @@ PonyXLDDPMModel::ReconPreview PonyXLDDPMModel::text2imgSdxlLatentDiffusion(
         const float sqrt_1mab = std::sqrt(std::max(0.0f, 1.0f - alpha_bar));
         const float t_norm = (T > 1) ? (static_cast<float>(t) / static_cast<float>(T - 1)) : 0.0f;
 
-        std::vector<float> eps = run_pred(text_ids, t, t_norm, alpha_bar);
+        std::vector<float> eps = run_pred(text_ids, cond_mod, t, t_norm, alpha_bar);
         if ((int)eps.size() < latent_raw_dim) {
             throw std::runtime_error("eps_pred size too small during text2img");
         }
         eps.resize(static_cast<size_t>(latent_raw_dim));
 
         if (g != 1.0f) {
-            std::vector<float> eps_u = run_pred(uncond_ids, t, t_norm, alpha_bar);
+            std::vector<float> eps_u = run_pred(uncond_ids, uncond_mod, t, t_norm, alpha_bar);
             if ((int)eps_u.size() < latent_raw_dim) {
                 throw std::runtime_error("eps_pred(uncond) size too small during text2img");
             }
@@ -3707,6 +3715,8 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
         m.modelConfig["type"] = "ponyxl_ddpm";
         m.modelConfig["task"] = "latent_diffusion_eps_predictor";
         m.modelConfig["latent_backbone"] = "vae_conv";
+        m.modelConfig["latent_bridge_encoder"] = "vae_conv/mu -> ponyxl/latent_raw";
+        m.modelConfig["latent_bridge_decoder"] = "x -> vae_conv/raw_z";
 
         const int d_model = std::max(1, cfg.d_model);
         const int text_len = std::max(1, cfg.text_ctx_len);
@@ -3733,6 +3743,9 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
         const int mlp_hidden = std::max(4, cfg.mlp_hidden);
         const int blocks_per_level = std::max(1, cfg.unet_blocks_per_level);
         const int bottleneck_blocks = std::max(1, cfg.unet_bottleneck_blocks);
+        const bool use_rms_text = (normalize_text_norm(cfg.text_norm) == "rmsnorm");
+        const bool use_geglu_text_mlp = cfg.text_mlp_geglu;
+        const bool use_deconv_upsample = (normalize_unet_upsample(cfg.unet_upsample) == "conv_transpose");
         const int base = std::max(16, (cfg.vae_base_channels > 0) ? cfg.vae_base_channels : std::min(d_model, 128));
         const int prompt_cross_attn_max_tokens = 1024;
         auto level_channels = [&](int level) {
@@ -3767,6 +3780,9 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
         m.modelConfig["output_activation"] = cfg.output_activation;
         m.modelConfig["sdxl_time_cond"] = cfg.sdxl_time_cond;
         m.modelConfig["text_clip_like"] = cfg.text_clip_like;
+        m.modelConfig["text_norm"] = use_rms_text ? "rmsnorm" : "layernorm";
+        m.modelConfig["text_mlp_geglu"] = use_geglu_text_mlp;
+        m.modelConfig["unet_upsample"] = use_deconv_upsample ? "conv_transpose" : "nearest";
         m.modelConfig["prompt_conditioning"] = "cross_attention+global";
         m.modelConfig["prompt_cross_attn_max_tokens"] = prompt_cross_attn_max_tokens;
 
@@ -3848,6 +3864,46 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
                 U->scale_w = 2.0f;
             }
             return out;
+        };
+
+        auto deconv2x = [&](const std::string& name,
+                            const std::string& in,
+                            const std::string& out,
+                            int in_c,
+                            int out_c,
+                            int in_h,
+                            int in_w,
+                            bool act) {
+            const int out_h = std::max(1, in_h * 2);
+            const int out_w = std::max(1, in_w * 2);
+            m.push(name, "ConvTranspose2d",
+                   sat_mul(static_cast<size_t>(out_c), sat_mul(static_cast<size_t>(in_c), sat_mul(static_cast<size_t>(4), static_cast<size_t>(4)))));
+            if (auto* L = m.getLayerByName(name)) {
+                L->inputs = {in};
+                L->output = out;
+                L->in_channels = in_c;
+                L->out_channels = out_c;
+                L->input_height = in_h;
+                L->input_width = in_w;
+                L->output_height = out_h;
+                L->output_width = out_w;
+                L->out_h = out_h;
+                L->out_w = out_w;
+                L->kernel_size = 4;
+                L->stride = 2;
+                L->padding = 1;
+                L->use_bias = false;
+            }
+            std::string y = out;
+            if (act) {
+                m.push(name + "/act", "SiLU", 0);
+                if (auto* A = m.getLayerByName(name + "/act")) {
+                    A->inputs = {out};
+                    A->output = out + "_act";
+                }
+                y = out + "_act";
+            }
+            return y;
         };
 
         auto norm_chw = [&](const std::string& prefix,
@@ -4033,10 +4089,42 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
             return prefix + "/out";
         };
 
-        // Input routing (latents = sortie mu du VAEConv convertie en tokens HWC)
+        auto text_norm = [&](const std::string& name,
+                             const std::string& in,
+                             const std::string& out) {
+            if (use_rms_text) {
+                m.push(name, "RMSNorm", static_cast<size_t>(d_model));
+                if (auto* L = m.getLayerByName(name)) {
+                    L->inputs = {in};
+                    L->output = out;
+                    L->affine = true;
+                    L->eps = 1e-5f;
+                    L->in_features = d_model;
+                }
+            } else {
+                m.push(name, "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
+                if (auto* L = m.getLayerByName(name)) {
+                    L->inputs = {in};
+                    L->output = out;
+                    L->affine = true;
+                    L->use_bias = true;
+                    L->eps = 1e-5f;
+                    L->in_features = d_model;
+                }
+            }
+            return out;
+        };
+
+        // Input routing explicite: le latent d'entrée provient de vae_conv/mu
+        // (conversion CHW->tokens HWC effectuée hors-graphe).
+        m.push("ponyxl_sdxl/bridge/from_vae_conv_mu", "Identity", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/bridge/from_vae_conv_mu")) {
+            L->inputs = {"latent"};
+            L->output = "ponyxl_sdxl/latent_from_vae_conv";
+        }
         m.push("ponyxl_sdxl/latent_in", "Identity", 0);
         if (auto* L = m.getLayerByName("ponyxl_sdxl/latent_in")) {
-            L->inputs = {"latent"};
+            L->inputs = {"ponyxl_sdxl/latent_from_vae_conv"};
             L->output = "ponyxl_sdxl/latent_raw";
         }
 
@@ -4081,15 +4169,7 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
         for (int i = 0; i < text_layers; ++i) {
             const std::string p = "ponyxl_sdxl/text_encoder/block" + std::to_string(i + 1);
 
-            m.push(p + "/ln1", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
-            if (auto* L = m.getLayerByName(p + "/ln1")) {
-                L->inputs = {text};
-                L->output = p + "/ln1_out";
-                L->affine = true;
-                L->use_bias = true;
-                L->eps = 1e-5f;
-                L->in_features = d_model;
-            }
+            text_norm(p + "/ln1", text, p + "/ln1_out");
 
             m.push(p + "/self_attn", "MultiHeadAttention", text_attn_params);
             if (auto* L = m.getLayerByName(p + "/self_attn")) {
@@ -4106,30 +4186,33 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
                 L->output = p + "/res1";
             }
 
-            m.push(p + "/ln2", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
-            if (auto* L = m.getLayerByName(p + "/ln2")) {
-                L->inputs = {p + "/res1"};
-                L->output = p + "/ln2_out";
-                L->affine = true;
-                L->use_bias = true;
-                L->eps = 1e-5f;
-                L->in_features = d_model;
-            }
+            text_norm(p + "/ln2", p + "/res1", p + "/ln2_out");
 
+            const int mlp_fc1_out = use_geglu_text_mlp ? (mlp_hidden * 2) : mlp_hidden;
             m.push(p + "/mlp_fc1", "Linear",
-                   sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(mlp_hidden)) + static_cast<size_t>(mlp_hidden));
+                   sat_mul(static_cast<size_t>(d_model), static_cast<size_t>(mlp_fc1_out)) + static_cast<size_t>(mlp_fc1_out));
             if (auto* L = m.getLayerByName(p + "/mlp_fc1")) {
                 L->inputs = {p + "/ln2_out"};
                 L->output = p + "/mlp_h";
                 L->seq_len = text_len;
                 L->in_features = d_model;
-                L->out_features = mlp_hidden;
+                L->out_features = mlp_fc1_out;
                 L->use_bias = true;
             }
-            m.push(p + "/mlp_act", "GELU", 0);
-            if (auto* L = m.getLayerByName(p + "/mlp_act")) {
-                L->inputs = {p + "/mlp_h"};
-                L->output = p + "/mlp_h_act";
+            if (use_geglu_text_mlp) {
+                m.push(p + "/mlp_act", "GEGLU", 0);
+                if (auto* L = m.getLayerByName(p + "/mlp_act")) {
+                    L->inputs = {p + "/mlp_h"};
+                    L->output = p + "/mlp_h_act";
+                    L->seq_len = text_len;
+                    L->out_features = mlp_hidden;
+                }
+            } else {
+                m.push(p + "/mlp_act", "GELU", 0);
+                if (auto* L = m.getLayerByName(p + "/mlp_act")) {
+                    L->inputs = {p + "/mlp_h"};
+                    L->output = p + "/mlp_h_act";
+                }
             }
             m.push(p + "/mlp_fc2", "Linear",
                    sat_mul(static_cast<size_t>(mlp_hidden), static_cast<size_t>(d_model)) + static_cast<size_t>(d_model));
@@ -4149,15 +4232,7 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
             text = p + "/out";
         }
 
-        m.push("ponyxl_sdxl/text_encoder/final_ln", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/final_ln")) {
-            L->inputs = {text};
-            L->output = "ponyxl_sdxl/text_encoder/final_ln_out";
-            L->affine = true;
-            L->use_bias = true;
-            L->eps = 1e-5f;
-            L->in_features = d_model;
-        }
+        text_norm("ponyxl_sdxl/text_encoder/final_ln", text, "ponyxl_sdxl/text_encoder/final_ln_out");
         text = "ponyxl_sdxl/text_encoder/final_ln_out";
 
         m.push("ponyxl_sdxl/text_encoder/meanpool", "TokenMeanPool", 0);
@@ -4168,15 +4243,7 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
             P->embed_dim = d_model;
         }
 
-        m.push("ponyxl_sdxl/text_encoder/cond_ln", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
-        if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/cond_ln")) {
-            L->inputs = {"ponyxl_sdxl/text_encoder/pooled"};
-            L->output = "ponyxl_sdxl/text_cond_pre";
-            L->affine = true;
-            L->use_bias = true;
-            L->eps = 1e-5f;
-            L->in_features = d_model;
-        }
+        text_norm("ponyxl_sdxl/text_encoder/cond_ln", "ponyxl_sdxl/text_encoder/pooled", "ponyxl_sdxl/text_cond_pre");
 
         m.push("ponyxl_sdxl/text_encoder/cond_act", "Tanh", 0);
         if (auto* L = m.getLayerByName("ponyxl_sdxl/text_encoder/cond_act")) {
@@ -4226,15 +4293,7 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
                 L->inputs = {"ponyxl_sdxl/text_cond", "ponyxl_sdxl/time/emb"};
                 L->output = "ponyxl_sdxl/cond_sum";
             }
-            m.push("ponyxl_sdxl/cond_ln", "LayerNorm", static_cast<size_t>(2) * static_cast<size_t>(d_model));
-            if (auto* L = m.getLayerByName("ponyxl_sdxl/cond_ln")) {
-                L->inputs = {"ponyxl_sdxl/cond_sum"};
-                L->output = "ponyxl_sdxl/cond_vec_pre";
-                L->affine = true;
-                L->use_bias = true;
-                L->eps = 1e-5f;
-                L->in_features = d_model;
-            }
+            text_norm("ponyxl_sdxl/cond_ln", "ponyxl_sdxl/cond_sum", "ponyxl_sdxl/cond_vec_pre");
             m.push("ponyxl_sdxl/cond_act", "Tanh", 0);
             if (auto* L = m.getLayerByName("ponyxl_sdxl/cond_act")) {
                 L->inputs = {"ponyxl_sdxl/cond_vec_pre"};
@@ -4309,7 +4368,11 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
             const std::string p = "ponyxl_sdxl/unet/up" + std::to_string(d + 1);
             const int up_h = cur_h;
             const int up_w = cur_w;
-            x = upsample2x(p + "/up", x, p + "/up_y", cur_c, up_h, up_w);
+            if (use_deconv_upsample) {
+                x = deconv2x(p + "/up", x, p + "/up_y", cur_c, cur_c, up_h, up_w, false);
+            } else {
+                x = upsample2x(p + "/up", x, p + "/up_y", cur_c, up_h, up_w);
+            }
             cur_h = up_h * 2;
             cur_w = up_w * 2;
 
@@ -4350,6 +4413,42 @@ void PonyXLDDPMModel::buildInto(Model& model, const Config& cfg) {
         if (auto* L = m.getLayerByName("ponyxl_sdxl/out")) {
             L->inputs = {"ponyxl_sdxl/unet/eps_hwc"};
             L->output = "x";
+        }
+
+        // Bridge explicite de sortie vers le décodeur VAE externe (vae_conv_decode/raw_z).
+        // Ce tensor est un alias pour visibilité architecture/debug; la consommation réelle
+        // par le décodeur est effectuée hors-graphe dans les chemins preview/validation/text2img.
+        m.push("ponyxl_sdxl/bridge/to_vae_conv_decode_z", "Identity", 0);
+        if (auto* L = m.getLayerByName("ponyxl_sdxl/bridge/to_vae_conv_decode_z")) {
+            L->inputs = {"x"};
+            L->output = "ponyxl_sdxl/x_for_vae_conv_decode";
+        }
+
+        // Runtime contract: PonyXL layers/tensors must use ponyxl/*.
+        // Keep backward-compat aliases authored earlier by normalizing once at the end.
+        auto normalize_runtime_name = [&](const std::string& s) -> std::string {
+            if (starts_with(s, "ponyxl_sdxl/")) {
+                return std::string("ponyxl/") + s.substr(std::char_traits<char>::length("ponyxl_sdxl/"));
+            }
+            if (starts_with(s, "vae_conv_decode/")) {
+                return std::string("vae_conv/") + s.substr(std::char_traits<char>::length("vae_conv_decode/"));
+            }
+            return s;
+        };
+
+        for (Layer& layer : m.getMutableLayers()) {
+            layer.name = normalize_runtime_name(layer.name);
+            for (std::string& in : layer.inputs) {
+                in = normalize_runtime_name(in);
+            }
+            layer.output = normalize_runtime_name(layer.output);
+        }
+
+        if (m.modelConfig.contains("latent_bridge_encoder") && m.modelConfig["latent_bridge_encoder"].is_string()) {
+            m.modelConfig["latent_bridge_encoder"] = normalize_runtime_name(m.modelConfig["latent_bridge_encoder"].get<std::string>());
+        }
+        if (m.modelConfig.contains("latent_bridge_decoder") && m.modelConfig["latent_bridge_decoder"].is_string()) {
+            m.modelConfig["latent_bridge_decoder"] = normalize_runtime_name(m.modelConfig["latent_bridge_decoder"].get<std::string>());
         }
     };
 

@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <stdexcept>
 #include <iostream>
+#include <vector>
 
 // ============================================================================
 // LAYER TYPE REGISTRY - Tous les types de layers supportés
@@ -87,6 +88,7 @@ enum class LayerType {
     Stack,
     MatMul,
     BatchMatMul,
+    NMS,
     
     // === Attention ===
     SelfAttention,
@@ -249,6 +251,8 @@ inline LayerType string_to_type(const std::string& str) {
         {"Stack", LayerType::Stack},
         {"MatMul", LayerType::MatMul},
         {"BatchMatMul", LayerType::BatchMatMul},
+        {"NMS", LayerType::NMS},
+        {"NonMaxSuppression", LayerType::NMS},
         
         // Attention
         {"SelfAttention", LayerType::SelfAttention},
@@ -364,6 +368,7 @@ inline std::string type_to_string(LayerType type) {
         case LayerType::Stack: return "Stack";
         case LayerType::MatMul: return "MatMul";
         case LayerType::BatchMatMul: return "BatchMatMul";
+        case LayerType::NMS: return "NMS";
         
         // Attention
         case LayerType::SelfAttention: return "SelfAttention";
@@ -417,7 +422,7 @@ inline std::vector<std::string> get_all_supported_types() {
         "Dropout", "Dropout2d", "AlphaDropout",
         "Flatten", "Reshape", "Transpose", "Permute", "Squeeze", "Unsqueeze", "View",
         "Add", "Subtract", "Multiply", "Divide",
-        "Concat", "Split", "Chunk", "Stack", "MatMul", "BatchMatMul",
+        "Concat", "Split", "Chunk", "Stack", "MatMul", "BatchMatMul", "NMS",
         "SelfAttention", "MultiHeadAttention", "CrossAttention",
         "UpsampleNearest", "UpsampleBilinear", "UpsampleBicubic", "PixelShuffle",
         "LSTM", "GRU", "RNN",

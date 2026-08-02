@@ -30,12 +30,12 @@ all: build
 build:
 	@echo "🏗️  Build via CMake (recommandé)"
 	@cmake -S . -B build
-	@cmake --build build -j
+	@cmake --build build --parallel 12
 
 build-static:
 	@echo "🏗️  Build statique: mimir_static (sortie dans ./bin)"
 	@cmake -S . -B build_static -DBUILD_MIMIR_STATIC=ON
-	@cmake --build build_static -j --target mimir_static
+	@cmake --build build_static --parallel 12 --target mimir_static
 
 
 

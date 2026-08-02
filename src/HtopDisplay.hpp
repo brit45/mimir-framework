@@ -30,6 +30,9 @@ struct winsize {
 #include <unistd.h>
 #endif
 
+void framework_log_write(const char* data, size_t size);
+void framework_log_write_file_only(const char* data, size_t size);
+
 // Petit streambuf qui écrit directement dans un file descriptor (ex: /dev/tty).
 // Objectif: permettre à l'UI d'écrire sur le terminal même si stdout/stderr sont redirigés.
 class FdStreamBuf final : public std::streambuf
@@ -65,6 +68,8 @@ private:
         if (n <= 0) {
             return 0;
         }
+
+        framework_log_write(pbase(), static_cast<size_t>(n));
 
         const char* data = pbase();
         std::ptrdiff_t remaining = n;
@@ -618,6 +623,7 @@ public:
     void setCsvLogFile(const std::string& filepath)
     {
         csv_log_file = filepath;
+        std::cerr << "[htop] csv_log_file=" << csv_log_file << std::endl;
     }
 
     void render()

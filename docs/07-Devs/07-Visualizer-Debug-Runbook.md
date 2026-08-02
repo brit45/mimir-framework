@@ -1,12 +1,26 @@
-# Runbook Debug Visualizer
+# Déboguer le visualizer
 
-## Pour qui
+Ce runbook permet de diagnostiquer les problèmes du visualizer Mímir à partir
+d'un symptôme observable. Chaque fiche associe vérification, cause probable et
+correction.
 
-Developpeur framework (C++/monitoring/UI SFML) en phase de debug Viz.
+**Public concerné :** développeurs C++, intégrateurs et personnes qui
+maintiennent les outils de visualisation.
 
-## Objectif
+## Sur cette page
 
-Diagnostiquer rapidement un probleme Viz, identifier la cause probable, appliquer un correctif sans casser le pipeline training/runtime.
+- [Principe](#principe)
+- [Checklist express avant toute investigation](#checklist-express-avant-toute-investigation)
+- [Cas 1: preview en bande horizontale](#cas-1-preview-en-bande-horizontale)
+- [Cas 2: image repetee/decalee dans Outputs](#cas-2-image-repeteedecalee-dans-outputs)
+- [Cas 3: perte de sortie training apres patch Viz](#cas-3-perte-de-sortie-training-apres-patch-viz)
+- [Cas 4: palettes/toggles sans effet immediat](#cas-4-palettestoggles-sans-effet-immediat)
+- [Cas 5: tips majoritairement noir/blanc](#cas-5-tips-majoritairement-noirblanc)
+- [Cas 6: ordre recon/diff incoherent](#cas-6-ordre-recondiff-incoherent)
+- [Cas 7: ProgressBar incoherente](#cas-7-progressbar-incoherente)
+- [Procedure de debug standard](#procedure-de-debug-standard)
+- [Gate de validation avant merge](#gate-de-validation-avant-merge)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Principe
 
@@ -232,3 +246,9 @@ Fichiers a inspecter:
 3. Le training reste fonctionnel (pas de regression `out_dim/image_dim`).
 4. Le comportement UI attendu est visible sans workaround.
 5. La doc utilisateur/dev est alignee avec le comportement reel.
+
+## Étapes suivantes
+
+- [Page précédente : Visualizer: Tips Et Nouvelles Features](06-Visualizer-Tips-And-Features.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Revenir à la documentation](../00-INDEX.md)

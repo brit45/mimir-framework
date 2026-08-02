@@ -71,9 +71,9 @@ public:
     // Définir l'image du dataset actuellement utilisée (RGB ou grayscale).
     void setDatasetImage(const std::vector<uint8_t>& pixels, int w, int h, int channels, const std::string& label);
 
-    // Si le modèle utilise du texte provenant du dataset: afficher le texte brut,
-    // une forme tokenisée (ids) et un résumé de l'encodage (stats/shape).
-    void setDatasetText(const std::string& raw_text, const std::string& tokenized, const std::string& encoded);
+    // Si le modele utilise du texte provenant du dataset: afficher le prompt,
+    // les tags normalises, une forme tokenisee (ids) et un resume de l'encodage.
+    void setDatasetText(const std::string& raw_text, const std::string& tags, const std::string& tokenized, const std::string& encoded);
 
     // Définir la sortie de projection (visualisée en image/grille, généralement grayscale).
     void setProjectionImage(const std::vector<uint8_t>& pixels, int w, int h, int channels, const std::string& label);
@@ -191,10 +191,14 @@ private:
     // Toggles UI (panneau Blocks/Layers)
     std::optional<sf::FloatRect> last_blocks_hide_act_box_;
     std::optional<sf::FloatRect> last_blocks_hide_norm_box_;
+    std::optional<sf::FloatRect> last_blocks_tips_limit_box_;
 
     // Label parsing / architecture hints
     bool hide_activation_blocks = false;
     bool hide_normalisation_blocks = false;
+    int blocks_tips_visible_limit_ = 0; // 0 = illimite
+    bool blocks_tips_limit_editing_ = false;
+    std::string blocks_tips_limit_input_;
     std::string architecture_path;
     bool architecture_loaded = false;
     std::unordered_set<std::string> arch_layer_names;
@@ -212,7 +216,7 @@ private:
 
     // Logo framework/programme (chargé depuis ./logo.png)
     sf::Texture logo_texture_;
-    sf::Sprite logo_sprite_;
+    sf::Sprite logo_sprite_{logo_texture_};
     bool logo_loaded_ = false;
     sf::Clock logo_clock_;
     float logo_splash_seconds_ = 2.5f;
@@ -228,7 +232,7 @@ private:
         int channels_alt = 1; // canaux de pixels_alt
         int display_size = 0;
         sf::Texture texture;
-        sf::Sprite sprite;
+        sf::Sprite sprite{texture};
 
         ImageData() = default;
 
@@ -307,6 +311,7 @@ private:
     // Texte dataset (optionnel)
     bool has_dataset_text = false;
     std::string dataset_text_raw;
+    std::string dataset_text_tags;
     std::string dataset_text_tokens;
     std::string dataset_text_encoded;
 
@@ -479,10 +484,10 @@ private:
     bool cursor_ok_hand_ = false;
     bool cursor_ok_cross_ = false;
     bool cursor_ok_resize_ = false;
-    sf::Cursor cursor_arrow_;
-    sf::Cursor cursor_hand_;
-    sf::Cursor cursor_cross_;
-    sf::Cursor cursor_resize_;
+    std::optional<sf::Cursor> cursor_arrow_;
+    std::optional<sf::Cursor> cursor_hand_;
+    std::optional<sf::Cursor> cursor_cross_;
+    std::optional<sf::Cursor> cursor_resize_;
     enum class CursorKind { Arrow, Hand, Cross, Resize };
     CursorKind cursor_kind_ = CursorKind::Arrow;
     void initCursorsIfNeeded();
@@ -512,13 +517,18 @@ private:
     // Scrollbar (slicer) cliquable pour Blocks/Layers
     bool dragging_blocks_scrollbar_ = false;
     float blocks_scroll_drag_grab_y_ = 0.0f;
-    sf::FloatRect last_blocks_scroll_track_rect_{0.f, 0.f, 0.f, 0.f};
-    sf::FloatRect last_blocks_scroll_thumb_rect_{0.f, 0.f, 0.f, 0.f};
+    sf::FloatRect last_blocks_scroll_track_rect_{};
+    sf::FloatRect last_blocks_scroll_thumb_rect_{};
 
     // Refresh auto textures (évite le reload UI)
     uint64_t last_auto_texture_refresh_ms_ = 0;
     bool first_texture_sync_done_ = false;
     static constexpr uint64_t kAutoTextureRefreshPeriodMs = 2000;
+    uint64_t last_block_texture_rebuild_ms_ = 0;
+
+    // Evite d'ecrire le CSV a chaque update de metriques.
+    uint64_t last_loss_log_flush_ms_ = 0;
+    bool pending_loss_log_flush_ = false;
 
     // Architecture awareness (optional)
     void maybeLoadArchitecture();
@@ -581,7 +591,7 @@ public:
     void addGeneratedImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
 
     void setDatasetImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
-    void setDatasetText(const std::string&, const std::string&, const std::string&) {}
+    void setDatasetText(const std::string&, const std::string&, const std::string&, const std::string&) {}
     void setProjectionImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
     void setUnderstandingImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
 

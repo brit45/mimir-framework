@@ -1,20 +1,12 @@
-# Tutoriel : VAEText
-
-## Pour qui
-
-Intermédiaire guidé.
-
-## Objectif
+# VAEText
 
 Entraîner et évaluer VAEText avec les bonnes options.
 
-## Avant de commencer
+**Public concerné :** Intermédiaire guidé.
 
-Dataset texte disponible.
-
-## Résultat attendu
-
-Tu peux produire un checkpoint VAEText exploitable.
+> **Prérequis**
+>
+> Dataset texte disponible.
 
 
 VAEText est un VAE “texte” qui reconstruit des tokens via logits, entraîné avec reconstruction (Cross-Entropy) + KL.
@@ -53,24 +45,33 @@ Points importants :
 - `decoder_causal=true` est recommandé pour la génération de dialogue auto-régressive.
 - Les contextes internes sont appris en auto-supervision à partir des tokens d’entrée.
 
-## Sampler
+## Décodage et sampling
 
-Script : `scripts/examples/vae_text_sample.lua`
+Le dépôt courant ne fournit pas de script `vae_text_sample.lua` prêt à l’emploi.
+Le registre fournit toutefois `vae_text_decode`, qui transforme un latent en logits
+de taille `seq_len × vocab_size`. Un sampler doit ensuite appliquer argmax,
+température ou top-k sur ces logits, puis convertir les ids avec le même tokenizer
+que celui du checkpoint.
 
-- `--mode posterior` : encode prompt → z → decode logits → sample tokens.
-- `--mode recon` : decode déterministe (argmax).
-- `--mode prior` : **true prior** via l’architecture `vae_text_decode` (z ~ N(0, I)).
-
-Exemple :
+Avant d’écrire ce workflow, inspecte les deux graphes :
 
 ```bash
-./bin/mimir --lua scripts/examples/vae_text_sample.lua -- \
-  --ckpt checkpoint/vae_text_trained \
-  --prompt "bonjour le monde" \
-  --mode posterior --temperature 1.0 --top-k 50
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- \
+  --list vae_text --params --layers
+
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- \
+  --list vae_text_decode --params --layers
 ```
 
 ## Compat checkpoint
 
-Le sampler lit `model/architecture.json` dans le checkpoint et refuse les overrides `seq_len` incompatibles.
+Tout sampler externe doit lire la configuration du checkpoint et refuser les
+overrides incompatibles de `seq_len`, `vocab_size`, `d_model`, `latent_tokens` ou
+tokenizer.
 C’est volontaire : changer `seq_len` après entraînement casse souvent les shapes.
+
+## Étapes suivantes
+
+- [Page précédente : Scripts et outils Lua](10-Examples.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Tutoriel : Transformer causal (GPT-style)](12-Transformer-GPT.md)

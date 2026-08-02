@@ -1,27 +1,19 @@
-# Tuto - Parcours complet du framework
-
-## Pour qui
-
-- Debutants qui veulent une vue d'ensemble concrete.
-- Utilisateurs intermediaires qui veulent passer d'un test simple a un workflow complet.
-- Contributeurs qui veulent comprendre ou se situe chaque piece du framework.
-
-## Objectif
+# Parcours complet du framework
 
 Apprendre le framework de bout en bout avec un chemin guide qui couvre la compilation, les donnees, les modeles, l'entrainement, l'inference, les checkpoints, le scripting, le runtime et l'extension du code.
 
-## Avant de commencer
+**Public concerné :** - Debutants qui veulent une vue d'ensemble concrete.
+- Utilisateurs intermediaires qui veulent passer d'un test simple a un workflow complet.
+- Contributeurs qui veulent comprendre ou se situe chaque piece du framework.
 
-1. Compiler Mimir.
-2. Verifier le smoketest.
-3. Ouvrir les pages de reference si besoin:
-- [docs/00-Framework-Philosophy.md](../00-Framework-Philosophy.md)
-- [docs/01-Getting-Started/00-GET-STARTED.md](../01-Getting-Started/00-GET-STARTED.md)
-- [docs/02-User-Guide/01-Core-Concepts.md](../02-User-Guide/01-Core-Concepts.md)
-
-## Resultat attendu
-
-Tu sais decrire le role de chaque sous-systeme du framework et tu sais vers quelle page aller selon le probleme a resoudre.
+> **Prérequis**
+>
+> 1. Compiler Mimir.
+> 2. Verifier le smoketest.
+> 3. Ouvrir les pages de reference si besoin:
+> - [docs/00-Framework-Philosophy.md](../00-Framework-Philosophy.md)
+> - [docs/01-Getting-Started/00-GET-STARTED.md](../01-Getting-Started/00-GET-STARTED.md)
+> - [docs/02-User-Guide/01-Core-Concepts.md](../02-User-Guide/01-Core-Concepts.md)
 
 ## Vue d'ensemble
 
@@ -46,12 +38,16 @@ Apprends comment Mimir voit un dataset et comment il relie texte, image, audio e
 
 1. Lire [docs/02-User-Guide/03-Data.md](../02-User-Guide/03-Data.md).
 2. Lire [docs/03-API-Reference/13-Dataset.md](../03-API-Reference/13-Dataset.md).
-3. Lire [docs/02-User-Guide/09-Memory.md](../02-User-Guide/09-Memory.md) pour le comportement memo et evictions.
-4. Tester un dataset minimal avec images et texte.
+3. Lire [docs/02-User-Guide/09-Memory.md](../02-User-Guide/09-Memory.md) pour le comportement mémoire et les évictions.
+4. Ne charger des données qu'après avoir vérifié le format attendu par le
+   script choisi. `Mimir.Dataset.get` expose principalement des chemins et des
+   métadonnées ; il ne constitue pas un décodeur multimédia générique.
 
 ### 3. Cycle de vie d'un modele
 
-Comprends le chemin create/build/allocate/init/forward/backward.
+Comprenez le chemin moderne : `create` construit le graphe, `build` est un
+no-op de compatibilité, puis `allocate`, `init`, `forward` et `backward`
+exécutent le cycle du modèle.
 
 1. Lire [docs/02-User-Guide/02-Model-Lifecycle.md](../02-User-Guide/02-Model-Lifecycle.md).
 2. Lire [docs/03-API-Reference/01-Layers.md](../03-API-Reference/01-Layers.md).
@@ -65,7 +61,10 @@ Passe du build au run reproductible.
 1. Lire [docs/02-User-Guide/04-Training.md](../02-User-Guide/04-Training.md).
 2. Lire [docs/02-User-Guide/05-Inference.md](../02-User-Guide/05-Inference.md).
 3. Lire [docs/02-User-Guide/08-Checkpoints.md](../02-User-Guide/08-Checkpoints.md).
-4. Faire un mini run train puis reload checkpoint.
+4. Commencer par le tutoriel sans dataset
+   [du registre au checkpoint](08-Tuto-Registre-Pipeline-Checkpoint.md).
+5. Effectuer un entraînement seulement avec un script, un format de données et
+   une loss compatibles avec l'architecture.
 
 ### 5. Scripting et automatisation
 
@@ -86,7 +85,7 @@ Apprends ou le framework peut echouer ou ralentir.
 
 ### 7. Extension du framework
 
-Quand il manque une piece, tu dois savoir la brancher proprement.
+Quand il manque une piece, vous devez savoir la brancher proprement.
 
 1. Ajouter un modele avec [docs/08-Tuto/02-Tuto-Ajouter-Modele.md](02-Tuto-Ajouter-Modele.md).
 2. Modifier un runtime avec [docs/08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md](04-Tuto-Modifier-Ou-Ajouter-Runtime.md).
@@ -95,22 +94,23 @@ Quand il manque une piece, tu dois savoir la brancher proprement.
 
 ## Atelier pratique
 
-Fais cette sequence simple pour couvrir tous les blocs au moins une fois:
+Suivez cette séquence sans dataset pour couvrir les blocs vérifiables :
 
-1. Compile le projet.
-2. Lance le smoketest.
-3. Ouvre un script Lua minimal.
-4. Charge un dataset.
-5. Lance un mini entrainement.
-6. Sauvegarde un checkpoint.
-7. Recharge le checkpoint et fais une inference.
-8. Lis la section runtime si la memoire ou la performance ne correspond pas aux attentes.
+1. Compilez le projet.
+2. Lancez le smoketest.
+3. Inspectez `basic_mlp` dans le registre.
+4. Construisez-le avec `template_pipeline_args.lua`.
+5. Sauvegardez un checkpoint.
+6. Analysez ce checkpoint.
+7. Exécutez les tests registre et sérialisation.
+8. Lisez la section runtime si la mémoire ou la performance ne correspond pas
+   aux attentes.
 
 ## Mini repere visuel
 
 ![Carte des composants](../graphs/02_component_map.svg)
 
-## Quand tu bloques
+## En cas de blocage
 
 - Si le probleme est conceptuel, reviens a la philosophie et au cycle de vie.
 - Si le probleme est runtime, regarde la memoire, les backends et le debugging.
@@ -123,3 +123,9 @@ Fais cette sequence simple pour couvrir tous les blocs au moins une fois:
 - Tuto scripting: [docs/08-Tuto/03-Tuto-Coder-Script.md](03-Tuto-Coder-Script.md)
 - Tuto runtime: [docs/08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md](04-Tuto-Modifier-Ou-Ajouter-Runtime.md)
 - Tuto op: [docs/08-Tuto/05-Tuto-Ajouter-Op.md](05-Tuto-Ajouter-Op.md)
+
+## Étapes suivantes
+
+- [Page précédente : Tuto - Ajouter une OPs](05-Tuto-Ajouter-Op.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Tutoriel : valider VAEConv sans dataset](07-Tuto-VAEConv-Sans-Dataset.md)

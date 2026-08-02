@@ -1128,10 +1128,16 @@ local function analyze_debug_json(path, opts)
         model_name = root.model.name
         total_params = root.model.total_params
         num_layers = root.model.num_layers
+        if type(root.model.type) == "string" and root.model.type ~= "" then
+            model_type = root.model.type
+        end
     end
 
     if model_name == nil then model_name = root.model_name end
-    model_type = root.model_type or root.model_type_name or root.model_kind
+    model_type = model_type or root.model_type or root.model_type_name or root.model_kind
+    if model_type == nil and type(root.model_config) == "table" and type(root.model_config.type) == "string" then
+        model_type = root.model_config.type
+    end
     if total_params == nil then total_params = root.total_params end
     if num_layers == nil then num_layers = root.num_layers end
 
@@ -1166,7 +1172,10 @@ local function analyze_debug_json(path, opts)
                     config = (type(l.config) == "table") and l.config or nil,
                     weights_size = (weights_elems > 0) and weights_elems or nil,
                     weights_bytes = (weights_bytes > 0) and weights_bytes or nil,
-                    -- pas d'inputs/output dans DebugJson; le graphe Mermaid aura un fallback linéaire
+                    -- Certains DebugJson récents exposent l'IO; les anciens
+                    -- continueront d'utiliser le fallback linéaire des renderers.
+                    inputs = l.inputs,
+                    output = l.output,
                 }
             end
         end
@@ -1289,12 +1298,16 @@ local function render_summary(info, opts)
     local total_params = arch.total_params
     local num_layers = arch.num_layers
     if (not num_layers) and type(arch.layers) == "table" then num_layers = #arch.layers end
+    local model_type_display = (type(arch.model_type) == "string" and arch.model_type ~= "") and arch.model_type
+        or ((type(arch.model) == "table" and type(arch.model.type) == "string" and arch.model.type ~= "") and arch.model.type
+        or ((type(arch.model_config) == "table" and type(arch.model_config.type) == "string" and arch.model_config.type ~= "") and arch.model_config.type
+        or ""))
 
     local rows = {
         { k = "Chemin", v = info.path or "" },
         { k = "Format", v = info.format or "" },
         { k = "Modèle", v = model_name },
-        { k = "Type modèle", v = (type(arch.model_type) == "string" and arch.model_type ~= "") and arch.model_type or "" },
+        { k = "Type modèle", v = model_type_display },
         { k = "Créé le", v = format_epoch(created_at) },
         { k = "Mímir version", v = mimir_version or "?" },
         { k = "Format version", v = format_version or "?" },
@@ -1922,6 +1935,418 @@ local function render_graph_mermaid_markdown(info, opts)
     return table.concat(lines, "\n")
 end
 
+local function render_graph_visu_bloc(info, opts)
+    local arch = info.arch
+    if type(arch) ~= "table" or type(arch.layers) ~= "table" then
+        return nil
+    end
+
+    local max_layers = tonumber(opts.max_layers)
+    if max_layers == nil then max_layers = #arch.layers end
+    max_layers = clamp(max_layers, 0, #arch.layers)
+
+    -- Chaîne compatible avec les littéraux du pseudocode Visu.
+    local function visu_string(s)
+        s = tostring(s or "")
+        s = s:gsub("\\", "\\\\")
+        s = s:gsub('"', '\\"')
+        s = s:gsub("\r", "\\r")
+        s = s:gsub("\n", "\\n")
+        s = s:gsub("\t", "\\t")
+        return '"' .. s .. '"'
+    end
+
+    local function norm_inputs(v, i)
+        if type(v) == "table" and #v > 0 then
+            local out = {}
+            for k = 1, #v do
+                local value = tostring(v[k] or "")
+                if value ~= "" then out[#out + 1] = value end
+            end
+            if #out > 0 then return out end
+        elseif type(v) == "string" and v ~= "" then
+            return { v }
+        end
+
+        -- DebugJson n'a pas forcément d'IO: fallback linéaire.
+        if i and i > 1 then return { "t" .. tostring(i - 1) } end
+        return { "x" }
+    end
+
+    local function norm_output(v, i)
+        if type(v) == "string" and v ~= "" then return v end
+        if i then return "t" .. tostring(i) end
+        return "x"
+    end
+
+    local function visu_list(values)
+        local encoded = {}
+        for i = 1, #values do
+            local value = values[i]
+            if type(value) == "number" then
+                encoded[#encoded + 1] = tostring(value)
+            else
+                encoded[#encoded + 1] = visu_string(value)
+            end
+        end
+        return "[" .. table.concat(encoded, ", ") .. "]"
+    end
+
+    local function convolution_kind(layer)
+        local typ = tostring((type(layer) == "table" and layer.type) or "")
+        local lower = typ:lower()
+        if lower:find("transpose", 1, true) or lower:find("deconv", 1, true) then
+            return "up-convolution"
+        elseif lower:find("conv", 1, true) then
+            return "convolution"
+        elseif lower:find("pool", 1, true) then
+            return "pooling"
+        elseif lower:find("norm", 1, true) then
+            return "normalization"
+        elseif lower:find("relu", 1, true) or lower:find("gelu", 1, true)
+            or lower:find("silu", 1, true) or lower:find("activation", 1, true) then
+            return "activation"
+        elseif lower:find("concat", 1, true) or lower == "add"
+            or lower:find("residual", 1, true) then
+            return "merge"
+        elseif lower:find("reshape", 1, true) or lower:find("permute", 1, true)
+            or lower:find("flatten", 1, true) then
+            return "reshape"
+        elseif lower:find("linear", 1, true) or lower:find("dense", 1, true) then
+            return "fully-connected"
+        end
+        return "operation"
+    end
+
+    local function convolution_layer_payload(layer, index)
+        local values = {
+            convolution_kind(layer),
+            index,
+            tostring(layer.name or ("layer_" .. tostring(index))),
+            tostring(layer.type or "unknown"),
+        }
+        local dims = layer_dims(layer)
+        if dims ~= "" then values[#values + 1] = dims end
+        local params = tonumber(layer.params_count)
+        if params then
+            values[#values + 1] = "params"
+            values[#values + 1] = math.floor(params)
+        end
+        return values
+    end
+
+    local model = (type(arch.model) == "table") and arch.model or {}
+    local model_name = arch.model_name or arch.name or model.name or info.path or "model"
+    local model_type = arch.model_type or arch.model_type_name or arch.model_kind
+        or model.type or "unknown"
+    local total_params = tonumber(arch.total_params or model.total_params)
+
+    local tensors = {}
+    local tensor_order = {}
+    local produced = {}
+    local consumed = {}
+    local layer_inputs = {}
+    local layer_outputs = {}
+
+    local function tensor_id(name)
+        name = tostring(name)
+        if not tensors[name] then
+            tensors[name] = "T" .. tostring(#tensor_order + 1)
+            tensor_order[#tensor_order + 1] = name
+        end
+        return tensors[name]
+    end
+
+    for i = 1, max_layers do
+        local layer = arch.layers[i]
+        if type(layer) == "table" then
+            local inputs = norm_inputs(layer.inputs, i)
+            local output = norm_output(layer.output, i)
+            layer_inputs[i] = inputs
+            layer_outputs[i] = output
+            for _, input in ipairs(inputs) do
+                consumed[input] = true
+                tensor_id(input)
+            end
+            produced[output] = true
+            tensor_id(output)
+        end
+    end
+
+    local layer_ids = {}
+    for i = 1, max_layers do
+        if type(arch.layers[i]) == "table" then
+            layer_ids[#layer_ids + 1] = visu_string("L" .. tostring(i))
+        end
+    end
+
+    local lines = {
+        "# Modèle IA généré par analyze_model.lua",
+        "# Les structures sont séparées en métadonnées, pipeline CNN et cartes d'activation.",
+        "",
+        "map model_info = []",
+        string.format("model_info.set(%s, %s)", visu_string("name"), visu_string(model_name)),
+        string.format("model_info.set(%s, %s)", visu_string("type"), visu_string(model_type)),
+        string.format("model_info.set(%s, %d)", visu_string("layers"), max_layers),
+    }
+    if total_params then
+        lines[#lines + 1] = string.format(
+            "model_info.set(%s, %d)",
+            visu_string("parameters"),
+            math.floor(total_params)
+        )
+    end
+
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "# Ordre séquentiel déclaré par le modèle"
+    lines[#lines + 1] = "array layer_order = [" .. table.concat(layer_ids, ", ") .. "]"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "# Pipeline CNN linéaire; une liste évite le layout circulaire des graphes Visu"
+    lines[#lines + 1] = "list cnn_blocks = []"
+    for i = 1, max_layers do
+        local layer = arch.layers[i]
+        if type(layer) == "table" then
+            lines[#lines + 1] = string.format(
+                "cnn_blocks.append(%s)",
+                visu_list(convolution_layer_payload(layer, i))
+            )
+        end
+    end
+
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "# Cartes d'activation et routes explicites (branches / skip connections)"
+    lines[#lines + 1] = "map feature_maps = []"
+    for _, tensor in ipairs(tensor_order) do
+        local role = "activation map"
+        if not produced[tensor] then
+            role = "input image"
+        elseif not consumed[tensor] then
+            role = "output prediction"
+        end
+        lines[#lines + 1] = string.format(
+            "feature_maps.set(%s, %s)",
+            visu_string(tensor),
+            visu_string(role)
+        )
+    end
+
+    lines[#lines + 1] = "map routes = []"
+    for i = 1, max_layers do
+        if type(arch.layers[i]) == "table" then
+            local encoded_inputs = {}
+            for _, input in ipairs(layer_inputs[i] or {}) do
+                encoded_inputs[#encoded_inputs + 1] = visu_string(input)
+            end
+            local output = layer_outputs[i]
+            lines[#lines + 1] = string.format(
+                "routes.set(%s, %s)",
+                visu_string("L" .. tostring(i) .. " -> " .. tostring(output)),
+                "[" .. table.concat(encoded_inputs, ", ") .. "]"
+            )
+        end
+    end
+
+    if max_layers < #arch.layers then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = string.format(
+            "# Graphe limité à %d/%d couches; utilisez --max-layers",
+            max_layers,
+            #arch.layers
+        )
+    end
+
+    return table.concat(lines, "\n")
+end
+
+local function render_graph_visu_tree(info, opts)
+    local arch = info.arch
+    if type(arch) ~= "table" or type(arch.layers) ~= "table" then
+        return nil
+    end
+
+    local max_layers = tonumber(opts.max_layers)
+    if max_layers == nil then max_layers = #arch.layers end
+    max_layers = clamp(max_layers, 0, #arch.layers)
+
+    local max_units = tonumber(opts.graph_units) or 8
+    max_units = clamp(math.floor(max_units), 1, 32)
+
+    local function visu_string(s)
+        s = tostring(s or "")
+        s = s:gsub("\\", "\\\\"):gsub('"', '\\"')
+        s = s:gsub("\r", "\\r"):gsub("\n", "\\n"):gsub("\t", "\\t")
+        return '"' .. s .. '"'
+    end
+
+    local function visu_list(values)
+        local encoded = {}
+        for i = 1, #values do
+            if type(values[i]) == "number" then
+                encoded[#encoded + 1] = tostring(values[i])
+            else
+                encoded[#encoded + 1] = visu_string(values[i])
+            end
+        end
+        return "[" .. table.concat(encoded, ", ") .. "]"
+    end
+
+    local function norm_inputs(v, i)
+        if type(v) == "table" and #v > 0 then
+            local out = {}
+            for k = 1, #v do
+                local value = tostring(v[k] or "")
+                if value ~= "" then out[#out + 1] = value end
+            end
+            if #out > 0 then return out end
+        elseif type(v) == "string" and v ~= "" then
+            return { v }
+        end
+        if i and i > 1 then return { "t" .. tostring(i - 1) } end
+        return { "x" }
+    end
+
+    local function norm_output(v, i)
+        if type(v) == "string" and v ~= "" then return v end
+        return "t" .. tostring(i or 0)
+    end
+
+    local function positive_int(v)
+        v = tonumber(v)
+        if not v or v <= 0 then return nil end
+        return math.floor(v)
+    end
+
+    local function unit_counts(layer, fallback)
+        local cfg = (type(layer.config) == "table") and layer.config or layer
+        local inputs = positive_int(cfg.in_channels)
+            or positive_int(cfg.in_features)
+            or fallback
+            or 1
+        local outputs = positive_int(cfg.out_channels)
+            or positive_int(cfg.out_features)
+            or inputs
+        return inputs, outputs
+    end
+
+    local function is_fully_connected(layer)
+        local typ = tostring(layer.type or ""):lower()
+        return typ:find("conv", 1, true) ~= nil
+            or typ:find("linear", 1, true) ~= nil
+            or typ:find("dense", 1, true) ~= nil
+            or typ:find("concat", 1, true) ~= nil
+            or typ == "add"
+    end
+
+    local consumed = {}
+    for i = 1, max_layers do
+        local layer = arch.layers[i]
+        if type(layer) == "table" then
+            for _, input in ipairs(norm_inputs(layer.inputs, i)) do
+                consumed[input] = true
+            end
+        end
+    end
+
+    local lines = {
+        "# Vue neuronale générée par analyze_model.lua",
+        "# Chaque tableau représente une couche; aucun layout circulaire n'est utilisé.",
+        "map layer_info = []",
+        "map connections = []",
+    }
+    local tensor_units = {}
+    local input_index = 0
+
+    local function add_group(prefix, count, role, detail)
+        local ids = {}
+        local encoded_ids = {}
+        local visible = math.min(count, max_units)
+        for unit = 1, visible do
+            local id = prefix .. "_" .. tostring(unit)
+            ids[#ids + 1] = id
+            encoded_ids[#encoded_ids + 1] = visu_string(id)
+        end
+        lines[#lines + 1] = string.format(
+            "array %s = [%s]",
+            prefix,
+            table.concat(encoded_ids, ", ")
+        )
+        lines[#lines + 1] = string.format(
+            "layer_info.set(%s, %s)",
+            visu_string(prefix),
+            visu_list({ role, detail, count })
+        )
+        return ids
+    end
+
+    local function connect(from_ids, to_ids, dense)
+        if dense then
+            local encoded_from = {}
+            for _, from_id in ipairs(from_ids) do
+                encoded_from[#encoded_from + 1] = visu_string(from_id)
+            end
+            for _, to_id in ipairs(to_ids) do
+                lines[#lines + 1] = string.format(
+                    "connections.set(%s, [%s])",
+                    visu_string(to_id),
+                    table.concat(encoded_from, ", ")
+                )
+            end
+        elseif #from_ids > 0 then
+            for index, to_id in ipairs(to_ids) do
+                local from_id = from_ids[((index - 1) % #from_ids) + 1]
+                lines[#lines + 1] = string.format(
+                    "connections.set(%s, [%s])",
+                    visu_string(to_id),
+                    visu_string(from_id)
+                )
+            end
+        end
+    end
+
+    for i = 1, max_layers do
+        local layer = arch.layers[i]
+        if type(layer) == "table" then
+            local incoming = {}
+            local inputs = norm_inputs(layer.inputs, i)
+            for _, input in ipairs(inputs) do
+                local group = tensor_units[input]
+                if not group then
+                    local input_count = select(1, unit_counts(layer, nil))
+                    input_index = input_index + 1
+                    group = add_group("X" .. tostring(input_index), input_count, "input", input)
+                    tensor_units[input] = group
+                end
+                for _, id in ipairs(group) do incoming[#incoming + 1] = id end
+            end
+
+            local _, output_count = unit_counts(layer, #incoming)
+            local output = norm_output(layer.output, i)
+            local role = consumed[output] and ("hidden layer " .. tostring(i)) or "output layer"
+            local detail = tostring(layer.name or ("layer_" .. tostring(i)))
+                .. " | " .. tostring(layer.type or "unknown")
+            local dims = layer_dims(layer)
+            if dims ~= "" then detail = detail .. " | " .. dims end
+            local outgoing = add_group("H" .. tostring(i), output_count, role, detail)
+            connect(incoming, outgoing, is_fully_connected(layer))
+            tensor_units[output] = outgoing
+        end
+    end
+
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format(
+        "# Limite visuelle: %d neurones/canaux par couche (--graph-units)",
+        max_units
+    )
+    if max_layers < #arch.layers then
+        lines[#lines + 1] = string.format(
+            "# Graphe limité à %d/%d couches; utilisez --max-layers",
+            max_layers,
+            #arch.layers
+        )
+    end
+    return table.concat(lines, "\n")
+end
+
 local function render_graph_mlp_markdown(info, opts)
     local arch = info.arch
     if type(arch) ~= "table" then
@@ -2187,20 +2612,22 @@ local function render_help()
         colorize("Formats supportés:", C.bold, C.cyan),
         "  - SafeTensors: *.safetensors (ou *.st)",
         "  - RawFolder  : dossier contenant manifest.json",
-        "  - DebugJson  : dump JSON (format=mimir_debug_dump ou JSON enhanced v1.3)",
+        "  - DebugJson  : dump JSON (format=mimir_debug_dump ou JSON enhanced v1.4)",
         "",
         colorize("Options:", C.bold, C.cyan),
         "  --in <path>                         Chemin du modèle (requis)",
         "  --max-layers <n>                    Limite l'affichage des couches / graphe",
         "  --top-tensors <n>                   Nb de tensors listés (par taille)",
         "  --enrich-tensors <n>                [RawFolder] enrichit les N plus gros tensors (dtype/shape)",
-        "  --graph-format <table|blocks|mermaid|mlp_graph>  Format de graphe (défaut: table)",
+        "  --graph-format <table|blocks|mermaid|mlp_graph|visu-bloc|visu-tree>",
+        "                                     Format de graphe (défaut: table; visu = visu-bloc)",
         "                                     Alias accepté: mermaind -> mermaid",
         "  --graph-out <path.{svg|png|jpg}>    Exporte le graphe Mermaid vers un fichier image",
         "  --graph-blocks <bool>               Affiche le graphe 'blocks' en plus du graphe principal (défaut: false)",
         "  --graph-in-width <n>                Largeur inputs (mode blocks)",
         "  --graph-layer-width <n>             Largeur layer (mode blocks)",
         "  --graph-out-width <n>               Largeur output (mode blocks)",
+        "  --graph-units <n>                   Neurones/canaux visibles par couche (visu-tree, défaut: 8, max: 32)",
         "  --all <bool>                        Affiche toutes les valeurs sans troncature dans l'entête (sur plusieurs lignes si besoin) (défaut: false)",
         "  --debug <bool>                      Logs de debug (défaut: false)",
         "  --script-help <bool>                Affiche cette aide (alias: --help-script, --h)",
@@ -2208,6 +2635,8 @@ local function render_help()
         colorize("Notes:", C.bold, C.cyan),
         "  - Le graphe Mermaid est émis en Markdown via un bloc ```mermaid```.",
         "  - Le format mlp_graph émet un diagramme Mermaid orienté architecture MLP (type image).",
+        "  - visu-bloc utilise une liste CNN et des routes, sans layout circulaire.",
+        "  - visu-tree utilise un tableau par couche et une map de connexions, sans layout circulaire.",
         "  - L'export image utilise Mermaid CLI (mmdc). Pour .jpg, ImageMagick est aussi requis.",
         "  - Les dumps DebugJson n'embarquent pas forcément inputs/output; dans ce cas le graphe Mermaid",
         "    utilise un fallback linéaire (layer1 -> layer2 -> ...).",
@@ -2231,6 +2660,7 @@ opts.graph_blocks = Args.get_bool(opts, "graph-blocks", Args.get_bool(opts, "gra
 opts.graph_in_width = Args.get_num(opts, "graph-in-width", Args.get_num(opts, "graph_in_width", nil))
 opts.graph_layer_width = Args.get_num(opts, "graph-layer-width", Args.get_num(opts, "graph_layer_width", nil))
 opts.graph_out_width = Args.get_num(opts, "graph-out-width", Args.get_num(opts, "graph_out_width", nil))
+opts.graph_units = Args.get_num(opts, "graph-units", Args.get_num(opts, "graph_units", 8))
 opts.graph_format = Args.get_str(opts, "graph-format", Args.get_str(opts, "graph_format", "table"))
 opts.graph_out = Args.get_str(opts, "graph-out", Args.get_str(opts, "graph_out", ""))
 opts.debug = Args.get_bool(opts, "debug", false)
@@ -2309,6 +2739,20 @@ do
             log("")
             log(colorize("Graphe (Mermaid/Markdown)", C.bold, C.blue))
             log(md)
+        end
+    elseif gf == "visu-tree" or gf == "visu_tree" then
+        local visu = render_graph_visu_tree(info, opts)
+        if visu then
+            log("")
+            log(colorize("Graphe neuronal (pseudocode Visu Tree)", C.bold, C.blue))
+            log(visu)
+        end
+    elseif gf == "visu" or gf == "visu-bloc" or gf == "visu_bloc" then
+        local visu = render_graph_visu_bloc(info, opts)
+        if visu then
+            log("")
+            log(colorize("Architecture CNN (pseudocode Visu Bloc)", C.bold, C.blue))
+            log(visu)
         end
     elseif gf == "mlp_graph" then
         local mlp = render_graph_mlp_markdown(info, opts)

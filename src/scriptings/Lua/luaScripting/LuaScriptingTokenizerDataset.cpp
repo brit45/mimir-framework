@@ -1,4 +1,5 @@
 #include "LuaScripting.hpp"
+#include "VizTextPayload.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Serialization/Serialization.hpp"
 #include "Serialization/DebugJsonDump.hpp"
@@ -743,15 +744,27 @@ int LuaScripting::lua_ponyxlDdpmTrainStep(lua_State* L) {
                 if (meta_dataset_i > 0) {
                     label += "/i=" + std::to_string(meta_dataset_i);
                 }
+                const auto viz_payload = VizTextPayload::buildDatasetTextPayload(
+                    ctx.currentModel.get(),
+                    ctx.currentTokenizer.get(),
+                    std::string(prompt ? prompt : ""),
+                    nullptr,
+                    -1,
+                    true,
+                    true,
+                    true
+                );
+
                 ctx.asyncMonitor->setDatasetSample(
                     rgb,
                     w,
                     h,
                     3,
                     label,
-                    std::string(prompt ? prompt : ""),
-                    std::string(),
-                    std::string()
+                    viz_payload.prompt,
+                    viz_payload.tags,
+                    viz_payload.tokens,
+                    viz_payload.encoding
                 );
 
                 // Pousser les viz taps (frames) générés par le modèle pendant la step.

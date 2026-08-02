@@ -1,10 +1,4 @@
-# API : monitoring / visualisation
-
-## Pour qui
-
-Développeur et utilisateur intermédiaire/avancé.
-
-## Objectif
+# Monitoring et visualisation
 
 Trouver rapidement le contrat API réel et les paramètres utilisables.
 
@@ -17,13 +11,11 @@ Le monitoring Mímir repose sur 2 interfaces complémentaires :
 
 En pratique, les deux passent par `AsyncMonitor`, qui met à jour l'UI sans bloquer l'entraînement.
 
-## Avant de commencer
+**Public concerné :** Développeur et utilisateur intermédiaire/avancé.
 
-Connaître les commandes de base de Mímir.
-
-## Résultat attendu
-
-Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+> **Prérequis**
+>
+> Connaître les commandes de base de Mímir.
 
 ## `Mimir.Htop`
 
@@ -39,7 +31,7 @@ Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
 2. Pousser des `Metrics` régulièrement (`updateMetrics`).
 3. Laisser le rendu asynchrone faire l'affichage.
 
-### Ce que tu vois dans le terminal
+### Ce que vous voyez dans le terminal
 
 - progression epoch/batch,
 - loss courante + moyenne,
@@ -52,7 +44,7 @@ Notes :
 - Le label de la métrique de reconstruction est dynamique et suit `recon_loss_type` quand fourni.
 - Si `recon_loss_type` est absent, l'affichage retombe sur un label générique `RECON`.
 
-## `Mimir.Viz` / `Mimir.visualiser`
+## `Mimir.Viz`
 
 - `create()`
 - `initialize()`
@@ -130,9 +122,15 @@ Validation édition :
 
 - Garder `visualization.update_interval_ms` autour de `16..33` ms pour un bon compromis fluidité/coût.
 - Utiliser la resync (`R`) seulement quand nécessaire (debug), pas en continu.
-- Si tu pousses des taps volumineux, réduire la fréquence (`viz_taps_every_steps`) pour limiter la charge.
+- Si vous envoyez des taps volumineux, réduisez la fréquence (`viz_taps_every_steps`) pour limiter la charge.
 
 Notes :
 
 - `Viz` peut dépendre de SFML selon le build.
 - Le runtime peut publier des “viz taps” pendant `Model.forward()` si un monitor async est actif.
+
+## Étapes suivantes
+
+- [Page précédente : API : mémoire](14-Memory.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : API : `Mimir.Serialization`](16-Serialization.md)

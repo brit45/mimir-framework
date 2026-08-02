@@ -1,20 +1,12 @@
-# Tutoriel : diffusion (PonyXL / SD3.5 / autoencoder)
-
-## Pour qui
-
-Intermédiaire guidé.
-
-## Objectif
+# Diffusion : PonyXL, SD3.5 et autoencodeurs
 
 Comprendre et exécuter les chemins diffusion disponibles.
 
-## Avant de commencer
+**Public concerné :** Intermédiaire guidé.
 
-Checkpoints/config adaptés au modèle choisi.
-
-## Résultat attendu
-
-Tu sais lancer un pipeline diffusion sans ambiguïté de setup.
+> **Prérequis**
+>
+> Checkpoints/config adaptés au modèle choisi.
 
 ## Diagrammes d'explication
 
@@ -36,7 +28,7 @@ Voir aussi:
 
 ## PonyXL (SDXL-like)
 
-- Architecture canonique : `ponyxl_sdxl` (anciens alias: `ponyxl_ddpm`, `t2i_autoencoder`, etc.)
+- Architecture canonique : `ponyxl_ddpm`
 - Scripts : `scripts/training/ponyxl_ddpm_train.lua`, `scripts/inferences/ponyxl_ddpm_text2img.lua`
 
 ### Entraîner (PonyXL DDPM)
@@ -82,9 +74,15 @@ Le script écrit généralement:
 ## SD3.5 (skeleton / démos)
 
 - Architecture : `sd3_5` (alias: `SD3.5`)
-- Démos : `scripts/examples/sd3_5_skeleton_demo.lua`, `sd3_5_subset_load_demo.lua`
+- Statut : squelette/placeholder enregistré, sans script de démonstration dédié dans
+  le dépôt courant.
 
-Ces scripts sont des démos/squelettes: ils servent surtout à valider les chemins de load/config.
+Inspection :
+
+```bash
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- \
+  --list sd3_5 --params --layers
+```
 
 ## Autoencoder image
 
@@ -119,3 +117,9 @@ Pour générer des images cohérentes, il faut :
 - un VAE image entraîné
 - un U-Net/diffusion entraîné
 - une config de scheduler cohérente
+
+## Étapes suivantes
+
+- [Page précédente : Tutoriel : Transformer causal (GPT-style)](12-Transformer-GPT.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : VAEConv : architecture, configuration et entraînement](14-VAEConv.md)

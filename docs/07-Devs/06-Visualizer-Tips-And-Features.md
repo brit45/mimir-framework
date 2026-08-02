@@ -1,25 +1,28 @@
-# Visualizer: Tips Et Nouvelles Features
-
-## Pour qui
-
-Developpeur framework (C++/runtime/monitoring/UI SFML).
-
-## Objectif
+# Étendre le visualizer
 
 Savoir brancher correctement les tips (viz taps), et ajouter/configurer/implementer
 une nouvelle feature Viz sans casser le run.
 
-## Avant de commencer
+**Public concerné :** Developpeur framework (C++/runtime/monitoring/UI SFML).
 
-Comprendre les chapitres Dev 01, 04 et 05.
-
-## Resultat attendu
-
-Tu peux:
+> **Prérequis**
+>
+> Comprendre les chapitres Dev 01, 04 et 05.
 
 1. ajouter un nouveau tip visuel dans le flux training,
 2. etendre l'UI Visualizer (rendu, raccourcis, options),
 3. garder un comportement stable et backward-compatible.
+
+## Sur cette page
+
+- [1. Pipeline Viz dans Mimir](#1-pipeline-viz-dans-mimir)
+- [2. Comment brancher un tip](#2-comment-brancher-un-tip)
+- [3. Ajouter une feature Viz (rendu/comportement)](#3-ajouter-une-feature-viz-renducomportement)
+- [4. Configurer une nouvelle feature](#4-configurer-une-nouvelle-feature)
+- [5. Checklist de securite (anti-regressions)](#5-checklist-de-securite-anti-regressions)
+- [6. Recette concrete: ajouter une feature de palette](#6-recette-concrete-ajouter-une-feature-de-palette)
+- [7. Validation rapide avant commit](#7-validation-rapide-avant-commit)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## 1. Pipeline Viz dans Mimir
 
@@ -39,6 +42,13 @@ Fichiers de reference:
 - `src/Visualizer.cpp`
 
 ## 2. Comment brancher un tip
+
+Depuis la mise a jour recente, il existe deux chemins complementaires:
+
+1. generation directe de frames (`VizFrame`) dans le flux modele,
+2. personnalisation de labels via hooks optionnels dans la classe modele enfant.
+
+Le chemin 2 est recommande pour standardiser les labels par architecture.
 
 ### 2.1 Produire la frame cote modele
 
@@ -74,6 +84,62 @@ Bonnes pratiques:
 - garder des noms predictibles,
 - eviter les labels ambigus,
 - ne pas reutiliser un label pour un contenu semantiquement different.
+
+### 2.3 Hooks optionnels par modele (recommande)
+
+Le socle `Model` expose maintenant deux hooks virtuels:
+
+- `InitVizTips()`
+- `UpdateVizTips(const Layer& layer, VizFrame& frame)`
+
+Comportement par defaut:
+
+- dans `Model` base, les hooks sont inactifs (mode opt-in),
+- aucun tip custom n'est applique si le modele enfant ne surcharge pas ces methodes.
+
+Contrat pratique:
+
+1. `InitVizTips()` est appelee une fois quand les viz taps sont actives,
+2. elle peut remplir un registre `layer.name -> tip label` via `registerVizTip(...)`,
+3. `UpdateVizTips(...)` peut appliquer ce registre et/ou des regles dynamiques.
+
+Exemple minimal (modele enfant):
+
+```cpp
+bool MyModel::InitVizTips() {
+	clearVizTipsRegistry();
+	registerVizTip("my_model/enc/in", "Dataset/raw");
+	registerVizTip("my_model/enc/mu", "Latent/mu");
+	return true; // active le chemin custom
+}
+
+bool MyModel::UpdateVizTips(const Layer& layer, VizFrame& frame) {
+	if (Model::UpdateVizTips(layer, frame)) return true; // applique le mapping exact
+
+	if (layer.name.find("/attn") != std::string::npos) {
+		frame.label = "Attention|" + frame.label;
+		return true;
+	}
+	return false;
+}
+```
+
+Points importants:
+
+1. Toujours appeler `Model::UpdateVizTips(...)` en premier si vous voulez conserver le mapping exact.
+2. Garder les prefixes de labels stables (ex: `Dataset/...`, `Encoder/...`, `Latent/...`, `Output/...`).
+3. Ne pas faire de logique couteuse dans `UpdateVizTips(...)` (appelee tres souvent).
+
+### 2.4 Exemples existants dans le repo
+
+- `src/Models/Vision/VAEConvModel.cpp`
+- `src/Models/Diffusion/PonyXLDDPMModel.cpp`
+
+Ces deux modeles montrent:
+
+1. un mapping statique de layers cle,
+2. des regles dynamiques basees sur des fragments de nom de layer,
+3. une composition du label sous la forme `prefix|label_existant`.
 
 ## 3. Ajouter une feature Viz (rendu/comportement)
 
@@ -139,6 +205,7 @@ Si la feature est pure UI:
 4. Eviter les interpretations de layout implicites non verifiees (CHW/HWC).
 5. Pour toute interaction clavier, verifier l'effet immediat sans attendre la step suivante.
 6. Compiler et verifier les erreurs avant merge.
+7. Lorsque vous ajoutez des hooks tips, verifier qu'un modele sans surcharge garde bien le comportement precedent.
 
 ## 6. Recette concrete: ajouter une feature de palette
 
@@ -167,3 +234,16 @@ Verification manuelle:
 3. les toggles clavier ont un effet immediat,
 4. la progression training reste coherent (global + batch),
 5. pas d'artefact de texture evident (bande, repetition, couleurs incoherentes).
+
+Verification hooks tips:
+
+1. `InitVizTips()` est appelee une fois a l'activation des taps,
+2. les labels mappes via `registerVizTip(...)` apparaissent en priorite,
+3. les regles dynamiques de `UpdateVizTips(...)` ne dupliquent pas les prefixes,
+4. la desactivation/re-activation des taps reinitialise proprement l'etat des tips.
+
+## Étapes suivantes
+
+- [Page précédente : Contrat API Scripting Inter-Langages](05-Scripting-System-Contract.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Runbook Debug Visualizer](07-Visualizer-Debug-Runbook.md)

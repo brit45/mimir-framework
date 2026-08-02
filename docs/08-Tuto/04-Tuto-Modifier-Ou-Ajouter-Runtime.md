@@ -1,129 +1,174 @@
-# Tuto - Modifier ou ajouter un runtime
+# Modifier ou ajouter un runtime
 
-## Pour qui
+Ce tutoriel suit le routage actuel des layers :
+`Model` appelle `RuntimeRouter`, qui planifie et essaie les runtimes dans
+l'ordre ROCm, CUDA, Vulkan, OpenCL, CPU.
 
-Profil avance qui touche au moteur d'execution C++.
+## Sources de vérité
 
-## Objectif
-
-Modifier un runtime existant ou en ajouter un nouveau sans casser le fallback.
-
-## Avant de commencer
-
-1. Lecture conseillee: [docs/07-Devs/04-Runtime-Development.md](../07-Devs/04-Runtime-Development.md).
-2. Comprendre le contrat runtime.
-3. Savoir compiler et tester rapidement.
-
-## Résultat attendu
-
-Le runtime respecte le contrat, retourne `false` quand non supporte, et n'introduit pas de regression.
-
-## Etape 1 - Comprendre le contrat
-
-Fichier de reference:
 - `src/runtimes/AbstractRuntime.hpp`
+- `src/runtimes/AbstractRuntime.cpp`
+- `src/runtimes/RuntimeRouter.hpp`
+- `src/runtimes/RuntimeRouter.cpp`
+- `src/runtimes/cpu/CpuRuntime.cpp`
+- `src/runtimes/cpu/RuntimeLayerDispatch.hpp`
+- `src/Model.cpp`
+- `CMakeLists.txt`
 
-Methodes critiques:
-1. `initialize(...)`
-2. `shutdown()`
-3. `isInitialized()`
-4. `linearForward(...)`
-5. `forwardLayer(...)`
+## Comprendre le contrat
 
-## Etape 2 - Modifier un runtime existant
+Un runtime dérive de `AbstractRuntime` et fournit au minimum :
 
-Checklist simple:
-1. garder la signature API,
-2. verifier shapes et dtypes,
-3. si non supporte: retourner `false`,
-4. ajouter des logs utiles en mode verbose,
-5. valider resultat numerique vs reference CPU.
-
-## Etape 3 - Ajouter un nouveau runtime
-
-Procedure pas-a-pas:
-1. creer un dossier backend: `src/runtimes/<backend>/`,
-2. creer une classe derivee de `AbstractRuntime`,
-3. implementer init/shutdown/isInitialized,
-4. implementer au minimum une op stable,
-5. brancher la config runtime,
-6. integrer au build CMake,
-7. tester fallback + non-regression.
-
-## Etape 4 - Test minimal obligatoire
-
-1. Build debug + release.
-2. Test op supportee (resultat attendu).
-3. Test op non supportee (retour `false`).
-4. Test run script standard sans crash.
-
-Commande utile:
-
-```bash
-./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1
+```cpp
+const char* name() const override;
+bool initialize(const RuntimeConfig& cfg) override;
+void shutdown() override;
+bool isInitialized() const override;
+bool linearForward(/* ... */) override;
+bool forwardLayer(/* ... */) override;
 ```
 
-## Etape 5 - Definition de done
+La passe arrière générique possède une implémentation de base, mais un backend
+peut redéfinir `backwardLayer`. Les votes
+`supportsForwardLayerType` et `supportsBackwardLayerType` servent à composer
+les routes avant l'exécution.
 
-Ton travail est termine si:
-1. les tests de base passent,
-2. le fallback fonctionne,
-3. les logs sont actionnables,
-4. aucune regression visible sur scripts smoke.
+`forwardLayer` retourne :
 
-## Exemple pratique
+- `true` uniquement si toutes les sorties demandées sont produites ;
+- `false` si le runtime est inactif, refuse les formes reçues ou ne possède pas
+  d'implémentation applicable.
 
-### Contexte
+`false` est donc un refus contrôlé. Il permet au routeur d'essayer le runtime
+suivant.
 
-Tu ajoutes un fast path pour une operation simple. Si le runtime ne peut pas traiter le cas, il doit rendre la main proprement.
+## Modifier un backend existant
 
-### Code commente
+Prenez le `case` équivalent dans le runtime CPU comme référence mathématique.
+Pour une modification :
+
+1. vérifiez le vote de support ;
+2. vérifiez les flags de `RuntimeConfig` ;
+3. validez le nombre d'entrées, les pointeurs et les formes ;
+4. ne modifiez pas `outputs` avant de savoir que le cas est accepté, ou
+   reconstruisez entièrement la sortie avant de retourner `true` ;
+5. comparez le résultat au CPU avec une tolérance explicite ;
+6. vérifiez séparément l'entraînement et l'inférence.
+
+> **Attention**
+> Le fait qu'un runtime vote pour un `LayerType` ne prouve pas qu'un kernel GPU
+> spécialisé sera utilisé pour toutes les formes. CUDA et ROCm possèdent aussi
+> des chemins partagés de dispatch.
+
+## Ajouter un backend
+
+Un nouveau backend exige plus qu'une classe :
+
+1. créez `src/runtimes/<backend>/MyRuntime.hpp` et `.cpp` ;
+2. implémentez l'initialisation, l'arrêt, les votes et le dispatch ;
+3. ajoutez une option CMake et la détection de ses dépendances ;
+4. ajoutez ses sources, définitions et bibliothèques à `mimir_core` ;
+5. instanciez-le dans le code d'initialisation des runtimes ;
+6. ajoutez-le à `RuntimeRouter::setRuntimes` et `setActivators` ;
+7. documentez sa priorité par rapport aux backends existants ;
+8. exposez ses capacités si l'API Lua de diagnostic doit les afficher.
+
+Le routeur actuel a cinq emplacements explicites. Ajouter un sixième backend
+nécessite donc de modifier les signatures et les structures internes du
+routeur ; créer uniquement le dossier backend ne suffit pas.
+
+## Exemple : refuser proprement `Add`
+
+La signature réelle de `forwardLayer` est :
 
 ```cpp
 bool MyRuntime::forwardLayer(
-	const std::vector<const std::vector<float>*>& inputs,
-	std::vector<std::vector<float>>& outputs,
-	const Layer& layer,
-	bool training) {
-	// 1) Runtime non pret => fallback vers un autre runtime.
-	if (!isInitialized()) return false;
+    const std::vector<const std::vector<float>*>& inputs,
+    std::vector<std::vector<float>>& outputs,
+    const Layer& layer,
+    bool training
+) {
+    (void)training;
+    if (!isInitialized()) return false;
+    if (layer.type_enum != LayerType::Add) return false;
+    if (inputs.size() < 2 || !inputs[0] || !inputs[1]) return false;
+    if (inputs[0]->size() != inputs[1]->size()) return false;
 
-	// 2) On ne traite que l'operation Add dans cet exemple.
-	if (layer.type != LayerType::Add) return false;
+    std::vector<float> result(inputs[0]->size());
+    for (size_t i = 0; i < result.size(); ++i) {
+        result[i] = (*inputs[0])[i] + (*inputs[1])[i];
+    }
 
-	// 3) Validation defensive des entrees.
-	if (inputs.size() != 2 || !inputs[0] || !inputs[1]) return false;
-	const auto& a = *inputs[0];
-	const auto& b = *inputs[1];
-	if (a.size() != b.size()) return false;
-
-	// 4) Calcul complet de la sortie.
-	outputs.resize(1);
-	outputs[0].resize(a.size());
-	for (size_t i = 0; i < a.size(); ++i) {
-		outputs[0][i] = a[i] + b[i];
-	}
-
-	// 5) true uniquement si la sortie est totalement produite.
-	return true;
+    outputs.clear();
+    outputs.push_back(std::move(result));
+    return true;
 }
 ```
 
-### Explication
+Cet exemple utilise le même contrat élément par élément que le cas `Add` du
+runtime CPU. Pour un backend accéléré, remplacez seulement le calcul après
+validation ; le contrat de sortie reste identique.
 
-1. `false` = je ne sais pas faire, laissez le fallback agir.
-2. `true` = sortie complete et exploitable.
-3. checks shapes/dtypes avant tout calcul.
+## Tester le runtime
 
-### Test rapide
+Un benchmark global ne démontre pas qu'un backend a exécuté l'opération visée.
+Ajoutez un test C++ ciblé qui :
+
+1. initialise le runtime ;
+2. construit un `Layer` du type testé ;
+3. compare sa sortie à une référence CPU ;
+4. vérifie un cas refusé ;
+5. vérifie la route et le runtime sélectionné ;
+6. couvre la passe arrière si elle est annoncée.
+
+Puis exécutez les tests runtime existants :
 
 ```bash
-./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1
+ctest --test-dir build --output-on-failure \
+  -R 'RuntimeTest|AutogradTest.Numerical'
 ```
 
-Verification attendue: pas de crash, et resultat numerique coherent par rapport au chemin de reference CPU.
+Les tests du planificateur constituent une suite distincte. Exécutez-les
+séparément lorsque votre modification touche la planification, afin qu'un
+échec de fusion ne soit pas confondu avec un échec du backend :
 
-## Suite
+```bash
+ctest --test-dir build --output-on-failure -R FrameworkTest.Planner
+```
 
-- Runtime dev: [docs/07-Devs/04-Runtime-Development.md](../07-Devs/04-Runtime-Development.md)
-- Internals moteur: [docs/04-Architecture-Internals/01-Engine-Overview.md](../04-Architecture-Internals/01-Engine-Overview.md)
+Pour observer le dispatch, appliquez les variables à un scénario ciblé dont
+vous maîtrisez la taille. Par exemple, lancez d'abord le test de contrat ou le
+script minimal associé à l'opération :
+
+```bash
+MIMIR_ACCEL_VERBOSE=1 MIMIR_RUNTIME_TRACE=1 \
+  ctest --test-dir build --output-on-failure -R RuntimeTest.MathLinear
+```
+
+`benchmark_official.lua --safe` n'est pas un smoke test : il inclut plusieurs
+tailles de Transformer jusqu'au profil Large et peut consommer plusieurs
+gigaoctets.
+
+Pour mesurer spécifiquement le forward NMS sans dataset :
+
+```bash
+./bin/mimir --lua scripts/benchmarks/benchmark_nms.lua -- --quick
+```
+
+Ce résultat mesure le chemin réellement routé par `Model.forward`; il ne prouve
+pas à lui seul qu'un kernel GPU natif a été utilisé.
+
+## Critères de validation
+
+- Les résultats correspondent au CPU dans la tolérance annoncée.
+- Un cas non supporté retourne `false` sans sortie partielle.
+- Les votes de support correspondent aux implémentations.
+- La route conserve un fallback CPU fonctionnel.
+- Les ressources sont libérées par `shutdown`.
+- Les options CMake désactivées n'introduisent pas de dépendance de lien.
+
+## Étapes suivantes
+
+- [Ajouter une opération](05-Tuto-Ajouter-Op.md)
+- [Développement des runtimes](../07-Devs/04-Runtime-Development.md)
+- [Internals des runtimes GPU](../04-Architecture-Internals/21-GPU-Runtimes.md)

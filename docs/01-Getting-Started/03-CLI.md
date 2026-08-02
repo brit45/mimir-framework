@@ -1,20 +1,23 @@
 # CLI (binaire `mimir`)
 
-## Pour qui
-
-Débutant à intermédiaire.
-
-## Objectif
-
 Comprendre les modes --lua et --conf sans ambiguïté.
 
-## Avant de commencer
+**Public concerné :** Débutant à intermédiaire.
 
-Binaire mimir compilé.
+> **Prérequis**
+>
+> Binaire mimir compilé.
 
-## Résultat attendu
+## Sur cette page
 
-Tu sais lancer un script, une config, et passer des overrides.
+- [Diagrammes d'explication](#diagrammes-dexplication)
+- [Usage](#usage)
+- [Exécuter un script Lua avec arguments](#exécuter-un-script-lua-avec-arguments)
+- [Exemples d'utilisation](#exemples-dutilisation)
+- [Variables injectées par --conf](#variables-injectées-par---conf)
+- [Exécuter un script Lua avec arguments](#exécuter-un-script-lua-avec-arguments)
+- [Sortie au démarrage](#sortie-au-démarrage)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Diagrammes d'explication
 
@@ -55,7 +58,7 @@ Exécute un script Lua directement. La config n'est pas injectée.
 
 **Injection disponible :**
 - `arg[]` : arguments du script (std Lua)
-- `Mimir.Args` : table de parsing des arguments
+- `Mimir` et les fonctions globales du framework
 
 #### Mode `--conf` (config-driven)
 
@@ -127,9 +130,10 @@ Les overrides sont appliqués avant l'exécution des scripts, donc les scripts v
 ./bin/mimir --lua scripts/examples/example_conf_inference.lua -- --num-samples 20
 ```
 
-Les arguments après `--` sont accessibles dans le script via `arg[]` ou `Mimir.Args`.
+Les arguments après `--` sont accessibles dans `arg[]`. Utilisez
+`scripts/modules/args.lua` pour les analyser.
 
-### Exemple 4: Créer ta propre config
+### Exemple 4: Créer votre propre config
 
 Crée un fichier `my_config.json`:
 
@@ -195,17 +199,18 @@ end
 
 ## Exécuter un script Lua avec arguments
 
-Le programme injecte la table globale `arg` (comme l’interpréteur Lua) et aussi `Mimir.Args`.
+Le programme injecte la table globale `arg`, comme l’interpréteur Lua.
 
 Exemple :
 
 ```bash
-./bin/mimir --lua scripts/examples/vae_text_sample.lua -- --ckpt checkpoint/_smoke_vae_text_ce --mode prior
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- \
+  --list vae_text --params --layers
 ```
 
 Notes :
 
-- Le séparateur `--` est un usage pratique pour “séparer” les args du binaire de ceux du script. Le binaire ne le consomme pas explicitement ; certains scripts l’acceptent/ignorent.
+- Le séparateur `--` termine les options du CLI Mímir ; les valeurs suivantes sont transmises au script.
 - Dans un script, parsage recommandé : `local Args = dofile("scripts/modules/args.lua")` puis `Args.parse(arg)`.
 
 ## Sortie au démarrage
@@ -217,3 +222,9 @@ Au lancement, Mímir affiche :
 - configuration OpenMP
 
 Ces logs sont utiles pour diagnostiquer un build “lent” ou une machine non compatible AVX.
+
+## Étapes suivantes
+
+- [Page précédente : 🔧 Installation & Compilation détaillée](02-Installation.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Organisation du dépôt](04-Repo-Layout.md)

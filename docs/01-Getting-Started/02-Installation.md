@@ -1,27 +1,30 @@
-# 🔧 Installation & Compilation détaillée
+# Installation et compilation
 
-## Pour qui
+Installer les dépendances et compiler selon votre environnement.
 
-Débutant qui veut une installation stable et reproductible.
+**Public concerné :** Débutant qui veut une installation stable et reproductible.
 
-## Objectif
-
-Installer les dépendances et compiler selon ton environnement.
-
-## Avant de commencer
-
-Accès internet + installation de paquets système.
-
-## Résultat attendu
-
-Tu sais quoi installer, quoi activer, et comment diagnostiquer un build.
+> **Prérequis**
+>
+> Accès internet + installation de paquets système.
 
 
 Pour compiler Mímir, il faut CMake, C++17 et quelques dépendances. Cette page couvre tout ce qu'il faut savoir.
 
 ---
 
-## 📦 Dépendances
+## Sur cette page
+
+- [Dépendances](#dépendances)
+- [🔨 Build — Guide par OS](#build-guide-par-os)
+- [📋 Options CMake principales](#options-cmake-principales)
+- [🧪 Vérifier l'installation](#vérifier-linstallation)
+- [🐛 Troubleshooting](#troubleshooting)
+- [💡 Tips avancés](#tips-avancés)
+- [Checklist de déploiement en production](#checklist-de-déploiement-en-production)
+- [Étapes suivantes](#étapes-suivantes)
+
+## Dépendances
 
 ### Obligatoires
 
@@ -46,8 +49,8 @@ Pour compiler Mímir, il faut CMake, C++17 et quelques dépendances. Cette page 
 
 | Dépendance | Rôle | Utilité | Installer si |
 | --- | --- | --- | --- |
-| **CUDA Toolkit** | GPU NVIDIA (cuBLAS) | Inférence NVIDIA 100x+ rapide | Tu as GPU NVIDIA + `-DENABLE_CUDA=ON` |
-| **ROCm** | GPU AMD (rocBLAS) | Inférence AMD rapide | Tu as GPU AMD + `-DENABLE_ROCM=ON` |
+| **CUDA Toolkit** | GPU NVIDIA (cuBLAS) | Inférence NVIDIA 100x+ rapide | Vous avez GPU NVIDIA + `-DENABLE_CUDA=ON` |
+| **ROCm** | GPU AMD (rocBLAS) | Inférence AMD rapide | Vous avez GPU AMD + `-DENABLE_ROCM=ON` |
 
 ---
 
@@ -342,7 +345,7 @@ cmake --build build -j
 
 ---
 
-## ✅ Checklist — Déploiement production
+## Checklist de déploiement en production
 
 - [ ] Compiler en `-DCMAKE_BUILD_TYPE=Release`
 - [ ] Vérifier capacités: `./bin/mimir --help`
@@ -351,3 +354,9 @@ cmake --build build -j
 - [ ] Si CPU ancien: compiler sans `-DENABLE_SIMD`
 - [ ] Si GPU requis: `-DENABLE_CUDA=ON` ou `-DENABLE_ROCM=ON`
 - [ ] Archiver le binaire + config utilisée
+
+## Étapes suivantes
+
+- [Page précédente : Quick start](01-Quick-Start.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : CLI (binaire `mimir`)](03-CLI.md)

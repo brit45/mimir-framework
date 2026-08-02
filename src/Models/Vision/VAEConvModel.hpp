@@ -94,9 +94,11 @@ public:
         // pour éviter tout conflit de dimension avec le latent spatial.
         int d_model = 0;
 
-        // [DÉPRÉCIÉ / IGNORÉ] Conditionnement texte. Un modèle purement convolutionnel
-        // ne peut pas embarquer le chemin dense texte (Embedding/Pool/Linear) ; ces
-        // champs sont conservés pour compatibilité mais n'affectent plus le graphe.
+        // Conditionnement texte optionnel.
+        // Quand activé, le graphe ajoute une branche texte légère
+        // (Embedding -> TokenMeanPool -> Linear) et deux têtes de projection
+        // (image/text) pour l'alignement multi-modal via trainStepVAEText.
+        // Quand désactivé, le graphe reste strictement image-only.
         bool text_cond = false;
         int vocab_size = 32000;
         int seq_len = 64;
@@ -113,6 +115,9 @@ public:
     // Decoder-only graph: input is z (latent CHW vector), output is recon (RGB vector).
     // Layer names match the decoder portion of buildInto().
     static void buildDecoderInto(Model& model, const Config& cfg);
+
+    bool InitVizTips() override;
+    bool UpdateVizTips(const Layer& layer, VizFrame& frame) override;
 
 private:
     Config cfg_;

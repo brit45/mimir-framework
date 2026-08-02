@@ -1,20 +1,12 @@
-# Internals - moteur d’exécution
-
-## Pour qui
-
-Développeur avancé qui modifie le moteur C/C++.
-
-## Objectif
+# Moteur d’exécution
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
-## Avant de commencer
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Connaître les bases C++ et la structure du dépôt.
-
-## Résultat attendu
-
-Tu peux modifier le code interne en limitant les régressions.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
 ## Diagrammes d'explication
 
@@ -30,7 +22,7 @@ Sources principales :
 - `src/Model.cpp` (forward, stores, mode training)
 - `src/Layers.hpp` (structure d’un layer : type, entrées/sorties, poids)
 - `src/LayerTypes.hpp` (enum des types + normalisation d’alias)
-- `src/RuntimeAllocator.hpp` (gestion strict/mémoire pour les activations)
+- `src/runtimes/cpu/RuntimeAllocator.hpp` (gestion strict/mémoire pour les activations)
 
 ## Vue d’ensemble
 
@@ -132,3 +124,9 @@ Le registre d’architectures (`ModelArchitectures`) construit des graphes “va
 - choisissant des noms d’entrées/sorties cohérents entre layers
 - fixant les champs obligatoires (dimensions, poids, paramètres)
 - produisant une `modelConfig` sérialisable (voir la page API dédiée)
+
+## Étapes suivantes
+
+- [Page précédente : Internals du framework](00-Internals-Index.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Internals - mémoire](02-Memory.md)

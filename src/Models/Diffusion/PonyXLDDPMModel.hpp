@@ -34,6 +34,13 @@ public:
         // avant la cross-attention UNet. Ça réduit énormément le coût et force un “résumé” global.
         bool text_bottleneck_meanpool = false;
 
+        // Type de normalisation des blocs texte: "layernorm" (défaut) ou "rmsnorm".
+        std::string text_norm = "layernorm";
+
+        // Active GEGLU dans le MLP des blocs texte (Linear -> GEGLU -> Linear)
+        // au lieu du chemin classique GELU. Désactivé par défaut pour compatibilité checkpoints.
+        bool text_mlp_geglu = false;
+
         // NOTE: Le VAE texte a été extrait en modèle séparé (`vae_text`).
         // Ce modèle de diffusion ne contient plus de bottleneck variational côté texte.
         // Par défaut on vise le VAE_conv 256x256: latent 64x64x64 => seq=4096, in_dim=64.
@@ -53,6 +60,11 @@ public:
         int latent_h = 0;     // 0 = auto (inféré de latent_seq_len)
         int latent_w = 0;     // 0 = auto
         int unet_depth = 3;   // nombre de niveaux down/up
+
+        // Upsample dans le décodeur U-Net ponyxl_sdxl:
+        // - "nearest" (défaut, historique)
+        // - "conv_transpose" (nouveau, via layer ConvTranspose2d)
+        std::string unet_upsample = "nearest";
 
         // Image (RGB) - dimensions attendues côté dataset loader
         int image_w = 64;
@@ -102,19 +114,13 @@ public:
         float dropout = 0.0f;
 
         // === Captions structurées (dataset texte) ===
-        // Supporte des sections optionnelles sous forme:
-        //   --- TAGS ---
-        //   ...
-        //   --- CONTEXTE ---
-        //   ...
-        //   --- MENTALITÉ ---
-        //   ...
-        //   --- TEXTE (langue...) ---
-        //   ...
-        // Si aucune balise n'est détectée, le prompt est utilisé tel quel.
+        // Parseur structuré standard: attend un objet JSON du type:
+        //   {"tags":[...],"context":"...","mentality":"...","text":"..."}
+        // Alias acceptés: keywords, theme/contexte, mentalite, description/desc/prompt/caption.
+        // Si aucune structure JSON n'est détectée, le prompt est utilisé tel quel.
         bool caption_structured_enable = true;
-        // Si true, on recompose une forme canonique "TAGS: ...\nCONTEXTE: ...".
-        // Si false, on conserve le prompt original (mais on peut appliquer le dropout par section).
+        // Si true, on recompose une forme canonique texte pour le conditionnement.
+        // Si false, on re-sérialise l'objet structuré en JSON compact.
         bool caption_structured_canonicalize = true;
 
         // Dropout par section (appliqué uniquement pendant l'entraînement).
@@ -206,6 +212,9 @@ public:
 
     void buildFromConfig(const Config& cfg);
     const Config& getConfig() const { return cfg_; }
+
+    bool InitVizTips() override;
+    bool UpdateVizTips(const Layer& layer, VizFrame& frame) override;
 
     // Permet de modifier l'échelle VAE après création du modèle (ex: calibration auto).
     void setVaeScale(float s) { cfg_.vae_scale = s; }

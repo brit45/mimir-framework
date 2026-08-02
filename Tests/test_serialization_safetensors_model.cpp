@@ -98,7 +98,7 @@ int main() {
 
         auto modelA = ModelArchitectures::create("basic_mlp", cfgA);
         TASSERT_TRUE(modelA != nullptr);
-        TASSERT_TRUE(modelA->getDefaultDType() == std::string(c.dtype));
+        TASSERT_TRUE(Mimir::parse_dtype(modelA->getDefaultDType()) == Mimir::parse_dtype(c.dtype));
         modelA->allocateParams();
         modelA->initializeWeights("xavier", 123u);
 
@@ -123,6 +123,7 @@ int main() {
         sopts.save_tokenizer = true;
         sopts.save_encoder = true;
         sopts.save_optimizer = false;
+        sopts.custom_metadata = R"({"run":"dtype-test","seed":123})";
 
         std::string err;
         TASSERT_TRUE(save_checkpoint(*modelA, p.string(), sopts, &err));
@@ -139,10 +140,20 @@ int main() {
             }
             TASSERT_TRUE(!first_weight.empty());
             json header = read_safetensors_header_json(p);
+            TASSERT_TRUE(header.contains("__metadata__"));
+            for (auto it = header["__metadata__"].begin(); it != header["__metadata__"].end(); ++it) {
+                TASSERT_TRUE(it.value().is_string());
+            }
+            TASSERT_TRUE(json::parse(header["__metadata__"]["custom"].get<std::string>())["seed"] == 123);
             TASSERT_TRUE(header.contains(first_weight));
             TASSERT_TRUE(header[first_weight].contains("dtype"));
             const std::string dt = header[first_weight]["dtype"].get<std::string>();
             TASSERT_TRUE(dt == c.expected_tag);
+
+            std::ifstream raw(p, std::ios::binary);
+            TASSERT_TRUE((bool)raw);
+            const uint64_t padded_header_len = read_u64_le(raw);
+            TASSERT_TRUE((padded_header_len % 8) == 0);
         }
 
         // Load into a fresh model with different init weights, to make sure load overwrites.
@@ -172,6 +183,23 @@ int main() {
         TASSERT_TRUE(modelB->getEncoder().vocab_size == modelA->getEncoder().vocab_size);
         TASSERT_TRUE(!modelB->getEncoder().token_embeddings.empty());
 
+        std::filesystem::remove(p);
+    }
+
+    // Invalid custom JSON must be reported, never silently discarded.
+    {
+        auto model = ModelArchitectures::create("basic_mlp", cfg);
+        TASSERT_TRUE(model != nullptr);
+        model->allocateParams();
+        const auto p = tmp / "mimir_test_invalid_custom_metadata.safetensors";
+        SaveOptions options;
+        options.format = CheckpointFormat::SafeTensors;
+        options.save_tokenizer = false;
+        options.save_encoder = false;
+        options.custom_metadata = "{invalid";
+        std::string error;
+        TASSERT_TRUE(!save_checkpoint(*model, p.string(), options, &error));
+        TASSERT_TRUE(!error.empty());
         std::filesystem::remove(p);
     }
     return 0;

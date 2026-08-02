@@ -1,20 +1,12 @@
-# Internals : GPU Runtimes — CUDA & ROCm (C++)
-
-## Pour qui
-
-Développeur avancé qui modifie le moteur C/C++.
-
-## Objectif
+# Runtimes GPU : CUDA et ROCm
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
-## Avant de commencer
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Connaître les bases C++ et la structure du dépôt.
-
-## Résultat attendu
-
-Tu peux modifier le code interne en limitant les régressions.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
 Cette page documente l'implémentation interne des backends GPU de Mímir : architecture, fast-paths, conventions de code.
 
@@ -28,6 +20,18 @@ Sources de vérité :
 Guide utilisateur associé : [docs/05-Advanced/05-GPU-Acceleration.md](../05-Advanced/05-GPU-Acceleration.md).
 
 ---
+
+## Sur cette page
+
+- [1) Interface commune (AbstractRuntime)](#1-interface-commune-abstractruntime)
+- [2) RuntimeConfig — paramètres et parsing](#2-runtimeconfig-paramètres-et-parsing)
+- [3) CudaRuntime — implémentation](#3-cudaruntime-implémentation)
+- [4) Fast-paths détaillés](#4-fast-paths-détaillés)
+- [5) ROCm Runtime — différences avec CUDA](#5-rocm-runtime-différences-avec-cuda)
+- [6) Vulkan Runtime — kernels compute réels (SPIR-V)](#6-vulkan-runtime-kernels-compute-réels-spir-v)
+- [7) Invariants et gotchas](#7-invariants-et-gotchas)
+- [8) Ajouter un nouveau fast-path GPU](#8-ajouter-un-nouveau-fast-path-gpu)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## 1) Interface commune (`AbstractRuntime`)
 
@@ -341,7 +345,11 @@ Le masque causal de l'attention (upper triangle → -∞) est appliqué sur le C
 
 ### Ordre des builds
 
-CUDA et ROCm sont mutuellement exclusifs (liés par `#ifdef`). On ne peut pas compiler les deux ensemble dans le même binaire.
+CUDA et ROCm sont deux options CMake indépendantes (`ENABLE_CUDA` et
+`ENABLE_ROCM`). Les deux backends peuvent donc être présents dans le même
+binaire si leurs bibliothèques sont détectées. Au runtime, le routeur essaie
+ROCm avant CUDA, puis Vulkan, OpenCL et CPU ; une opération refusée par un
+backend est proposée au suivant.
 
 ---
 
@@ -354,3 +362,9 @@ Pré-requis pratique : vérifier que le nouveau case est intégré au dispatch d
 3. Implémenter le `case` dans `CudaRuntime::forwardLayer`
 4. Implémenter le `case` miroir dans `RocmRuntime::forwardLayer`
 5. Mettre à jour le tableau de synthèse dans `docs/04-Architecture-Internals/03-Hardware-Backends.md`
+
+## Étapes suivantes
+
+- [Page précédente : Internals : CLI (binaire `mimir`) et points d’entrée](20-CLI-EntryPoints.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Internals : Execution Planner (C++)](22-Planning.md)

@@ -1,8 +1,7 @@
 #!/usr/bin/env lua
 ---@diagnostic disable: undefined-field, need-check-nil
 -- Entraînement DDPM latent – générique (ponyxl_dppm / ponyxl_ddpm / …)
--- Le dataset est enregistré auprès de Mimir mais jamais itéré depuis Lua ;
--- Mimir.Model.train() gère entièrement données, validation, autosave et steps.
+-- Le dataset est chargé via API Mimir et l'entraînement est piloté par Mimir.Model.train().
 --
 -- Exemple :
 --   OMP_NUM_THREADS=10 ./run_mimir.sh --lua scripts/training/ponyxl_ddpm_train.lua --no-htop \
@@ -16,16 +15,6 @@
 --     --log-every 1 --validate-every-steps 64 --validate-items 4 --validate-holdout-frac 0.1 \
 --     --viz --resume 0 --viz-hide-activation-blocks=true --viz-hide-normalisation-blocks=true \
 --     --dtype "fp16"
-
--- ── Logging ───────────────────────────────────────────────────────────────────
-
-local _raw_log = _G.log or function(m) io.stdout:write(tostring(m or ""), "\n") end
-
-local function log(msg)
-  local s = tostring(msg or "")
-  s = s:gsub("^%s+", "")
-  _raw_log(s)
-end
 
 -- ---------------------------------------------------------------------------
 -- Logs: normalisation (évite les indentations "  ..." et homogénéise les erreurs)
@@ -188,7 +177,7 @@ end
 
 -- ── Options ───────────────────────────────────────────────────────────────────
 
-local ARCH         = Args.get_str(opts, "arch",     "ldm_unet")
+local ARCH         = Args.get_str(opts, "arch",     "ponyxl_ddpm")
 
 local DATASET_DIR  = Args.get_str(opts, "dataset",  "dataset_2")
 local DATASET_W    = Args.get_int(opts, "image-w",  Args.get_int(opts, "dataset-w", 512))
@@ -204,12 +193,20 @@ local MAX_ITEMS    = Args.get_int(opts, "max-items", 0)
 
 local TOKENIZER_PATH    = Args.get_str(opts, "tokenizer",  "checkpoint/base_tokenizer/tokenizer.json")
 local DESIRED_MAX_VOCAB = Args.get_int(opts, "max-vocab",  32000)
+local TOKENIZER_COMPOSE_DATASET = opt_bool("tokenizer-compose-dataset", true)
+local TOKENIZER_COMPOSE_LIMIT   = Args.get_int(opts, "tokenizer-compose-limit", 0)
+local TOKENIZER_GROWTH_HEADROOM = Args.get_int(opts, "tokenizer-growth-headroom", 4096)
+local TOKENIZER_COMPOSE_LOG_EVERY = math.max(1, Args.get_int(opts, "tokenizer-compose-log-every", 50))
+
+local VAE_USE_SKIP       = opt_bool("vae-use-skip", true)
+local VAE_USE_PRIOR      = opt_bool("vae-use-prior", true)
+local VAE_DEC_UPSAMPLE   = Args.get_str(opts, "vae-decoder-upsample", "conv_transpose")
 
 local VAE_CKPT = resolve_checkpoint_dir(
   Args.get_str(opts, "vae-checkpoint", "checkpoint/vae_conv/epoch_0002_stop")
 )
 
-local OUT_DIR = Args.get_str(opts, "out-dir", "checkpoint/ldm_unet")
+local OUT_DIR = Args.get_str(opts, "out-dir", "checkpoint/ponyxl_ddpm")
 
 -- --resume 0 → false,  --resume / --resume 1 → true
 local RESUME  = opt_bool("resume", false)
@@ -230,7 +227,7 @@ end
 local DDPM_STEPS_PER_IMAGE = Args.get_int(opts, "ddpm-steps-per-image", 1)
 
 -- Loss / conditioning
-local RECON_LOSS        = Args.get_str(opts, "recon-loss",        "mse")
+local RECON_LOSS        = Args.get_str(opts, "recon-loss",        "charbonnier")
 local TIMESTEP_COND     = Args.get_str(opts, "timestep-cond",     "log_snr")
 local LOSS_WEIGHTING    = Args.get_str(opts, "loss-weighting",    "none")
 local MIN_SNR_GAMMA     = opt_num("min-snr-gamma",    5.0)
@@ -257,7 +254,7 @@ local WEIGHT_DECAY      = opt_num("weight-decay",    0.0)
 local DECAY_STRATEGY    = Args.get_str(opts, "decay-strategy",  "linear")
 
 -- Text encoder
-local TEXT_CTX_LEN      = Args.get_int(opts, "text-ctx-len",  1300)
+local TEXT_CTX_LEN      = Args.get_int(opts, "text-ctx-len",  75)
 local TEXT_MEANPOOL     = opt_bool("text-meanpool", false)
 
 -- U-Net
@@ -284,7 +281,7 @@ local INIT_WEIGHTS          = opt_bool("init-weights", true)
 
 -- Visualizer
 local VIZ_DDPM            = opt_bool("viz-ddpm", true)
-local VIZ_DDPM_EVERY      = Args.get_int(opts, "viz-ddpm-every", 200)
+local VIZ_DDPM_EVERY      = Args.get_int(opts, "viz-ddpm-every", 1)
 local VIZ_DDPM_STEPS      = Args.get_int(opts, "viz-ddpm-steps", 1)
 local VIZ_TAPS_MAX_FRAMES = Args.get_int(opts, "viz-taps",
                                Args.get_int(opts, "viz-taps-max-frames", 64))
@@ -297,8 +294,10 @@ local VIZ_HIDE_NORM       = opt_bool("viz-hide-normalisation-blocks", false)
 
 log("init tokenizer")
 Mimir.Tokenizer.load(TOKENIZER_PATH)
-if Mimir.Tokenizer.set_max_vocab then
-  pcall(Mimir.Tokenizer.set_max_vocab, DESIRED_MAX_VOCAB)
+if Mimir.Tokenizer.set_max_vocab and Mimir.Tokenizer.vocab_size then
+  local cur_vocab = tonumber(Mimir.Tokenizer.vocab_size() or 0) or 0
+  local target_max = math.max(DESIRED_MAX_VOCAB, cur_vocab + math.max(0, TOKENIZER_GROWTH_HEADROOM))
+  pcall(Mimir.Tokenizer.set_max_vocab, target_max)
 end
 Mimir.Tokenizer.ensure_vocab_from_text("pony horse snow forest portrait")
 
@@ -309,7 +308,7 @@ log(string.format("tokenizer: path=%s vocab_size=%d max_vocab=%d",
   tonumber(Mimir.Tokenizer.vocab_size() or 0) or 0,
   tonumber(TOKENIZER_VOCAB or 0) or 0))
 
--- ── Dataset (enregistrement uniquement – jamais itéré depuis Lua) ─────────────
+-- ── Dataset (chargement via API Mimir) ──────────────────────────────────────
 
 log("load dataset")
 local ok_ds, n_or_err = Mimir.Dataset.load(DATASET_DIR, DATASET_W, DATASET_H, DATASET_MIN_MOD)
@@ -318,6 +317,96 @@ local DATASET_TOTAL = math.floor(tonumber(n_or_err) or 0)
 if DATASET_TOTAL <= 0 then die("dataset vide") end
 log(string.format("dataset: total=%d dir=%s w=%d h=%d c=%d",
   DATASET_TOTAL, DATASET_DIR, DATASET_W, DATASET_H, DATASET_C))
+
+-- ── Tokenizer composition pré-train (sans analyse manuelle du dataset) ─────
+-- On compose le vocab avec les textes déjà exposés par Dataset.load().
+-- Aucun scan de fichiers par Lua: on consomme l'API Dataset.get(i) uniquement.
+if TOKENIZER_COMPOSE_DATASET then
+  local before = tonumber(Mimir.Tokenizer.vocab_size() or 0) or 0
+  local max_before = (Mimir.Tokenizer.get_max_vocab and tonumber(Mimir.Tokenizer.get_max_vocab() or 0)) or before
+  local added_calls = 0
+  local missing_text = 0
+  local processed = 0
+
+  local function normalize_term(s)
+    local t = tostring(s or ""):lower()
+    t = t:gsub("[%c%z]", " ")
+    t = t:gsub("[%[%]%(%){}<>\"'`~]", " ")
+    t = t:gsub("[,:;!?|\\/]", " ")
+    t = t:gsub("[%s]+", " ")
+    t = t:gsub("^%s+", "")
+    t = t:gsub("%s+$", "")
+    return t
+  end
+
+  local function enrich_text_terms(txt)
+    local uniq = {}
+    local function push(tok)
+      tok = normalize_term(tok)
+      if tok == "" then return end
+      if #tok < 3 then return end
+      if #tok > 48 then return end
+      if not uniq[tok] then
+        uniq[tok] = true
+        Mimir.Tokenizer.tokenize_ensure(tok)
+      end
+    end
+
+    for phrase in tostring(txt):gmatch("[^%.]+") do
+      push(phrase)
+      for w in normalize_term(phrase):gmatch("[^%s]+") do
+        push(w)
+      end
+    end
+  end
+
+  local compose_n = DATASET_TOTAL
+  if TOKENIZER_COMPOSE_LIMIT > 0 then
+    compose_n = math.min(DATASET_TOTAL, TOKENIZER_COMPOSE_LIMIT)
+  end
+
+  log(string.format(
+    "tokenizer compose dataset: start items=%d vocab=%d max_vocab=%d",
+    compose_n, before, max_before
+  ))
+
+  for i = 1, compose_n do
+    local item, err_item = Mimir.Dataset.get(i)
+    if type(item) == "table" then
+      local txt = tostring(item.text or "")
+      if txt ~= "" then
+        Mimir.Tokenizer.tokenize_ensure(txt)
+        enrich_text_terms(txt)
+        added_calls = added_calls + 1
+      else
+        missing_text = missing_text + 1
+      end
+    else
+      -- item inaccessible (lazy/erreur), on continue best-effort.
+      if err_item ~= nil then
+        missing_text = missing_text + 1
+      end
+    end
+
+    processed = processed + 1
+    if (processed % TOKENIZER_COMPOSE_LOG_EVERY) == 0 or processed == compose_n then
+      local vnow = tonumber(Mimir.Tokenizer.vocab_size() or 0) or before
+      log(string.format("tokenizer compose dataset: progress %d/%d vocab=%d", processed, compose_n, vnow))
+    end
+  end
+
+  local after = tonumber(Mimir.Tokenizer.vocab_size() or 0) or before
+  local max_after = (Mimir.Tokenizer.get_max_vocab and tonumber(Mimir.Tokenizer.get_max_vocab() or 0)) or max_before
+  log(string.format(
+    "tokenizer compose dataset: done items=%d before=%d after=%d delta=%d max_vocab_before=%d max_vocab_after=%d items_with_text=%d missing_text=%d",
+    compose_n, before, after, math.max(0, after - before), max_before, max_after, added_calls, missing_text
+  ))
+  if after <= before then
+    log("tokenizer compose dataset: aucun nouveau token ajouté (vocab déjà couvrant ou dataset homogène)")
+  end
+else
+  log("tokenizer compose dataset: disabled")
+end
 
 -- ── Modèle ────────────────────────────────────────────────────────────────────
 
@@ -337,6 +426,12 @@ cfg.image_c                = DATASET_C
 
 -- VAE / checkpoint
 cfg.vae_checkpoint         = VAE_CKPT
+cfg.vae_arch               = "vae_conv"
+cfg.latent_backbone        = "vae_conv"
+cfg.stochastic_latent      = false
+cfg.use_skip_connections   = VAE_USE_SKIP
+cfg.use_encoder_prior      = VAE_USE_PRIOR
+cfg.decoder_upsample       = VAE_DEC_UPSAMPLE
 cfg.base_tokenizer_path    = TOKENIZER_PATH
 cfg.checkpoint_dir         = OUT_DIR
 
@@ -371,6 +466,7 @@ cfg.text_clip_like         = opt_bool("text-clip-like", cfg.text_clip_like ~= fa
 cfg.global_ctx_tokens      = Args.get_int(opts, "global-ctx-tokens",
                                tonumber(cfg.global_ctx_tokens or 0) or 0)
 cfg.sdxl_time_cond         = opt_bool("sdxl-time-cond", cfg.sdxl_time_cond ~= false)
+cfg.use_ldm_unet_arch      = (tostring(ARCH) == "ldm_unet")
 
 -- U-Net
 cfg.unet_depth             = UNET_DEPTH
@@ -504,6 +600,10 @@ end
 -- ── Debug JSON (pre-train) ────────────────────────────────────────────────────
 
 if SAVE_PRETRAIN_DEBUG then
+  local dbg_dir = FS.dirname(PRETRAIN_DEBUG_PATH)
+  if dbg_dir and dbg_dir ~= "" then
+    FS.mkdir_p(dbg_dir)
+  end
   log("save pretrain debug_json: " .. PRETRAIN_DEBUG_PATH)
   local ok_dbg, err_dbg = Mimir.Serialization.save(PRETRAIN_DEBUG_PATH, "debug_json", {
     include_checksums       = true,

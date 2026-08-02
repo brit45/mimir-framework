@@ -143,9 +143,8 @@ public:
     void setDensity(double d);
     double getDensity() const;
 
-    // Default dtype preference for the model. Note: the current runtime is
-    // still float32-first; this setting is used for planning/serialization
-    // and for raw tensor allocations.
+    // Default storage dtype propagated to every layer. FP16/BF16 accumulate
+    // in FP32; FP64 accumulates in FP64. Integer/bool models are forward-only.
     void setDefaultDType(const std::string& dtype);
     const std::string& getDefaultDType() const { return default_dtype_; }
 
@@ -181,10 +180,10 @@ public:
                                               const std::vector<float>& image_vec,
                                               uint32_t seed,
                                               bool training = false);
-    // Nouveau: forward en entrée tokens int (Embedding consomme des ids)
+    // Forward en entrée tokens int: délègue au chemin float après conversion des ids.
     std::vector<float> forwardPass(const std::vector<int> &input_ids, bool training = true);
 
-    // Variante "view": évite la copie/allocation du std::vector de sortie.
+    // Variante "view": conserve la même délégation au chemin float.
     const std::vector<float>& forwardPassView(const std::vector<int> &input_ids, bool training = true);
 
     // Nouveau: forward multi-entrées (floats + ids) via TensorStore.
@@ -216,7 +215,13 @@ public:
         std::string label;
     };
 
-    void setVizTapsEnabled(bool enabled) { viz_taps_enabled_ = enabled; }
+    void setVizTapsEnabled(bool enabled) {
+        if (viz_taps_enabled_ == enabled) return;
+        viz_taps_enabled_ = enabled;
+        viz_tips_init_done_ = false;
+        viz_tips_custom_enabled_ = false;
+        clearVizTipsRegistry();
+    }
     bool isVizTapsEnabled() const { return viz_taps_enabled_; }
     int getVizTapsMaxSide() const { return viz_taps_max_side_; }
     void setVizTapsLimits(int max_frames, int max_side) {
@@ -226,12 +231,18 @@ public:
     // Permet à des modèles spécialisés d'ajouter des vignettes (recon/dénoise/etc.).
     // Respecte le mode enabled, la déduplication par label, et évince en fin de liste si plein.
     void addVizTapFrame(VizFrame vf);
-    void clearVizTaps() { viz_taps_.clear(); }
-    std::vector<VizFrame> consumeVizTaps() {
-        auto out = std::move(viz_taps_);
+    void clearVizTaps() {
         viz_taps_.clear();
-        return out;
+        viz_tips_init_done_ = false;
+        viz_tips_custom_enabled_ = false;
+        clearVizTipsRegistry();
     }
+    std::vector<VizFrame> consumeVizTaps();
+
+    // Hooks de personnalisation des tips Viz (par modèle enfant).
+    // Par défaut: désactivés (retournent false / ne modifient rien).
+    virtual bool InitVizTips();
+    virtual bool UpdateVizTips(const Layer& layer, VizFrame& frame);
 
     // Variante trainStep pour forwardPassNamed.
     // Calcule loss (MSE) puis backward+optimizerStep.
@@ -507,6 +518,9 @@ public:
     // Stored here to avoid rebuild/alloc each step.
     std::shared_ptr<Model> aux_perceptual_;
     std::shared_ptr<Model> aux_discriminator_;
+    // Prior latent prepare a partir des features perceptuelles du batch
+    // precedent; applique avant le forward suivant pour garder un graphe coherent.
+    std::vector<float> pending_perceptual_prior_;
     Optimizer aux_discriminator_opt_{};
     bool aux_discriminator_opt_inited_ = false;
 
@@ -643,6 +657,9 @@ public:
     
     // TensorStore : stockage nommé des tensors pour routing
     std::unordered_map<std::string, std::vector<float>> tensor_store;
+    // Authoritative typed representation. The float store above is a
+    // compatibility compute view for kernels not migrated to TypedTensor yet.
+    std::unordered_map<std::string, Mimir::TypedTensor> typed_tensor_store;
     // Nouveau: TensorStore d'IDs (int) pour layers type Embedding
     std::unordered_map<std::string, std::vector<int>> tensor_store_int;
 
@@ -653,6 +670,8 @@ public:
     // Helper pour récupérer un tensor (avec erreur explicite si manquant)
     const std::vector<float>& getTensor(const std::string& name) const;
     std::vector<float>& getTensorMutable(const std::string& name);
+    const Mimir::TypedTensor& getTypedTensor(const std::string& name) const;
+    bool hasTypedTensor(const std::string& name) const;
 
     const std::vector<int>& getTensorInt(const std::string& name) const;
     std::vector<int>& getTensorIntMutable(const std::string& name);
@@ -686,11 +705,19 @@ public:
     std::vector<float> scratch_loss_grad_;
     std::vector<float> scratch_packed_grad_;
 
+    // Registre des tips Viz (layer.name -> label tip personnalisé)
+    void clearVizTipsRegistry();
+    void registerVizTip(const std::string& layer_name, const std::string& tip_label);
+    bool applyVizTipByLayerName(const Layer& layer, VizFrame& frame) const;
+
     // Viz taps state
     bool viz_taps_enabled_ = false;
     int viz_taps_max_frames_ = 12;
     int viz_taps_max_side_ = 64;
     std::vector<VizFrame> viz_taps_;
+    bool viz_tips_init_done_ = false;
+    bool viz_tips_custom_enabled_ = false;
+    std::unordered_map<std::string, std::string> viz_tips_by_layer_name_;
 
 protected:
     std::vector<Layer> layers;

@@ -1,20 +1,12 @@
-# Développeurs : Ajouter une Architecture et Utiliser les Outils
-
-## Pour qui
-
-Contributeur du projet.
-
-## Objectif
+# Ajouter une architecture et ses outils
 
 Contribuer avec des changements cohérents et maintenables.
 
-## Avant de commencer
+**Public concerné :** Contributeur du projet.
 
-Connaître le workflow Git et les bases du projet.
-
-## Résultat attendu
-
-Tu sais proposer des changements alignés avec les conventions du framework.
+> **Prérequis**
+>
+> Connaître le workflow Git et les bases du projet.
 
 
 Cette page explique, de manière opérationnelle, comment :
@@ -23,6 +15,16 @@ Cette page explique, de manière opérationnelle, comment :
 - l'enregistrer dans le registre C++,
 - écrire un script Lua de training/inférence pour l'utiliser,
 - utiliser les scripts de `scripts/tools/`.
+
+## Sur cette page
+
+- [1. Ajouter une nouvelle architecture C++](#1-ajouter-une-nouvelle-architecture-c)
+- [2. Enregistrer l'architecture dans le registre](#2-enregistrer-larchitecture-dans-le-registre)
+- [3. Écrire un script Lua pour utiliser l'architecture](#3-écrire-un-script-lua-pour-utiliser-larchitecture)
+- [4. Checklist d'intégration](#4-checklist-dintégration)
+- [5. Scripts outils (scripts/tools/.lua)](#5-scripts-outils-scriptstoolslua)
+- [6. Commandes rapides pour un dev](#6-commandes-rapides-pour-un-dev)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## 1. Ajouter une nouvelle architecture C++
 
@@ -152,7 +154,7 @@ Avantages :
 
 ### 3.2 Avec parseur d'arguments (template complet)
 
-See [scripts/templates/template_pipeline_args.lua](../../../scripts/templates/template_pipeline_args.lua) pour un exemple complet avec `--from-registry` et `--arch`.
+Voir [scripts/templates/template_pipeline_args.lua](../../scripts/templates/template_pipeline_args.lua) pour un exemple complet avec `--from-registry` et `--arch`.
 
 Usage :
 
@@ -317,6 +319,13 @@ Test 4: Structure legacy désactivée... ✅ Structure legacy désactivée (conf
 +----------------------+------------------+---------+
 
 * Layers – vae_conv
+
+> Capture historique : les nombres de layers et de paramètres ci-dessous proviennent
+> d’un graphe construit sans normalisation émise. Avec les valeurs courantes
+> `enc_norm=groupnorm` et `dec_norm=groupnorm`, le builder ajoute des couches
+> `GroupNorm` et le total change. Pour une valeur à jour, exécuter
+> `scripts/examples/inspect_vae_conv.lua` ou interroger `Mimir.Model.get_layers()`.
+
 ✓ Vulkan Compute initialized
 [vae_conv] Modèle créé via registre: vae_conv
 📦 Allocation de 52 blocs de poids (941440 paramètres au total)...
@@ -583,3 +592,9 @@ Analyser un artefact :
 ```bash
 ./bin/mimir --lua scripts/tools/analyze_model.lua -- --in checkpoint/my_run
 ```
+
+## Étapes suivantes
+
+- [Page précédente : Contribuer](01-Contributing.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Chapitre développeur complet : Étendre le framework](03-Extending-Models-Runtimes-And-Features.md)

@@ -161,19 +161,22 @@ static int testBridgeDirectCommands() {
     }
 
     // Utiliser un contexte runtime disponible comme contexte generique.
-#if defined(MIMIR_ENABLE_SCRIPTING_JS)
-    JSContext& ctx = JSContext::getInstance();
-#elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
-    CSharpContext& ctx = CSharpContext::getInstance();
-#elif defined(MIMIR_ENABLE_SCRIPTING_RUST)
-    RustContext& ctx = RustContext::getInstance();
-#else
+#if !defined(MIMIR_ENABLE_SCRIPTING_JS) && \
+    !defined(MIMIR_ENABLE_SCRIPTING_CSHARP) && \
+    !defined(MIMIR_ENABLE_SCRIPTING_RUST)
     std::cerr << "[SKIP] BridgeTest.Direct: aucun bridge script activé\n";
     {
         std::error_code skip_ec;
         fs::remove(cmd_file, skip_ec);
     }
     return 0;
+#else
+#if defined(MIMIR_ENABLE_SCRIPTING_JS)
+    JSContext& ctx = JSContext::getInstance();
+#elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
+    CSharpContext& ctx = CSharpContext::getInstance();
+#else
+    RustContext& ctx = RustContext::getInstance();
 #endif
 
     ctx.resetRuntimeState();
@@ -188,6 +191,7 @@ static int testBridgeDirectCommands() {
 
     ctx.resetRuntimeState();
     return 0;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -328,19 +332,22 @@ static int testBridgeCreateWithConfig() {
         f << "Model.allocate_params\n";
     }
 
-#if defined(MIMIR_ENABLE_SCRIPTING_JS)
-    JSContext& ctx = JSContext::getInstance();
-#elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
-    CSharpContext& ctx = CSharpContext::getInstance();
-#elif defined(MIMIR_ENABLE_SCRIPTING_RUST)
-    RustContext& ctx = RustContext::getInstance();
-#else
+#if !defined(MIMIR_ENABLE_SCRIPTING_JS) && \
+    !defined(MIMIR_ENABLE_SCRIPTING_CSHARP) && \
+    !defined(MIMIR_ENABLE_SCRIPTING_RUST)
     std::cerr << "[SKIP] BridgeTest.CreateWithConfig: aucun bridge script activé\n";
     {
         std::error_code skip_ec;
         fs::remove(cmd_file, skip_ec);
     }
     return 0;
+#else
+#if defined(MIMIR_ENABLE_SCRIPTING_JS)
+    JSContext& ctx = JSContext::getInstance();
+#elif defined(MIMIR_ENABLE_SCRIPTING_CSHARP)
+    CSharpContext& ctx = CSharpContext::getInstance();
+#else
+    RustContext& ctx = RustContext::getInstance();
 #endif
 
     ctx.resetRuntimeState();
@@ -354,6 +361,7 @@ static int testBridgeCreateWithConfig() {
 
     ctx.resetRuntimeState();
     return 0;
+#endif
 }
 
 // ---------------------------------------------------------------------------

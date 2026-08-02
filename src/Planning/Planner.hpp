@@ -100,6 +100,10 @@ struct ExecutionPlan {
     std::vector<int> fuse_split_consumer;
     std::vector<uint8_t> fuse_split_kind; // 0=none, 1=Split, 2=Chunk
 
+    // Generic chained fusion edges (producer -> fused consumer).
+    // Allows fusing repeated adjacent layers (e.g. op->act->act->shape->shape).
+    std::vector<int> fuse_chain_next;
+
     bool empty() const { return ops.empty(); }
 };
 
@@ -162,6 +166,7 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
     plan.fuse_unary_consumer.assign(layers.size(), -1);
     plan.fuse_split_consumer.assign(layers.size(), -1);
     plan.fuse_split_kind.assign(layers.size(), 0);
+    plan.fuse_chain_next.assign(layers.size(), -1);
 
     std::unordered_map<std::string, int> tensor_use_count;
     for (const auto& layer : layers) {
@@ -205,6 +210,7 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
                 plan.fuse_split_consumer[producer_idx] = static_cast<int>(consumer_idx);
                 plan.fuse_split_kind[producer_idx] = (split_layer.type_enum == LayerType::Split) ? 1 : 2;
                 plan.skip_layer[consumer_idx] = 1;
+                plan.fuse_chain_next[producer_idx] = static_cast<int>(consumer_idx);
                 if (after_activation) {
                     op.fusion = (split_layer.type_enum == LayerType::Split)
                         ? FusionKind::GENERIC_ACTIVATION_SPLIT
@@ -217,29 +223,59 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
             };
 
             if (producer_has_single_consumer && (i + 1) < layers.size()) {
-                const Layer& next = layers[i + 1];
-                if (is_fusible_activation_layer(next) && consumes_single_tensor(next, producer_out)) {
-                    plan.fuse_activation_consumer[i] = static_cast<int>(i + 1);
-                    plan.skip_layer[i + 1] = 1;
-                    if (op.fusion == FusionKind::NONE) {
-                        op.fusion = FusionKind::GENERIC_ACTIVATION;
+                int chain_cursor = static_cast<int>(i);
+                std::string chain_output = producer_out;
+                bool first_in_chain = true;
+
+                while (true) {
+                    const size_t next_idx = static_cast<size_t>(chain_cursor + 1);
+                    if (next_idx >= layers.size()) break;
+
+                    const Layer& next = layers[next_idx];
+                    if (!consumes_single_tensor(next, chain_output)) break;
+                    if (tensor_use_count[chain_output] != 1) break;
+
+                    if (is_fusible_activation_layer(next)) {
+                        plan.skip_layer[next_idx] = 1;
+                        plan.fuse_chain_next[static_cast<size_t>(chain_cursor)] = static_cast<int>(next_idx);
+                        if (first_in_chain) {
+                            plan.fuse_activation_consumer[i] = static_cast<int>(next_idx);
+                            if (op.fusion == FusionKind::NONE) {
+                                op.fusion = FusionKind::GENERIC_ACTIVATION;
+                            }
+                        }
+                        chain_cursor = static_cast<int>(next_idx);
+                        chain_output = planner_output_name_for(next);
+                        first_in_chain = false;
+                        continue;
                     }
 
-                    const std::string activation_out = planner_output_name_for(next);
-                    if (tensor_use_count[activation_out] == 1 && (i + 2) < layers.size()) {
-                        const Layer& after_activation = layers[i + 2];
-                        if (is_fusible_split_layer(after_activation) && consumes_single_tensor(after_activation, activation_out)) {
-                            maybe_mark_split(i, i + 2, true);
+                    if (is_fusible_unary_shape_layer(next)) {
+                        plan.skip_layer[next_idx] = 1;
+                        plan.fuse_chain_next[static_cast<size_t>(chain_cursor)] = static_cast<int>(next_idx);
+                        if (first_in_chain) {
+                            plan.fuse_unary_consumer[i] = static_cast<int>(next_idx);
+                            if (op.fusion == FusionKind::NONE) {
+                                op.fusion = FusionKind::GENERIC_UNARY_SHAPE;
+                            }
                         }
+                        chain_cursor = static_cast<int>(next_idx);
+                        chain_output = planner_output_name_for(next);
+                        first_in_chain = false;
+                        continue;
                     }
-                } else if (is_fusible_unary_shape_layer(next) && consumes_single_tensor(next, producer_out)) {
-                    plan.fuse_unary_consumer[i] = static_cast<int>(i + 1);
-                    plan.skip_layer[i + 1] = 1;
-                    if (op.fusion == FusionKind::NONE) {
-                        op.fusion = FusionKind::GENERIC_UNARY_SHAPE;
+
+                    if (is_fusible_split_layer(next)) {
+                        const bool after_activation = (op.fusion == FusionKind::GENERIC_ACTIVATION);
+                        maybe_mark_split(static_cast<size_t>(chain_cursor), next_idx, after_activation);
+                        // Keep the legacy root-producer metadata coherent even
+                        // when the split is reached through a fused chain.
+                        plan.fuse_split_consumer[i] = static_cast<int>(next_idx);
+                        plan.fuse_split_kind[i] = (next.type_enum == LayerType::Split) ? 1 : 2;
+                        break;
                     }
-                } else if (is_fusible_split_layer(next) && consumes_single_tensor(next, producer_out)) {
-                    maybe_mark_split(i, i + 1, false);
+
+                    break;
                 }
             }
         }

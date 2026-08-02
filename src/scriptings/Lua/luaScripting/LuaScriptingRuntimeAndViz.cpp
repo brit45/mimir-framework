@@ -18,9 +18,11 @@
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
+#include <unordered_map>
 #include <unordered_set>
 #include <type_traits>
 #include <utility>
+
 int LuaScripting::lua_allocateParams(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
@@ -132,10 +134,71 @@ int LuaScripting::lua_getModelLayers(lua_State* L) {
         lua_pushinteger(L, la.vocab_size);    lua_setfield(L, -2, "vocab_size");
         lua_pushinteger(L, la.input_height);  lua_setfield(L, -2, "input_height");
         lua_pushinteger(L, la.input_width);   lua_setfield(L, -2, "input_width");
+        lua_pushinteger(L, la.kernel_h);      lua_setfield(L, -2, "kernel_h");
+        lua_pushinteger(L, la.kernel_w);      lua_setfield(L, -2, "kernel_w");
+        lua_pushinteger(L, la.stride_h);      lua_setfield(L, -2, "stride_h");
+        lua_pushinteger(L, la.stride_w);      lua_setfield(L, -2, "stride_w");
+        lua_pushinteger(L, la.pad_h);         lua_setfield(L, -2, "pad_h");
+        lua_pushinteger(L, la.pad_w);         lua_setfield(L, -2, "pad_w");
+        lua_pushinteger(L, la.dilation);      lua_setfield(L, -2, "dilation");
+        lua_pushinteger(L, la.groups);        lua_setfield(L, -2, "groups");
+        lua_pushnumber(L, la.eps);            lua_setfield(L, -2, "eps");
+        lua_pushinteger(L, la.num_groups);    lua_setfield(L, -2, "num_groups");
+        lua_pushnumber(L, la.dropout_p);      lua_setfield(L, -2, "dropout_p");
+        lua_pushinteger(L, la.axis);          lua_setfield(L, -2, "axis");
+        lua_pushinteger(L, la.concat_axis);   lua_setfield(L, -2, "concat_axis");
+        lua_pushinteger(L, la.split_axis);    lua_setfield(L, -2, "split_axis");
+        lua_pushinteger(L, la.num_splits);    lua_setfield(L, -2, "num_splits");
+        lua_pushnumber(L, la.scale_h);        lua_setfield(L, -2, "scale_h");
+        lua_pushnumber(L, la.scale_w);        lua_setfield(L, -2, "scale_w");
+        lua_pushinteger(L, la.out_h);         lua_setfield(L, -2, "out_h");
+        lua_pushinteger(L, la.out_w);         lua_setfield(L, -2, "out_w");
+        lua_pushinteger(L, la.head_dim);      lua_setfield(L, -2, "head_dim");
+        lua_pushboolean(L, la.causal);        lua_setfield(L, -2, "causal");
+        lua_pushboolean(L, la.use_bias);      lua_setfield(L, -2, "use_bias");
+        lua_pushnumber(L, la.nms_iou_threshold);
+        lua_setfield(L, -2, "nms_iou_threshold");
+        lua_pushnumber(L, la.nms_score_threshold);
+        lua_setfield(L, -2, "nms_score_threshold");
+        lua_pushinteger(L, la.nms_max_detections);
+        lua_setfield(L, -2, "nms_max_detections");
+        lua_pushboolean(L, la.nms_class_agnostic);
+        lua_setfield(L, -2, "nms_class_agnostic");
+
+        auto push_int_array = [L](const std::vector<int>& values,
+                                  const char* field) {
+            lua_createtable(L, static_cast<int>(values.size()), 0);
+            for (size_t j = 0; j < values.size(); ++j) {
+                lua_pushinteger(L, values[j]);
+                lua_rawseti(L, -2, static_cast<int>(j + 1));
+            }
+            lua_setfield(L, -2, field);
+        };
+        push_int_array(la.target_shape, "target_shape");
+        push_int_array(la.permute_dims, "permute_dims");
+        push_int_array(la.split_sizes, "split_sizes");
 
         lua_rawseti(L, -2, static_cast<int>(i + 1));
     }
     return 1;
+}
+
+int LuaScripting::lua_clearModelLayers(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+
+    auto& layers = ctx.currentModel->getMutableLayers();
+    const lua_Integer old_count = static_cast<lua_Integer>(layers.size());
+    layers.clear();
+    ctx.currentModel->clearVizTaps();
+
+    lua_pushboolean(L, true);
+    lua_pushinteger(L, old_count);
+    return 2;
 }
 
 int LuaScripting::lua_pushLayer(lua_State* L) {
@@ -149,11 +212,122 @@ int LuaScripting::lua_pushLayer(lua_State* L) {
     
     const char* name = luaL_checkstring(L, 1);
     const char* type = luaL_checkstring(L, 2);
-    size_t params_count = luaL_checkinteger(L, 3);
-    
-    ctx.currentModel->push(name, type, params_count);
-    lua_pushboolean(L, true);
-    return 1;
+    const lua_Integer raw_params_count = luaL_checkinteger(L, 3);
+    if (raw_params_count < 0) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "params_count must be >= 0");
+        return 2;
+    }
+
+    try {
+        ctx.currentModel->push(
+            name, type, static_cast<size_t>(raw_params_count));
+
+        // Argument 4 optionnel: paramètres propres au nœud MPK. Cela évite
+        // d'aplatir une configuration de graphe dans modelConfig.
+        if (lua_istable(L, 4)) {
+            Layer* layer = ctx.currentModel->getLayerByName(name);
+            if (!layer) throw std::runtime_error("new layer not found");
+            const json p = luaTableToJson(L, 4);
+            if (!p.is_object()) {
+                throw std::runtime_error("layer params must be a map");
+            }
+
+            auto set_int = [&p](const char* key, int& dst) {
+                if (p.contains(key)) dst = p.at(key).get<int>();
+            };
+            auto set_float = [&p](const char* key, float& dst) {
+                if (p.contains(key)) dst = p.at(key).get<float>();
+            };
+            auto set_bool = [&p](const char* key, bool& dst) {
+                if (p.contains(key)) dst = p.at(key).get<bool>();
+            };
+            auto set_ints = [&p](const char* key, std::vector<int>& dst) {
+                if (p.contains(key)) dst = p.at(key).get<std::vector<int>>();
+            };
+
+            set_int("in_features", layer->in_features);
+            set_int("out_features", layer->out_features);
+            set_int("in_channels", layer->in_channels);
+            set_int("out_channels", layer->out_channels);
+            set_int("input_height", layer->input_height);
+            set_int("input_width", layer->input_width);
+            set_int("output_height", layer->output_height);
+            set_int("output_width", layer->output_width);
+            set_int("kernel_size", layer->kernel_size);
+            set_int("kernel_h", layer->kernel_h);
+            set_int("kernel_w", layer->kernel_w);
+            set_int("stride", layer->stride);
+            set_int("stride_h", layer->stride_h);
+            set_int("stride_w", layer->stride_w);
+            set_int("padding", layer->padding);
+            set_int("pad_h", layer->pad_h);
+            set_int("pad_w", layer->pad_w);
+            set_int("dilation", layer->dilation);
+            set_int("dilation_h", layer->dilation_h);
+            set_int("dilation_w", layer->dilation_w);
+            set_int("groups", layer->groups);
+            set_float("eps", layer->eps);
+            set_int("num_groups", layer->num_groups);
+            set_float("momentum", layer->momentum);
+            set_bool("affine", layer->affine);
+            set_bool("track_running_stats", layer->track_running_stats);
+            set_float("dropout_p", layer->dropout_p);
+            set_int("vocab_size", layer->vocab_size);
+            set_int("embed_dim", layer->embed_dim);
+            set_int("padding_idx", layer->padding_idx);
+            set_int("axis", layer->axis);
+            set_bool("use_mask", layer->use_mask);
+            set_ints("target_shape", layer->target_shape);
+            set_ints("shape", layer->shape);
+            set_ints("permute_dims", layer->permute_dims);
+            set_int("concat_axis", layer->concat_axis);
+            set_int("num_splits", layer->num_splits);
+            set_ints("split_sizes", layer->split_sizes);
+            set_int("split_axis", layer->split_axis);
+            set_float("scale_h", layer->scale_h);
+            set_float("scale_w", layer->scale_w);
+            set_int("out_h", layer->out_h);
+            set_int("out_w", layer->out_w);
+            set_int("output_h", layer->out_h);
+            set_int("output_w", layer->out_w);
+            set_int("num_heads", layer->num_heads);
+            set_int("head_dim", layer->head_dim);
+            set_int("seq_len", layer->seq_len);
+            set_bool("causal", layer->causal);
+            set_float("alpha", layer->alpha);
+            set_float("negative_slope", layer->negative_slope);
+            set_int("squeeze_dim", layer->squeeze_dim);
+            set_int("unsqueeze_dim", layer->unsqueeze_dim);
+            set_int("num_chunks", layer->num_chunks);
+            set_int("stack_axis", layer->stack_axis);
+            set_bool("use_bias", layer->use_bias);
+            set_bool("trainable_parameter", layer->trainable_parameter);
+
+            set_float("nms_iou_threshold", layer->nms_iou_threshold);
+            set_float("iou_threshold", layer->nms_iou_threshold);
+            set_float("nms_score_threshold", layer->nms_score_threshold);
+            set_float("score_threshold", layer->nms_score_threshold);
+            set_int("nms_max_detections", layer->nms_max_detections);
+            set_int("max_detections", layer->nms_max_detections);
+            set_bool("nms_class_agnostic", layer->nms_class_agnostic);
+            set_bool("class_agnostic", layer->nms_class_agnostic);
+
+            if (p.contains("axis")) {
+                const int axis = p.at("axis").get<int>();
+                layer->concat_axis = axis;
+                layer->split_axis = axis;
+                layer->stack_axis = axis;
+            }
+        }
+
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
 }
 
 int LuaScripting::lua_setLayerIO(lua_State* L) {
@@ -212,7 +386,7 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
     
     // Argument 1: input
     // - soit un tableau (array) de floats/ints
-    // - soit une table { __input__ = <array> }
+    // - soit une table nommée { __input__ = <array_float>, text_ids = <array_int> }
     luaL_checktype(L, 1, LUA_TTABLE);
     
     // Argument 2 (optionnel): training (bool, défaut: true)
@@ -248,6 +422,80 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
         ctx.asyncMonitor->setLayerBlockImages(frames);
     };
     
+    // Support générique des entrées nommées (forwardPassNamedView):
+    // { boxes={...}, scores={...}, classes={...} }, mais aussi les contrats
+    // historiques { __input__={...}, text_ids={...} }.
+    bool has_named_tensors = false;
+    if (lua_rawlen(L, 1) == 0) {
+        lua_pushnil(L);
+        while (lua_next(L, 1) != 0) {
+            if (lua_type(L, -2) == LUA_TSTRING && lua_istable(L, -1)) {
+                has_named_tensors = true;
+            }
+            lua_pop(L, 1);
+            if (has_named_tensors) {
+                lua_pop(L, 1);
+                break;
+            }
+        }
+    }
+
+    if (has_named_tensors) {
+        std::unordered_map<std::string, std::vector<float>> fin;
+        std::unordered_map<std::string, std::vector<int>> iin;
+
+        lua_pushnil(L);
+        while (lua_next(L, 1) != 0) {
+            if (lua_type(L, -2) == LUA_TSTRING && lua_istable(L, -1)) {
+                const std::string key = lua_tostring(L, -2);
+                const size_t count = lua_rawlen(L, -1);
+                if (key == "text_ids") {
+                    std::vector<int> values;
+                    values.reserve(count);
+                    for (size_t i = 1; i <= count; ++i) {
+                        lua_rawgeti(L, -1, static_cast<lua_Integer>(i));
+                        values.push_back(static_cast<int>(lua_tointeger(L, -1)));
+                        lua_pop(L, 1);
+                    }
+                    iin[key] = std::move(values);
+                } else {
+                    std::vector<float> values;
+                    values.reserve(count);
+                    for (size_t i = 1; i <= count; ++i) {
+                        lua_rawgeti(L, -1, static_cast<lua_Integer>(i));
+                        values.push_back(static_cast<float>(lua_tonumber(L, -1)));
+                        lua_pop(L, 1);
+                    }
+                    fin[key] = std::move(values);
+                }
+            }
+            lua_pop(L, 1);
+        }
+
+        if (fin.empty() && iin.empty()) {
+            lua_pushnil(L);
+            lua_pushstring(L, "Model.forward(named): expected named tensor arrays");
+            return 2;
+        }
+
+        try {
+            const std::vector<float>& output = ctx.currentModel->forwardPassNamedView(fin, iin, training);
+
+            maybe_push_viz_taps();
+
+            lua_newtable(L);
+            for (size_t i = 0; i < output.size(); ++i) {
+                lua_pushnumber(L, output[i]);
+                lua_rawseti(L, -2, i + 1);
+            }
+            return 1;
+        } catch (const std::exception& e) {
+            lua_pushnil(L);
+            lua_pushstring(L, e.what());
+            return 2;
+        }
+    }
+
     // Résoudre le tableau "array" à lire.
     // Si arg1 est une map {__input__=...}, on lit arg1.__input__.
     int input_index = 1;
@@ -439,18 +687,28 @@ int LuaScripting::lua_optimizerStep(lua_State* L) {
     const char* opt_type = luaL_optstring(L, 2, "adamw");
     
     try {
-        Optimizer opt;
-        opt.initial_lr = lr;
-        
-        if (std::string(opt_type) == "sgd") {
-            opt.type = OptimizerType::SGD;
-        } else if (std::string(opt_type) == "adam") {
-            opt.type = OptimizerType::ADAM;
-        } else {
-            opt.type = OptimizerType::ADAMW;
+        // Keep moments and step count across Lua calls and checkpoint saves.
+        if (!ctx.currentModel->getSerializedOptimizer()) {
+            Optimizer opt;
+            opt.initial_lr = lr;
+            if (std::string(opt_type) == "sgd") {
+                opt.type = OptimizerType::SGD;
+            } else if (std::string(opt_type) == "adam") {
+                opt.type = OptimizerType::ADAM;
+            } else {
+                opt.type = OptimizerType::ADAMW;
+            }
+            const auto& cfg = ctx.currentModel->modelConfig;
+            if (cfg.contains("beta1")) opt.beta1 = cfg["beta1"].get<float>();
+            if (cfg.contains("beta2")) opt.beta2 = cfg["beta2"].get<float>();
+            if (cfg.contains("epsilon")) opt.eps = cfg["epsilon"].get<float>();
+            if (cfg.contains("weight_decay")) opt.weight_decay = cfg["weight_decay"].get<float>();
+            ctx.currentModel->setSerializedOptimizer(std::move(opt));
         }
-        
-        ctx.currentModel->optimizerStep(opt, lr, nullptr);
+        Optimizer* opt = ctx.currentModel->getMutableSerializedOptimizer();
+        if (!opt) throw std::runtime_error("optimizer state unavailable");
+        opt->initial_lr = lr;
+        ctx.currentModel->optimizerStep(*opt, lr, nullptr);
         lua_pushboolean(L, true);
         return 1;
     } catch (const std::exception& e) {
@@ -721,9 +979,19 @@ int LuaScripting::lua_saveTokenizer(lua_State* L) {
     const char* filepath = luaL_checkstring(L, 1);
     
     try {
+        const std::filesystem::path output_path(filepath);
+        if (output_path.has_parent_path()) {
+            std::filesystem::create_directories(output_path.parent_path());
+        }
         json j = ctx.currentTokenizer->to_json();
         std::ofstream f(filepath);
+        if (!f) {
+            throw std::runtime_error("Impossible de créer le fichier tokenizer: " + std::string(filepath));
+        }
         f << j.dump(2);
+        if (!f.good()) {
+            throw std::runtime_error("Échec d'écriture du tokenizer: " + std::string(filepath));
+        }
         
         ctx.addLog("Tokenizer sauvegardé: " + std::string(filepath));
         lua_pushboolean(L, true);
@@ -741,6 +1009,9 @@ int LuaScripting::lua_loadTokenizer(lua_State* L) {
     
     try {
         std::ifstream f(filepath);
+        if (!f) {
+            throw std::runtime_error("Fichier tokenizer introuvable ou illisible: " + std::string(filepath));
+        }
         json j;
         f >> j;
         

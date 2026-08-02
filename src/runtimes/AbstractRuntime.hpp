@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+#include "LayerTypes.hpp"
+#include "TypedTensor.hpp"
+
 struct Layer;
 
 struct RuntimeConfig {
@@ -68,6 +71,18 @@ public:
         int out_f
     ) = 0;
 
+    // Typed path. Backends must return false when they do not implement the
+    // requested dtype; callers must not silently relabel float32 output.
+    virtual bool linearForwardTyped(
+        const Mimir::TypedTensor& input,
+        const Mimir::TypedTensor& weights,
+        const Mimir::TypedTensor* bias_or_null,
+        Mimir::TypedTensor& output
+    ) {
+        (void)input; (void)weights; (void)bias_or_null; (void)output;
+        return false;
+    }
+
     // API générique (objectif: couvrir tous les LayerType via un switch). 
     // - `inputs`: tenseurs float (multi-input)
     // - `outputs`: 1 ou plusieurs tenseurs float produits (Split/Chunk peuvent produire N sorties)
@@ -91,6 +106,11 @@ public:
         Layer& layer,
         bool training
     );
+
+    // Vote de support (sans calcul): indique si ce runtime prend en charge
+    // la famille d'ops d'un LayerType donné.
+    virtual bool supportsForwardLayerType(LayerType type) const;
+    virtual bool supportsBackwardLayerType(LayerType type) const;
 
     // Routeur central: interroge les runtimes par ordre de priorité fourni.
     // Sélectionne le premier runtime initialisé qui supporte l'op.

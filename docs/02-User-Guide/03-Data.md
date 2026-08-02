@@ -1,20 +1,12 @@
-# Données / datasets
-
-## Pour qui
-
-Débutant à intermédiaire.
-
-## Objectif
+# Données et datasets
 
 Préparer un dataset compatible et comprendre comment il est lu.
 
-## Avant de commencer
+**Public concerné :** Débutant à intermédiaire.
 
-Avoir un dossier de données local.
-
-## Résultat attendu
-
-Tu sais structurer tes fichiers pour un chargement correct.
+> **Prérequis**
+>
+> Avoir un dossier de données local.
 
 
 Cette page décrit le comportement **réel** du loader de dataset actuellement exposé à Lua via `Mimir.Dataset`, et ses limitations.
@@ -23,6 +15,17 @@ Sources principales :
 
 - API Lua: `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (`lua_loadDataset`, `lua_getDataset`, `lua_prepareSequences`)
 - Indexation + lazy-loading: `src/Helpers.hpp` (`loadDataset`, `DatasetItem`, `DatasetMemoryManager`, `DatasetManager`)
+
+## Sur cette page
+
+- [Vue d’ensemble](#vue-densemble)
+- [Format disque et règle de “linking”](#format-disque-et-règle-de-linking)
+- [API Lua: Mimir.Dataset](#api-lua-mimirdataset)
+- [Détails utiles (mémoire et lazy-loading)](#détails-utiles-mémoire-et-lazy-loading)
+- [Exemples d’usage](#exemples-dusage)
+- [Bonnes pratiques](#bonnes-pratiques)
+- [Limites actuelles (et implications)](#limites-actuelles-et-implications)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Vue d’ensemble
 
@@ -134,7 +137,7 @@ Conséquences côté Lua:
 À retenir:
 
 - Évite de mettre des fichiers texte énormes “bruts” dans le dataset; préfère des items plus petits (ou un pré-traitement hors runtime).
-- Si tu observes `0` séquences préparées, vérifie d’abord: tokenizer présent, puis taille/qualité des fichiers texte.
+- Si vous observez `0` séquences préparées, vérifie d’abord: tokenizer présent, puis taille/qualité des fichiers texte.
 
 ## Exemples d’usage
 
@@ -168,11 +171,17 @@ end
 ## Bonnes pratiques
 
 - Datasets multi-modaux: préfère des basenames uniques sur tout le dataset (évite les collisions entre sous-dossiers).
-- Reproductibilité: loggue dans ton checkpoint les infos “pipeline” (chemin dataset, `seq_len`, vocab/tokenizer utilisé).
+- Reproductibilité: loggue dans votre checkpoint les infos “pipeline” (chemin dataset, `seq_len`, vocab/tokenizer utilisé).
 - Validation rapide: ajoute un script de smoke test qui fait `load()` puis `get(1)` et vérifie la présence des champs attendus.
 
 ## Limites actuelles (et implications)
 
 - `Mimir.Dataset.load()` ne permet pas (encore) de choisir `target_w/target_h/min_modalities` via l’API Lua, même si le C++ le supporte.
 - `Mimir.Dataset.get()` ne charge pas les fichiers à la demande: il expose principalement des chemins.
-- Si tu as besoin des buffers image/audio/vidéo en Lua, il faut ajouter des fonctions dédiées côté C++ (ex: `Dataset.load_image(i)`), ou traiter ces données côté C++ dans la pipeline.
+- Si vous avez besoin des buffers image/audio/vidéo en Lua, il faut ajouter des fonctions dédiées côté C++ (ex: `Dataset.load_image(i)`), ou traiter ces données côté C++ dans la pipeline.
+
+## Étapes suivantes
+
+- [Page précédente : Workflow modèle (lifecycle)](02-Model-Lifecycle.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Entraînement](04-Training.md)

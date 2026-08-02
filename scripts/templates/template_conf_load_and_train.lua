@@ -2,6 +2,8 @@
 local Help = dofile("scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
+---@diagnostic disable: undefined-global
+
 -- scripts/templates/template_conf_load_and_train.lua
 --
 -- Template: charger une config via --conf et entraîner un modèle

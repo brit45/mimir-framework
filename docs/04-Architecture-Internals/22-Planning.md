@@ -1,28 +1,45 @@
-# Internals : Execution Planner (C++)
-
-## Pour qui
-
-Développeur avancé qui modifie le moteur C/C++.
-
-## Objectif
+# Planificateur d’exécution
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
-## Avant de commencer
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Connaître les bases C++ et la structure du dépôt.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
-## Résultat attendu
-
-Tu peux modifier le code interne en limitant les régressions.
-
-Cette page documente le système de planification statique du graphe d'exécution.
+Cette page explique le système de planification statique du graphe d'exécution, avec une lecture orientée compréhension progressive.
 
 Source de vérité : `src/Planning/Planner.hpp`.
 
 Intégration runtime : `src/Model.cpp` (forward) et `Model::static_plan_` dans `src/Model.hpp`.
 
 ---
+
+## Sur cette page
+
+- [Lecture rapide (5 minutes)](#lecture-rapide-5-minutes)
+- [Rôle](#rôle)
+- [Vue mentale : ce qui se passe réellement](#vue-mentale-ce-qui-se-passe-réellement)
+- [Ce que fait le planner au lancement](#ce-que-fait-le-planner-au-lancement)
+- [1) Analyse des durées de vie (TensorLifetime)](#1-analyse-des-durées-de-vie-tensorlifetime)
+- [2) Fusions de layers (FusionKind)](#2-fusions-de-layers-fusionkind)
+- [3) Plan d'exécution (ExecutionPlan)](#3-plan-dexécution-executionplan)
+- [4) Scratchpad pour Conv2d (Conv2dScratchPlan)](#4-scratchpad-pour-conv2d-conv2dscratchplan)
+- [Exemple guidé](#exemple-guidé)
+- [5) Intégration avec le runtime](#5-intégration-avec-le-runtime)
+- [Déboguer efficacement le planner](#déboguer-efficacement-le-planner)
+- [Étapes suivantes](#étapes-suivantes)
+
+## Lecture rapide (5 minutes)
+
+Si vous devez comprendre vite, retiens ceci :
+
+1. Le planner construit un plan au premier `forward`.
+2. Ce plan contient les durées de vie, les fusions et les règles de skip.
+3. Le plan est mis en cache et réutilisé tant que le graphe et le mode (`training`) ne changent pas.
+4. En `training`, les fusions génériques restent désactivées par sécurité.
+5. Le planner améliore surtout la stabilité d'exécution et la mémoire, pas seulement la vitesse brute.
 
 ## Rôle
 
@@ -38,6 +55,20 @@ Ces informations permettent de :
 - Éviter des passes intermédiaires (fusions)
 
 En pratique, le planner est le composant qui transforme la liste brute des layers en un plan exécutable stable et réutilisable entre forwards.
+
+---
+
+## Vue mentale : ce qui se passe réellement
+
+Cycle simplifié d'un run :
+
+1. Le modèle reçoit un `forward`.
+2. Le runtime vérifie si un plan valide existe déjà.
+3. Si non, il calcule un plan statique.
+4. Il exécute la boucle de layers en appliquant les règles du plan.
+5. Les passes suivantes réutilisent ce plan.
+
+Le gain principal vient du fait que les décisions coûteuses sont déplacées vers une phase de préparation unique.
 
 ---
 
@@ -71,6 +102,8 @@ analyze_tensor_lifetimes(const std::vector<Layer>& layers);
 
 Utilisation : déterminer quels buffers peuvent être aliasés/réutilisés.
 
+Lecture pratique : plus le `last_use` d'un tenseur est tôt, plus tôt son buffer peut être recyclé.
+
 ---
 
 ## 2) Fusions de layers (`FusionKind`)
@@ -95,6 +128,9 @@ Fusions actuellement implémentées (inférence uniquement, pas en training) :
 - Producer + unary shape (`Flatten`, `Reshape`, `View`, `Transpose`, `Permute`, `Squeeze`, `Unsqueeze`, `Identity`)
 - Producer + `Split`/`Chunk`
 - Producer + activation + `Split`/`Chunk`
+- Chaînes répétées adjacentes automatiquement: `producer -> activation* -> unary_shape*` (et terminaison optionnelle par `Split`/`Chunk`)
+
+Lecture pratique : la fusion en chaîne évite les matérialisations intermédiaires répétitives (exemple typique : `Add -> ReLU -> ReLU -> View`).
 
 ---
 
@@ -114,6 +150,7 @@ struct ExecutionPlan {
     std::vector<int>        fuse_unary_consumer;
     std::vector<int>        fuse_split_consumer;
     std::vector<uint8_t>    fuse_split_kind; // 0=none, 1=Split, 2=Chunk
+    std::vector<int>        fuse_chain_next;  // edges producer->consumer pour fusions en chaîne
 };
 
 ExecutionPlan build_execution_plan_static(
@@ -124,6 +161,8 @@ ExecutionPlan build_execution_plan_static(
 `build_execution_plan_static(...)` est conservateur : en mode `training=true`, les fusions sont désactivées.
 
 `skip_layer` marque les consommateurs fusionnés qui ne doivent plus être exécutés comme ops indépendantes dans la boucle de forward.
+
+`fuse_chain_next` relie les couches enchaînées qui sont absorbées dans une même exécution logique.
 
 ---
 
@@ -141,6 +180,26 @@ Conv2dScratchPlan plan_conv2d_fastpath_scratch(
 ```
 
 Retourne la taille maximale nécessaire sur l'ensemble des layers Conv2d du modèle. Permet de pré-allouer un scratchpad unique réutilisé sur tous les Conv2d, évitant les allocations dynamiques pendant le forward.
+
+---
+
+## Exemple guidé
+
+Supposons ce sous-graphe :
+
+1. `conv0` (`Conv2d`)
+2. `relu0` (`ReLU`)
+3. `relu1` (`ReLU`)
+4. `view0` (`View`)
+5. `split0` (`Split`)
+
+Ce que le planner peut produire en inférence :
+
+1. `conv0 + relu0` fusionnés (`CONV2D_RELU`)
+2. `relu1`, `view0`, `split0` absorbés via la chaîne de fusion générique
+3. `skip_layer=1` pour les consommateurs déjà fusionnés
+
+Résultat attendu : moins de passages intermédiaires, moins de copies, boucle de forward plus régulière.
 
 ---
 
@@ -178,3 +237,27 @@ Le forward utilise ensuite le plan pour :
 - garder un chemin d'exécution stable entre passes tant que les conditions ci-dessus ne changent pas.
 
 En pratique, la reconstruction n'est pas liée à un appel `build()` explicite : elle est pilotée par les invariants vérifiés dans le forward.
+
+---
+
+## Déboguer efficacement le planner
+
+Checklist terrain :
+
+1. Activer `MIMIR_PLANNER_DUMP=1`.
+2. Vérifier que le nombre d'ops planifiées correspond au graphe.
+3. Vérifier que les `skip_layer` correspondent bien aux consommateurs fusionnés.
+4. Refaire un run en `MIMIR_ENABLE_FUSION=0` pour comparer le comportement.
+5. En cas d'écart training/inférence, vérifier `MIMIR_ENABLE_FUSION_TRAIN`.
+
+Erreurs fréquentes :
+
+1. Oublier qu'un changement de mode `training` invalide le cache plan.
+2. Interpréter un `skip_layer` comme un layer perdu alors qu'il est exécuté dans la fusion.
+3. Ajouter une nouvelle fusion sans mettre à jour la logique de consommation d'output.
+
+## Étapes suivantes
+
+- [Page précédente : Internals : GPU Runtimes — CUDA & ROCm (C++)](21-GPU-Runtimes.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Revenir à la documentation](../00-INDEX.md)

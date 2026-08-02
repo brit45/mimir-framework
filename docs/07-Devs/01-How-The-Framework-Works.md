@@ -1,22 +1,28 @@
-# Comment Fonctionne Le Framework
-
-## Pour qui
-
-Développeur framework (C/C++/runtime/scripting).
-
-## Objectif
+# Fonctionnement du framework
 
 Implémenter ou modifier des briques techniques sans casser le contrat global.
 
-## Avant de commencer
+**Public concerné :** Développeur framework (C/C++/runtime/scripting).
 
-Comprendre le registre d'architectures et les conventions I/O.
-
-## Résultat attendu
-
-Tu peux livrer des évolutions compatibles avec la base existante.
+> **Prérequis**
+>
+> Comprendre le registre d'architectures et les conventions I/O.
 
 Ce chapitre decrit la boucle centrale du framework, du point de vue developpeur.
+
+## Sur cette page
+
+- [1. Vue d'ensemble](#1-vue-densemble)
+- [Role explicite de la Viz dans le framework](#role-explicite-de-la-viz-dans-le-framework)
+- [2. Cycle de vie standard d'un modele](#2-cycle-de-vie-standard-dun-modele)
+- [3. Topologie et execution](#3-topologie-et-execution)
+- [4. Pourquoi le registre est central](#4-pourquoi-le-registre-est-central)
+- [5. Runtime et dispatch](#5-runtime-et-dispatch)
+- [6. Contrat scripting et stabilite API](#6-contrat-scripting-et-stabilite-api)
+- [7. Contraintes metier a respecter](#7-contraintes-metier-a-respecter)
+- [8. Demo metier - run reproductible en mode conf](#8-demo-metier---run-reproductible-en-mode-conf)
+- [9. Demo metier - boucle d'analyse architecture](#9-demo-metier---boucle-danalyse-architecture)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## 1. Vue d'ensemble
 
@@ -161,3 +167,9 @@ But metier :
 - valider que le schema des layers est coherent,
 - valider que le nombre de parametres n'a pas derive sans justification,
 - garder un point de comparaison avant/apres refactor.
+
+## Étapes suivantes
+
+- [Page précédente : Développement du framework](00-INDEX.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Construire Un Modele Et Ses Layers](02-Building-Models-And-Layers.md)

@@ -1,20 +1,21 @@
 # Entraînement
 
-## Pour qui
-
-Intermédiaire (mais guidé pas à pas).
-
-## Objectif
-
 Lancer un entraînement fiable avec checkpoints et mémoire maîtrisée.
 
-## Avant de commencer
+**Public concerné :** Intermédiaire (mais guidé pas à pas).
 
-Comprendre la différence entre entraînement from scratch et reprise.
+> **Prérequis**
+>
+> Comprendre la différence entre entraînement from scratch et reprise.
 
-## Résultat attendu
+## Sur cette page
 
-Tu peux exécuter un run d'entraînement complet et le reprendre.
+- [Diagramme d'explication](#diagramme-dexplication)
+- [Les deux styles d'entraînement](#les-deux-styles-dentraînement)
+- [Workflow recommandé étape par étape](#workflow-recommandé-étape-par-étape)
+- [Calibration par feedback de validation](#calibration-par-feedback-de-validation)
+- [Références](#références)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Diagramme d'explication
 
@@ -38,7 +39,7 @@ Mimir.Dataset.load("dataset_2/")
 assert(Mimir.Model.train(100, 1e-4))
 ```
 
-L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, PonyXL DDPM fait des passes de diffusion multi-timestep, VAEConv calcule la reconstruction + KL, etc. Ces comportements sont codés dans `src/scriptings/Lua/luaScripting/LuaScripting.cpp` → `lua_trainModel`.
+L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, PonyXL DDPM fait des passes de diffusion multi-timestep et VAEConv calcule reconstruction + KL. La fonction `lua_trainModel` et ses branches par architecture se trouvent dans `src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp`. Les calculs VAE élémentaires sont dans `Model::trainStepVAE` et `Model::trainStepVAEText`, dans `src/Model.cpp`.
 
 ### Style boucle manuelle
 
@@ -51,12 +52,17 @@ for epoch = 1, epochs do
         local output = Mimir.Model.forward(batch.input, true)
         local grad = compute_grad(output, batch.target)  -- votre fonction
         Mimir.Model.backward(grad)
-        Mimir.Model.optimizer_step()
+        Mimir.Model.optimizer_step(learning_rate, "adamw")
     end
 end
 ```
 
 > **Note :** la boucle manuelle nécessite que vous calculiez vous-même les gradients de la loss. Pour les architectures complexes (diffusion, VAE), la boucle haut-niveau est beaucoup plus simple car elle intègre les spécificités numériques de chaque modèle.
+
+`optimizer_step` exige le learning rate en premier argument. Le second argument
+optionnel vaut `"adamw"` par défaut et accepte aussi `"adam"` ou `"sgd"`.
+
+Le nom Lua exact est `zero_grads()`. Le nom C++ correspondant est `Model::zeroGradients()`.
 
 ---
 
@@ -133,7 +139,7 @@ local cfg = {
     -- ... autres paramètres
 }
 
-assert(Mimir.Model.create("ponyxl_sdxl", cfg))
+assert(Mimir.Model.create("ponyxl_ddpm", cfg))
 -- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
 
 assert(Mimir.Model.allocate_params())
@@ -250,3 +256,10 @@ local cfg = {
 - Format des datasets : [docs/02-User-Guide/03-Data.md](03-Data.md)
 - Checkpoints : [docs/02-User-Guide/08-Checkpoints.md](08-Checkpoints.md)
 - Scripts d'exemple : `scripts/training/`, `scripts/examples/`
+- VAEConv, latent et prior appris : [docs/02-User-Guide/14-VAEConv.md](14-VAEConv.md)
+
+## Étapes suivantes
+
+- [Page précédente : Données / datasets](03-Data.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Inférence](05-Inference.md)
