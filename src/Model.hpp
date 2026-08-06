@@ -237,6 +237,8 @@ public:
         viz_tips_custom_enabled_ = false;
         clearVizTipsRegistry();
     }
+    // Retourne le snapshot complet sans vider le cache. Les frames sont mises à
+    // jour en place par label; clearVizTaps() réalise l'effacement explicite.
     std::vector<VizFrame> consumeVizTaps();
 
     // Hooks de personnalisation des tips Viz (par modèle enfant).

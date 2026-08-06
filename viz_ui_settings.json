@@ -3,22 +3,22 @@
   "last": {
     "blocks_tips_visible_limit": 400,
     "heatmap_palette": 1,
-    "hide_activation_blocks": true,
-    "hide_normalisation_blocks": true,
+    "hide_activation_blocks": false,
+    "hide_normalisation_blocks": false,
     "panels": [
       {
         "allow_drag": true,
-        "h": 291.0,
+        "h": 290.0,
         "id": 0,
         "title": "Context",
         "visible": true,
-        "w": 324.0000915527344,
+        "w": 399.0000305175781,
         "x": 4.0,
         "y": 4.0
       },
       {
         "allow_drag": true,
-        "h": 666.9998779296875,
+        "h": 598.9998779296875,
         "id": 1,
         "title": "Blocks / Layers",
         "visible": true,
@@ -28,11 +28,11 @@
       },
       {
         "allow_drag": true,
-        "h": 291.00006103515625,
+        "h": 293.00006103515625,
         "id": 2,
         "title": "Generated",
-        "visible": false,
-        "w": 844.0,
+        "visible": true,
+        "w": 841.0,
         "x": 415.0,
         "y": 4.000091552734375
       },
@@ -42,37 +42,37 @@
         "id": 3,
         "title": "Training",
         "visible": true,
-        "w": 519.0,
+        "w": 520.0,
         "x": 1268.0,
         "y": 5.0
       },
       {
         "allow_drag": true,
-        "h": 810.0001220703125,
+        "h": 817.9999389648438,
         "id": 4,
         "title": "Metrics",
         "visible": true,
         "w": 521.0,
         "x": 1267.0,
-        "y": 152.00006103515625
+        "y": 85.0
       },
       {
         "allow_drag": true,
-        "h": 291.0,
+        "h": 238.0,
         "id": 5,
         "title": "Loss",
-        "visible": true,
-        "w": 918.9999389648438,
-        "x": 337.00006103515625,
-        "y": 4.0
+        "visible": false,
+        "w": 1783.9998779296875,
+        "x": 4.0,
+        "y": 668.0
       }
     ],
-    "show_generated_images": false,
-    "show_loss_graph": true,
+    "show_generated_images": true,
+    "show_loss_graph": false,
     "show_prompt_text": true,
     "show_training_progress": true,
     "version": 2,
-    "window_height": 976,
+    "window_height": 912,
     "window_width": 1792
   },
   "showgraph": {

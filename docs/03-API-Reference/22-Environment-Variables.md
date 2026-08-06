@@ -211,13 +211,13 @@ Les variables `MIMIR_NMS_*` pilotent
 `scripts/benchmarks/benchmark_nms.lua`. Ce benchmark fabrique ses boîtes en
 mémoire et ne lit aucun dataset.
 
-### Variables tokenizer / PonyXL tooling
+### Variables tokenizer / SafeTensors externe
 
 - `MIMIR_BASE_TOKENIZER`
 - `MIMIR_BASE_TOKENIZER_MAX_VOCAB`
 - `MIMIR_REQUIRE_BASE_TOKENIZER`
-- `MIMIR_PONYXL_INCLUDE`
-- `MIMIR_PONYXL_SAFETENSORS`
+- `MIMIR_EXTERNAL_SAFETENSORS_INCLUDE`
+- `MIMIR_EXTERNAL_SAFETENSORS`
 - `MIMIR_MAX_TENSORS`
 
 ### Variables système lues par scripts

@@ -21,7 +21,6 @@
 #include "Models/Diffusion/DiffusionModel.hpp"
 #include "Models/Diffusion/CondDiffusionModel.hpp"
 #include "Models/Diffusion/HFSDXLTransformerBlockModel.hpp"
-#include "Models/Diffusion/PonyXLDDPMModel.hpp"
 #include "Models/Diffusion/SD35Model.hpp"
 #include "Models/Vision/PatchDiscriminatorModel.hpp"
 
@@ -36,7 +35,6 @@ namespace {
 static inline std::string canonicalArchName(const std::string& name) {
     // Alias convivial: "SD3.5" -> "sd3_5".
     if (name == "sd3.5" || name == "SD3.5" || name == "sd3_5" || name == "SD3_5") return "sd3_5";
-    if (name == "ponyxl_safetensors_base" || name == "ponyxl_monolith_base") return "external_safetensors_base";
     return name;
 }
 } // namespace
@@ -388,220 +386,6 @@ static ViTModel::Config vitCfgFromJson(const json& cfg) {
 static json vitDefaultConfigJson() {
     ViTModel::Config d;
     return json{{"num_tokens", d.num_tokens}, {"d_model", d.d_model}, {"num_layers", d.num_layers}, {"num_heads", d.num_heads}, {"mlp_hidden", d.mlp_hidden}, {"output_dim", d.output_dim}, {"causal", d.causal}};
-}
-
-static PonyXLDDPMModel::Config ponyxlDdpmCfgFromJson(const json& cfg) {
-    PonyXLDDPMModel::Config out;
-
-    out.seed = jget<int>(cfg, "seed", out.seed);
-    out.d_model = jget<int>(cfg, "d_model", out.d_model);
-    out.max_vocab = jget<int>(cfg, "max_vocab", out.max_vocab);
-    out.text_ctx_len = jget<int>(cfg, "text_ctx_len", out.text_ctx_len);
-    out.text_bottleneck_meanpool = jget<bool>(cfg, "text_bottleneck_meanpool", out.text_bottleneck_meanpool);
-    out.text_norm = jget<std::string>(cfg, "text_norm", out.text_norm);
-    out.text_mlp_geglu = jget<bool>(cfg, "text_mlp_geglu", out.text_mlp_geglu);
-
-    out.latent_seq_len = jget<int>(cfg, "latent_seq_len", out.latent_seq_len);
-    out.latent_in_dim = jget<int>(cfg, "latent_in_dim", out.latent_in_dim);
-    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
-
-    out.sdxl_time_cond = jget<bool>(cfg, "sdxl_time_cond", out.sdxl_time_cond);
-    out.unet_layers = jget<int>(cfg, "unet_layers", out.unet_layers);
-    out.text_layers = jget<int>(cfg, "text_layers", out.text_layers);
-    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
-
-    out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
-    out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
-    out.unet_depth = jget<int>(cfg, "unet_depth", out.unet_depth);
-    out.unet_upsample = jget<std::string>(cfg, "unet_upsample", out.unet_upsample);
-
-    out.image_w = jget<int>(cfg, "image_w", out.image_w);
-    out.image_h = jget<int>(cfg, "image_h", out.image_h);
-    out.image_c = jget<int>(cfg, "image_c", out.image_c);
-
-    out.ddpm_steps = jget<int>(cfg, "ddpm_steps", out.ddpm_steps);
-    out.ddpm_beta_start = jget<float>(cfg, "ddpm_beta_start", out.ddpm_beta_start);
-    out.ddpm_beta_end = jget<float>(cfg, "ddpm_beta_end", out.ddpm_beta_end);
-    out.ddpm_steps_per_image = jget<int>(cfg, "ddpm_steps_per_image", out.ddpm_steps_per_image);
-
-    out.recon_loss = jget<std::string>(cfg, "recon_loss", out.recon_loss);
-
-    out.peltier_noise = jget<bool>(cfg, "peltier_noise", out.peltier_noise);
-    out.peltier_mix = jget<float>(cfg, "peltier_mix", out.peltier_mix);
-    out.peltier_blur_radius = jget<int>(cfg, "peltier_blur_radius", out.peltier_blur_radius);
-
-    out.vae_arch = jget<std::string>(cfg, "vae_arch", out.vae_arch);
-    out.vae_checkpoint = jget<std::string>(cfg, "vae_checkpoint", out.vae_checkpoint);
-    out.vae_scale = jget<float>(cfg, "vae_scale", out.vae_scale);
-    out.vae_base_channels = jget<int>(cfg, "vae_base_channels", out.vae_base_channels);
-
-    out.cfg_dropout_prob = jget<float>(cfg, "cfg_dropout_prob", out.cfg_dropout_prob);
-    out.max_text_chars = jget<int>(cfg, "max_text_chars", out.max_text_chars);
-    out.dropout = jget<float>(cfg, "dropout", out.dropout);
-
-    // Captions structurées
-    out.caption_structured_enable = jget<bool>(cfg, "caption_structured_enable", out.caption_structured_enable);
-    out.caption_structured_canonicalize = jget<bool>(cfg, "caption_structured_canonicalize", out.caption_structured_canonicalize);
-    out.caption_tags_dropout_prob = jget<float>(cfg, "caption_tags_dropout_prob", out.caption_tags_dropout_prob);
-    out.caption_contexte_dropout_prob = jget<float>(cfg, "caption_contexte_dropout_prob", out.caption_contexte_dropout_prob);
-    out.caption_mentalite_dropout_prob = jget<float>(cfg, "caption_mentalite_dropout_prob", out.caption_mentalite_dropout_prob);
-    out.caption_texte_dropout_prob = jget<float>(cfg, "caption_texte_dropout_prob", out.caption_texte_dropout_prob);
-
-    out.viz_ddpm_every_steps = jget<int>(cfg, "viz_ddpm_every_steps", out.viz_ddpm_every_steps);
-    out.viz_ddpm_num_steps = jget<int>(cfg, "viz_ddpm_num_steps", out.viz_ddpm_num_steps);
-
-    out.timestep_cond = jget<std::string>(cfg, "timestep_cond", out.timestep_cond);
-    out.loss_weighting = jget<std::string>(cfg, "loss_weighting", out.loss_weighting);
-    out.min_snr_gamma = jget<float>(cfg, "min_snr_gamma", out.min_snr_gamma);
-    out.output_activation = jget<std::string>(cfg, "output_activation", out.output_activation);
-    out.kl_beta = jget<float>(cfg, "kl_beta", out.kl_beta);
-    out.kl_warmup_steps = jget<int>(cfg, "kl_warmup_steps", out.kl_warmup_steps);
-    out.logvar_clip_min = jget<float>(cfg, "logvar_clip_min", out.logvar_clip_min);
-    out.logvar_clip_max = jget<float>(cfg, "logvar_clip_max", out.logvar_clip_max);
-    out.global_ctx_tokens = jget<int>(cfg, "global_ctx_tokens", out.global_ctx_tokens);
-    out.caption_kv_enable = jget<bool>(cfg, "caption_kv_enable", out.caption_kv_enable);
-    out.term_freq_boost_enable = jget<bool>(cfg, "term_freq_boost_enable", out.term_freq_boost_enable);
-    out.term_freq_boost_use_tokens = jget<bool>(cfg, "term_freq_boost_use_tokens", out.term_freq_boost_use_tokens);
-    out.term_freq_boost_use_keywords = jget<bool>(cfg, "term_freq_boost_use_keywords", out.term_freq_boost_use_keywords);
-    out.term_freq_boost_start_step = jget<int>(cfg, "term_freq_boost_start_step", out.term_freq_boost_start_step);
-    out.term_freq_boost_update_every_steps = jget<int>(cfg, "term_freq_boost_update_every_steps", out.term_freq_boost_update_every_steps);
-    out.term_freq_boost_top_k = jget<int>(cfg, "term_freq_boost_top_k", out.term_freq_boost_top_k);
-    out.term_freq_boost_repeat = jget<int>(cfg, "term_freq_boost_repeat", out.term_freq_boost_repeat);
-    out.img_loss_weight = jget<float>(cfg, "img_loss_weight", out.img_loss_weight);
-    out.img_loss_every_steps = jget<int>(cfg, "img_loss_every_steps", out.img_loss_every_steps);
-    out.unet_blocks_per_level = jget<int>(cfg, "unet_blocks_per_level", out.unet_blocks_per_level);
-    out.unet_bottleneck_blocks = jget<int>(cfg, "unet_bottleneck_blocks", out.unet_bottleneck_blocks);
-    out.text_clip_like = jget<bool>(cfg, "text_clip_like", out.text_clip_like);
-    out.base_tokenizer_path = jget<std::string>(cfg, "base_tokenizer_path", out.base_tokenizer_path);
-    out.ddpm_schedule = jget<std::string>(cfg, "ddpm_schedule", out.ddpm_schedule);
-    out.use_ldm_unet_arch = jget<bool>(cfg, "use_ldm_unet_arch", out.use_ldm_unet_arch);
-
-    return out;
-}
-
-static json ponyxlDdpmDefaultConfigJson() {
-    PonyXLDDPMModel::Config d;
-    return json{
-        {"seed", d.seed},
-        {"d_model", d.d_model},
-        {"max_vocab", d.max_vocab},
-        {"text_ctx_len", d.text_ctx_len},
-        {"text_bottleneck_meanpool", d.text_bottleneck_meanpool},
-        {"text_norm", d.text_norm},
-        {"text_mlp_geglu", d.text_mlp_geglu},
-
-        {"latent_seq_len", d.latent_seq_len},
-        {"latent_in_dim", d.latent_in_dim},
-        {"num_heads", d.num_heads},
-
-        {"sdxl_time_cond", d.sdxl_time_cond},
-        {"unet_layers", d.unet_layers},
-        {"text_layers", d.text_layers},
-        {"mlp_hidden", d.mlp_hidden},
-
-        {"latent_h", d.latent_h},
-        {"latent_w", d.latent_w},
-        {"unet_depth", d.unet_depth},
-        {"unet_upsample", d.unet_upsample},
-
-        {"image_w", d.image_w},
-        {"image_h", d.image_h},
-        {"image_c", d.image_c},
-
-        {"ddpm_steps", d.ddpm_steps},
-        {"ddpm_beta_start", d.ddpm_beta_start},
-        {"ddpm_beta_end", d.ddpm_beta_end},
-        {"ddpm_steps_per_image", d.ddpm_steps_per_image},
-
-        {"recon_loss", d.recon_loss},
-
-        {"peltier_noise", d.peltier_noise},
-        {"peltier_mix", d.peltier_mix},
-        {"peltier_blur_radius", d.peltier_blur_radius},
-
-        {"vae_arch", d.vae_arch},
-        {"vae_checkpoint", d.vae_checkpoint},
-        {"vae_scale", d.vae_scale},
-        {"vae_base_channels", d.vae_base_channels},
-
-        {"cfg_dropout_prob", d.cfg_dropout_prob},
-        {"max_text_chars", d.max_text_chars},
-        {"dropout", d.dropout},
-
-        // Captions structurées
-        {"caption_structured_enable", d.caption_structured_enable},
-        {"caption_structured_canonicalize", d.caption_structured_canonicalize},
-        {"caption_tags_dropout_prob", d.caption_tags_dropout_prob},
-        {"caption_contexte_dropout_prob", d.caption_contexte_dropout_prob},
-        {"caption_mentalite_dropout_prob", d.caption_mentalite_dropout_prob},
-        {"caption_texte_dropout_prob", d.caption_texte_dropout_prob},
-
-        {"viz_ddpm_every_steps", d.viz_ddpm_every_steps},
-        {"viz_ddpm_num_steps", d.viz_ddpm_num_steps},
-
-        {"timestep_cond", d.timestep_cond},
-        {"loss_weighting", d.loss_weighting},
-        {"min_snr_gamma", d.min_snr_gamma},
-        {"output_activation", d.output_activation},
-        {"kl_beta", d.kl_beta},
-        {"kl_warmup_steps", d.kl_warmup_steps},
-        {"logvar_clip_min", d.logvar_clip_min},
-        {"logvar_clip_max", d.logvar_clip_max},
-        {"global_ctx_tokens", d.global_ctx_tokens},
-        {"caption_kv_enable", d.caption_kv_enable},
-        {"term_freq_boost_enable", d.term_freq_boost_enable},
-        {"term_freq_boost_use_tokens", d.term_freq_boost_use_tokens},
-        {"term_freq_boost_use_keywords", d.term_freq_boost_use_keywords},
-        {"term_freq_boost_start_step", d.term_freq_boost_start_step},
-        {"term_freq_boost_update_every_steps", d.term_freq_boost_update_every_steps},
-        {"term_freq_boost_top_k", d.term_freq_boost_top_k},
-        {"term_freq_boost_repeat", d.term_freq_boost_repeat},
-        {"img_loss_weight", d.img_loss_weight},
-        {"img_loss_every_steps", d.img_loss_every_steps},
-        {"unet_blocks_per_level", d.unet_blocks_per_level},
-        {"unet_bottleneck_blocks", d.unet_bottleneck_blocks},
-        {"text_clip_like", d.text_clip_like},
-        {"base_tokenizer_path", d.base_tokenizer_path},
-        {"ddpm_schedule", d.ddpm_schedule},
-        {"use_ldm_unet_arch", d.use_ldm_unet_arch},
-    };
-}
-
-// ── LdmUNet: config helpers (dépend de ponyxlDdpmDefaultConfigJson) ──────────
-
-static PonyXLDDPMModel::Config ldmUNetCfgFromJson(const json& cfg) {
-    PonyXLDDPMModel::Config out = ponyxlDdpmCfgFromJson(cfg);
-    out.use_ldm_unet_arch = jget<bool>(cfg, "use_ldm_unet_arch", true);
-    out.ddpm_schedule     = jget<std::string>(cfg, "ddpm_schedule", "cosine");
-    out.sdxl_time_cond    = true;
-    return out;
-}
-
-static json ldmUNetDefaultConfigJson() {
-    json j = ponyxlDdpmDefaultConfigJson();
-    j["use_ldm_unet_arch"]        = true;
-    j["ddpm_schedule"]            = "cosine";
-    j["sdxl_time_cond"]           = true;
-    j["d_model"]                  = 1024;
-    j["text_ctx_len"]             = 250;
-    j["num_heads"]                = 16;
-    j["text_layers"]              = 8;
-    j["mlp_hidden"]               = 4096;
-    j["unet_depth"]               = 3;
-    j["unet_blocks_per_level"]    = 2;
-    j["unet_bottleneck_blocks"]   = 2;
-    j["latent_seq_len"]           = 256;
-    j["latent_in_dim"]            = 128;
-    j["latent_h"]                 = 16;
-    j["latent_w"]                 = 16;
-    j["vae_base_channels"]        = 256;
-    j["vae_arch"]                 = "vae_conv";
-    j["ddpm_steps"]               = 1000;
-    j["peltier_noise"]            = false;
-    j["image_w"]                  = 512;
-    j["image_h"]                  = 512;
-    j["image_c"]                  = 3;
-    return j;
 }
 
 static VAEModel::Config vaeCfgFromJson(const json& cfg) {
@@ -1375,34 +1159,6 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<PatchDiscriminatorModel>();
                     m->buildFromConfig(patchDiscCfgFromJson(cfg));
-                    return m;
-                },
-            }
-        );
-
-        entries_.emplace(
-            "ponyxl_ddpm",
-            Entry{
-                "ponyxl_ddpm",
-                "PonyXL SDXL-like DDPM latent diffusion (trainStepSdxlLatentDiffusion)",
-                ponyxlDdpmDefaultConfigJson(),
-                [](const json& cfg) -> std::shared_ptr<Model> {
-                    auto m = std::make_shared<PonyXLDDPMModel>();
-                    m->buildFromConfig(ponyxlDdpmCfgFromJson(cfg));
-                    return m;
-                },
-            }
-        );
-
-        entries_.emplace(
-            "ldm_unet",
-            Entry{
-                "ldm_unet",
-                "Latent Diffusion U-Net: VAE_conv backbone + proper U-Net (ResBlock+CrossAttn+per-block time inject), d_model=1024, cosine schedule",
-                ldmUNetDefaultConfigJson(),
-                [](const json& cfg) -> std::shared_ptr<Model> {
-                    auto m = std::make_shared<PonyXLDDPMModel>();
-                    m->buildFromConfig(ldmUNetCfgFromJson(cfg));
                     return m;
                 },
             }

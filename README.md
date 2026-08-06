@@ -279,7 +279,7 @@ Le registre inclut notamment:
 - GAN Latent
 - Transformer
 - Diffusion / Conditional Diffusion
-- SDXL / PonyXL
+- SDXL
 - CLIP
 - modèles HuggingFace
 - modèles externes SafeTensors

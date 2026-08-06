@@ -7,7 +7,6 @@
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
-#include "Models/Diffusion/PonyXLDDPMModel.hpp"
 #include "Helpers.hpp"
 #include <fstream>
 #include <sstream>

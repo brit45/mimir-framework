@@ -37,7 +37,7 @@ Dans la plupart des scripts, on configure d’abord:
 - `Mimir.Allocator.configure({ max_ram_gb=..., enable_compression=true, swap_strategy="lru" })`
 - `Mimir.Model.set_hardware(true)` (si dispo)
 
-Exemples: `scripts/examples/example_conf_inference.lua`, `scripts/inferences/ponyxl_ddpm_text2img.lua`.
+Exemples: `scripts/examples/example_conf_inference.lua`, `scripts/inferences/hf_vae_decoder_infer.lua`.
 
 ### Exemple: charger un checkpoint puis faire un forward
 

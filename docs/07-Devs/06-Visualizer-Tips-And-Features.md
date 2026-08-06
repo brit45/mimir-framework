@@ -133,7 +133,6 @@ Points importants:
 ### 2.4 Exemples existants dans le repo
 
 - `src/Models/Vision/VAEConvModel.cpp`
-- `src/Models/Diffusion/PonyXLDDPMModel.cpp`
 
 Ces deux modeles montrent:
 

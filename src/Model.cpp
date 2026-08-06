@@ -1176,8 +1176,10 @@ void Model::addVizTapFrame(VizFrame vf) {
 }
 
 std::vector<Model::VizFrame> Model::consumeVizTaps() {
-    auto out = std::move(viz_taps_);
-    viz_taps_.clear();
+    // Le cache est dédupliqué et mis à jour en place par addVizTapFrame().
+    // Retourner un snapshot complet évite qu'un forward partiel fasse disparaître
+    // de l'interface toutes les couches qui n'ont pas été recapturées ce cycle-ci.
+    auto out = viz_taps_;
     if (g_viz_capture_root == this) g_viz_capture_root = nullptr;
     return out;
 }
@@ -4921,7 +4923,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
 
         // Convention: "seq" = sortie tokenizer (ids). Alias utile pour modèles existants.
-        // PonyXL et d'autres utilisent "text_ids".
+        // Les modèles texte utilisent "text_ids".
         const auto it_seq = pending_int_inputs_->find("seq");
         if (it_seq != pending_int_inputs_->end()) {
             // store under both keys (safe overwrite ok)

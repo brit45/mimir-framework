@@ -140,7 +140,7 @@ Regle projet :
 - wiring I/O (`Layer.inputs`, `Layer.output`): C/C++,
 - scripts Lua: creation via registre + execution/inspection uniquement.
 
-Pour une architecture produit (ex: `vae_conv`, `ponyxl_ddpm`, `hf_vae_decoder`), modifier la topologie dans les fichiers C/C++ du modele et son enregistrement registre.
+Pour une architecture produit (ex: `vae_conv`, `diffusion`, `hf_vae_decoder`), modifier la topologie dans les fichiers C/C++ du modele et son enregistrement registre.
 
 ## 7. Erreurs frequentes
 

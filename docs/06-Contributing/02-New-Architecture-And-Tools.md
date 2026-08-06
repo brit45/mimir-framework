@@ -245,10 +245,8 @@ Test 4: Structure legacy désactivée... ✅ Structure legacy désactivée (conf
 | hf_clip_text_encoder_2    | float32      | Encodeur texte OpenCLIP/SDXL exécutable pour checkpoints HuggingFace/... |
 | hf_sdxl_transformer_block | float32      | Bloc transformer SDXL/HuggingFace exécutable avec SelfAttention, Cros... |
 | hf_vae_decoder            | float32      | Décodeur VAE SDXL/HuggingFace exécutable pour le composant first_stag... |
-| ldm_unet                  | float32      | Latent Diffusion U-Net: VAE_conv backbone + proper U-Net (ResBlock+Cr... |
 | mobilenet                 | float32      | MobileNetV1-style (DepthwiseConv2d + pointwise Conv2d)                   |
 | patch_discriminator       | float32      | PatchGAN-like discriminator (image -> patch logits)                      |
-| ponyxl_ddpm               | float32      | PonyXL SDXL-like DDPM latent diffusion (trainStepSdxlLatentDiffusion)    |
 | resnet                    | float32      | ResNet (simplified ResNet18-like)                                        |
 | sd3_5                     | float32      | Stable Diffusion 3.5 (placeholder: registry + skeleton model)            |
 | transformer               | float32      | Transformer encoder (float-only: input=seq_len*d_model)                  |

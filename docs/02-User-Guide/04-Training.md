@@ -39,7 +39,7 @@ Mimir.Dataset.load("dataset_2/")
 assert(Mimir.Model.train(100, 1e-4))
 ```
 
-L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, PonyXL DDPM fait des passes de diffusion multi-timestep et VAEConv calcule reconstruction + KL. La fonction `lua_trainModel` et ses branches par architecture se trouvent dans `src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp`. Les calculs VAE élémentaires sont dans `Model::trainStepVAE` et `Model::trainStepVAEText`, dans `src/Model.cpp`.
+L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, VAEConv calcule reconstruction + KL. La fonction `lua_trainModel` et ses branches par architecture se trouvent dans `src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp`. Les calculs VAE élémentaires sont dans `Model::trainStepVAE` et `Model::trainStepVAEText`, dans `src/Model.cpp`.
 
 ### Style boucle manuelle
 
@@ -93,7 +93,7 @@ pcall(Mimir.Model.set_hardware, true)
 
 ### 2 — Charger le tokenizer (si nécessaire)
 
-Certaines architectures (Transformer, PonyXL DDPM) nécessitent un tokenizer. Si vous partez de zéro, créez-en un simple :
+Certaines architectures texte, comme Transformer, nécessitent un tokenizer. Si vous partez de zéro, créez-en un simple :
 
 ```lua
 -- Tokenizer minimal pour les tests
@@ -103,7 +103,7 @@ Mimir.Tokenizer.create(8192)  -- vocab_size
 Pour un entraînement sérieux, chargez le tokenizer de base préentraîné :
 
 ```lua
--- Recommandé pour PonyXL et les modèles texte
+-- Recommandé pour les modèles texte
 local tok = require("scripts/modules/base_tokenizer")
 tok.load("checkpoint/base_tokenizer/")
 ```
@@ -134,12 +134,16 @@ Voir [docs/02-User-Guide/03-Data.md](03-Data.md) pour les détails et limitation
 
 ```lua
 local cfg = {
-    d_model    = 256,
-    num_layers = 8,
-    -- ... autres paramètres
+    image_w      = 64,
+    image_h      = 64,
+    image_c      = 3,
+    latent_h     = 8,
+    latent_w     = 8,
+    latent_c     = 4,
+    base_channels = 16,
 }
 
-assert(Mimir.Model.create("ponyxl_ddpm", cfg))
+assert(Mimir.Model.create("vae_conv", cfg))
 -- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
 
 assert(Mimir.Model.allocate_params())
@@ -158,7 +162,7 @@ assert(Mimir.Model.init_weights("he", 0))
 **Reprise d'un entraînement :**
 
 ```lua
-local ok, err = Mimir.Serialization.load("checkpoint/ponyxl_run1/model.safetensors")
+local ok, err = Mimir.Serialization.load("checkpoint/vae_conv_run1/model.safetensors")
 assert(ok, err)
 print("Checkpoint chargé")
 ```
@@ -176,7 +180,7 @@ assert(Mimir.Model.train(100, 1e-4))
 ### 7 — Sauvegarder
 
 ```lua
-local ok, err = Mimir.Serialization.save("checkpoint/ponyxl_run1/", {
+local ok, err = Mimir.Serialization.save("checkpoint/vae_conv_run1/", {
     format         = "safetensors",
     save_optimizer = true,
     save_tokenizer = true,

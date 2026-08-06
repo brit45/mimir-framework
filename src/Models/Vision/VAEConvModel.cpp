@@ -897,7 +897,7 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     // Résultat : skip_proj reçoit [decoder_feats, 0] → W_dec * decoder_feats
     // C'est bien meilleur que bypasser skip_proj entièrement.
     const bool use_skip_dec = cfg.use_skip_connections;
-    // Stocker dans modelConfig pour que PonyXL puisse reconstruire une architecture identique.
+    // Stocker dans modelConfig pour permettre de reconstruire une architecture identique.
     model.modelConfig["use_attention"] = use_resnet_dec;
     model.modelConfig["resnet_max_tokens"] = resnet_max_dec;
     model.modelConfig["use_attn"] = use_attn_dec;

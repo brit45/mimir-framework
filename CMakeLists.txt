@@ -393,7 +393,6 @@ set(MIMIR_SOURCES
     src/Models/Diffusion/CondDiffusionModel.cpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.cpp
     src/Models/Diffusion/SD35Model.cpp
-    src/Models/Diffusion/PonyXLDDPMModel.cpp
     src/Serialization/Serialization.cpp
     src/Serialization/SafeTensorsWriter.cpp
     src/Serialization/SafeTensorsReader.cpp
@@ -463,7 +462,6 @@ set(MIMIR_HEADERS
     src/Models/Diffusion/CondDiffusionModel.hpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.hpp
     src/Models/Diffusion/SD35Model.hpp
-    src/Models/Diffusion/PonyXLDDPMModel.hpp
     src/Serialization/Serialization.hpp
     src/Serialization/SafeTensorsWriter.hpp
     src/Serialization/SafeTensorsReader.hpp

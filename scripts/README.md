@@ -9,7 +9,7 @@ Cette page décrit les scripts utiles dans le workspace actuel. Elle ne reflète
 ```text
 scripts/
 ├── examples/        # Exemples ciblés (inspection, config, classification)
-├── inferences/      # Inférence CLIP, SDXL, VAE et PonyXL
+├── inferences/      # Inférence CLIP, SDXL et VAE
 ├── tests/           # Tests et validation
 ├── benchmarks/      # Benchmarks
 ├── training/        # Scripts d'entraînement
@@ -31,7 +31,6 @@ scripts/
 - encodeurs CLIP SDXL 1 et 2
 - bloc transformer SDXL
 - décodeur VAE Hugging Face
-- génération PonyXL avec VAE interne ou externe
 - inspection d'une base SafeTensors externe
 
 Ces scripts nécessitent généralement des checkpoints compatibles. Afficher leur aide avant exécution.
@@ -110,8 +109,6 @@ Profil personnalisé :
 
 Scripts d'entraînement:
 
-- `ponyxl_ddpm_train.lua` - Entraînement PonyXL-DDPM (diffusion)
-- `ponyxl_ddpm_direct_train.lua` - Entraînement PonyXL-DDPM direct sur une image + un prompt, sans loader de dataset
 - `train_vae_conv.lua` - Entraînement VAE Conv
 - `train_vae_texte.lua` - Entraînement VAE Texte
 - `pretrain_vgg16_feat.lua` - préentraînement extracteur perceptuel
@@ -244,8 +241,7 @@ Note: conserver le separateur `--` avant les arguments du script Lua.
 ./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1
 
 # Training
-./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua -- --help
-./bin/mimir --lua scripts/training/ponyxl_ddpm_direct_train.lua -- --help
+./bin/mimir --lua scripts/training/train_vae_conv.lua -- --help
 ```
 
 Règles d'export pour `inspect_architectures.lua -e`:

@@ -288,6 +288,6 @@ ctest --test-dir build --output-on-failure \
 
 ## Étapes suivantes
 
-- [Page précédente : Tutoriel : diffusion (PonyXL / SD3.5 / autoencoder)](13-Diffusion.md)
+- [Page précédente : Tutoriel : diffusion (SD3.5 / autoencoder)](13-Diffusion.md)
 - [Index de la documentation](../00-INDEX.md)
 - [Page suivante : MPK : packages d’architecture](15-MPK.md)

@@ -72,6 +72,8 @@ int main() {
 
     const std::vector<float> packed = vae.forwardPass(input, true);
     const std::vector<float> mu = vae.getTensor("vae_conv/mu");
+    const std::vector<float> z = vae.getTensor("vae_conv/z");
+    const std::vector<float> prior_values = vae.getTensor("vae_conv/prior_bias_out");
     const std::vector<float> z_biased = vae.getTensor("vae_conv/z_biased");
     TASSERT_TRUE(mu.size() == 8);
     TASSERT_TRUE(packed.size() == 16 + 2 * mu.size());
@@ -79,6 +81,11 @@ int main() {
         TASSERT_NEAR(packed[16 + i], mu[i], 1e-6f);
     }
     TASSERT_TRUE(z_biased.size() == mu.size());
+    TASSERT_TRUE(z.size() == z_biased.size());
+    TASSERT_TRUE(prior_values.size() == z_biased.size());
+    for (size_t i = 0; i < z_biased.size(); ++i) {
+        TASSERT_NEAR(z_biased[i], z[i] + prior_values[i], 1e-6f);
+    }
 
     // VIZ contract: a deliberately tiny historical limit must not hide graph
     // layers. Every node gets one canonical <model>/blocks/... label.

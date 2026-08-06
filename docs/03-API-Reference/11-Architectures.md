@@ -133,24 +133,19 @@ Quelques noms sont normalisés par `canonicalArchName`.
 Canonicalisation observée dans le registre C++ :
 
 - variantes conviviales `SD3.5` / `sd3.5` / `SD3_5` -> `sd3_5`
-- `ponyxl_safetensors_base` et `ponyxl_monolith_base` -> `external_safetensors_base`
-
-`ponyxl_ddpm` est actuellement une clé canonique du registre. Les anciens noms
-`ponyxl_sdxl`, `t2i_autoencoder`, `ponyxl_sdxl_stub` et
-`ponyxl_sdxl_unet2d` ne sont pas des alias enregistrés.
 
 ---
 
 ## Architectures disponibles
 
-Le registre C++ contient actuellement 27 entrées natives canoniques :
+Le registre C++ contient actuellement 25 entrées natives canoniques :
 
 | Famille | Architectures |
 | --- | --- |
 | Général | `basic_mlp` |
 | Texte | `causal_lm`, `transformer`, `vae_text`, `vae_text_decode`, `hf_clip_text_encoder_1`, `hf_clip_text_encoder_2` |
 | Vision | `vit`, `vae`, `vae_conv`, `vae_conv_decode`, `resnet`, `unet`, `mobilenet`, `vgg16`, `vgg19`, `vgg16_feat`, `hf_vae_decoder` |
-| Diffusion/latent | `diffusion`, `cond_diffusion`, `ponyxl_ddpm`, `ldm_unet`, `sd3_5`, `hf_sdxl_transformer_block`, `gan_latent` |
+| Diffusion/latent | `diffusion`, `cond_diffusion`, `sd3_5`, `hf_sdxl_transformer_block`, `gan_latent` |
 | Discrimination/import | `patch_discriminator`, `external_safetensors_base` |
 
 Cette liste décrit les clés effectivement enregistrées. Les alias acceptés peuvent
@@ -330,40 +325,6 @@ nombre de canaux inférieur ou égal à `enc_gn_groups`.
   "prompt_dim": 128, "latent_w": 32, "latent_h": 32, "latent_c": 4,
   "time_dim": 128, "hidden_dim": 2048
 }
-```
-
-**`ponyxl_ddpm`** — diffusion latente SDXL-like
-
-Config principale (extraits) :
-```json
-{
-  "d_model": 256, "max_vocab": 32000, "text_ctx_len": 1300,
-  "latent_seq_len": 4096, "latent_in_dim": 64,
-  "num_heads": 8, "unet_layers": 16, "text_layers": 8,
-  "image_w": 64, "image_h": 64, "image_c": 3,
-  "ddpm_steps": 1000, "ddpm_beta_start": 1e-4, "ddpm_beta_end": 0.02,
-  "peltier_noise": true, "peltier_mix": 0.65,
-  "caption_structured_enable": true,
-  "vae_arch": "vae_conv", "vae_scale": 1.0,
-  "cfg_dropout_prob": 0.10
-}
-```
-
-Bindings Lua spécifiques :
-```lua
--- Entraînement
-local stats, err = Mimir.Model.ponyxl_ddpm_train_step(
-  prompt, rgb, w, h, learning_rate, "adamw", metadata)
-assert(stats, err)
-
--- Validation
-local val, val_err = Mimir.Model.ponyxl_ddpm_validate_step(
-  prompt, wrong_prompt, rgb, w, h, seed, ddpm_step)
-assert(val, val_err)
-
--- Génération
-local pixels, out_w, out_h, channels =
-  Mimir.Model.ponyxl_ddpm_text2img(prompt, seed, steps, guidance_scale)
 ```
 
 **`sd3_5`** — Placeholder SD3.5 (stub)

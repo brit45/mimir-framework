@@ -62,7 +62,7 @@ Enregistre l'architecture `name` comme modèle courant et fusionne `cfg` avec la
 
 **Paramètres :**
 
-- `name` — nom canonique de l'architecture (ex: `"causal_lm"`, `"transformer"`, `"vae_conv"`, `"ponyxl_ddpm"`). Voir [la liste complète](./11-Architectures.md).
+- `name` — nom canonique de l'architecture (ex: `"causal_lm"`, `"transformer"`, `"vae_conv"`, `"diffusion"`). Voir [la liste complète](./11-Architectures.md).
 - `cfg` *(optionnel)* — table Lua de surcharge de config. Les clés non spécifiées conservent leurs valeurs par défaut.
 
 **Retour :** `true` en cas de succès, ou `(false, message_erreur)`.
@@ -250,7 +250,7 @@ Mimir.Model.train(epochs: int, lr: number)
     -> (true, step_global: int) | (false, string)
 ```
 
-Lance la boucle d'entraînement complète. Le comportement exact dépend de l'architecture : certains modèles, notamment VAEConv et PonyXL/DDPM, ont des chemins dédiés dans `LuaScriptingModelAndRegistry.cpp`. Les fonctions mathématiques d’un step VAE vivent dans `Model.cpp`.
+Lance la boucle d'entraînement complète. Le comportement exact dépend de l'architecture : certains modèles, notamment VAEConv, ont des chemins dédiés dans `LuaScriptingModelAndRegistry.cpp`. Les fonctions mathématiques d’un step VAE vivent dans `Model.cpp`.
 
 **Prérequis :** le dataset doit être chargé avant cet appel (`Mimir.Dataset.load()`).
 
@@ -269,13 +269,13 @@ Le paramètre `modelConfig.recon_loss` est interprété selon le chemin d'entra�
 
 | Valeur `recon_loss` | Alias | Disponibilité | Notes |
 | --- | --- | --- | --- |
-| `mse` | `l2` (PonyXL) | générale | défaut dans la plupart des chemins |
+| `mse` | `l2` | générale | défaut dans la plupart des chemins |
 | `mae` | `l1` | générale | erreur absolue moyenne |
 | `bce` | - | générale | binary cross-entropy |
 | `huber` | - | générale | `delta` configurable |
-| `smoothl1` | `smooth_l1` (PonyXL) | générale | équivalent Huber |
+| `smoothl1` | `smooth_l1` | générale | équivalent Huber |
 | `charbonnier` | - | générale | robuste, `eps` configurable |
-| `gaussian_nll` | `nll_gaussian`, `gaussian-nll` (PonyXL) | générale | NLL gaussienne |
+| `gaussian_nll` | `nll_gaussian`, `gaussian-nll` | générale | NLL gaussienne |
 
 ### Noms supportés (spécifiques)
 
@@ -296,7 +296,7 @@ Selon le type choisi, ces clés de config peuvent s'appliquer :
 ### Important
 
 - Certains chemins internes publient `recon_loss_type` avec des valeurs comme `bce_logits` pour l'affichage/monitoring; ce label peut être émis même si la clé `recon_loss` n'est pas utilisée telle quelle dans la config.
-- Si une valeur n'est pas reconnue dans certains modèles (ex: PonyXL), un fallback explicite vers `mse` est appliqué.
+- Si une valeur n'est pas reconnue par un modèle, un fallback explicite vers `mse` peut être appliqué.
 
 ---
 

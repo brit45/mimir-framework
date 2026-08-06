@@ -752,22 +752,6 @@ local function make_model_structure_template(kind)
       },
     }
   end
-  if kind == "ponyxl_ddpm" then
-    return {
-      template = "ponyxl_ddpm",
-      blocks = {
-        { name = "text_conditioning", notes = "text embeddings / pooled embeddings" },
-        { name = "diffusion_unet", notes = "noise prediction network" },
-        { name = "scheduler", notes = "timesteps/noise schedule" },
-        { name = "vae_bridge", notes = "latent<->image decode path" },
-      },
-      io = {
-        input = "prompt_or_conditioning",
-        latent = "noise/latent",
-        output = "generated_image_or_latent",
-      },
-    }
-  end
   return {
     template = kind ~= "" and kind or "generic",
     blocks = {},

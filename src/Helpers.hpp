@@ -36,6 +36,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/samplefmt.h>
+#include <libavutil/version.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -102,21 +103,43 @@ static inline bool ffmpegDecodeAudioToPcm(const std::string &audio_file, std::ve
         return false;
     }
 
-    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
-    AVChannelLayout in_ch_layout = codec->ch_layout;
-    if (in_ch_layout.nb_channels <= 0) {
-        av_channel_layout_default(&in_ch_layout, 2);
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    AVChannelLayout output_channel_layout = AV_CHANNEL_LAYOUT_STEREO;
+    AVChannelLayout input_channel_layout = codec->ch_layout;
+    if (input_channel_layout.nb_channels <= 0) {
+        av_channel_layout_default(&input_channel_layout, 2);
     }
-    if (swr_alloc_set_opts2(
-            &swr,
-            &out_ch_layout,
-            AV_SAMPLE_FMT_S16,
-            48000,
-            &in_ch_layout,
-            codec->sample_fmt,
-            codec->sample_rate,
-            0,
-            nullptr) < 0 || !swr || swr_init(swr) < 0) {
+    const int swr_alloc_result = swr_alloc_set_opts2(
+        &swr,
+        &output_channel_layout,
+        AV_SAMPLE_FMT_S16,
+        48000,
+        &input_channel_layout,
+        codec->sample_fmt,
+        codec->sample_rate,
+        0,
+        nullptr
+    );
+#else
+    int64_t input_channel_layout = codec->channel_layout;
+    if (input_channel_layout == 0) {
+        const int input_channels = codec->channels > 0 ? codec->channels : 2;
+        input_channel_layout = av_get_default_channel_layout(input_channels);
+    }
+    swr = swr_alloc_set_opts(
+        nullptr,
+        AV_CH_LAYOUT_STEREO,
+        AV_SAMPLE_FMT_S16,
+        48000,
+        input_channel_layout,
+        codec->sample_fmt,
+        codec->sample_rate,
+        0,
+        nullptr
+    );
+    const int swr_alloc_result = swr ? 0 : AVERROR(ENOMEM);
+#endif
+    if (swr_alloc_result < 0 || !swr || swr_init(swr) < 0) {
         if (err) *err = "swr_init failed";
         cleanup();
         return false;

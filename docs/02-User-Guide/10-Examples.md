@@ -328,13 +328,12 @@ Le dossier contient :
 - encodeurs texte CLIP 1 et 2 ;
 - bloc transformer SDXL ;
 - décodeur VAE Hugging Face ;
-- génération PonyXL avec VAE interne ou HF ;
 - inspection d’une base SafeTensors externe.
 
 Ces scripts nécessitent généralement des checkpoints précis. Commence toujours par :
 
 ```bash
-./bin/mimir --lua scripts/inferences/ponyxl_ddpm_text2img.lua -- --help
+./bin/mimir --lua scripts/inferences/hf_vae_decoder_infer.lua -- --help
 ```
 
 Ne suppose pas qu’un checkpoint PyTorch/Hugging Face est directement compatible : les noms, shapes et mappings doivent correspondre.
@@ -345,8 +344,6 @@ Ne suppose pas qu’un checkpoint PyTorch/Hugging Face est directement compatibl
 | --- | --- |
 | `train_vae_conv.lua` | VAE image convolutionnel |
 | `train_vae_texte.lua` | VAE texte |
-| `ponyxl_ddpm_train.lua` | diffusion latente PonyXL |
-| `ponyxl_ddpm_direct_train.lua` | entraînement direct image+prompt |
 | `pretrain_vgg16_feat.lua` | extracteur perceptuel |
 | `train_vgg16_tags_multilabel.lua` | classification multi-label |
 | `prepare_tokenizer_dataset.lua` | préparation tokenizer |

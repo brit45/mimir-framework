@@ -84,14 +84,6 @@ private:
     static int lua_pushLayer(lua_State* L);
     static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
-    static int lua_ponyxlDdpmTrainStep(lua_State* L);
-    static int lua_ponyxlDdpmValidateStep(lua_State* L);
-    static int lua_ponyxlDdpmVizReconstructStep(lua_State* L);
-    static int lua_ponyxlDdpmText2Img(lua_State* L);
-    static int lua_ponyxlDdpmText2ImgLatent(lua_State* L);
-    static int lua_ponyxlDdpmSetVaeScale(lua_State* L);
-    static int lua_ponyxlDdpmGetVaeScale(lua_State* L);
-    static int lua_ponyxlDdpmVaeMuMoments(lua_State* L);
     static int lua_forwardPromptImageSeed(lua_State* L);
 
     // === Image IO helpers (Lua) ===

@@ -44,7 +44,7 @@
       "properties": {
         "architecture": {
           "type": "string",
-          "description": "Nom de l'architecture (ex: transformer, vae_conv, ponyxl_ddpm, vgg16)."
+          "description": "Nom de l'architecture (ex: transformer, vae_conv, diffusion, vgg16)."
         },
         "vocab_size":   { "type": "integer", "minimum": 1 },
         "seq_len":      { "type": "integer", "minimum": 1 },

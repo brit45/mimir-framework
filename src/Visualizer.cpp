@@ -377,7 +377,7 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
     out.raw = label_raw;
 
     // Convention: une partie "chemin" peut être suivie d'extra après " | ".
-    // Ex: "ponyxl_sdxl/input/dataset/rgb | /path/file.png"
+    // Ex: "vae_conv/input/dataset/rgb | /path/file.png"
     const std::string s = label_raw;
     const size_t bar = s.find("|");
     if (bar != std::string::npos) {

@@ -34,7 +34,7 @@ Choix recommandé :
 
 Ce guide est volontairement pratique: chaque section te donne une action concrète et un résultat attendu.
 
-Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles — PonyXL, VAEConv 512 px, Transformers profonds — le CPU devient rapidement le goulot d'étranglement.
+Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles, comme VAEConv 512 px ou les Transformers profonds, le CPU devient rapidement le goulot d'étranglement.
 
 Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécution spécialisés qui délèguent les opérations lourdes (multiplications matricielles, convolutions, attention) à cuBLAS (NVIDIA) ou rocBLAS (AMD). Le reste des layers continue de s'exécuter sur CPU, sans aucun changement dans vos scripts Lua.
 
@@ -146,7 +146,7 @@ export MIMIR_CUDA_CONV=1       # Conv2d → im2col + SGEMM
 export MIMIR_CUDA_NORM=1       # LayerNorm/RMSNorm → hybride GPU
 export MIMIR_CUDA_ATTENTION=1  # Attention → multi-SGEMM
 
-./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua
+./bin/mimir --lua scripts/training/train_vae_conv.lua
 ```
 
 ### Activer tous les fast-paths sur ROCm
@@ -157,7 +157,7 @@ export MIMIR_ROCM_CONV=1
 export MIMIR_ROCM_NORM=1
 export MIMIR_ROCM_ATTENTION=1
 
-./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua
+./bin/mimir --lua scripts/training/train_vae_conv.lua
 ```
 
 > **Conseil :** ajoutez ces exports dans votre script de lancement (`.sh`) ou dans votre `.env` pour ne pas les réécrire à chaque fois. Voir `run_mimir.sh` à la racine du projet comme exemple.
@@ -270,17 +270,6 @@ Comment utiliser la matrice :
 ---
 
 ## Recettes par modèle
-
-### PonyXL / DDPM (recommandé)
-
-PonyXL est le modèle qui bénéficie le plus de l'accélération GPU : il contient de nombreux blocs `SelfAttention`, `CrossAttention` et des couches `Linear` larges dans les blocs UNet.
-
-```bash
-export MIMIR_CUDA_LINEAR=1
-export MIMIR_CUDA_ATTENTION=1
-export MIMIR_CUDA_NORM=1
-export MIMIR_CUDA_CONV=1
-```
 
 ### VAEConv (encodeur/décodeur convolutionnel)
 

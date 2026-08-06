@@ -188,7 +188,7 @@ Chaque modèle “builder” sait pousser une séquence de layers cohérente (no
   - `src/Models/Vision/ViTModel.*`, `VAEModel.*`, `VAEConvModel.*`, `UNetModel.*`
   - CNN : `ResNetModel.*`, `MobileNetModel.*`, `VGG16Model.*`, `VGG19Model.*`
 - Diffusion :
-  - `src/Models/Diffusion/DiffusionModel.*`, `PonyXLDDPMModel.*`, `SD35Model.*`
+  - `src/Models/Diffusion/DiffusionModel.*`, `CondDiffusionModel.*`, `SD35Model.*`
 
 À lire quand : vous voulez voir comment une architecture “réaliste” se traduit en layers, et quelles conventions de noms sont utilisées.
 
