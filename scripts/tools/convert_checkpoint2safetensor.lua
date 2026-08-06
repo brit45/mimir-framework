@@ -303,9 +303,6 @@ local function infer_model_type_from_arch(arch)
                 if name:match("^vae_conv/") or name:match("^vae_conv") then
                     return "vae_conv"
                 end
-                if name:match("^ponyxl_ddpm/") or name:match("^ponyxl_ddpm") then
-                    return "ponyxl_ddpm"
-                end
                 if name:match("^transformer/") or name:match("^transformer") then
                     return "transformer"
                 end

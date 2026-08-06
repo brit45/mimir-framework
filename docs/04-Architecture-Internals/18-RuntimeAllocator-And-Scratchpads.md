@@ -1,28 +1,20 @@
-# Internals : `RuntimeAllocator` et scratchpads
-
-## Pour qui
-
-Développeur avancé qui modifie le moteur C/C++.
-
-## Objectif
+# `RuntimeAllocator` et scratchpads
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
-## Avant de commencer
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Connaître les bases C++ et la structure du dépôt.
-
-## Résultat attendu
-
-Tu peux modifier le code interne en limitant les régressions.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
 Cette page documente le gestionnaire mémoire runtime utilisé dans les hot-path (forward/backward) pour éviter les allocations sauvages et respecter les limites `MemoryGuard`.
 
 Source de vérité :
 
-- Runtime allocator : `src/RuntimeAllocator.hpp`
+- Runtime allocator : `src/runtimes/cpu/RuntimeAllocator.hpp`
 - Memory guard : `src/MemoryGuard.hpp`
-- Dynamic allocator : `src/DynamicTensorAllocator.hpp` (autre stratégie)
+- Dynamic allocator : `src/runtimes/cpu/DynamicTensorAllocator.hpp` (autre stratégie)
 - Utilisation dans Model : `src/Model.cpp` (création `RuntimeAllocator allocator(guard, cap_mb)`)
 
 ## 1) Objectif
@@ -74,3 +66,9 @@ Le header définit :
 Important : `MIMIR_STRICT_MODE` est une macro de compilation (`#define`), pas une variable d'environnement lue via `getenv`.
 
 Ce mécanisme est utilisé dans le runtime forward/backward pour éviter des corruptions silencieuses.
+
+## Étapes suivantes
+
+- [Page précédente : Internals : bindings Lua (`LuaScripting` / `LuaContext`)](17-Lua-Bindings-Internals.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Internals : registre d’architectures (`ModelArchitectures`) et builders](19-Models-Registry-And-Builders.md)

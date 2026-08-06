@@ -1,20 +1,12 @@
 # Scripting Lua
 
-## Pour qui
-
-Débutant script et contributeur.
-
-## Objectif
-
 Écrire des scripts Lua robustes et lisibles.
 
-## Avant de commencer
+**Public concerné :** Débutant script et contributeur.
 
-Connaître les bases de Lua (variables, tables, fonctions).
-
-## Résultat attendu
-
-Tu peux créer un script réutilisable sans pièges courants.
+> **Prérequis**
+>
+> Connaître les bases de Lua (variables, tables, fonctions).
 
 
 Ce chapitre explique **comment écrire des scripts Lua “robustes”** pour Mímir : démarrage, arguments, conventions, patterns, et pièges fréquents.
@@ -23,7 +15,7 @@ Ce chapitre explique **comment écrire des scripts Lua “robustes”** pour Mí
 
 - Lua est le chemin supporte complet pour le scripting metier.
 - Les bridges JS, C# et Rust existent, mais ils sont encore incomplets.
-- Si tu lis ce guide pour migrer un script, considere Lua comme la reference; les autres langages doivent etre valides au cas par cas.
+- Si vous lisez ce guide pour migrer un script, considere Lua comme la reference; les autres langages doivent etre valides au cas par cas.
 
 ## 1) Lancer un script (et passer des args)
 
@@ -48,7 +40,6 @@ Le support `--help` est unifie sur les scripts executables du repo. La sortie co
 | Nom | Contenu | À quoi ça sert |
 | --- | --- | --- |
 | `arg` | `arg[0]=script`, `arg[1..n]=args` | compat Lua classique |
-| `Mimir.Args` | copie de `arg` | éviter ambiguïtés/collisions |
 | `Mimir` | table API (`Mimir.Model`, `Mimir.Serialization`, …) | accès “moderne” |
 | globals utilitaires | `log`, `read_json`, `write_json` | scripts rapides |
 | aliases globaux | `model`, `architectures`, … | rétrocompat + confort |
@@ -60,21 +51,9 @@ Référence complète des globals/aliases : `docs/03-API-Reference/19-Globals.md
 Ce template couvre 80% des scripts (benchmark/test/training) :
 
 ```lua
-local args = dofile("scripts/modules/args.lua")
-
-local opts = args.parse(Mimir.Args, {
-
-  {"--seed", "0"},
-  {"--ram", "10"},
-})
-
-pcall(Mimir.MemoryGuard.setLimit, tonumber(opts["--ram"]))
-local ok, err = Mimir.Allocator.configure({
-  max_ram_gb = tonumber(opts["--ram"]),
-  enable_compression = true,
-  swap_strategy = "lru",
-})
-assert(ok ~= false, err)
+local Args = dofile("scripts/modules/args.lua")
+local opts = Args.parse(arg) or {}
+local seed = Args.get_int(opts, "seed", 0)
 
 local cfg, cfg_err = Mimir.Architectures.default_config("transformer")
 assert(cfg, cfg_err)
@@ -84,7 +63,7 @@ cfg.vocab_size = 2000
 assert(Mimir.Model.create("transformer", cfg))
 -- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
 assert(Mimir.Model.allocate_params())
-assert(Mimir.Model.init_weights("xavier", tonumber(opts["--seed"]) or 0))
+assert(Mimir.Model.init_weights("xavier", seed))
 
 local ids = {}
 for i = 1, cfg.seq_len do ids[i] = 1 end
@@ -139,3 +118,9 @@ Ces patterns sont non portables et doivent être remplacés par `FS.*`.
 
 - Utilise `Mimir.*` pour un projet long terme (lisible, explicite). Les aliases globaux (`model`, `architectures`, …) sont OK pour des scripts rapides.
 - Centralise le setup mémoire au début (MemoryGuard + Allocator). Ça rend les erreurs reproductibles et évite les OOM “bizarres”.
+
+## Étapes suivantes
+
+- [Page précédente : Inférence](05-Inference.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Tokenizer & ConditioningEncoder](07-Tokenizer-Encoder.md)

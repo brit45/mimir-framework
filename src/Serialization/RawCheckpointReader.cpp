@@ -6,6 +6,7 @@
 #include "../Sha256.hpp"
 #include <fstream>
 #include <algorithm>
+#include <iostream>
 
 namespace Mimir {
 namespace Serialization {
@@ -24,6 +25,10 @@ bool RawCheckpointReader::load(
 ) {
     try {
         fs::path root(path);
+        std::cerr << "[serialization] raw load path=" << root.string()
+                  << " load_tokenizer=" << options.load_tokenizer
+                  << " load_encoder=" << options.load_encoder
+                  << " load_optimizer=" << options.load_optimizer << std::endl;
         
         // Check if directory exists
         if (!fs::exists(root) || !fs::is_directory(root)) {
@@ -92,6 +97,7 @@ bool RawCheckpointReader::load_training(
 ) {
     try {
         fs::path training_path = fs::path(root) / "model" / "training.json";
+        std::cerr << "[serialization] raw load_training path=" << training_path.string() << std::endl;
         if (!fs::exists(training_path)) {
             if (error) {
                 *error = "training.json not found";
@@ -147,6 +153,7 @@ bool RawCheckpointReader::load_manifest(
 ) {
     try {
         fs::path manifest_path = fs::path(root) / "manifest.json";
+        std::cerr << "[serialization] raw load_manifest path=" << manifest_path.string() << std::endl;
         
         if (!fs::exists(manifest_path)) {
             if (error) {
@@ -182,6 +189,7 @@ bool RawCheckpointReader::load_architecture(
 ) {
     try {
         fs::path arch_path = fs::path(root) / "model" / "architecture.json";
+        std::cerr << "[serialization] raw load_architecture path=" << arch_path.string() << std::endl;
         
         if (!fs::exists(arch_path)) {
             if (error) {
@@ -250,6 +258,7 @@ bool RawCheckpointReader::load_architecture(
                 const std::string type = layer_obj.value("type", "");
                 const size_t params_count = layer_obj.value("params_count", 0);
                 Layer layer(name, type, params_count); // initialise type_enum + normalise le type
+                layer.trainable_parameter = layer_obj.value("trainable_parameter", false);
                 model.getMutableLayers().push_back(std::move(layer));
             }
 
@@ -277,6 +286,7 @@ bool RawCheckpointReader::load_tokenizer(
 ) {
     try {
         fs::path tok_path = fs::path(root) / "tokenizer" / "tokenizer.json";
+        std::cerr << "[serialization] raw load_tokenizer path=" << tok_path.string() << std::endl;
         
         if (!fs::exists(tok_path)) {
             if (error) {
@@ -316,6 +326,7 @@ bool RawCheckpointReader::load_encoder(
 ) {
     try {
         fs::path enc_path = fs::path(root) / "encoder" / "encoder.json";
+        std::cerr << "[serialization] raw load_encoder path=" << enc_path.string() << std::endl;
         
         if (!fs::exists(enc_path)) {
             if (error) {

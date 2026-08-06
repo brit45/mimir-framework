@@ -30,6 +30,8 @@ public:
         bool training
     ) override;
 
+    bool supportsForwardLayerType(LayerType type) const override;
+
 private:
     struct Impl;
     Impl* impl_ = nullptr;

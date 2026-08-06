@@ -132,6 +132,48 @@ int main() {
         TASSERT_TRUE(train_plan_opt_in.skip_layer[1] == 0);
     }
 
+    // Generic producer -> activations répétées -> unary shape répétés
+    // doit construire une chaîne de fusion complète en inférence.
+    {
+        Layer add;
+        add.name = "add_chain";
+        add.type_enum = LayerType::Add;
+        add.inputs = {"a", "b"};
+        add.output = "sum0";
+
+        Layer relu1 = make_unary_layer("relu1", LayerType::ReLU, "sum0", "sum1");
+        Layer relu2 = make_unary_layer("relu2", LayerType::ReLU, "sum1", "sum2");
+        Layer id1 = make_unary_layer("id1", LayerType::Identity, "sum2", "sum3");
+        Layer id2 = make_unary_layer("id2", LayerType::Identity, "sum3", "sum4");
+
+        std::vector<Layer> chain_layers = {add, relu1, relu2, id1, id2};
+        auto plan = Mimir::Planning::build_execution_plan_static(chain_layers, /*training=*/false);
+
+        TASSERT_TRUE(plan.ops.size() == chain_layers.size());
+        TASSERT_TRUE(plan.fuse_chain_next.size() == chain_layers.size());
+        TASSERT_TRUE(plan.fuse_chain_next[0] == 1);
+        TASSERT_TRUE(plan.fuse_chain_next[1] == 2);
+        TASSERT_TRUE(plan.fuse_chain_next[2] == 3);
+        TASSERT_TRUE(plan.fuse_chain_next[3] == 4);
+        TASSERT_TRUE(plan.fuse_chain_next[4] == -1);
+
+        TASSERT_TRUE(plan.skip_layer[1] == 1);
+        TASSERT_TRUE(plan.skip_layer[2] == 1);
+        TASSERT_TRUE(plan.skip_layer[3] == 1);
+        TASSERT_TRUE(plan.skip_layer[4] == 1);
+
+        // Le premier maillon reste classé comme fusion d'activation générique.
+        TASSERT_TRUE(plan.ops[0].fusion == Mimir::Planning::FusionKind::GENERIC_ACTIVATION);
+
+        // En training, la fusion générique en chaîne reste désactivée.
+        auto train_plan = Mimir::Planning::build_execution_plan_static(chain_layers, /*training=*/true);
+        TASSERT_TRUE(train_plan.fuse_chain_next[0] == -1);
+        TASSERT_TRUE(train_plan.skip_layer[1] == 0);
+        TASSERT_TRUE(train_plan.skip_layer[2] == 0);
+        TASSERT_TRUE(train_plan.skip_layer[3] == 0);
+        TASSERT_TRUE(train_plan.skip_layer[4] == 0);
+    }
+
     // Scratch planner: should request non-zero buffers
     {
         auto scratch = Mimir::Planning::plan_conv2d_fastpath_scratch(layers);

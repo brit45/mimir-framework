@@ -29,6 +29,340 @@ using json = nlohmann::json;
 
 #include "Sha256.hpp"
 
+#ifdef MIMIR_ENABLE_FFMPEG
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/samplefmt.h>
+#include <libavutil/version.h>
+#include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
+}
+
+static inline bool ffmpegDecodeAudioToPcm(const std::string &audio_file, std::vector<uint8_t> &out, std::string *err = nullptr)
+{
+    out.clear();
+
+    AVFormatContext *format = nullptr;
+    AVCodecContext *codec = nullptr;
+    SwrContext *swr = nullptr;
+    AVPacket *packet = av_packet_alloc();
+    AVFrame *frame = av_frame_alloc();
+    if (!packet || !frame) {
+        if (err) *err = "ffmpeg allocation failed";
+        if (packet) av_packet_free(&packet);
+        if (frame) av_frame_free(&frame);
+        return false;
+    }
+
+    auto cleanup = [&]() {
+        if (swr) swr_free(&swr);
+        if (codec) avcodec_free_context(&codec);
+        if (format) avformat_close_input(&format);
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+    };
+
+    if (avformat_open_input(&format, audio_file.c_str(), nullptr, nullptr) < 0) {
+        if (err) *err = "avformat_open_input failed";
+        cleanup();
+        return false;
+    }
+    if (avformat_find_stream_info(format, nullptr) < 0) {
+        if (err) *err = "avformat_find_stream_info failed";
+        cleanup();
+        return false;
+    }
+
+    const int stream_index = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    if (stream_index < 0) {
+        if (err) *err = "no audio stream found";
+        cleanup();
+        return false;
+    }
+
+    AVStream *stream = format->streams[stream_index];
+    const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+    if (!decoder) {
+        if (err) *err = "audio decoder not found";
+        cleanup();
+        return false;
+    }
+
+    codec = avcodec_alloc_context3(decoder);
+    if (!codec) {
+        if (err) *err = "avcodec_alloc_context3 failed";
+        cleanup();
+        return false;
+    }
+    if (avcodec_parameters_to_context(codec, stream->codecpar) < 0 || avcodec_open2(codec, decoder, nullptr) < 0) {
+        if (err) *err = "avcodec open failed";
+        cleanup();
+        return false;
+    }
+
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    AVChannelLayout output_channel_layout = AV_CHANNEL_LAYOUT_STEREO;
+    AVChannelLayout input_channel_layout = codec->ch_layout;
+    if (input_channel_layout.nb_channels <= 0) {
+        av_channel_layout_default(&input_channel_layout, 2);
+    }
+    const int swr_alloc_result = swr_alloc_set_opts2(
+        &swr,
+        &output_channel_layout,
+        AV_SAMPLE_FMT_S16,
+        48000,
+        &input_channel_layout,
+        codec->sample_fmt,
+        codec->sample_rate,
+        0,
+        nullptr
+    );
+#else
+    int64_t input_channel_layout = codec->channel_layout;
+    if (input_channel_layout == 0) {
+        const int input_channels = codec->channels > 0 ? codec->channels : 2;
+        input_channel_layout = av_get_default_channel_layout(input_channels);
+    }
+    swr = swr_alloc_set_opts(
+        nullptr,
+        AV_CH_LAYOUT_STEREO,
+        AV_SAMPLE_FMT_S16,
+        48000,
+        input_channel_layout,
+        codec->sample_fmt,
+        codec->sample_rate,
+        0,
+        nullptr
+    );
+    const int swr_alloc_result = swr ? 0 : AVERROR(ENOMEM);
+#endif
+    if (swr_alloc_result < 0 || !swr || swr_init(swr) < 0) {
+        if (err) *err = "swr_init failed";
+        cleanup();
+        return false;
+    }
+
+    std::vector<uint8_t> pcm;
+    while (av_read_frame(format, packet) >= 0) {
+        if (packet->stream_index != stream_index) {
+            av_packet_unref(packet);
+            continue;
+        }
+        if (avcodec_send_packet(codec, packet) < 0) {
+            av_packet_unref(packet);
+            continue;
+        }
+        av_packet_unref(packet);
+
+        while (avcodec_receive_frame(codec, frame) == 0) {
+            const int out_samples = av_rescale_rnd(
+                swr_get_delay(swr, codec->sample_rate) + frame->nb_samples,
+                48000,
+                codec->sample_rate,
+                AV_ROUND_UP
+            );
+            std::vector<uint8_t> buffer((size_t)out_samples * 2ULL * sizeof(int16_t));
+            uint8_t *out_data[1] = { buffer.data() };
+            const int converted = swr_convert(
+                swr,
+                out_data,
+                out_samples,
+                (const uint8_t **)frame->extended_data,
+                frame->nb_samples
+            );
+            if (converted > 0) {
+                buffer.resize((size_t)converted * 2ULL * sizeof(int16_t));
+                pcm.insert(pcm.end(), buffer.begin(), buffer.end());
+            }
+        }
+    }
+
+    if (avcodec_send_packet(codec, nullptr) == 0) {
+        while (avcodec_receive_frame(codec, frame) == 0) {
+            const int out_samples = av_rescale_rnd(
+                swr_get_delay(swr, codec->sample_rate) + frame->nb_samples,
+                48000,
+                codec->sample_rate,
+                AV_ROUND_UP
+            );
+            std::vector<uint8_t> buffer((size_t)out_samples * 2ULL * sizeof(int16_t));
+            uint8_t *out_data[1] = { buffer.data() };
+            const int converted = swr_convert(
+                swr,
+                out_data,
+                out_samples,
+                (const uint8_t **)frame->extended_data,
+                frame->nb_samples
+            );
+            if (converted > 0) {
+                buffer.resize((size_t)converted * 2ULL * sizeof(int16_t));
+                pcm.insert(pcm.end(), buffer.begin(), buffer.end());
+            }
+        }
+    }
+
+    if (pcm.empty()) {
+        if (err) *err = "audio decode produced no samples";
+        cleanup();
+        return false;
+    }
+
+    out = std::move(pcm);
+    cleanup();
+    return true;
+}
+
+static inline bool ffmpegDecodeVideoToRgbFirstFrame(const std::string &video_file, std::vector<uint8_t> &out, int &out_w, int &out_h, std::string *err = nullptr)
+{
+    out.clear();
+    out_w = 0;
+    out_h = 0;
+
+    AVFormatContext *format = nullptr;
+    AVCodecContext *codec = nullptr;
+    SwsContext *sws = nullptr;
+    AVPacket *packet = av_packet_alloc();
+    AVFrame *frame = av_frame_alloc();
+    AVFrame *rgb = av_frame_alloc();
+    if (!packet || !frame || !rgb) {
+        if (err) *err = "ffmpeg allocation failed";
+        if (packet) av_packet_free(&packet);
+        if (frame) av_frame_free(&frame);
+        if (rgb) av_frame_free(&rgb);
+        return false;
+    }
+
+    auto cleanup = [&]() {
+        if (sws) sws_freeContext(sws);
+        if (codec) avcodec_free_context(&codec);
+        if (format) avformat_close_input(&format);
+        av_frame_free(&frame);
+        av_frame_free(&rgb);
+        av_packet_free(&packet);
+    };
+
+    if (avformat_open_input(&format, video_file.c_str(), nullptr, nullptr) < 0) {
+        if (err) *err = "avformat_open_input failed";
+        cleanup();
+        return false;
+    }
+    if (avformat_find_stream_info(format, nullptr) < 0) {
+        if (err) *err = "avformat_find_stream_info failed";
+        cleanup();
+        return false;
+    }
+
+    const int stream_index = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (stream_index < 0) {
+        if (err) *err = "no video stream found";
+        cleanup();
+        return false;
+    }
+
+    AVStream *stream = format->streams[stream_index];
+    const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+    if (!decoder) {
+        if (err) *err = "video decoder not found";
+        cleanup();
+        return false;
+    }
+
+    codec = avcodec_alloc_context3(decoder);
+    if (!codec) {
+        if (err) *err = "avcodec_alloc_context3 failed";
+        cleanup();
+        return false;
+    }
+    if (avcodec_parameters_to_context(codec, stream->codecpar) < 0 || avcodec_open2(codec, decoder, nullptr) < 0) {
+        if (err) *err = "avcodec open failed";
+        cleanup();
+        return false;
+    }
+
+    out_w = codec->width > 0 ? codec->width : stream->codecpar->width;
+    out_h = codec->height > 0 ? codec->height : stream->codecpar->height;
+    if (out_w <= 0 || out_h <= 0) {
+        if (err) *err = "invalid video dimensions";
+        cleanup();
+        return false;
+    }
+
+    rgb->format = AV_PIX_FMT_RGB24;
+    rgb->width = out_w;
+    rgb->height = out_h;
+    if (av_frame_get_buffer(rgb, 32) < 0) {
+        if (err) *err = "av_frame_get_buffer failed";
+        cleanup();
+        return false;
+    }
+
+    sws = sws_getContext(
+        out_w,
+        out_h,
+        codec->pix_fmt,
+        out_w,
+        out_h,
+        AV_PIX_FMT_RGB24,
+        SWS_BICUBIC,
+        nullptr,
+        nullptr,
+        nullptr
+    );
+    if (!sws) {
+        if (err) *err = "sws_getContext failed";
+        cleanup();
+        return false;
+    }
+
+    while (av_read_frame(format, packet) >= 0) {
+        if (packet->stream_index != stream_index) {
+            av_packet_unref(packet);
+            continue;
+        }
+        if (avcodec_send_packet(codec, packet) < 0) {
+            av_packet_unref(packet);
+            continue;
+        }
+        av_packet_unref(packet);
+
+        if (avcodec_receive_frame(codec, frame) == 0) {
+            if (av_frame_make_writable(rgb) < 0) {
+                if (err) *err = "av_frame_make_writable failed";
+                cleanup();
+                return false;
+            }
+
+            sws_scale(
+                sws,
+                frame->data,
+                frame->linesize,
+                0,
+                out_h,
+                rgb->data,
+                rgb->linesize
+            );
+
+            const int row_bytes = out_w * 3;
+            out.resize((size_t)out_w * (size_t)out_h * 3ULL);
+            for (int y = 0; y < out_h; ++y) {
+                const uint8_t *row = rgb->data[0] + (size_t)y * (size_t)rgb->linesize[0];
+                std::memcpy(out.data() + (size_t)y * (size_t)row_bytes, row, (size_t)row_bytes);
+            }
+            cleanup();
+            return true;
+        }
+    }
+
+    if (err) *err = "video decode produced no frame";
+    cleanup();
+    return false;
+}
+
+#endif
+
 // NOTE: STB_IMAGE_IMPLEMENTATION is defined in src/stb_image_impl.cpp
 // Do NOT define it here to avoid multiple definition errors
 #include "stb_image.h"
@@ -510,6 +844,7 @@ struct DatasetItem {
     
     // Chemins (toujours présents - négligeable en RAM)
     std::string text_file;
+    std::string text_inline;
     std::string image_file;
     std::string audio_file;
     std::string video_file;
@@ -568,10 +903,13 @@ struct DatasetItem {
     size_t estimateRAMNeeded() const {
         size_t total = 0;
         
-        if (!text_file.empty() && !text.has_value()) {
+        if ((!text_file.empty() || !text_inline.empty()) && !text.has_value()) {
             try {
-                auto fsize = fs::file_size(text_file);
-                total += fsize * 2; // UTF-8 peut doubler
+                if (!text_inline.empty()) total += text_inline.size() * 2;
+                else {
+                    auto fsize = fs::file_size(text_file);
+                    total += fsize * 2; // UTF-8 peut doubler
+                }
             } catch (...) {}
         }
         
@@ -608,13 +946,13 @@ struct DatasetItem {
             touch();
             return true;
         }
-        if (text_file.empty()) return false;
+        if (text_file.empty() && text_inline.empty()) return false;
         
         auto& mgr = DatasetMemoryManager::instance();
         
         try {
             // Estimer la taille
-            size_t file_size = fs::file_size(text_file);
+            size_t file_size = !text_inline.empty() ? text_inline.size() : fs::file_size(text_file);
             size_t needed = file_size * 2; // Sécurité UTF-8
             
             // Vérifier si on peut allouer
@@ -622,12 +960,16 @@ struct DatasetItem {
                 return false; // Pas assez de RAM
             }
             
-            std::ifstream f(text_file);
-            if (!f) return false;
-            std::ostringstream ss;
-            ss << f.rdbuf();
-            
-            std::string loaded = sanitize_utf8(ss.str());
+            std::string loaded;
+            if (!text_inline.empty()) {
+                loaded = sanitize_utf8(text_inline);
+            } else {
+                std::ifstream f(text_file);
+                if (!f) return false;
+                std::ostringstream ss;
+                ss << f.rdbuf();
+                loaded = sanitize_utf8(ss.str());
+            }
             size_t actual_size = loaded.size();
             
             text = std::move(loaded);
@@ -755,6 +1097,25 @@ struct DatasetItem {
             return true;
         }
         if (audio_file.empty()) return false;
+
+#ifdef MIMIR_ENABLE_FFMPEG
+        {
+            std::vector<uint8_t> decoded_audio;
+            std::string ffmpeg_err;
+            if (ffmpegDecodeAudioToPcm(audio_file, decoded_audio, &ffmpeg_err)) {
+                auto& mgr = DatasetMemoryManager::instance();
+                if (!mgr.canAllocate(decoded_audio.size())) {
+                    return false;
+                }
+                audio_bytes = std::move(decoded_audio);
+                audio_loaded = true;
+                mgr.trackAllocation((void*)audio_bytes.data(), audio_bytes.size());
+                estimated_ram_usage += audio_bytes.size();
+                touch();
+                return true;
+            }
+        }
+#endif
         
         auto& mgr = DatasetMemoryManager::instance();
         
@@ -791,6 +1152,31 @@ struct DatasetItem {
             return true;
         }
         if (video_file.empty()) return false;
+
+#ifdef MIMIR_ENABLE_FFMPEG
+        {
+            std::vector<uint8_t> decoded_video;
+            int decoded_w = 0;
+            int decoded_h = 0;
+            std::string ffmpeg_err;
+            if (ffmpegDecodeVideoToRgbFirstFrame(video_file, decoded_video, decoded_w, decoded_h, &ffmpeg_err)) {
+                auto& mgr = DatasetMemoryManager::instance();
+                if (!mgr.canAllocate(decoded_video.size())) {
+                    return false;
+                }
+
+                video_bytes = std::move(decoded_video);
+                video_loaded = true;
+                mgr.trackAllocation((void*)video_bytes.data(), video_bytes.size());
+                estimated_ram_usage += video_bytes.size();
+                w = decoded_w;
+                h = decoded_h;
+                img_c = 3;
+                touch();
+                return true;
+            }
+        }
+#endif
         
         auto& mgr = DatasetMemoryManager::instance();
         
@@ -824,7 +1210,7 @@ struct DatasetItem {
     // Helper: compte les modalités disponibles
     int countModalities() const {
         int count = 0;
-        if (!text_file.empty()) count++;
+        if (!text_file.empty() || !text_inline.empty()) count++;
         if (!image_file.empty()) count++;
         if (!audio_file.empty()) count++;
         if (!video_file.empty()) count++;
@@ -893,6 +1279,18 @@ public:
                     all_loaded = false;
                 }
             }
+
+            if (!item.audio_file.empty() && !item.audio_loaded) {
+                if (!item.loadAudio()) {
+                    all_loaded = false;
+                }
+            }
+
+            if (!item.video_file.empty() && !item.video_loaded) {
+                if (!item.loadVideo()) {
+                    all_loaded = false;
+                }
+            }
         }
         
         return all_loaded;
@@ -949,6 +1347,127 @@ public:
 
 // implémentation de loadDataset (parcours récursif, indexation des linkables)
 // Version optimisée RAM : ne charge PAS les données, seulement les métadonnées
+static inline bool loadCocoCaptionsDataset(const std::string &root_dir,
+                                           int target_w,
+                                           int target_h,
+                                           int min_modalities,
+                                           std::vector<DatasetItem>& items)
+{
+    items.clear();
+    const fs::path root(root_dir);
+    const fs::path annotations_dir = root / "annotations";
+    if (!fs::exists(annotations_dir) || !fs::is_directory(annotations_dir)) return false;
+
+    std::vector<fs::path> caption_files;
+    for (const char* name : {"captions_train2017.json", "captions_val2017.json", "captions_train2014.json", "captions_val2014.json"}) {
+        const fs::path p = annotations_dir / name;
+        if (fs::exists(p) && fs::is_regular_file(p)) caption_files.push_back(p);
+    }
+    if (caption_files.empty()) return false;
+
+    auto resolve_coco_image = [&](const std::string& file_name) -> std::string {
+        const std::vector<fs::path> candidates = {
+            root / file_name,
+            root / "train2017" / file_name,
+            root / "val2017" / file_name,
+            root / "test2017" / file_name,
+            root / "train2014" / file_name,
+            root / "val2014" / file_name,
+            root / "images" / file_name,
+            root / "images" / "train2017" / file_name,
+            root / "images" / "val2017" / file_name,
+            root / "images" / "train2014" / file_name,
+            root / "images" / "val2014" / file_name
+        };
+        for (const auto& c : candidates) {
+            if (fs::exists(c) && fs::is_regular_file(c)) return c.string();
+        }
+        return std::string();
+    };
+
+    size_t total_items = 0;
+    for (const auto& ann_path : caption_files) {
+        try {
+            std::ifstream f(ann_path);
+            if (!f) continue;
+            json doc;
+            f >> doc;
+            if (!doc.is_object() || !doc.contains("images") || !doc.contains("annotations")) continue;
+            if (!doc["images"].is_array() || !doc["annotations"].is_array()) continue;
+
+            struct CocoImageRef {
+                std::string file_name;
+                std::string resolved_path;
+            };
+
+            std::unordered_map<long long, CocoImageRef> images_by_id;
+            images_by_id.reserve(doc["images"].size());
+            for (const auto& img : doc["images"]) {
+                if (!img.is_object() || !img.contains("id") || !img.contains("file_name")) continue;
+                long long id = 0;
+                try { id = img["id"].get<long long>(); } catch (...) { continue; }
+                std::string file_name;
+                try { file_name = img["file_name"].get<std::string>(); } catch (...) { continue; }
+                CocoImageRef ref;
+                ref.file_name = file_name;
+                ref.resolved_path = resolve_coco_image(file_name);
+                if (!ref.resolved_path.empty()) images_by_id.emplace(id, std::move(ref));
+            }
+            if (images_by_id.empty()) continue;
+
+            std::unordered_map<long long, std::vector<std::string>> captions_by_image;
+            captions_by_image.reserve(images_by_id.size());
+            for (const auto& ann : doc["annotations"]) {
+                if (!ann.is_object() || !ann.contains("image_id") || !ann.contains("caption")) continue;
+                long long image_id = 0;
+                try { image_id = ann["image_id"].get<long long>(); } catch (...) { continue; }
+                auto it_img = images_by_id.find(image_id);
+                if (it_img == images_by_id.end()) continue;
+                std::string caption;
+                try { caption = ann["caption"].get<std::string>(); } catch (...) { continue; }
+                caption = sanitize_utf8(caption);
+                if (!caption.empty()) captions_by_image[image_id].push_back(std::move(caption));
+            }
+
+            for (const auto& kv : captions_by_image) {
+                const auto it_img = images_by_id.find(kv.first);
+                if (it_img == images_by_id.end() || it_img->second.resolved_path.empty()) continue;
+
+                std::string joined_text;
+                for (size_t i = 0; i < kv.second.size(); ++i) {
+                    if (i > 0) joined_text += " / ";
+                    joined_text += kv.second[i];
+                }
+                if (joined_text.empty()) continue;
+
+                DatasetItem item;
+                item.name = fs::path(it_img->second.file_name).replace_extension("").generic_string();
+                item.is_linked = true;
+                item.image_file = it_img->second.resolved_path;
+                item.text_inline = json{{"text", joined_text}}.dump();
+                item.text_file = ann_path.string() + "#image_id=" + std::to_string(kv.first);
+                item.w = target_w;
+                item.h = target_h;
+
+                if (item.countModalities() >= min_modalities) {
+                    items.push_back(std::move(item));
+                    total_items++;
+                }
+            }
+        } catch (...) {
+            continue;
+        }
+    }
+
+    if (items.empty()) return false;
+
+    std::cerr << "\n📂 COCO captions dataset détecté" << std::endl;
+    std::cerr << "   Items indexés:      " << total_items << std::endl;
+    std::cerr << "   Mode texte:         inline captions JSON" << std::endl;
+    std::cerr << "   Seuil modalités:    " << min_modalities << std::endl;
+    return true;
+}
+
 static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, int target_w = 64, int target_h = 64, int min_modalities = 1)
 {
     static const std::regex re_image(R"(\.(png|jpg|jpeg|bmp|tiff|webp)$)", std::regex::icase);
@@ -958,6 +1477,12 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     
     std::vector<DatasetItem> items;
     if (root_dir.empty()) return items;
+
+    if (loadCocoCaptionsDataset(root_dir, target_w, target_h, min_modalities, items)) {
+        std::cerr << "\n   ⚡ Mode: Lazy loading (images) + inline text captions" << std::endl;
+        std::cerr << "   💾 RAM utilisée:    0 MB (métadonnées uniquement)" << std::endl;
+        return items;
+    }
 
     std::cerr << "\n📂 Indexation du dataset (lazy loading activé)..." << std::endl;
 
@@ -1133,6 +1658,7 @@ struct DatasetCache {
                 ji["name"] = item.name;
                 ji["is_linked"] = item.is_linked;
                 ji["text_file"] = item.text_file;
+                ji["text_inline"] = item.text_inline;
                 ji["image_file"] = item.image_file;
                 ji["audio_file"] = item.audio_file;
                 ji["video_file"] = item.video_file;
@@ -1181,6 +1707,7 @@ struct DatasetCache {
                 item.name = ji.value("name", "");
                 item.is_linked = ji.value("is_linked", false);
                 item.text_file = ji.value("text_file", "");
+                item.text_inline = ji.value("text_inline", "");
                 item.image_file = ji.value("image_file", "");
                 item.audio_file = ji.value("audio_file", "");
                 item.video_file = ji.value("video_file", "");

@@ -37,6 +37,7 @@ declare -a FEATURE_KEYS=(
   ENABLE_OPENCL
   ENABLE_CUDA
   ENABLE_ROCM
+  ENABLE_FFMPEG
   ENABLE_SFML
   ENABLE_LZ4
   ENABLE_SCRIPTING_REST
@@ -53,6 +54,7 @@ declare -A FEATURE_LABELS=(
   [ENABLE_OPENCL]="OpenCL Compute"
   [ENABLE_CUDA]="CUDA Compute"
   [ENABLE_ROCM]="ROCm Compute"
+  [ENABLE_FFMPEG]="FFmpeg (audio/vidéo)"
   [ENABLE_SFML]="Visualizer (SFML)"
   [ENABLE_LZ4]="Compression LZ4"
   [ENABLE_SCRIPTING_REST]="Bridge REST (placeholder)"
@@ -69,6 +71,7 @@ declare -A FEATURE_DEFAULTS=(
   [ENABLE_OPENCL]=1
   [ENABLE_CUDA]=0
   [ENABLE_ROCM]=0
+  [ENABLE_FFMPEG]=1
   [ENABLE_SFML]=1
   [ENABLE_LZ4]=1
   [ENABLE_SCRIPTING_REST]=0
@@ -217,18 +220,77 @@ if (( is_interactive == 1 )) && [[ "${AUTO_ACCEPT:-0}" != "1" ]]; then
   interactive_configure
 fi
 
+detect_sfml_version() {
+  if command -v pkg-config >/dev/null 2>&1; then
+    if pkg-config --exists sfml-graphics; then
+      pkg-config --modversion sfml-graphics 2>/dev/null || true
+      return 0
+    fi
+    if pkg-config --exists sfml-all; then
+      pkg-config --modversion sfml-all 2>/dev/null || true
+      return 0
+    fi
+  fi
+  echo ""
+}
+
+SFML_DETECTED_VERSION=""
+SFML_MODE="disabled"
+
+# Compat Visualizer: le code UI cible SFML3.
+if [[ "${FEATURE_VALUES[ENABLE_SFML]}" == "1" ]]; then
+  SFML_DETECTED_VERSION="$(detect_sfml_version)"
+  if [[ -z "$SFML_DETECTED_VERSION" ]]; then
+    SFML_MODE="missing"
+    echo "[warn] SFML non détecté via pkg-config (sfml-graphics/sfml-all)."
+    echo "[note] Le build continue. CMake désactivera la partie viz si SFML est introuvable."
+  else
+    SFML_MAJOR="${SFML_DETECTED_VERSION%%.*}"
+    if [[ "$SFML_MAJOR" =~ ^[0-9]+$ ]]; then
+      if (( SFML_MAJOR >= 3 )); then
+        SFML_MODE="sfml3-enabled"
+        echo "[ok] SFML $SFML_DETECTED_VERSION détecté: visualizer SFML3 activé."
+      else
+        FEATURE_VALUES[ENABLE_SFML]=0
+        SFML_MODE="sfml2-headless"
+        echo "[warn] SFML $SFML_DETECTED_VERSION détecté (v2): visualizer SFML3 non compatible."
+        echo "[note] ENABLE_SFML basculé à OFF pour un build headless stable."
+      fi
+    else
+      SFML_MODE="unknown-version"
+      echo "[warn] Version SFML non interprétable: '$SFML_DETECTED_VERSION'."
+      echo "[note] ENABLE_SFML conservé tel quel."
+    fi
+  fi
+
+  # Variable legacy: garder une trace explicite pour éviter les confusions.
+  if [[ "${MIMIR_FORCE_SFML3_VISUALIZER:-0}" == "1" ]]; then
+    echo "[note] MIMIR_FORCE_SFML3_VISUALIZER=1 est désormais inutile (SFML3 auto-détecté)."
+  fi
+fi
+
 echo
 printf "Configuration retenue:\n"
 for key in "${FEATURE_KEYS[@]}"; do
   printf "  - %-24s : %s\n" "$key" "$(cmake_bool "${FEATURE_VALUES[$key]}")"
 done
+if [[ -n "$SFML_DETECTED_VERSION" ]]; then
+  printf "  - %-24s : %s\n" "SFML_DETECTED_VERSION" "$SFML_DETECTED_VERSION"
+fi
+printf "  - %-24s : %s\n" "SFML_MODE" "$SFML_MODE"
 printf "  - %-24s : %s\n" "CMAKE_BUILD_TYPE" "$BUILD_TYPE"
 printf "  - %-24s : %s\n" "BUILD_DIR" "$BUILD_DIR"
 
 echo
 
-echo "[1/4] Installation des dépendances système..."
-$SUDO apt-get update
+SKIP_SYSTEM_DEPS="${SKIP_SYSTEM_DEPS:-0}"
+
+if [[ "$SKIP_SYSTEM_DEPS" == "1" ]]; then
+  echo "[1/4] Installation des dépendances système... (skipped: SKIP_SYSTEM_DEPS=1)"
+else
+  echo "[1/4] Installation des dépendances système..."
+  $SUDO apt-get update
+fi
 
 REQUIRED_PACKAGES=(
   cmake
@@ -249,14 +311,27 @@ fi
 if [[ "${FEATURE_VALUES[ENABLE_OPENCL]}" == "1" ]]; then
   OPTIONAL_PACKAGES+=(ocl-icd-opencl-dev clinfo)
 fi
+if [[ "${FEATURE_VALUES[ENABLE_FFMPEG]}" == "1" ]]; then
+  OPTIONAL_PACKAGES+=(ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev)
+fi
 if [[ "${FEATURE_VALUES[ENABLE_SFML]}" == "1" ]]; then
-  OPTIONAL_PACKAGES+=(libsfml-dev)
+  # Privilégier SFML3 si disponible; fallback SFML2 uniquement si nécessaire.
+  if apt-cache show libsfml3-dev >/dev/null 2>&1; then
+    OPTIONAL_PACKAGES+=(libsfml3-dev)
+  elif apt-cache show libsfml-dev >/dev/null 2>&1; then
+    OPTIONAL_PACKAGES+=(libsfml-dev)
+  else
+    echo "[warn] Aucun package SFML apt détecté (libsfml3-dev/libsfml-dev)."
+    echo "[note] Installe SFML3 manuellement puis relance ./config.sh."
+  fi
 fi
 if [[ "${FEATURE_VALUES[ENABLE_LZ4]}" == "1" ]]; then
   OPTIONAL_PACKAGES+=(liblz4-dev)
 fi
 
-$SUDO apt-get install -y "${REQUIRED_PACKAGES[@]}" "${OPTIONAL_PACKAGES[@]}"
+if [[ "$SKIP_SYSTEM_DEPS" != "1" ]]; then
+  $SUDO apt-get install -y "${REQUIRED_PACKAGES[@]}" "${OPTIONAL_PACKAGES[@]}"
+fi
 
 echo "[2/4] Vérification des outils..."
 cmake --version | head -n 1

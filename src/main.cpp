@@ -29,10 +29,14 @@
 #include <algorithm>
 #include <numeric>
 #include <chrono>
+#include <ctime>
 #include <cstring>
 #include <iomanip>
 #include <cstdlib>
 #include <cerrno>
+#include <sstream>
+#include <array>
+#include <mutex>
 
 #ifdef ENABLE_CUDA
 #include <cuda_runtime.h>
@@ -51,6 +55,162 @@ using namespace ModelArchitectures;
 
 // Spill disque: dossier attendu par le système en cas d'éviction/MemoryGuard.
 static std::string g_mimir_spill_dir = ".mimir-spill";
+
+namespace {
+std::mutex g_framework_log_mutex;
+std::ofstream* g_framework_log_stream = nullptr;
+}
+
+void framework_log_write(const char* data, size_t size) {
+    std::lock_guard<std::mutex> lock(g_framework_log_mutex);
+    if (!g_framework_log_stream || !g_framework_log_stream->is_open() || data == nullptr || size == 0) {
+        return;
+    }
+    g_framework_log_stream->write(data, static_cast<std::streamsize>(size));
+    g_framework_log_stream->flush();
+}
+
+void framework_log_write_file_only(const char* data, size_t size) {
+    framework_log_write(data, size);
+}
+
+class FrameworkLogTee {
+public:
+    FrameworkLogTee() {
+        try {
+            const fs::path logs_dir = fs::current_path() / "logs";
+            std::error_code ec;
+            fs::create_directories(logs_dir, ec);
+
+            const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            std::tm tm{};
+            if (auto* local_tm = std::localtime(&now)) {
+                tm = *local_tm;
+            }
+
+            std::ostringstream name;
+            name << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S") << ".log";
+            log_path_ = logs_dir / name.str();
+
+            log_file_.open(log_path_, std::ios::out | std::ios::trunc);
+            if (!log_file_.is_open()) {
+                return;
+            }
+
+            saved_cout_ = std::cout.rdbuf();
+            saved_cerr_ = std::cerr.rdbuf();
+            tee_cout_ = std::make_unique<TeeStreamBuf>(saved_cout_, log_file_.rdbuf());
+            tee_cerr_ = std::make_unique<TeeStreamBuf>(saved_cerr_, log_file_.rdbuf());
+            std::cout.rdbuf(tee_cout_.get());
+            std::cerr.rdbuf(tee_cerr_.get());
+            g_framework_log_stream = &log_file_;
+            active_ = true;
+        } catch (...) {
+            cleanup();
+        }
+    }
+
+    ~FrameworkLogTee() {
+        cleanup();
+    }
+
+    const fs::path& logPath() const { return log_path_; }
+    bool active() const { return active_; }
+
+private:
+    class TeeStreamBuf final : public std::streambuf {
+    public:
+        TeeStreamBuf(std::streambuf* primary, std::streambuf* secondary)
+            : primary_(primary), secondary_(secondary) {}
+
+    protected:
+        std::streamsize xsputn(const char* s, std::streamsize n) override {
+            if (n <= 0) return 0;
+            const std::streamsize a = primary_ ? primary_->sputn(s, n) : n;
+            const std::streamsize b = secondary_ ? secondary_->sputn(s, n) : n;
+            if (primary_) primary_->pubsync();
+            if (secondary_) secondary_->pubsync();
+            return (a < b) ? a : b;
+        }
+
+        int overflow(int ch) override {
+            if (ch == traits_type::eof()) return traits_type::not_eof(ch);
+            const char c = static_cast<char>(ch);
+            return xsputn(&c, 1) == 1 ? ch : traits_type::eof();
+        }
+
+        int sync() override {
+            int result = 0;
+            if (primary_ && primary_->pubsync() != 0) result = -1;
+            if (secondary_ && secondary_->pubsync() != 0) result = -1;
+            return result;
+        }
+
+    private:
+        std::streambuf* primary_ = nullptr;
+        std::streambuf* secondary_ = nullptr;
+    }
+    ;
+
+    void restoreStandardStreams() {
+        if (saved_cout_) {
+            std::cout.rdbuf(saved_cout_);
+        }
+        if (saved_cerr_) {
+            std::cerr.rdbuf(saved_cerr_);
+        }
+        g_framework_log_stream = nullptr;
+    }
+
+    void cleanup() {
+        if (!active_) {
+            restoreStandardStreams();
+            if (log_file_.is_open()) log_file_.close();
+            return;
+        }
+
+        std::cout.flush();
+        std::cerr.flush();
+        restoreStandardStreams();
+        if (log_file_.is_open()) {
+            log_file_.flush();
+            log_file_.close();
+        }
+        active_ = false;
+    }
+
+    std::filesystem::path log_path_;
+    std::ofstream log_file_;
+    std::streambuf* saved_cout_ = nullptr;
+    std::streambuf* saved_cerr_ = nullptr;
+    std::unique_ptr<TeeStreamBuf> tee_cout_;
+    std::unique_ptr<TeeStreamBuf> tee_cerr_;
+    bool active_ = false;
+};
+
+class FrameworkExitSummary {
+public:
+    FrameworkExitSummary()
+        : start_(std::chrono::steady_clock::now()) {}
+
+    ~FrameworkExitSummary() {
+        const auto end = std::chrono::steady_clock::now();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start_).count();
+        const auto elapsed_sec = elapsed_ms / 1000;
+        const auto elapsed_rem_ms = elapsed_ms % 1000;
+
+        auto& guard = MemoryGuard::instance();
+        std::cerr << "\n[exit] execution_time=" << elapsed_sec << 's'
+                  << ' ' << elapsed_rem_ms << "ms"
+                  << " memory_current=" << (guard.getCurrentBytes() / 1024 / 1024) << "MB"
+                  << " memory_peak=" << (guard.getPeakBytes() / 1024 / 1024) << "MB"
+                  << " memory_usage=" << std::fixed << std::setprecision(1)
+                  << guard.getUsagePercent() << "%" << std::endl;
+    }
+
+private:
+    std::chrono::steady_clock::time_point start_;
+};
 
 static std::string cudaAccelStatus() {
 #ifndef ENABLE_CUDA
@@ -174,8 +334,13 @@ void printUsage(const char *prog)
 #endif
     std::cout << "  --config <config.json>   Charger et entraîner depuis config\n";
     std::cout << "  --conf <config.json>     Charger une conf et exécuter lua.scripts\n";
-    std::cout << "  --override <path=value>  Override (répétable) appliqué à la config du modèle\n";
+    std::cout << "  --run <task>             Exécuter une tâche nommée définie dans tasks.<task> (avec --conf)\n";
+    std::cout << "  --override <path=value>  Override (répétable) appliqué à la config\n";
     std::cout << "  --help                   Afficher cette aide\n";
+    std::cout << "\nTâches (avec --conf + --run):\n";
+    std::cout << "  La section 'tasks' du fichier de conf définit des tâches nommées.\n";
+    std::cout << "  Chaque tâche contient un bloc 'lua' identique au bloc racine.\n";
+    std::cout << "  Sans --run, la section 'lua' racine est utilisée (comportement par défaut).\n";
     std::cout << "\nExamples:\n";
     std::cout << "  " << prog << " --lua scripts/test_lua_api.lua\n";
 #ifdef MIMIR_ENABLE_SCRIPTING_JS
@@ -189,12 +354,17 @@ void printUsage(const char *prog)
 #endif
     std::cout << "  " << prog << " --config config.json\n";
     std::cout << "  " << prog << " --conf config.json\n";
+    std::cout << "  " << prog << " --conf config.json --run train\n";
+    std::cout << "  " << prog << " --conf config.json --run infer\n";
     std::cout << "  " << prog << " --config config.json --override max_vocab=64000\n";
     std::cout << "  " << prog << " --config config.json --override optimizer=\"adamw\" --override weight_decay=0.01\n";
 }
 
 int main(int argc, char **argv)
 {
+    FrameworkLogTee framework_log;
+    FrameworkExitSummary exit_summary;
+
     for (int i = 1; i < argc; ++i) {
         const std::string opt = argv[i];
         if (opt == "--version" || opt == "-v") {
@@ -213,6 +383,31 @@ int main(int argc, char **argv)
         std::cerr << "║       Mímir Framework v" << ver << std::string(trailing, ' ') << "║\n";
         std::cerr << "║     Deep Learning Architectures        ║\n";
         std::cerr << "╚════════════════════════════════════════╝\n\n";
+    }
+
+    if (framework_log.active()) {
+        std::cerr << "📝 Journal du framework: " << framework_log.logPath().string() << "\n\n";
+    }
+
+    {
+        std::vector<std::string> mpk_warnings;
+        const std::size_t mpk_loaded =
+            LuaScripting::autoRegisterMpkArchitectures(fs::current_path().string(), &mpk_warnings);
+        if (mpk_loaded > 0) {
+            std::cerr << "[startup] mpk_architectures_loaded=" << mpk_loaded
+                      << " from=" << (fs::current_path() / "_archi").string() << std::endl;
+        }
+        for (const auto& warning : mpk_warnings) {
+            std::cerr << "[startup] MPK ignoré: " << warning << std::endl;
+        }
+
+        const auto registry_count = ModelArchitectures::Registry::instance().list().size();
+        auto& guard = MemoryGuard::instance();
+        std::cerr << "[startup] workspace=" << fs::current_path().string() << std::endl;
+        std::cerr << "[startup] registry_architectures=" << registry_count << std::endl;
+        std::cerr << "[memory] current=" << (guard.getCurrentBytes() / 1024 / 1024)
+                  << "MB limit=" << (guard.getLimit() / 1024 / 1024)
+                  << "MB usage=" << guard.getUsagePercent() << "%" << std::endl;
     }
 
     // Préparer le spill dir + nettoyage fin de run.
@@ -381,6 +576,7 @@ int main(int argc, char **argv)
     // Mode --config
     std::string config_path;
     std::string conf_path;
+    std::string run_task;          // tâche nommée sélectionnée via --run
     std::vector<std::string> overrides;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -388,6 +584,8 @@ int main(int argc, char **argv)
             config_path = argv[++i];
         } else if (a == "--conf" && i + 1 < argc) {
             conf_path = argv[++i];
+        } else if (a == "--run" && i + 1 < argc) {
+            run_task = argv[++i];
         } else if (a == "--override" && i + 1 < argc) {
             overrides.emplace_back(argv[++i]);
         } else if (a == "--help") {
@@ -413,6 +611,7 @@ int main(int argc, char **argv)
                 return 1;
             }
             if (!conf_path.empty()) {
+                // --run sans valeur est traité plus haut; ici on rejette les vrais inconnus.
                 std::cerr << "❌ Option inconnue en mode --conf: " << a << "\n";
                 std::cerr << "💡 Utilisez --help pour la liste des options\n";
                 return 1;
@@ -450,15 +649,52 @@ int main(int argc, char **argv)
             std::cerr << "\n";
         }
 
+        // ── Résolution de la tâche active ───────────────────────────────────────
+        // Sans --run : utilise la section lua racine du fichier (comportement défaut).
+        // Avec --run <name> : cherche conf["tasks"][name], qui doit contenir un bloc
+        //   lua identique au bloc racine (lua.scripts[] ou lua.script).
+        const json* task_conf = &conf;
+        if (!run_task.empty()) {
+            if (!conf.contains("tasks") || !conf["tasks"].is_object()) {
+                std::cerr << "❌ --run '" << run_task << "': aucune section 'tasks' dans '" << conf_path << "'\n";
+                std::cerr << "💡 Ajoutez une section \"tasks\": { \"" << run_task << "\": { \"lua\": { \"scripts\": [...] } } }\n";
+                return 1;
+            }
+            const json& tasks_node = conf["tasks"];
+            if (!tasks_node.contains(run_task) || !tasks_node[run_task].is_object()) {
+                std::cerr << "❌ --run: tâche '" << run_task << "' introuvable\n";
+                std::cerr << "💡 Tâches disponibles dans '" << conf_path << "':";
+                bool first = true;
+                for (auto& [k, v] : tasks_node.items()) {
+                    std::cerr << (first ? " " : ", ") << k;
+                    if (v.is_object() && v.contains("description") && v["description"].is_string())
+                        std::cerr << " (" << v["description"].get<std::string>() << ")";
+                    first = false;
+                }
+                std::cerr << "\n";
+                return 1;
+            }
+            task_conf = &tasks_node[run_task];
+            const std::string task_desc = task_conf->value("description", std::string{});
+            std::cerr << "▶️  Tâche: " << run_task;
+            if (!task_desc.empty()) std::cerr << " — " << task_desc;
+            std::cerr << "\n";
+        }
+
+        // ── Résolution du bloc lua dans la tâche active ─────────────────────────
         const json* lua_conf = nullptr;
-        if (conf.contains("lua") && conf["lua"].is_object()) {
-            lua_conf = &conf["lua"];
-        } else if (conf.contains("run") && conf["run"].is_object() && conf["run"].contains("lua") && conf["run"]["lua"].is_object()) {
-            lua_conf = &conf["run"]["lua"];
+        if (task_conf->contains("lua") && (*task_conf)["lua"].is_object()) {
+            lua_conf = &(*task_conf)["lua"];
+        } else if (task_conf->contains("run") && (*task_conf)["run"].is_object()
+                   && (*task_conf)["run"].contains("lua") && (*task_conf)["run"]["lua"].is_object()) {
+            lua_conf = &(*task_conf)["run"]["lua"];
         }
 
         if (!lua_conf) {
-            std::cerr << "❌ --conf: aucune section lua trouvée (attendu: lua.scripts ou run.lua.scripts)\n";
+            if (run_task.empty())
+                std::cerr << "❌ --conf: aucune section lua trouvée (attendu: lua.scripts ou run.lua.scripts)\n";
+            else
+                std::cerr << "❌ --conf --run '" << run_task << "': aucune section lua dans la tâche\n";
             return 1;
         }
 

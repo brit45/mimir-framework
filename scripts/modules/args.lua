@@ -26,6 +26,9 @@ Help.auto_exit_help({
 
 local function maybe_start_htop(opts)
   if not opts then return end
+  if rawget(_G, "__MIMIR_MONITOR_STARTED") == true then
+    return
+  end
   -- Historiquement, la viz est pilotée via AsyncMonitor (htop). Beaucoup de scripts
   -- passent juste `--viz` en pensant que ça "active la viz". On traite donc `--viz`
   -- comme un alias pratique qui démarre htop+viz.
@@ -102,6 +105,9 @@ local function maybe_start_htop(opts)
   local hide = as_bool(opts["viz-hide-activation-blocks"])
   if hide ~= nil then cfg.viz_config.visualization.hide_activation_blocks = hide end
 
+  local hide_norm = as_bool(opts["viz-hide-normalisation-blocks"])
+  if hide_norm ~= nil then cfg.viz_config.visualization.hide_normalisation_blocks = hide_norm end
+
   if opts.csv ~= nil then cfg.csv = opts.csv end
   if opts["csv-enabled"] ~= nil then cfg.csv_enabled = opts["csv-enabled"] end
   if opts["csv-path"] ~= nil then cfg.csv_path = tostring(opts["csv-path"]) end
@@ -121,6 +127,7 @@ local function maybe_start_htop(opts)
   if ok == false then
     error("Mimir.Htop.create a échoué: " .. tostring(err))
   end
+  rawset(_G, "__MIMIR_MONITOR_STARTED", true)
   -- `Htop.create` peut retourner (true, "Viz init failed: ...") sans casser le run.
   -- Avant, ce message était silencieux => impression que la viz/htop ne démarre pas.
   if err ~= nil and tostring(err) ~= "" then

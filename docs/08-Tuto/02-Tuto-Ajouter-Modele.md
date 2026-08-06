@@ -1,78 +1,32 @@
-# Tuto - Ajouter un modele
+# Ajouter un modèle
 
-## Pour qui
+Ce tutoriel décrit le chemin réellement utilisé par `basic_mlp` : définir une
+classe dérivée de `Model`, construire son graphe, convertir sa configuration
+JSON et l'enregistrer dans `ModelArchitectures`.
 
-Debutant/intermediaire qui veut ajouter une nouvelle architecture dans Mimir.
+> **Prérequis**
+>
+> Le projet doit compiler et `./bin/mimir --lua
+> scripts/tools/inspect_architectures.lua -- -a` doit fonctionner.
 
-## Objectif
+## Sources de vérité
 
-Ajouter un modele C++, l'enregistrer dans le registre, puis le lancer avec un script.
-
-## Avant de commencer
-
-1. Build fonctionnel de Mimir.
-2. Lecture conseillee: [docs/06-Contributing/02-New-Architecture-And-Tools.md](../06-Contributing/02-New-Architecture-And-Tools.md).
-3. Connaissances C++ de base (classe, struct, include).
-
-## Résultat attendu
-
-Ton architecture apparait dans la liste du registre et peut etre instanciee depuis Lua.
-
-## Etape 1 - Creer la classe du modele
-
-1. Creer les fichiers dans un dossier logique, par exemple:
-- `src/Models/MyDomain/MyNewModel.hpp`
-- `src/Models/MyDomain/MyNewModel.cpp`
-
-2. Ajouter une config simple dans la classe:
-- dimensions principales,
-- nombre de couches,
-- valeurs par defaut raisonnables.
-
-3. Implementer la construction du graphe dans `buildFromConfig(...)` (ou helper equivalent appele par le registre).
-
-A retenir: commencer petit. Une version minimale qui compile et forward vaut mieux qu'un gros modele incomplet.
-
-## Etape 2 - Enregistrer dans le registre d'architectures
-
-Fichiers de reference:
-- `src/Models/Registry/ModelArchitectures.hpp`
+- `src/Models/MLP/BasicMLPModel.hpp`
+- `src/Models/MLP/BasicMLPModel.cpp`
 - `src/Models/Registry/ModelArchitectures.cpp`
+- `src/Model.hpp`
+- `src/Layers.hpp`
+- `Tests/test_registry_cfg_from_config.cpp`
+- `Tests/test_registry_create_from_config.cpp`
+- `Tests/test_registry_aliases.cpp`
 
-Checklist:
-1. Ajouter l'include de ta classe.
-2. Mapper config JSON vers ta `Config` C++.
-3. Definir une config par defaut JSON.
-4. Ajouter l'entree registre (`name`, `description`, `default_config`, `create`).
+Les noms utilisés ci-dessous sont illustratifs. Les fichiers `MySimpleModel.*`
+ne sont pas fournis : vous devez les créer.
 
-## Etape 3 - Verifier que le modele est visible
+## Étape 1 — Définir la configuration
 
-Commande simple:
-
-```bash
-./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
-```
-
-Tu dois voir le nom de ton architecture.
-
-## Etape 4 - Lancer un script minimal
-
-Point de depart recommande:
-- `scripts/templates/template_new_model.lua`
-
-Objectif du premier run:
-1. create
-2. allocate params
-3. init weights
-4. forward
-
-## Exemple pratique - Squelette complet
-
-### Contexte
-
-Voici un squelette fonctionnel minimal que tu peux compiler et utiliser immediatement. Remplace les noms et ajuste les dimensions selon tes besoins.
-
-### Header (`src/Models/MyDomain/MySimpleModel.hpp`)
+Créez `src/Models/MyDomain/MySimpleModel.hpp` sur le modèle de
+`BasicMLPModel.hpp` :
 
 ```cpp
 #pragma once
@@ -82,25 +36,27 @@ Voici un squelette fonctionnel minimal que tu peux compiler et utiliser immediat
 class MySimpleModel : public Model {
 public:
     struct Config {
-        // Dimensionnalité de l'entrée
-        int input_dim = 256;
-        // Dimensionnalité de la couche cachee
-        int hidden_dim = 512;
-        // Dimensionnalité de la sortie
-        int output_dim = 128;
+        int input_dim = 64;
+        int hidden_dim = 128;
+        int output_dim = 16;
     };
 
     MySimpleModel();
-    ~MySimpleModel() override = default;
-
     void buildFromConfig(const Config& cfg);
+    static void buildInto(Model& model, const Config& cfg);
 
 private:
     Config cfg_;
 };
 ```
 
-### Code (`src/Models/MyDomain/MySimpleModel.cpp`)
+`buildInto` est utile pour séparer la description du graphe de l'instance
+concrète. C'est le pattern actuellement employé par `BasicMLPModel`.
+
+## Étape 2 — Construire le graphe
+
+Dans `src/Models/MyDomain/MySimpleModel.cpp`, reproduisez le contrat réel de
+`Model::push` et des champs de `Layer` :
 
 ```cpp
 #include "MySimpleModel.hpp"
@@ -112,145 +68,165 @@ MySimpleModel::MySimpleModel() {
 
 void MySimpleModel::buildFromConfig(const Config& cfg) {
     cfg_ = cfg;
-    
-    // Efface les couches precedentes
-    getMutableLayers().clear();
-    
-    // Fixe la config du modele
-    setModelName("MySimpleModel");
-    modelConfig["type"] = "my_simple_model";
-    modelConfig["input_dim"] = cfg_.input_dim;
-    modelConfig["hidden_dim"] = cfg_.hidden_dim;
-    modelConfig["output_dim"] = cfg_.output_dim;
-    
-    // Couche 1: lineaire entree -> cachee
-    // push(name, type, params_count)
-    // params_count = in * out + out (weights + biases)
-    size_t linear1_params = cfg_.input_dim * cfg_.hidden_dim + cfg_.hidden_dim;
-    push("simple/fc1", "Linear", linear1_params);
-    if (auto* L = getLayerByName("simple/fc1")) {
-        L->inputs = {"__input__"};  // lit de l'entree
-        L->output = "simple/h1";    // produit "simple/h1"
-        L->in_features = cfg_.input_dim;
-        L->out_features = cfg_.hidden_dim;
-        L->use_bias = true;
+    buildInto(*this, cfg_);
+}
+
+void MySimpleModel::buildInto(Model& model, const Config& cfg) {
+    model.getMutableLayers().clear();
+    model.setModelName("MySimpleModel");
+    model.modelConfig["type"] = "my_simple_model";
+    model.modelConfig["input_dim"] = cfg.input_dim;
+    model.modelConfig["hidden_dim"] = cfg.hidden_dim;
+    model.modelConfig["output_dim"] = cfg.output_dim;
+
+    model.push(
+        "my_simple/fc1",
+        "Linear",
+        static_cast<size_t>(cfg.input_dim) * cfg.hidden_dim + cfg.hidden_dim
+    );
+    if (auto* layer = model.getLayerByName("my_simple/fc1")) {
+        layer->inputs = {"__input__"};
+        layer->output = "my_simple/hidden";
+        layer->in_features = cfg.input_dim;
+        layer->out_features = cfg.hidden_dim;
+        layer->use_bias = true;
     }
-    
-    // Couche 2: activation ReLU
-    push("simple/relu1", "ReLU", 0);  // pas de params pour ReLU
-    if (auto* L = getLayerByName("simple/relu1")) {
-        L->inputs = {"simple/h1"};  // lit de h1
-        L->output = "simple/a1";    // produit "simple/a1"
+
+    model.push("my_simple/gelu", "GELU", 0);
+    if (auto* layer = model.getLayerByName("my_simple/gelu")) {
+        layer->inputs = {"my_simple/hidden"};
+        layer->output = "my_simple/activated";
     }
-    
-    // Couche 3: lineaire cachee -> sortie
-    size_t linear2_params = cfg_.hidden_dim * cfg_.output_dim + cfg_.output_dim;
-    push("simple/fc2", "Linear", linear2_params);
-    if (auto* L = getLayerByName("simple/fc2")) {
-        L->inputs = {"simple/a1"};  // lit de a1
-        L->output = "x";             // produit la sortie finale
-        L->in_features = cfg_.hidden_dim;
-        L->out_features = cfg_.output_dim;
-        L->use_bias = true;
+
+    model.push(
+        "my_simple/out",
+        "Linear",
+        static_cast<size_t>(cfg.hidden_dim) * cfg.output_dim + cfg.output_dim
+    );
+    if (auto* layer = model.getLayerByName("my_simple/out")) {
+        layer->inputs = {"my_simple/activated"};
+        layer->output = "x";
+        layer->in_features = cfg.hidden_dim;
+        layer->out_features = cfg.output_dim;
+        layer->use_bias = true;
     }
 }
 ```
 
-### Enregistrement (dans `src/Models/Registry/ModelArchitectures.cpp`)
+Les points importants sont factuels :
 
-Ajoute d'abord les helpers pour parser la config JSON (au début du fichier, avant `ensureBuiltinsRegistered()`):
+- `push(name, type, params_count)` attend un nom de type reconnu par
+  `LayerRegistry` dans `src/LayerTypes.hpp` ;
+- les entrées et sorties sont des noms de tenseurs ;
+- `__input__` est l'entrée conventionnelle et `x` la sortie principale ;
+- pour `Linear`, le nombre de paramètres avec biais vaut
+  `in_features * out_features + out_features`.
+
+## Étape 3 — Ajouter les sources à CMake
+
+Ajouter les `.cpp` au dépôt ne suffit pas. Incluez
+`src/Models/MyDomain/MySimpleModel.cpp` dans la liste de sources qui construit
+`mimir_core` dans `CMakeLists.txt`, à côté des autres modèles.
+
+Une erreur de lien sur le constructeur ou `buildFromConfig` indique
+généralement que le `.cpp` n'est pas compilé dans la cible.
+
+## Étape 4 — Convertir la configuration JSON
+
+`ModelArchitectures.cpp` possède déjà le helper interne `jget`. Ne redéfinissez
+pas un second template du même nom dans ce fichier. Ajoutez seulement les deux
+fonctions propres au modèle :
 
 ```cpp
-// Helper robuste pour extraire les valeurs JSON
-template <typename T>
-static T jget(const json& j, const char* key, T def) {
-    if (!j.is_object()) return def;
-    auto it = j.find(key);
-    if (it == j.end() || it->is_null()) return def;
-    try {
-        return it->get<T>();
-    } catch (...) {
-        return def;
-    }
-}
-
-// Config par defaut JSON
-static json mySimpleModelDefaultConfigJson() {
-    MySimpleModel::Config d;  // instance par defaut
-    return json{
-        {"input_dim", d.input_dim},
-        {"hidden_dim", d.hidden_dim},
-        {"output_dim", d.output_dim},
-    };
-}
-
-// Mapper JSON -> Config C++
-static MySimpleModel::Config mySimpleModelCfgFromJson(const json& cfg) {
+static MySimpleModel::Config mySimpleCfgFromJson(const json& cfg) {
     MySimpleModel::Config out;
     out.input_dim = jget<int>(cfg, "input_dim", out.input_dim);
     out.hidden_dim = jget<int>(cfg, "hidden_dim", out.hidden_dim);
     out.output_dim = jget<int>(cfg, "output_dim", out.output_dim);
     return out;
 }
+
+static json mySimpleDefaultConfigJson() {
+    MySimpleModel::Config defaults;
+    return json{
+        {"input_dim", defaults.input_dim},
+        {"hidden_dim", defaults.hidden_dim},
+        {"output_dim", defaults.output_dim},
+    };
+}
 ```
 
-Puis dans `ensureBuiltinsRegistered()`, ajoute:
+Ajoutez également l'include de `MySimpleModel.hpp`.
+
+## Étape 5 — Enregistrer l'architecture
+
+Dans `Registry::ensureBuiltinsRegistered()`, ajoutez :
 
 ```cpp
 entries_.emplace(
     "my_simple_model",
     Entry{
         "my_simple_model",
-        "Simple linear model template",
-        mySimpleModelDefaultConfigJson(),
+        "Minimal two-layer MLP",
+        mySimpleDefaultConfigJson(),
         [](const json& cfg) -> std::shared_ptr<Model> {
-            auto m = std::make_shared<MySimpleModel>();
-            m->buildFromConfig(mySimpleModelCfgFromJson(cfg));
-            return m;
+            auto model = std::make_shared<MySimpleModel>();
+            model->buildFromConfig(mySimpleCfgFromJson(cfg));
+            return model;
         },
     }
 );
 ```
 
-### Explication
+N'affectez pas `modelConfig` une seconde fois dans la lambda. Après la factory,
+`Registry::create` attache la configuration JSON fusionnée au modèle et
+propage aussi `dtype`.
 
-1. **Header** : classe héritant de `Model`, Config struct avec les hyperparam.
-2. **Constructeur** : appelle `setModelName()` et `setHasEncoder()`.
-3. **buildFromConfig()** : 
-   - efface les couches avec `getMutableLayers().clear()`
-   - stocke la config dans `modelConfig` (JSON interne pour save/load)
-   - ajoute chaque couche avec `push(name, type, params_count)`
-   - récupère la couche avec `getLayerByName()` et configure:
-     - `inputs`: liste des tenseurs d'entrée (ou `{"__input__"}` pour l'entrée du modèle)
-     - `output`: nom du tenseur de sortie
-     - `in_features`, `out_features`: dimensions (pour Linear)
-     - `use_bias`: si les biais sont présents
-4. **Registre** : helpers config + lambda qui crée le modèle puis appelle `buildFromConfig()`.
-
-### Test rapide
+## Étape 6 — Compiler et inspecter
 
 ```bash
-./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
+cmake --build build -j2
+
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- \
+  --list my_simple_model --params --layers --stats
 ```
 
-Verification attendue: le nom `my_simple_model` apparait dans la liste.
+L'inspection doit montrer trois layers et deux blocs de paramètres `Linear`.
 
-## Etape 5 - Validation rapide
+## Étape 7 — Ajouter les tests
 
-Tu peux valider si:
-1. la compilation passe,
-2. l'architecture est visible dans `inspect_architectures.lua`,
-3. un forward simple passe sans crash,
-4. save/load checkpoint fonctionne sur un mini test.
+Les tests du registre sont répartis entre
+`Tests/test_registry_cfg_from_config.cpp`,
+`Tests/test_registry_create_from_config.cpp` et
+`Tests/test_registry_aliases.cpp`. Ils sont déclarés par
+`Tests/CMakeLists.txt`. Vérifiez au minimum :
 
-## Erreurs frequentes
+1. la présence de `my_simple_model` dans `Registry::available()` ;
+2. les valeurs de la configuration par défaut ;
+3. la création avec overrides ;
+4. le nombre et le câblage des layers ;
+5. un cycle allocation, initialisation et passe avant ;
+6. une sauvegarde/relecture si le modèle doit être sérialisable.
 
-1. Nom d'architecture incoherent entre registre et script.
-2. Parametre de config absent ou mal type.
-3. Build du modele incomplet (couches non branchees).
-4. Formes de tenseurs incompatibles dans le forward.
+```bash
+ctest --test-dir build --output-on-failure -R RegistryTest
+```
 
-## Suite
+## Erreurs fréquentes
 
-- Guide complet contribution: [docs/06-Contributing/02-New-Architecture-And-Tools.md](../06-Contributing/02-New-Architecture-And-Tools.md)
-- Lifecycle modele: [docs/02-User-Guide/02-Model-Lifecycle.md](../02-User-Guide/02-Model-Lifecycle.md)
+> **Attention**
+> `Model.create()` construit déjà le graphe via la factory du registre.
+> `Model.build()` est conservé comme no-op de compatibilité dans le chemin
+> moderne ; ne construisez pas le graphe une seconde fois depuis Lua.
+
+- Type de layer absent de `LayerRegistry`.
+- Mauvais `params_count` pour un layer entraînable.
+- Sortie d'un layer différente de l'entrée attendue par le suivant.
+- Source `.cpp` absente de la cible CMake.
+- Config par défaut et parser JSON utilisant des noms différents.
+
+## Étapes suivantes
+
+- [Coder un script Lua](03-Tuto-Coder-Script.md)
+- [Ajouter une opération](05-Tuto-Ajouter-Op.md)
+- [Guide du registre](../07-Devs/03-Config-And-Registry.md)

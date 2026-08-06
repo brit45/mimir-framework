@@ -1,5 +1,14 @@
 #!/bin/bash
 
+export MIMIR_ALLOCATOR_LOG=1
+export MIMIR_ALLOCATOR_LOG_VERBOSE=1
+
+# OpenCL Rusticl (AMD/Mesa): activer automatiquement sur iGPU AMD.
+# Override possible: RUSTICL_ENABLE=... ./run_mimir.sh
+if [ -z "${RUSTICL_ENABLE:-}" ]; then
+	export RUSTICL_ENABLE=radeonsi
+fi
+
 # Configuration OpenMP (override possible via env)
 NPROC=$(nproc 2>/dev/null || echo 4)
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$NPROC}"
@@ -24,6 +33,17 @@ if [ -z "${GOMP_CPU_AFFINITY:-}" ]; then
 	fi
 fi
 
+# ROCm guard: sur certaines stacks AMD (ex: gfx90c + rocBLAS incomplet),
+# l'initialisation peut terminer en IOT/core dump. Par défaut on garde
+# Vulkan/CPU stables, et on n'active ROCm qu'en opt-in explicite.
+if [ -z "${MIMIR_DISABLE_ROCM:-}" ]; then
+	if [ "${MIMIR_FORCE_ROCM:-0}" = "1" ]; then
+		export MIMIR_DISABLE_ROCM=0
+	else
+		export MIMIR_DISABLE_ROCM=1
+	fi
+fi
+
 # Afficher la configuration
 echo "╔════════════════════════════════════════════════╗"
 echo "║   LANCEMENT MÍMIR AVEC CONFIGURATION OPTIMALE  ║"
@@ -39,6 +59,8 @@ echo "  OMP_MAX_ACTIVE_LEVELS=$OMP_MAX_ACTIVE_LEVELS"
 echo "  OMP_WAIT_POLICY=$OMP_WAIT_POLICY"
 echo "  OMP_DYNAMIC=$OMP_DYNAMIC"
 echo "  GOMP_CPU_AFFINITY=$GOMP_CPU_AFFINITY"
+echo "  MIMIR_DISABLE_ROCM=$MIMIR_DISABLE_ROCM (override: MIMIR_FORCE_ROCM=1)"
+echo "  RUSTICL_ENABLE=$RUSTICL_ENABLE"
 echo ""
 echo ""
 echo "Vérifier avec: top -p \$(pgrep mimir)"

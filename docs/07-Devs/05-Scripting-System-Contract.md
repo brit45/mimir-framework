@@ -1,20 +1,12 @@
-# Contrat API Scripting Inter-Langages
-
-## Pour qui
-
-Développeur framework (C/C++/runtime/scripting).
-
-## Objectif
+# Contrat de scripting entre langages
 
 Implémenter ou modifier des briques techniques sans casser le contrat global.
 
-## Avant de commencer
+**Public concerné :** Développeur framework (C/C++/runtime/scripting).
 
-Comprendre le registre d'architectures et les conventions I/O.
-
-## Résultat attendu
-
-Tu peux livrer des évolutions compatibles avec la base existante.
+> **Prérequis**
+>
+> Comprendre le registre d'architectures et les conventions I/O.
 
 
 Ce chapitre formalise le contrat API systeme que tous les bridges de scripting doivent respecter.
@@ -147,3 +139,9 @@ Les scripts metier doivent utiliser `scripts/modules/fs.lua` pour les acces file
 Ne pas introduire de shell Linux-specifique pour le filesystem (`mkdir -p`, `ls`, `find`, `test -d`, `stat`) dans les scripts applicatifs.
 
 Exception: les appels shell qui pilotent des processus externes (ex: ouvrir un navigateur, lancer un binaire tiers) peuvent rester en `os.execute`/`io.popen` si necessaire.
+
+## Étapes suivantes
+
+- [Page précédente : Runtime - Modifier Et Ajouter Un Backend](04-Runtime-Development.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Visualizer: Tips Et Nouvelles Features](06-Visualizer-Tips-And-Features.md)

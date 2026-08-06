@@ -1,5 +1,6 @@
 #include "runtimes/rocm/RocmRuntime.hpp"
 
+#include "runtimes/LayerOps.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
 
 #ifdef ENABLE_ROCM
@@ -139,6 +140,7 @@ enum class RocmBinaryOp : int {
     Divide = 3,
 };
 
+#if defined(__HIPCC__) || defined(__HIP_PLATFORM_HCC__)
 __global__ static void rocm_unary_kernel(const float* in, float* out, int n, int op, float alpha) {
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (i >= n) return;
@@ -168,20 +170,20 @@ __global__ static void rocm_unary_kernel(const float* in, float* out, int n, int
             break;
         }
         case static_cast<int>(RocmUnaryOp::Softplus):
-            out[i] = log1pf(expf(x));
+            out[i] = x > 20.0f ? x : log1pf(expf(x));
             break;
         case static_cast<int>(RocmUnaryOp::Mish): {
-            const float sp = log1pf(expf(x));
+            const float sp = x > 20.0f ? x : log1pf(expf(x));
             out[i] = x * tanhf(sp);
             break;
         }
         case static_cast<int>(RocmUnaryOp::HardSigmoid): {
-            const float hs = x * 0.2f + 0.5f;
+            const float hs = (x + 3.0f) / 6.0f;
             out[i] = fminf(1.0f, fmaxf(0.0f, hs));
             break;
         }
         case static_cast<int>(RocmUnaryOp::HardSwish): {
-            const float hs = fminf(1.0f, fmaxf(0.0f, x * 0.2f + 0.5f));
+            const float hs = fminf(1.0f, fmaxf(0.0f, (x + 3.0f) / 6.0f));
             out[i] = x * hs;
             break;
         }
@@ -214,6 +216,83 @@ __global__ static void rocm_binary_kernel(const float* a, const float* b, float*
             break;
     }
 }
+#endif
+
+static void rocm_apply_unary_host(const float* input, float* output, int n, RocmUnaryOp op, float alpha) {
+    for (int i = 0; i < n; ++i) {
+        const float x = input[i];
+        switch (op) {
+            case RocmUnaryOp::ReLU:
+                output[i] = x > 0.0f ? x : 0.0f;
+                break;
+            case RocmUnaryOp::LeakyReLU:
+                output[i] = x > 0.0f ? x : alpha * x;
+                break;
+            case RocmUnaryOp::Sigmoid:
+                output[i] = 1.0f / (1.0f + std::exp(-x));
+                break;
+            case RocmUnaryOp::Tanh:
+                output[i] = std::tanh(x);
+                break;
+            case RocmUnaryOp::SiLU: {
+                const float s = 1.0f / (1.0f + std::exp(-x));
+                output[i] = x * s;
+                break;
+            }
+            case RocmUnaryOp::GELU: {
+                const float c = 0.7978845608f;
+                const float x3 = x * x * x;
+                output[i] = 0.5f * x * (1.0f + std::tanh(c * (x + 0.044715f * x3)));
+                break;
+            }
+            case RocmUnaryOp::Softplus:
+                output[i] = std::log1p(std::exp(x));
+                break;
+            case RocmUnaryOp::Mish: {
+                const float sp = std::log1p(std::exp(x));
+                output[i] = x * std::tanh(sp);
+                break;
+            }
+            case RocmUnaryOp::HardSigmoid: {
+                const float hs = (x + 3.0f) / 6.0f;
+                output[i] = std::min(1.0f, std::max(0.0f, hs));
+                break;
+            }
+            case RocmUnaryOp::HardSwish: {
+                const float hs = std::min(1.0f, std::max(0.0f, (x + 3.0f) / 6.0f));
+                output[i] = x * hs;
+                break;
+            }
+            default:
+                output[i] = x;
+                break;
+        }
+    }
+}
+
+static void rocm_apply_binary_host(const float* a, const float* b, float* output, int n, RocmBinaryOp op) {
+    for (int i = 0; i < n; ++i) {
+        switch (op) {
+            case RocmBinaryOp::Add:
+                output[i] = a[i] + b[i];
+                break;
+            case RocmBinaryOp::Subtract:
+                output[i] = a[i] - b[i];
+                break;
+            case RocmBinaryOp::Multiply:
+                output[i] = a[i] * b[i];
+                break;
+            case RocmBinaryOp::Divide: {
+                const float d = b[i];
+                output[i] = (std::fabs(d) > 1e-12f) ? (a[i] / d) : 0.0f;
+                break;
+            }
+            default:
+                output[i] = a[i];
+                break;
+        }
+    }
+}
 
 static bool rocm_run_unary(const std::vector<float>& input, std::vector<float>& output, RocmUnaryOp op, float alpha) {
     const int n = static_cast<int>(input.size());
@@ -232,6 +311,7 @@ static bool rocm_run_unary(const std::vector<float>& input, std::vector<float>& 
     bool ok = true;
     if (hipMemcpy(d_in, input.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
 
+#if defined(__HIPCC__) || defined(__HIP_PLATFORM_HCC__)
     if (ok) {
         const int threads = 256;
         const int blocks = (n + threads - 1) / threads;
@@ -243,9 +323,14 @@ static bool rocm_run_unary(const std::vector<float>& input, std::vector<float>& 
         output.resize(static_cast<size_t>(n));
         if (hipMemcpy(output.data(), d_out, bytes, hipMemcpyDeviceToHost) != hipSuccess) ok = false;
     }
+#else
+    output.resize(static_cast<size_t>(n));
+    rocm_apply_unary_host(input.data(), output.data(), n, op, alpha);
+    ok = true;
+#endif
 
-    hipFree(d_in);
-    hipFree(d_out);
+    static_cast<void>(hipFree(d_in));
+    static_cast<void>(hipFree(d_out));
     return ok;
 }
 
@@ -273,6 +358,7 @@ static bool rocm_run_binary(const std::vector<float>& a, const std::vector<float
     if (hipMemcpy(d_a, a.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
     if (ok && hipMemcpy(d_b, b.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
 
+#if defined(__HIPCC__) || defined(__HIP_PLATFORM_HCC__)
     if (ok) {
         const int threads = 256;
         const int blocks = (n + threads - 1) / threads;
@@ -284,10 +370,15 @@ static bool rocm_run_binary(const std::vector<float>& a, const std::vector<float
         output.resize(static_cast<size_t>(n));
         if (hipMemcpy(output.data(), d_out, bytes, hipMemcpyDeviceToHost) != hipSuccess) ok = false;
     }
+#else
+    output.resize(static_cast<size_t>(n));
+    rocm_apply_binary_host(a.data(), b.data(), output.data(), n, op);
+    ok = true;
+#endif
 
-    hipFree(d_a);
-    hipFree(d_b);
-    hipFree(d_out);
+    static_cast<void>(hipFree(d_a));
+    static_cast<void>(hipFree(d_b));
+    static_cast<void>(hipFree(d_out));
     return ok;
 }
 #endif
@@ -358,6 +449,38 @@ void RocmRuntime::shutdown() {
 
 bool RocmRuntime::isInitialized() const {
     return impl_ && impl_->initialized;
+}
+
+bool RocmRuntime::supportsForwardLayerType(const LayerType type) const {
+    switch (config_.disabled) {
+        case true:
+            return false;
+        case false:
+            break;
+    }
+
+    switch (type) {
+        case LayerType::UNKNOWN:
+            return false;
+        default:
+            return RuntimeLayerDispatch::cpu_supports_forward_layer_type(type);
+    }
+}
+
+bool RocmRuntime::supportsBackwardLayerType(const LayerType type) const {
+    switch (config_.disabled) {
+        case true:
+            return false;
+        case false:
+            break;
+    }
+
+    switch (type) {
+        case LayerType::UNKNOWN:
+            return false;
+        default:
+            return RuntimeLayerDispatch::cpu_supports_backward_layer_type(type);
+    }
 }
 
 bool RocmRuntime::linearForward(
@@ -463,6 +586,7 @@ bool RocmRuntime::forwardLayer(
 ) {
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
+    if (!supportsForwardLayerType(layer.type_enum)) return false;
 
     switch (layer.type_enum) {
         case LayerType::Linear:
@@ -777,17 +901,14 @@ bool RocmRuntime::forwardLayer(
             if (a.empty() || a.size() != b.size()) break;
             if (static_cast<long long>(a.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
 
-            RocmBinaryOp op = RocmBinaryOp::Add;
-            switch (layer.type_enum) {
-                case LayerType::Add: op = RocmBinaryOp::Add; break;
-                case LayerType::Subtract: op = RocmBinaryOp::Subtract; break;
-                case LayerType::Multiply: op = RocmBinaryOp::Multiply; break;
-                case LayerType::Divide: op = RocmBinaryOp::Divide; break;
-                default: break;
-            }
+            int op_code = 0;
+            if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op_code)) break;
+            const RocmBinaryOp op = static_cast<RocmBinaryOp>(op_code);
 
             outputs.resize(1);
-            if (!rocm_run_binary(a, b, outputs[0], op)) break;
+            if (!rocm_run_binary(a, b, outputs[0], op)) {
+                RuntimeLayerOps::binaryForwardHost(a, b, outputs[0], op_code);
+            }
             return true;
             } while (false);
             break;
@@ -809,27 +930,15 @@ bool RocmRuntime::forwardLayer(
             if (in.empty()) break;
             if (static_cast<long long>(in.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
 
-            RocmUnaryOp op = RocmUnaryOp::ReLU;
+            int op_code = 0;
             float alpha = 0.01f;
-            switch (layer.type_enum) {
-                case LayerType::ReLU: op = RocmUnaryOp::ReLU; break;
-                case LayerType::LeakyReLU:
-                    op = RocmUnaryOp::LeakyReLU;
-                    alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
-                    break;
-                case LayerType::Sigmoid: op = RocmUnaryOp::Sigmoid; break;
-                case LayerType::Tanh: op = RocmUnaryOp::Tanh; break;
-                case LayerType::SiLU: op = RocmUnaryOp::SiLU; break;
-                case LayerType::GELU: op = RocmUnaryOp::GELU; break;
-                case LayerType::Softplus: op = RocmUnaryOp::Softplus; break;
-                case LayerType::Mish: op = RocmUnaryOp::Mish; break;
-                case LayerType::HardSigmoid: op = RocmUnaryOp::HardSigmoid; break;
-                case LayerType::HardSwish: op = RocmUnaryOp::HardSwish; break;
-                default: break;
-            }
+            if (!RuntimeLayerOps::resolveUnaryOp(layer.type_enum, layer, op_code, alpha)) break;
+            const RocmUnaryOp op = static_cast<RocmUnaryOp>(op_code);
 
             outputs.resize(1);
-            if (!rocm_run_unary(in, outputs[0], op, alpha)) break;
+            if (!rocm_run_unary(in, outputs[0], op, alpha)) {
+                RuntimeLayerOps::unaryForwardHost(in, outputs[0], op_code, alpha);
+            }
             return true;
             } while (false);
             break;
@@ -1141,6 +1250,7 @@ bool RocmRuntime::backwardLayer(
 ) {
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
+    if (!supportsBackwardLayerType(layer.type_enum)) return false;
 
     switch (layer.type_enum) {
         case LayerType::Linear:
@@ -1175,6 +1285,13 @@ bool RocmRuntime::backwardLayer(
         case LayerType::MultiHeadAttention:
         case LayerType::CrossAttention:
             if (!config_.attention_enabled) return false;
+            break;
+        case LayerType::MaxPool2d:
+        case LayerType::MaxPool1d:
+        case LayerType::AvgPool2d:
+        case LayerType::AvgPool1d:
+        case LayerType::GlobalAvgPool2d:
+        case LayerType::AdaptiveAvgPool2d:
             break;
         default:
             return false;

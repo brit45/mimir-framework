@@ -340,8 +340,7 @@ cfg.align_weight = opt_num("align-weight", cfg.align_weight or 0.1)
 -- IMPORTANT: base tokenizer commun (si texte activé)
 local base_tok_path = opt_str("base-tokenizer", BaseTok.default_path())
 do
-  -- vae_conv est purement convolutionnel (text_cond=false hardcodé dans le graphe).
-  -- On ne requiert jamais le tokenizer pour cette architecture.
+  -- Tokenizer base: requis pour text-cond (natif ou fallback runtime), optionnel sinon.
   local ok_bt, err_bt = BaseTok.load_base({
     path = base_tok_path,
     max_vocab = opt_int("max-vocab", cfg.vocab_size or 50000),
@@ -350,14 +349,13 @@ do
   assert(ok_bt == true, "Base tokenizer: " .. tostring(err_bt))
 end
 
--- NOTE: l'architecture vae_conv reste purement convolutionnelle (graphe inchangé).
--- Si l'utilisateur passe --text-cond true, un mode runtime optionnel est activé:
---   - le tokenizer est utilisé sur les .txt du dataset,
---   - les token ids servent à entraîner le ConditioningEncoder externe (corrélation image↔texte),
---   - trainStep principal reste image-only (compat checkpoints et comportement existant).
+-- NOTE: text-cond est maintenant supporté nativement par le graphe vae_conv (optionnel).
+-- Compat legacy: si un ancien checkpoint image-only est repris avec --text-cond true,
+-- le runtime active automatiquement un fallback tokenizer+ConditioningEncoder,
+-- sans casser la compatibilité de convergence.
 if cfg.text_cond then
-  log("ℹ️  vae_conv: --text-cond true active le mode runtime tokenizer+encoder (graphe inchangé).")
-  log("   Le training principal reste image-only (trainStepVAE), avec alignement texte via ConditioningEncoder externe.")
+  log("ℹ️  vae_conv: --text-cond true active le chemin multi-modal (texte optionnel) pour l'alignement image↔texte.")
+  log("   En reprise d'un ancien graphe image-only, un fallback runtime tokenizer+encoder reste disponible.")
 end
 
 -- Si latent_h/w non fournis, on dérive (downsample x8 par défaut)
@@ -447,18 +445,18 @@ end
 cfg.recon_loss = opt_str("recon-loss", cfg.recon_loss or "charbonnier")
 
 -- Losses additionnelles (optionnelles)
-cfg.ssim_weight = opt_num("ssim-weight", cfg.ssim_weight or 0.01)
-cfg.ssim_mode = opt_str("ssim-mode", cfg.ssim_mode or "ms_ssim") -- "ssim" ou "ms_ssim"
+cfg.ssim_weight = opt_num("ssim-weight", cfg.ssim_weight or 0.0)
+cfg.ssim_mode = opt_str("ssim-mode", cfg.ssim_mode or "ssim") -- "ssim" ou "ms_ssim"
 cfg.ssim_k1 = opt_num("ssim-k1", cfg.ssim_k1 or 0.01)
 cfg.ssim_k2 = opt_num("ssim-k2", cfg.ssim_k2 or 0.03)
 cfg.ssim_L = opt_num("ssim-L", cfg.ssim_L or 1.2)
 
-cfg.spectral_weight = opt_num("spectral-weight", cfg.spectral_weight or 0.05)
+cfg.spectral_weight = opt_num("spectral-weight", cfg.spectral_weight or 0.0)
 cfg.spectral_scales = opt_int("spectral-scales", cfg.spectral_scales or 1)
 
--- Perceptual loss: désactivée par défaut (coûteuse et peut compliquer le debug).
--- Réactiver explicitement via `--perceptual-weight <valeur>`.
-cfg.perceptual_weight = opt_num("perceptual-weight", 0.0)
+-- Perceptual loss: utilise par défaut le vgg16_feat pré-entraîné par
+-- scripts/training/pretrain_vgg16_feat.lua.
+cfg.perceptual_weight = opt_num("perceptual-weight", 0.2)
 cfg.perceptual_arch = opt_str("perceptual-arch", cfg.perceptual_arch or "vgg16_feat")
 do
   local default_pckpt = cfg.perceptual_checkpoint
@@ -467,7 +465,7 @@ do
   end
   cfg.perceptual_checkpoint = opt_str("perceptual-ckpt", default_pckpt)
 end
-cfg.perceptual_base_channels = opt_int("perceptual-base-channels", cfg.perceptual_base_channels or 4)
+cfg.perceptual_base_channels = opt_int("perceptual-base-channels", cfg.perceptual_base_channels or 16)
 
 -- Compat: `vgg16_feat` force base_channels>=4 côté C++.
 -- Ici on aligne dès le script pour éviter warnings/rebuild inutiles.
@@ -480,17 +478,52 @@ do
   end
 end
 
--- Compat UX: permettre `--perceptual-ckpt checkpoint/vgg16_feat_pretrain` (résout vers final/ ou epoch_*).
+-- Compat UX: permettre `--perceptual-ckpt checkpoint/vgg16_feat_pretrain`
+-- (résout vers le dernier epoch disponible). On lit aussi base_channels dans
+-- l'architecture sauvegardée afin que le modèle auxiliaire corresponde exactement
+-- aux poids pré-entraînés, sauf override explicite de l'utilisateur.
 do
   local p = tostring(cfg.perceptual_checkpoint or "")
+  local perceptual_enabled = (tonumber(cfg.perceptual_weight or 0) or 0) > 0
+  local base_channels_explicit = opts["perceptual-base-channels"] ~= nil
+
   if #p > 0 and Ckpt then
     local resolver = Ckpt.resolve_dir_prefer_final or Ckpt.resolve_dir
     local resolved = resolver and resolver(p) or nil
     if resolved then
       cfg.perceptual_checkpoint = resolved
+      if not base_channels_explicit then
+        local arch_path = FS.join(resolved, "model", "architecture.json")
+        local f = io.open(arch_path, "r")
+        if f then
+          local json = f:read("*a") or ""
+          f:close()
+          local layer = json:match('"name"%s*:%s*"vgg16_feat/b1/c1"(.-)}')
+          local inferred = layer and tonumber(layer:match('"out_channels"%s*:%s*(%d+)')) or nil
+          if inferred and inferred >= 4 then
+            cfg.perceptual_base_channels = inferred
+          elseif perceptual_enabled then
+            error("Cannot infer perceptual base_channels from " .. arch_path)
+          end
+        elseif perceptual_enabled then
+          error("Missing perceptual architecture: " .. arch_path)
+        end
+      end
+    elseif perceptual_enabled then
+      error("Perceptual loss is enabled but no loadable checkpoint was found at: " .. p)
     end
+  elseif perceptual_enabled then
+    error("Perceptual loss is enabled but --perceptual-ckpt is empty")
   end
 end
+
+-- Si la perception est utilisee, le prior latent est obligatoire: ses poids
+-- seront hydrates par EMA avec les features du modele perceptuel.
+if (tonumber(cfg.perceptual_weight or 0) or 0) > 0 then
+  cfg.use_encoder_prior = true
+end
+cfg.perceptual_prior_momentum = opt_num("perceptual-prior-momentum", cfg.perceptual_prior_momentum or 0.95)
+cfg.perceptual_prior_scale = opt_num("perceptual-prior-scale", cfg.perceptual_prior_scale or 0.05)
 
 -- Paramètres recon loss
 cfg.huber_delta = opt_num("huber-delta", cfg.huber_delta or 1.0)
@@ -503,7 +536,7 @@ cfg.warmup_steps = opt_int("lr-warmup-steps", opt_int("warmup-steps", cfg.warmup
 
 -- Autosave (consommé côté C++ dans LuaScripting::lua_trainModel)
 -- 0 = désactiver. 1 = sauvegarde à chaque epoch.
-cfg.autosave_every_epochs = opt_int("autosave-every-epochs", opt_int("autosave_every_epochs", cfg.autosave_every_epochs or 1))
+cfg.autosave_every_epochs = opt_int("autosave-every-epochs", opt_int("autosave_every_epochs", 0))
 
 -- Marqueurs (Wasserstein/Temporal) qui modulent la loss de reconstruction côté C++.
 -- Par défaut: désactivé (0.0) pour conserver un training identique.
@@ -608,6 +641,11 @@ log(string.format("  - perceptual: weight=%g arch=%s base=%d ckpt=%s",
   tostring(cfg.perceptual_arch or ""),
   tonumber(cfg.perceptual_base_channels or 0) or 0,
   tostring(cfg.perceptual_checkpoint or "")))
+if (tonumber(cfg.perceptual_weight or 0) or 0) > 0 then
+  log(string.format("  - perceptual_prior: enabled=true momentum=%g scale=%g",
+    tonumber(cfg.perceptual_prior_momentum or 0.95) or 0.95,
+    tonumber(cfg.perceptual_prior_scale or 0.05) or 0.05))
+end
 log(string.format("  - seed=%d", seed))
 log(string.format("  - warmup: lr_warmup_steps=%d kl_warmup_steps=%d", cfg.warmup_steps or 0, cfg.kl_warmup_steps or 0))
 log(string.format("  - logvar_clip=[%g,%g] grad_clip_norm=%g",
@@ -748,12 +786,85 @@ if ok_train == false and tostring(err_train) == "STOP_REQUESTED" then
   })
   assert_ok(ok_save_stop, err_save_stop, "Serialization.save(stop) failed")
   log("✓ Checkpoint STOP écrit: " .. tostring(last_dir))
+
+  -- Snapshot debug JSON de fin d'entraînement (cas STOP).
+  do
+    local endtrain_path = last_dir .. "/endtrain.json"
+    local ok_dbg_end, err_dbg_end = Mimir.Serialization.save(endtrain_path, "debug_json", {
+      save_optimizer = true,
+      save_tokenizer = true,
+      save_encoder = true,
+      include_checksums = true,
+      include_git_info = true,
+      include_gradients = true,
+      include_activations = true,
+      include_optimizer_state = true,
+      include_weight_deltas = true,
+    })
+    assert_ok(ok_dbg_end, err_dbg_end, "Serialization.save(endtrain.json, debug_json) failed")
+    log("✓ Debug JSON écrit: " .. endtrain_path)
+  end
+
+  -- Export SafeTensors de fin d'entraînement (cas STOP).
+  do
+    local st_path = last_dir .. "/model.safetensors"
+    local ok_st, err_st = Mimir.Serialization.save(st_path, "safetensors", {
+      save_optimizer = true,
+      save_tokenizer = true,
+      save_encoder = true,
+      include_checksums = true,
+      include_git_info = true,
+      include_gradients = true,
+      include_activations = true,
+      include_optimizer_state = true,
+      include_weight_deltas = true,
+    })
+    assert_ok(ok_st, err_st, "Serialization.save(model.safetensors) failed")
+    log("✓ SafeTensors écrit: " .. st_path)
+  end
   return
 end
 assert_ok(ok_train, err_train, "Model.train failed")
 
 -- Sauvegarde
 FS.mkdir_p(save_out_dir)
+
+-- Snapshot debug JSON de fin d'entraînement (run normal).
+do
+  local endtrain_path = save_out_dir .. "/endtrain.json"
+  local ok_dbg_end, err_dbg_end = Mimir.Serialization.save(endtrain_path, "debug_json", {
+    save_optimizer = true,
+    save_tokenizer = true,
+    save_encoder = true,
+    include_checksums = true,
+    include_git_info = true,
+    include_gradients = true,
+    include_activations = true,
+    include_optimizer_state = true,
+    include_weight_deltas = true,
+  })
+  assert_ok(ok_dbg_end, err_dbg_end, "Serialization.save(endtrain.json, debug_json) failed")
+  log("✓ Debug JSON écrit: " .. endtrain_path)
+end
+
+-- Export SafeTensors de fin d'entraînement (run normal).
+do
+  local st_path = save_out_dir .. "/model.safetensors"
+  local ok_st, err_st = Mimir.Serialization.save(st_path, "safetensors", {
+    save_optimizer = true,
+    save_tokenizer = true,
+    save_encoder = true,
+    include_checksums = true,
+    include_git_info = true,
+    include_gradients = true,
+    include_activations = true,
+    include_optimizer_state = true,
+    include_weight_deltas = true,
+  })
+  assert_ok(ok_st, err_st, "Serialization.save(model.safetensors) failed")
+  log("✓ SafeTensors écrit: " .. st_path)
+end
+
 local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
   save_optimizer = true,
   save_tokenizer = true,

@@ -17,6 +17,14 @@
 
 namespace RuntimeLayerDispatch {
 
+inline bool cpu_supports_forward_layer_type(LayerType type) {
+    return type != LayerType::UNKNOWN;
+}
+
+inline bool cpu_supports_backward_layer_type(LayerType type) {
+    return type != LayerType::UNKNOWN && type != LayerType::NMS;
+}
+
 inline bool cpu_forward_layer(
     const std::vector<const std::vector<float>*>& inputs,
     std::vector<std::vector<float>>& outputs,
@@ -749,6 +757,118 @@ inline bool cpu_forward_layer(
                             Cp[static_cast<size_t>(i) * static_cast<size_t>(N) + static_cast<size_t>(j)] = sum;
                         }
                     }
+                }
+                return true;
+            }
+
+            case LayerType::NMS: {
+                if (inputs.size() < 2 || inputs[1] == nullptr) return false;
+                const std::vector<float>& boxes = *inputs[0];
+                const std::vector<float>& scores = *inputs[1];
+                if (boxes.size() % 4 != 0) return false;
+
+                const size_t count = boxes.size() / 4;
+                if (scores.size() != count) return false;
+                const std::vector<float>* classes =
+                    (inputs.size() >= 3) ? inputs[2] : nullptr;
+                if (classes != nullptr && classes->size() != count) return false;
+                if (!std::isfinite(layer.nms_iou_threshold) ||
+                    layer.nms_iou_threshold < 0.0f ||
+                    layer.nms_iou_threshold > 1.0f ||
+                    !std::isfinite(layer.nms_score_threshold) ||
+                    layer.nms_max_detections < 0) {
+                    return false;
+                }
+
+                struct Candidate {
+                    size_t index;
+                    float score;
+                    int class_id;
+                };
+                std::vector<Candidate> candidates;
+                candidates.reserve(count);
+                for (size_t i = 0; i < count; ++i) {
+                    const float score = scores[i];
+                    const size_t b = i * 4;
+                    if (!std::isfinite(score) ||
+                        score < layer.nms_score_threshold ||
+                        !std::isfinite(boxes[b]) ||
+                        !std::isfinite(boxes[b + 1]) ||
+                        !std::isfinite(boxes[b + 2]) ||
+                        !std::isfinite(boxes[b + 3])) {
+                        continue;
+                    }
+                    int class_id = 0;
+                    if (classes != nullptr) {
+                        const float raw_class = (*classes)[i];
+                        if (!std::isfinite(raw_class)) continue;
+                        class_id = static_cast<int>(std::llround(raw_class));
+                    }
+                    candidates.push_back({i, score, class_id});
+                }
+
+                std::stable_sort(
+                    candidates.begin(),
+                    candidates.end(),
+                    [](const Candidate& a, const Candidate& b) {
+                        if (a.score != b.score) return a.score > b.score;
+                        return a.index < b.index;
+                    });
+
+                auto iou = [&boxes](size_t lhs, size_t rhs) {
+                    const size_t a = lhs * 4;
+                    const size_t b = rhs * 4;
+                    const float ax1 = boxes[a];
+                    const float ay1 = boxes[a + 1];
+                    const float ax2 = boxes[a + 2];
+                    const float ay2 = boxes[a + 3];
+                    const float bx1 = boxes[b];
+                    const float by1 = boxes[b + 1];
+                    const float bx2 = boxes[b + 2];
+                    const float by2 = boxes[b + 3];
+
+                    const float area_a =
+                        std::max(0.0f, ax2 - ax1) * std::max(0.0f, ay2 - ay1);
+                    const float area_b =
+                        std::max(0.0f, bx2 - bx1) * std::max(0.0f, by2 - by1);
+                    const float iw =
+                        std::max(0.0f, std::min(ax2, bx2) - std::max(ax1, bx1));
+                    const float ih =
+                        std::max(0.0f, std::min(ay2, by2) - std::max(ay1, by1));
+                    const float intersection = iw * ih;
+                    const float union_area = area_a + area_b - intersection;
+                    return union_area > 0.0f ? intersection / union_area : 0.0f;
+                };
+
+                std::vector<Candidate> kept;
+                kept.reserve(candidates.size());
+                for (const Candidate& candidate : candidates) {
+                    bool suppressed = false;
+                    for (const Candidate& accepted : kept) {
+                        const bool same_class =
+                            layer.nms_class_agnostic ||
+                            classes == nullptr ||
+                            candidate.class_id == accepted.class_id;
+                        if (same_class &&
+                            iou(candidate.index, accepted.index) >
+                                layer.nms_iou_threshold) {
+                            suppressed = true;
+                            break;
+                        }
+                    }
+                    if (suppressed) continue;
+                    kept.push_back(candidate);
+                    if (layer.nms_max_detections > 0 &&
+                        kept.size() >=
+                            static_cast<size_t>(layer.nms_max_detections)) {
+                        break;
+                    }
+                }
+
+                outputs.resize(1);
+                outputs[0].reserve(kept.size());
+                for (const Candidate& candidate : kept) {
+                    outputs[0].push_back(static_cast<float>(candidate.index));
                 }
                 return true;
             }
@@ -3434,6 +3554,16 @@ inline bool cpu_backward_layer(
             }
 
             case LayerType::Constant: {
+                if (layer.trainable_parameter) {
+                    const std::vector<float>& go = *grad_outputs[0];
+                    if (go.size() != layer.getWeightsSize()) return false;
+                    if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                        layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+                    }
+                    for (size_t i = 0; i < go.size(); ++i) {
+                        layer.grad_weights[i] += go[i];
+                    }
+                }
                 grad_inputs.clear();
                 return true;
             }
@@ -3528,7 +3658,9 @@ inline bool cpu_backward_layer(
                     for (int n = 0; n < 3 * embed_dim; ++n) {
                         float sum = 0.0f;
                         for (int k = 0; k < embed_dim; ++k) {
-                            sum += xrow[static_cast<size_t>(k)] * Wqkv[static_cast<size_t>(k) * static_cast<size_t>(3 * embed_dim) + static_cast<size_t>(n)];
+                            sum += xrow[static_cast<size_t>(k)] *
+                                   Wqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
+                                         static_cast<size_t>(k)];
                         }
                         yrow[static_cast<size_t>(n)] = sum;
                     }
@@ -3692,14 +3824,15 @@ inline bool cpu_backward_layer(
                     }
                 }
 
-                for (int k = 0; k < embed_dim; ++k) {
-                    for (int n = 0; n < 3 * embed_dim; ++n) {
+                for (int n = 0; n < 3 * embed_dim; ++n) {
+                    for (int k = 0; k < embed_dim; ++k) {
                         float sum = 0.0f;
                         for (int i = 0; i < seq_len; ++i) {
                             sum += x[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
                                  * dqkv[static_cast<size_t>(i) * static_cast<size_t>(3 * embed_dim) + static_cast<size_t>(n)];
                         }
-                        gradWqkv[static_cast<size_t>(k) * static_cast<size_t>(3 * embed_dim) + static_cast<size_t>(n)] += sum;
+                        gradWqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
+                                 static_cast<size_t>(k)] += sum;
                     }
                 }
 
@@ -3710,8 +3843,11 @@ inline bool cpu_backward_layer(
                     float* xrow = &grad_inputs[0][static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
                     for (int k = 0; k < embed_dim; ++k) {
                         float sum = 0.0f;
-                        const float* wrow = &Wqkv[static_cast<size_t>(k) * static_cast<size_t>(3 * embed_dim)];
-                        for (int n = 0; n < 3 * embed_dim; ++n) sum += drow[n] * wrow[n];
+                        for (int n = 0; n < 3 * embed_dim; ++n) {
+                            sum += drow[n] *
+                                   Wqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
+                                         static_cast<size_t>(k)];
+                        }
                         xrow[static_cast<size_t>(k)] = sum;
                     }
                 }

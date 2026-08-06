@@ -1,20 +1,26 @@
-# Mode `--conf`: Config-Driven Scripting
-
-## Pour qui
-
-Débutant à intermédiaire (ops/automation).
-
-## Objectif
+# Configuration pilotée par fichier avec `--conf`
 
 Piloter des expériences via JSON avec --conf.
 
-## Avant de commencer
+**Public concerné :** Débutant à intermédiaire (ops/automation).
 
-Savoir éditer un fichier JSON.
+> **Prérequis**
+>
+> Savoir éditer un fichier JSON.
 
-## Résultat attendu
+## Sur cette page
 
-Tu peux rejouer une expérience avec les mêmes paramètres.
+- [Diagramme d'explication](#diagramme-dexplication)
+- [QuickStart](#quickstart)
+- [Structure de la config](#structure-de-la-config)
+- [Sections personnalisables](#sections-personnalisables)
+- [Variables injectées](#variables-injectées)
+- [Override avec --override](#override-avec---override)
+- [Exemples de workflows](#exemples-de-workflows)
+- [Bonnes pratiques](#bonnes-pratiques)
+- [Troubleshooting](#troubleshooting)
+- [Fichiers d'exemple](#fichiers-dexemple)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Diagramme d'explication
 
@@ -92,7 +98,7 @@ Les arguments sont accessibles dans le script via `arg[]` (std Lua).
 
 ### Format 3: Chemin alternatif (`run.lua.scripts`)
 
-Si la section `lua.scripts` est profondément imbriquée, tu peux l'organiser sous `run.lua.scripts`:
+Si la section `lua.scripts` est profondément imbriquée, vous pouvez l'organiser sous `run.lua.scripts`:
 
 ```json
 {
@@ -108,7 +114,7 @@ Si la section `lua.scripts` est profondément imbriquée, tu peux l'organiser so
 
 ## Sections personnalisables
 
-Au-delà de `lua.scripts`, tu peux ajouter n'importe quelle section JSON. Tout est accessible dans le script via la table `CONF`:
+Au-delà de `lua.scripts`, vous pouvez ajouter n'importe quelle section JSON. Tout est accessible dans le script via la table `CONF`:
 
 ```json
 {
@@ -222,9 +228,14 @@ Les overrides sont appliqués en JSON path. Exemples:
 
 ## Exemples de workflows
 
+Les chemins `scripts/workflows/*` et `scripts/stages/*` des exemples ci-dessous
+sont des **noms illustratifs à créer dans votre projet** ; ils ne sont pas fournis
+dans ce dépôt. Pour partir d’un fichier existant, copie
+`scripts/templates/template_conf_load_and_train.lua` et adapte-le.
+
 ### Exemple 1: Entraînement paramétrisé
 
-```json
+```jsonc
 {
   "lua": {
     "scripts": [
@@ -257,7 +268,7 @@ Exécute:
 
 ### Exemple 2: Pipeline multi-stage
 
-```json
+```jsonc
 {
   "lua": {
     "scripts": [
@@ -329,7 +340,7 @@ Bon:
 local data = load_csv(CONF_DIR .. "/../data/train.csv")
 ```
 
-### 2. **Documente ta config avec un `description` field**
+### 2. **Documente votre config avec un `description` field**
 
 ```json
 {
@@ -397,7 +408,7 @@ local batch_size = CONF.training.batch_size or 32
 
 ### Variables de config ne sont pas mises à jour
 
-**Problème:** Tu utilises `--override` mais le script ne voit pas les changements.
+**Problème:** Vous utilisez `--override` mais le script ne voit pas les changements.
 
 **Solution:** Les overrides ne changent que `CONF`. Si le script capture une variable locale avant l'override, la modification ne sera pas visible. Toujours accéder via `CONF` au lieu de cacher en variable locale:
 
@@ -423,3 +434,9 @@ Utilisation:
 ```bash
 ./bin/mimir --conf configs/example_conf_driven.json
 ```
+
+## Étapes suivantes
+
+- [Page précédente : Checkpoints / reprise d’entraînement](08-Checkpoints.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Mémoire (Allocator, MemoryGuard)](09-Memory.md)

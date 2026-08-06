@@ -13,6 +13,8 @@
 #include <ctime>
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
+#include <unordered_set>
 
 namespace {
 
@@ -38,6 +40,20 @@ static void set_env_if_present(nlohmann::json& env, const char* key) {
     if (const char* value = std::getenv(key)) {
         env[key] = value;
     }
+}
+
+static size_t shape_element_count(const std::vector<size_t>& shape) {
+    if (shape.empty()) return 0;
+    size_t count = 1;
+    for (const size_t dim : shape) {
+        if (dim == 0 || count > std::numeric_limits<size_t>::max() / dim) return 0;
+        count *= dim;
+    }
+    return count;
+}
+
+static nlohmann::json json_number_or_null(double value) {
+    return std::isfinite(value) ? nlohmann::json(value) : nlohmann::json(nullptr);
 }
 
 } // namespace
@@ -95,38 +111,84 @@ DebugJsonDump::TensorStats DebugJsonDump::calculate_stats(
 ) {
     TensorStats stats;
     stats.total_elements = size;
+    stats.finite_elements = 0;
+    stats.zero_elements = 0;
+    stats.nan_elements = 0;
+    stats.pos_inf_elements = 0;
+    stats.neg_inf_elements = 0;
     
     if (size == 0 || data == nullptr) {
-        stats.min = stats.max = stats.mean = stats.std = stats.l2_norm = 0.0f;
+        stats.min = stats.max = stats.mean = stats.std = stats.l2_norm = 0.0;
         return stats;
     }
     
-    // Calculate min, max, mean, L2 norm
-    float sum = 0.0f;
+    double sum = 0.0;
     double l2_sum = 0.0;
-    stats.min = data[0];
-    stats.max = data[0];
+    stats.min = std::numeric_limits<double>::infinity();
+    stats.max = -std::numeric_limits<double>::infinity();
     
     for (size_t i = 0; i < size; ++i) {
-        float val = data[i];
+        const double val = static_cast<double>(data[i]);
+        if (std::isnan(val)) {
+            ++stats.nan_elements;
+            continue;
+        }
+        if (std::isinf(val)) {
+            if (val > 0.0) ++stats.pos_inf_elements;
+            else ++stats.neg_inf_elements;
+            continue;
+        }
+        ++stats.finite_elements;
+        if (val == 0.0) ++stats.zero_elements;
         sum += val;
-        l2_sum += static_cast<double>(val) * static_cast<double>(val);
+        l2_sum += val * val;
         if (val < stats.min) stats.min = val;
         if (val > stats.max) stats.max = val;
     }
     
-    stats.mean = sum / static_cast<float>(size);
+    if (stats.finite_elements == 0) {
+        stats.min = stats.max = stats.mean = stats.std = stats.l2_norm = 0.0;
+        return stats;
+    }
+    stats.mean = sum / static_cast<double>(stats.finite_elements);
     stats.l2_norm = std::sqrt(l2_sum);
     
-    // Calculate standard deviation
-    float var_sum = 0.0f;
+    double var_sum = 0.0;
     for (size_t i = 0; i < size; ++i) {
-        float diff = data[i] - stats.mean;
+        const double val = static_cast<double>(data[i]);
+        if (!std::isfinite(val)) continue;
+        const double diff = val - stats.mean;
         var_sum += diff * diff;
     }
-    stats.std = std::sqrt(var_sum / static_cast<float>(size));
+    stats.std = std::sqrt(var_sum / static_cast<double>(stats.finite_elements));
     
     return stats;
+}
+
+json DebugJsonDump::tensor_stats_to_json(const TensorStats& stats) const {
+    json out;
+    out["total_elements"] = stats.total_elements;
+    out["finite_elements"] = stats.finite_elements;
+    out["zero_elements"] = stats.zero_elements;
+    out["nan_elements"] = stats.nan_elements;
+    out["pos_inf_elements"] = stats.pos_inf_elements;
+    out["neg_inf_elements"] = stats.neg_inf_elements;
+    out["has_non_finite"] =
+        stats.nan_elements + stats.pos_inf_elements + stats.neg_inf_elements > 0;
+    if (stats.finite_elements > 0) {
+        out["min"] = stats.min;
+        out["max"] = stats.max;
+        out["mean"] = stats.mean;
+        out["std"] = stats.std;
+        out["l2_norm"] = stats.l2_norm;
+    } else {
+        out["min"] = nullptr;
+        out["max"] = nullptr;
+        out["mean"] = nullptr;
+        out["std"] = nullptr;
+        out["l2_norm"] = nullptr;
+    }
+    return out;
 }
 
 DebugJsonDump::WeightDelta DebugJsonDump::calculate_delta(
@@ -222,6 +284,18 @@ json DebugJsonDump::build_json(
     // Model info
     json model_info;
     model_info["name"] = model.getModelName();
+    std::string model_type = "";
+    try {
+        if (model.modelConfig.contains("type") && model.modelConfig["type"].is_string()) {
+            model_type = model.modelConfig["type"].get<std::string>();
+        }
+    } catch (...) {
+        model_type.clear();
+    }
+    if (!model_type.empty()) {
+        model_info["type"] = model_type;
+        root["model_type"] = model_type;
+    }
     model_info["total_params"] = model.totalParamCount();
     model_info["num_layers"] = model.getLayers().size();
     
@@ -239,6 +313,7 @@ json DebugJsonDump::build_json(
         layer_obj["name"] = layer.name;
         layer_obj["type"] = layer.type;
         layer_obj["params_count"] = layer.params_count;
+        layer_obj["trainable_parameter"] = layer.trainable_parameter;
         layers_array.push_back(layer_obj);
     }
     root["layers"] = layers_array;
@@ -282,7 +357,7 @@ json DebugJsonDump::build_json(
         size_t sample_size = std::min(size, options.debug_max_values);
         json sample_array = json::array();
         for (size_t j = 0; j < sample_size; ++j) {
-            sample_array.push_back(data[j]);
+            sample_array.push_back(json_number_or_null(data[j]));
         }
         tensor_obj["sample_values"] = sample_array;
         tensor_obj["sample_size"] = sample_size;
@@ -586,6 +661,7 @@ void DebugJsonDump::add_tensor_enhanced(
     json& parent,
     const std::string& name,
     const float* data,
+    size_t element_count,
     const std::vector<size_t>& shape,
     const float* grad_data,
     size_t max_values,
@@ -598,47 +674,41 @@ void DebugJsonDump::add_tensor_enhanced(
     
     // Real shape (not just size)
     json shape_array = json::array();
-    size_t total_size = 1;
-    for (size_t dim : shape) {
+    std::vector<size_t> safe_shape = shape;
+    if (shape_element_count(safe_shape) != element_count) {
+        safe_shape = {element_count};
+        tensor_obj["shape_inferred"] = false;
+    } else {
+        tensor_obj["shape_inferred"] = true;
+    }
+    for (size_t dim : safe_shape) {
         shape_array.push_back(dim);
-        total_size *= dim;
     }
     tensor_obj["shape"] = shape_array;
-    tensor_obj["total_elements"] = total_size;
+    tensor_obj["total_elements"] = element_count;
     
-    if (data != nullptr && total_size > 0) {
+    if (data != nullptr && element_count > 0) {
         // Statistics
-        TensorStats stats = calculate_stats(data, total_size);
-        json stats_obj;
-        stats_obj["min"] = stats.min;
-        stats_obj["max"] = stats.max;
-        stats_obj["mean"] = stats.mean;
-        stats_obj["std"] = stats.std;
-        stats_obj["l2_norm"] = stats.l2_norm;
-        tensor_obj["stats"] = stats_obj;
+        TensorStats stats = calculate_stats(data, element_count);
+        tensor_obj["stats"] = tensor_stats_to_json(stats);
         
         // Sample values (first N)
-        size_t sample_size = std::min(total_size, max_values);
+        size_t sample_size = std::min(element_count, max_values);
         json sample_array = json::array();
         for (size_t j = 0; j < sample_size; ++j) {
-            sample_array.push_back(data[j]);
+            sample_array.push_back(json_number_or_null(data[j]));
         }
         tensor_obj["sample_values"] = sample_array;
         tensor_obj["sample_size"] = sample_size;
         
-        if (total_size > sample_size) {
+        if (element_count > sample_size) {
             tensor_obj["truncated"] = true;
         }
         
         // Gradients (if requested and available)
         if (include_grads && grad_data != nullptr) {
-            TensorStats grad_stats = calculate_stats(grad_data, total_size);
-            json grad_stats_obj;
-            grad_stats_obj["min"] = grad_stats.min;
-            grad_stats_obj["max"] = grad_stats.max;
-            grad_stats_obj["mean"] = grad_stats.mean;
-            grad_stats_obj["std"] = grad_stats.std;
-            grad_stats_obj["l2_norm"] = grad_stats.l2_norm;
+            TensorStats grad_stats = calculate_stats(grad_data, element_count);
+            json grad_stats_obj = tensor_stats_to_json(grad_stats);
             
             // Check if gradients are all zero
             bool all_zero = (grad_stats.l2_norm < 1e-9);
@@ -649,7 +719,7 @@ void DebugJsonDump::add_tensor_enhanced(
             // Sample gradient values
             json grad_sample = json::array();
             for (size_t j = 0; j < sample_size; ++j) {
-                grad_sample.push_back(grad_data[j]);
+                grad_sample.push_back(json_number_or_null(grad_data[j]));
             }
             tensor_obj["gradient_sample"] = grad_sample;
         }
@@ -681,7 +751,7 @@ void DebugJsonDump::add_tensor_info(
         size_t sample_size = std::min(size, max_values);
         json sample = json::array();
         for (size_t i = 0; i < sample_size; ++i) {
-            sample.push_back(data[i]);
+            sample.push_back(json_number_or_null(data[i]));
         }
         tensor_obj["sample"] = sample;
         
@@ -851,17 +921,36 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     json root;
 
     std::string tensor_dtype_tag = "F32";
+    size_t serialized_element_bytes = sizeof(float);
     try {
-        tensor_dtype_tag = dtype_to_string(string_to_dtype(model.getDefaultDType()));
+        const auto serialized_dtype = string_to_dtype(model.getDefaultDType());
+        tensor_dtype_tag = dtype_to_string(serialized_dtype);
+        serialized_element_bytes = dtype_size(serialized_dtype);
     } catch (...) {
         tensor_dtype_tag = "F32";
+        serialized_element_bytes = sizeof(float);
     }
     
     // Version and format
+    const auto timestamp = std::time(nullptr);
+    const std::string mimir_version = get_mimir_version();
+    const std::string git_commit = options.include_git_info ? get_git_commit() : std::string();
     root["format"] = "mimir_debug_dump";
-    root["format_version"] = "1.3.0";
-    root["timestamp"] = std::time(nullptr);
+    root["format_version"] = "1.4.0";
+    root["timestamp"] = timestamp;
     root["model_name"] = model.getModelName();
+
+    json metadata;
+    metadata["format"] = "mimir_debug_dump";
+    metadata["format_version"] = "1.4.0";
+    metadata["mimir_version"] = mimir_version;
+    metadata["created_at_epoch_seconds"] = static_cast<long long>(timestamp);
+    metadata["inspection_only"] = true;
+    metadata["tensor_values_truncated"] = true;
+    metadata["max_values_per_tensor"] = options.max_values_per_tensor;
+    if (!git_commit.empty()) metadata["git_commit"] = git_commit;
+    root["metadata"] = metadata;
+    root["mimir_version"] = mimir_version;
     
     // Features supported in this version
     json features = json::array();
@@ -870,14 +959,17 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     features.push_back("layer_io");
     features.push_back("extended_layer_types");
     features.push_back("framework_state");
+    features.push_back("export_metrics");
+    features.push_back("non_finite_metrics");
     if (options.include_gradients) features.push_back("gradients");
     if (options.include_weight_deltas) features.push_back("weight_deltas");
     if (options.include_optimizer_state) features.push_back("optimizer_state");
     if (options.include_checksums) features.push_back("checksums");
     root["features"] = features;
     
-    // Model statistics
-    root["total_params"] = model.totalParamCount();
+    // Model statistics. Keep legacy top-level fields and provide a scoped object.
+    const size_t logical_params = model.totalParamCount();
+    root["total_params"] = logical_params;
     root["num_layers"] = model.getLayers().size();
 
     // DType + config snapshot (kept in sync by Model::setDefaultDType)
@@ -890,6 +982,22 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
         }
         root["model_config"] = cfg;
     }
+    json model_info;
+    model_info["name"] = model.getModelName();
+    model_info["default_dtype"] = model.getDefaultDType();
+    model_info["layer_count"] = model.getLayers().size();
+    model_info["num_layers"] = model.getLayers().size();
+    model_info["logical_parameter_elements"] = logical_params;
+    model_info["total_params"] = logical_params;
+    model_info["parameters_frozen"] = model.parametersFrozen();
+    model_info["image_width"] = model.width();
+    model_info["image_height"] = model.height();
+    model_info["has_encoder"] = model.getHasEncoder();
+    model_info["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
+    if (root["model_config"].contains("type") && root["model_config"]["type"].is_string()) {
+        model_info["type"] = root["model_config"]["type"];
+    }
+    root["model"] = model_info;
 
     // Optional captured gradients: no longer supported (VAEModel removed)
     const std::unordered_map<std::string, std::vector<float>>* captured_grads = nullptr;
@@ -927,13 +1035,10 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
                 TensorStats s = calculate_stats(opt->m.data(), opt->m.size());
                 json mj;
                 mj["size"] = opt->m.size();
-                mj["stats"] = {
-                    {"min", s.min}, {"max", s.max}, {"mean", s.mean}, {"std", s.std},
-                    {"l2_norm", s.l2_norm}, {"total_elements", s.total_elements}
-                };
+                mj["stats"] = tensor_stats_to_json(s);
                 const size_t sample_n = std::min<size_t>(options.max_values_per_tensor, opt->m.size());
                 json sample = json::array();
-                for (size_t i = 0; i < sample_n; ++i) sample.push_back(opt->m[i]);
+                for (size_t i = 0; i < sample_n; ++i) sample.push_back(json_number_or_null(opt->m[i]));
                 mj["sample_values"] = sample;
                 mj["truncated"] = (opt->m.size() > sample_n);
                 opt_state["m"] = mj;
@@ -942,13 +1047,10 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
                 TensorStats s = calculate_stats(opt->v.data(), opt->v.size());
                 json vj;
                 vj["size"] = opt->v.size();
-                vj["stats"] = {
-                    {"min", s.min}, {"max", s.max}, {"mean", s.mean}, {"std", s.std},
-                    {"l2_norm", s.l2_norm}, {"total_elements", s.total_elements}
-                };
+                vj["stats"] = tensor_stats_to_json(s);
                 const size_t sample_n = std::min<size_t>(options.max_values_per_tensor, opt->v.size());
                 json sample = json::array();
-                for (size_t i = 0; i < sample_n; ++i) sample.push_back(opt->v[i]);
+                for (size_t i = 0; i < sample_n; ++i) sample.push_back(json_number_or_null(opt->v[i]));
                 vj["sample_values"] = sample;
                 vj["truncated"] = (opt->v.size() > sample_n);
                 opt_state["v"] = vj;
@@ -963,6 +1065,11 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     // Layer information with configs
     json layers_array = json::array();
     const auto& layers = model.getLayers();
+    size_t parameterized_layer_count = 0;
+    size_t exported_tensor_count = 0;
+    size_t exported_parameter_elements = 0;
+    size_t unique_parameter_elements = 0;
+    std::unordered_set<const float*> unique_parameter_buffers;
     
     for (size_t i = 0; i < layers.size(); ++i) {
         const Layer& layer = layers[i];
@@ -972,6 +1079,7 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
         layer_obj["name"] = layer.name;
         layer_obj["type"] = layer.type;
         layer_obj["params_count"] = layer.params_count;
+        layer_obj["trainable_parameter"] = layer.trainable_parameter;
         layer_obj["output"] = layer.output;
         if (!layer.inputs.empty()) {
             layer_obj["inputs"] = layer.inputs;
@@ -990,7 +1098,13 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
         const float* wb = layer.getWeights();
         const size_t wb_size = layer.getWeightsSize();
         if (wb && wb_size > 0) {
-            // Heuristique de séparation weights/bias pour Conv2d (layout: weights puis bias)
+            ++parameterized_layer_count;
+            exported_parameter_elements += wb_size;
+            if (unique_parameter_buffers.insert(wb).second) {
+                unique_parameter_elements += wb_size;
+            }
+
+            // Split a trailing bias only when dimensions prove its exact layout.
             size_t weight_count = wb_size;
             size_t bias_count = 0;
 
@@ -1009,6 +1123,21 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
                         bias_count = oc;
                     } else if (wb_size > conv_w) {
                         bias_count = wb_size - conv_w;
+                    }
+                }
+            } else if (layer.type_enum == LayerType::Linear &&
+                       layer.in_features > 0 && layer.out_features > 0) {
+                const size_t linear_w =
+                    static_cast<size_t>(layer.in_features) *
+                    static_cast<size_t>(layer.out_features);
+                const size_t linear_b = static_cast<size_t>(layer.out_features);
+                if (linear_w <= wb_size) {
+                    weight_count = linear_w;
+                    if (layer.use_bias && wb_size == linear_w + linear_b) {
+                        bias_count = linear_b;
+                    } else if (wb_size != linear_w) {
+                        // Unknown packed layout: describe the complete buffer safely.
+                        weight_count = wb_size;
                     }
                 }
             }
@@ -1034,12 +1163,14 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
                     tensors,
                     layer.name + ".weight",
                     wb,
+                    weight_count,
                     weight_shape.empty() ? std::vector<size_t>{weight_count} : weight_shape,
                     grad_ptr,
                     options.max_values_per_tensor,
                     options.include_gradients,
                     tensor_dtype_tag
                 );
+                ++exported_tensor_count;
 
                 if (options.include_checksums) {
                     uint64_t checksum = compute_checksum(wb, weight_count);
@@ -1088,12 +1219,14 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
                     tensors,
                     layer.name + ".bias",
                     bias_ptr,
+                    bias_count,
                     std::vector<size_t>{bias_count},
                     grad_bias_ptr,
                     options.max_values_per_tensor,
                     options.include_gradients,
                     tensor_dtype_tag
                 );
+                ++exported_tensor_count;
 
                 if (options.include_checksums) {
                     uint64_t checksum = compute_checksum(bias_ptr, bias_count);
@@ -1107,6 +1240,28 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     }
     
     root["layers"] = layers_array;
+
+    json export_metrics;
+    export_metrics["layer_count"] = layers.size();
+    export_metrics["parameterized_layer_count"] = parameterized_layer_count;
+    export_metrics["exported_parameter_tensor_count"] = exported_tensor_count;
+    export_metrics["logical_parameter_elements"] = logical_params;
+    export_metrics["referenced_parameter_elements"] = exported_parameter_elements;
+    export_metrics["unique_parameter_elements"] = unique_parameter_elements;
+    export_metrics["shared_parameter_elements"] =
+        exported_parameter_elements >= unique_parameter_elements
+            ? exported_parameter_elements - unique_parameter_elements
+            : 0;
+    export_metrics["runtime_parameter_bytes"] = unique_parameter_elements * sizeof(float);
+    export_metrics["serialized_parameter_bytes"] =
+        unique_parameter_elements * serialized_element_bytes;
+    export_metrics["serialized_dtype"] = tensor_dtype_tag;
+    export_metrics["serialized_element_bytes"] = serialized_element_bytes;
+    export_metrics["sampled_value_limit_per_tensor"] = options.max_values_per_tensor;
+    export_metrics["counts_include_optimizer"] = false;
+    export_metrics["counts_include_tokenizer"] = false;
+    export_metrics["counts_include_encoder"] = false;
+    root["export_metrics"] = export_metrics;
     
     // Tokenizer section (ONLY if model actually has a tokenizer)
     if (options.save_tokenizer) {
@@ -1132,8 +1287,8 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     // Git info (if requested)
     if (options.include_git_info) {
         json git;
-        git["commit"] = "unknown";  // Would parse from .git if available
-        git["branch"] = "unknown";
+        git["available"] = !git_commit.empty();
+        if (!git_commit.empty()) git["commit"] = git_commit;
         root["git"] = git;
     }
 
@@ -1151,21 +1306,33 @@ bool DebugJsonDump::save_enhanced(
 ) {
     try {
         json j = build_json_enhanced(model, options);
-        
+
+        fs::path file_path(path);
+        if (file_path.has_parent_path()) {
+            fs::create_directories(file_path.parent_path());
+        }
         std::ofstream file(path);
         if (!file.is_open()) {
-            std::cerr << "[DebugJsonDump] Failed to open file: " << path << std::endl;
+            const std::string message = "Failed to create DebugJson file: " + path;
+            if (error) *error = message;
+            std::cerr << "[DebugJsonDump] " << message << std::endl;
             return false;
         }
         
         // Write with pretty formatting (4 spaces indent)
         file << std::setw(4) << j << std::endl;
+        if (!file.good()) {
+            const std::string message = "Failed while writing DebugJson file: " + path;
+            if (error) *error = message;
+            return false;
+        }
         file.close();
         
         std::cerr << "[DebugJsonDump] Saved enhanced debug JSON to: " << path << std::endl;
         return true;
         
     } catch (const std::exception& e) {
+        if (error) *error = std::string("DebugJson export error: ") + e.what();
         std::cerr << "[DebugJsonDump] Error saving enhanced JSON: " << e.what() << std::endl;
         return false;
     }

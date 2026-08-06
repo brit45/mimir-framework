@@ -1,28 +1,19 @@
-## Pour qui
+# Registre d’architectures et builders
 
-Développeur avancé qui modifie le moteur C/C++.
+Cette page explique comment le registre transforme une configuration JSON en
+instance de `Model`, puis comment les builders construisent sa topologie.
 
-## Objectif
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Comprendre le fonctionnement interne exact des composants runtime.
-
-## Avant de commencer
-
-Connaître les bases C++ et la structure du dépôt.
-
-## Résultat attendu
-
-Tu peux modifier le code interne en limitant les régressions.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
 ## Diagrammes d'explication
 
 ![Flux model factory](../graphs/06_model_factory_flow.svg)
 
 ![Flux de création d'architecture](../graphs/24_architecture_creation_flow.svg)
-
-# Internals : registre d’architectures (`ModelArchitectures`) et builders
-
-Cette page documente le registre d’architectures (config JSON → instance de `Model`) et la manière dont les topologies sont construites.
 
 Source de vérité :
 
@@ -61,3 +52,9 @@ Sous le capot :
 
 - CLI : `src/main.cpp` (`--config` et `--conf`)
 - Lua : `LuaScripting` (`Mimir.Architectures.*` et `Mimir.Model.create`)
+
+## Étapes suivantes
+
+- [Page précédente : Internals : `RuntimeAllocator` et scratchpads](18-RuntimeAllocator-And-Scratchpads.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Internals : CLI (binaire `mimir`) et points d’entrée](20-CLI-EntryPoints.md)

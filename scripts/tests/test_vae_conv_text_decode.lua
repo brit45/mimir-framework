@@ -21,7 +21,7 @@
 --   --interp-alpha <f>        Coefficient d'interpolation [0..1] (défaut: 0.5)
 --   --alloc-gb <n>            RAM max pour l'allocateur (défaut: 8)
 
----@diagnostic disable: need-check-nil, inject-field
+---@diagnostic disable: need-check-nil, inject-field, undefined-global
 
 local Args = dofile("scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
@@ -237,7 +237,10 @@ local function infer_cfg_from_checkpoint(ckpt_dir)
 
     local mc = arch.model_config or arch.modelConfig
     if type(mc) == "table" and (tonumber(mc.image_w) or 0) > 0 then
-        local function mci(k) return math.floor(tonumber(mc[k] or 0)) end
+        local function mci(k)
+            local v = tonumber(mc[k])
+            return math.floor(v or 0)
+        end
         return {
             image_w              = mci("image_w"),
             image_h              = mci("image_h"),

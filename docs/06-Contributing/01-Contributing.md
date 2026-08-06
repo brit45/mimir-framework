@@ -1,20 +1,12 @@
 # Contribuer
 
-## Pour qui
-
-Contributeur du projet.
-
-## Objectif
-
 Contribuer avec des changements cohérents et maintenables.
 
-## Avant de commencer
+**Public concerné :** Contributeur du projet.
 
-Connaître le workflow Git et les bases du projet.
-
-## Résultat attendu
-
-Tu sais proposer des changements alignés avec les conventions du framework.
+> **Prérequis**
+>
+> Connaître le workflow Git et les bases du projet.
 
 ## Diagramme d'explication
 
@@ -44,3 +36,9 @@ Compléments développeurs :
 - Nouvelle architecture : `src/Models/Registry/ModelArchitectures.cpp`
 - API scripting (contrat système commun) : `src/scriptings/ScriptingContext.hpp`
 - API Lua (implémentation) : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`
+
+## Étapes suivantes
+
+- [Revenir à la documentation](../00-INDEX.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Développeurs : Ajouter une Architecture et Utiliser les Outils](02-New-Architecture-And-Tools.md)

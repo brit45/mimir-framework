@@ -78,6 +78,40 @@ local function file_exists(path)
   return FS.file_exists(path)
 end
 
+local function strip_extension(path)
+  local s = tostring(path or "")
+  local base = s:match("^(.*)%.([^.]+)$")
+  return base or s
+end
+
+local function default_class_composition_path(vocab_path)
+  return strip_extension(vocab_path) .. ".composition.json"
+end
+
+local function decode_json_table(raw)
+  local json_mod = rawget(_G, "json")
+  if type(json_mod) == "table" and type(json_mod.decode) == "function" then
+    local ok, v = pcall(json_mod.decode, raw)
+    if ok and type(v) == "table" then return v end
+  end
+
+  local cjson_mod = rawget(_G, "cjson")
+  if type(cjson_mod) == "table" and type(cjson_mod.decode) == "function" then
+    local ok, v = pcall(cjson_mod.decode, raw)
+    if ok and type(v) == "table" then return v end
+  end
+
+  return nil
+end
+
+local function read_all(path)
+  local f = io.open(path, "r")
+  if not f then return nil, "cannot open file: " .. tostring(path) end
+  local s = f:read("*a") or ""
+  f:close()
+  return s, nil
+end
+
 local function read_lines(path)
   local f = io.open(path, "r")
   if not f then return nil, "cannot open file: " .. tostring(path) end
@@ -136,6 +170,8 @@ local max_items = opt_int("max-items", 0)
 local log_every = opt_int("log-every", 1)
 
 local lowercase_tags = opt_bool("lowercase-tags", true)
+local class_composition_path = opt_str("class-composition", "")
+local use_class_composition_weights = opt_bool("use-class-composition-weights", true)
 
 -- Validation (anti-collapse)
 local validate_items = opt_int("validate-items", opt_int("val-items", 32))
@@ -173,9 +209,59 @@ if #tags_vocab < 2 then
   error("tags vocab trop petit (>=2 recommandé): " .. tostring(tags_vocab_path))
 end
 
+if class_composition_path == "" then
+  local guessed = default_class_composition_path(tags_vocab_path)
+  if file_exists(guessed) then
+    class_composition_path = guessed
+  end
+end
+
+local class_pos_weights = nil
+if use_class_composition_weights and class_composition_path ~= "" then
+  if not file_exists(class_composition_path) then
+    error("composition de classes introuvable: " .. tostring(class_composition_path))
+  end
+  local raw_comp, err_comp = read_all(class_composition_path)
+  if not raw_comp then
+    error("lecture composition de classes échouée: " .. tostring(err_comp))
+  end
+  local comp = decode_json_table(raw_comp)
+  if type(comp) ~= "table" or type(comp.classes) ~= "table" then
+    error("composition de classes invalide: champ classes manquant")
+  end
+
+  local weights_by_tag = {}
+  for _, entry in ipairs(comp.classes) do
+    if type(entry) == "table" and type(entry.tag) == "string" then
+      local w = tonumber(entry.recommended_pos_weight)
+      if w and w > 0 then
+        weights_by_tag[entry.tag] = w
+      end
+    end
+  end
+
+  class_pos_weights = {}
+  local matched = 0
+  for i, tag in ipairs(tags_vocab) do
+    local w = weights_by_tag[tag]
+    if w then
+      class_pos_weights[i] = w
+      matched = matched + 1
+    else
+      class_pos_weights[i] = bce_pos_weight
+    end
+  end
+  if matched == 0 then
+    error("composition de classes invalide: aucune classe du vocabulaire ne correspond")
+  end
+end
+
 log("=== Train " .. arch .. " multi-label tags ===")
 log(string.format("- dataset_root=%s", dataset_root))
 log(string.format("- tags_vocab=%s (classes=%d)", tags_vocab_path, #tags_vocab))
+if class_composition_path ~= "" then
+  log(string.format("- class_composition=%s use_weights=%s", class_composition_path, tostring(use_class_composition_weights)))
+end
 log(string.format("- out_dir=%s", out_dir))
 log(string.format("- image=%dx%dx%d", image_w, image_h, image_c))
 log(string.format("- base_channels=%d fc_hidden=%d", base_channels, fc_hidden))
@@ -211,6 +297,7 @@ cfg.seed = seed
 
 cfg.lowercase_tags = lowercase_tags
 cfg.tags_vocab = tags_vocab
+if class_pos_weights then cfg.class_pos_weights = class_pos_weights end
 
 -- Validation knobs (consommés côté C++)
 cfg.validate_items = validate_items

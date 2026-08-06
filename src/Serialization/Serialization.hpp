@@ -31,10 +31,15 @@ enum class DType {
     Float16,
     BFloat16,
     Float64,
-    Int32,
+    Int8,
     Int16,
+    Int32,
+    Int64,
+    Uint8,
     Uint16,
-    Uint8
+    Uint32,
+    Uint64,
+    Bool
 };
 
 struct SaveOptions {

@@ -7,7 +7,6 @@
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
-#include "Models/Diffusion/PonyXLDDPMModel.hpp"
 #include "Helpers.hpp"
 #include <fstream>
 #include <sstream>
@@ -177,6 +176,9 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_createModel);
     lua_setfield(L, -2, "create");
 
+    lua_pushcfunction(L, lua_createEmptyModel);
+    lua_setfield(L, -2, "create_empty");
+
     lua_pushcfunction(L, lua_createModelFromConfig);
     lua_setfield(L, -2, "create_from_config");
     
@@ -207,6 +209,9 @@ void LuaScripting::registerAPI() {
 
     lua_pushcfunction(L, lua_getModelLayers);
     lua_setfield(L, -2, "get_layers");
+
+    lua_pushcfunction(L, lua_clearModelLayers);
+    lua_setfield(L, -2, "clear_layers");
     
     lua_pushcfunction(L, lua_pushLayer);
     lua_setfield(L, -2, "push_layer");
@@ -241,31 +246,6 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_modelDType);
     lua_setfield(L, -2, "dtype");
 
-    // Helpers spécifiques (PonyXL / Diffusion)
-    lua_pushcfunction(L, lua_ponyxlDdpmTrainStep);
-    lua_setfield(L, -2, "ponyxl_ddpm_train_step");
-
-    lua_pushcfunction(L, lua_ponyxlDdpmValidateStep);
-    lua_setfield(L, -2, "ponyxl_ddpm_validate_step");
-
-    lua_pushcfunction(L, lua_ponyxlDdpmVizReconstructStep);
-    lua_setfield(L, -2, "ponyxl_ddpm_viz_reconstruct_step");
-
-    lua_pushcfunction(L, lua_ponyxlDdpmText2Img);
-    lua_setfield(L, -2, "ponyxl_ddpm_text2img");
-
-    lua_pushcfunction(L, lua_ponyxlDdpmText2ImgLatent);
-    lua_setfield(L, -2, "ponyxl_ddpm_text2img_latent");
-
-    lua_pushcfunction(L, lua_ponyxlDdpmSetVaeScale);
-    lua_setfield(L, -2, "ponyxl_ddpm_set_vae_scale");
-
-    lua_pushcfunction(L, lua_ponyxlDdpmGetVaeScale);
-    lua_setfield(L, -2, "ponyxl_ddpm_get_vae_scale");
-
-    lua_pushcfunction(L, lua_ponyxlDdpmVaeMuMoments);
-    lua_setfield(L, -2, "ponyxl_ddpm_vae_mu_moments");
-    
     // Expose both Mimir.Model and Mimir.model (lowercase alias)
     lua_pushvalue(L, -1);
     lua_setfield(L, -3, "model");  // Mimir.model

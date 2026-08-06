@@ -1,20 +1,12 @@
 # Performance (CPU)
 
-## Pour qui
-
-Utilisateur intermédiaire à avancé.
-
-## Objectif
-
 Optimiser, diagnostiquer et stabiliser des runs complexes.
 
-## Avant de commencer
+**Public concerné :** Utilisateur intermédiaire à avancé.
 
-Avoir déjà exécuté au moins un pipeline complet.
-
-## Résultat attendu
-
-Tu peux investiguer les problèmes de perf et de stabilité.
+> **Prérequis**
+>
+> Avoir déjà exécuté au moins un pipeline complet.
 
 
 Cette page liste les leviers **réels** (implémentés) pour améliorer les perfs, et où les retrouver côté C/C++.
@@ -25,17 +17,17 @@ Point d’entrée conseillé : [04-Source-Code-Map.md](04-Source-Code-Map.md).
 
 Dans ce repo, les goulots typiques côté CPU sont :
 
-- `Linear` / `MatMul` (projection, MLP, embeddings) : `src/LayerOps.hpp`, `src/SIMD_Ops.hpp`, et le dispatch dans `src/Model.cpp`.
-- Attention (QKV + softmax + matmul) : `src/LayerOps.hpp`.
-- Conv / ops “image” (si workload diffusion/vae) : `src/Layers.hpp`, `src/LayerOpsExt.hpp`.
-- Allocations temporaires / copies : `src/RuntimeAllocator.hpp`, `src/tensors.cpp`, `src/DynamicTensorAllocator.*`.
+- `Linear` / `MatMul` (projection, MLP, embeddings) : `src/runtimes/cpu/LayerOps.hpp`, `src/runtimes/cpu/SIMD_Ops.hpp`, et le dispatch dans `src/Model.cpp`.
+- Attention (QKV + softmax + matmul) : `src/runtimes/cpu/LayerOps.hpp`.
+- Conv / ops “image” (si workload diffusion/vae) : `src/Layers.hpp`, `src/runtimes/cpu/LayerOpsExt.hpp`.
+- Allocations temporaires / copies : `src/runtimes/cpu/RuntimeAllocator.hpp`, `src/tensors.cpp`, `src/DynamicTensorAllocator.*`.
 
 ## 2) OpenMP (threads)
 
 Le code utilise OpenMP (si compilé avec support) pour paralléliser certaines boucles (matmul/conv/ops) avec des seuils de travail.
 
 - Au démarrage, le binaire affiche le nombre de threads disponibles et appelle `omp_set_num_threads(omp_get_max_threads())` (voir `src/main.cpp`).
-- Les kernels ont souvent des directives du type `#pragma omp parallel for ... if(work >= 262144)` (par ex. dans `src/LayerOps.hpp`, `src/SIMD_Ops.hpp`, `src/LayerOpsExt.hpp`).
+- Les kernels ont souvent des directives du type `#pragma omp parallel for ... if(work >= 262144)` (par ex. dans `src/runtimes/cpu/LayerOps.hpp`, `src/runtimes/cpu/SIMD_Ops.hpp`, `src/runtimes/cpu/LayerOpsExt.hpp`).
 
 Conseils pratiques :
 
@@ -47,7 +39,7 @@ Conseils pratiques :
 Le runtime expose des kernels AVX2 sur certaines ops (et un fallback sinon) :
 
 - Détection des capacités + affichage au démarrage : `src/main.cpp` + helpers `Model::hasAVX2()` etc.
-- Kernels SIMD : `src/SIMD_Ops.hpp`, et certaines routines dans `src/Layers.hpp` / `src/HardwareOpt.hpp`.
+- Kernels SIMD : `src/runtimes/cpu/SIMD_Ops.hpp`, et certaines routines dans `src/Layers.hpp` / `src/runtimes/cpu/HardwareOpt.hpp`.
 
 Conseils pratiques :
 
@@ -59,7 +51,7 @@ Conseils pratiques :
 Ce qui compte ici est moins “malloc vs new” et plus “qui alloue, quand, et sous quel garde-fou” :
 
 - Les tenseurs “dynamiques” (utilisés dans des chemins runtime) passent par `DynamicTensorAllocator` et sont comptabilisés par `MemoryGuard` (voir `src/tensors.cpp`, `src/DynamicTensorAllocator.*`, `src/MemoryGuard.hpp`).
-- Les scratchpads/temporaires RAII sont gérés par `RuntimeAllocator` (voir `src/RuntimeAllocator.hpp`) — utile pour limiter les pics de mémoire et stabiliser les perfs.
+- Les scratchpads/temporaires RAII sont gérés par `RuntimeAllocator` (voir `src/runtimes/cpu/RuntimeAllocator.hpp`) — utile pour limiter les pics de mémoire et stabiliser les perfs.
 
 Conseils pratiques :
 
@@ -109,3 +101,9 @@ export MIMIR_ACCEL_VERBOSE=1
 export MIMIR_RUNTIME_TRACE=1
 ./bin/mimir --lua scripts/benchmarks/benchmark.lua
 ```
+
+## Étapes suivantes
+
+- [Revenir à la documentation](../00-INDEX.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Debugging & stabilité numérique](02-Debugging.md)

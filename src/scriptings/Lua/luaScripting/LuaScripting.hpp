@@ -50,11 +50,18 @@ public:
     // Enregistrer les bindings
     void registerAPI() override;
 
+    // Découvre <project_root>/_archi/*.mpk et expose chaque package valide
+    // comme une entrée du registre d'architectures.
+    static std::size_t autoRegisterMpkArchitectures(
+        const std::string& project_root,
+        std::vector<std::string>* warnings = nullptr);
+
 private:
     lua_State* L;
     
     // === Model API ===
     static int lua_createModel(lua_State* L);
+    static int lua_createEmptyModel(lua_State* L);
     static int lua_createModelFromConfig(lua_State* L);
     static int lua_buildModel(lua_State* L);
     static int lua_trainModel(lua_State* L);
@@ -73,17 +80,10 @@ private:
     static int lua_initWeights(lua_State* L);
     static int lua_totalParams(lua_State* L);
     static int lua_getModelLayers(lua_State* L);
+    static int lua_clearModelLayers(lua_State* L);
     static int lua_pushLayer(lua_State* L);
     static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
-    static int lua_ponyxlDdpmTrainStep(lua_State* L);
-    static int lua_ponyxlDdpmValidateStep(lua_State* L);
-    static int lua_ponyxlDdpmVizReconstructStep(lua_State* L);
-    static int lua_ponyxlDdpmText2Img(lua_State* L);
-    static int lua_ponyxlDdpmText2ImgLatent(lua_State* L);
-    static int lua_ponyxlDdpmSetVaeScale(lua_State* L);
-    static int lua_ponyxlDdpmGetVaeScale(lua_State* L);
-    static int lua_ponyxlDdpmVaeMuMoments(lua_State* L);
     static int lua_forwardPromptImageSeed(lua_State* L);
 
     // === Image IO helpers (Lua) ===

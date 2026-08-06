@@ -14,7 +14,7 @@ namespace Serialization {
 using json = nlohmann::json;
 
 /**
- * Enhanced DebugJson options (v1.3.0)
+ * Enhanced DebugJson options (v1.4.0)
  */
 struct DebugJsonOptions {
     bool include_gradients = false;
@@ -31,8 +31,8 @@ struct DebugJsonOptions {
 /**
  * DebugJsonDump - Create debug JSON dumps of models
  * 
- * v1.3.0: Enhanced with layer configs, real shapes, gradients, weight deltas,
- *         and framework state snapshot.
+ * v1.4.0: Adds scoped metadata/model/export metrics, safe shape accounting,
+ *         and explicit non-finite statistics.
  * For development and debugging only. NOT for production use.
  * Saves model structure + truncated tensor data + statistics.
  */
@@ -63,11 +63,16 @@ public:
     
 private:
     struct TensorStats {
-        float min;
-        float max;
-        float mean;
-        float std;
+        double min;
+        double max;
+        double mean;
+        double std;
         size_t total_elements;
+        size_t finite_elements;
+        size_t zero_elements;
+        size_t nan_elements;
+        size_t pos_inf_elements;
+        size_t neg_inf_elements;
         double l2_norm;
     };
     
@@ -82,6 +87,8 @@ private:
      * Calculate tensor statistics.
      */
     TensorStats calculate_stats(const float* data, size_t size);
+
+    json tensor_stats_to_json(const TensorStats& stats) const;
     
     /**
      * Calculate weight delta between snapshots.
@@ -142,6 +149,7 @@ private:
         json& parent,
         const std::string& name,
         const float* data,
+        size_t element_count,
         const std::vector<size_t>& shape,
         const float* grad_data,
         size_t max_values,

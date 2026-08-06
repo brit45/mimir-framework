@@ -5,6 +5,8 @@
 #include <fstream>
 #include <algorithm>
 #include <cstring>
+#include <limits>
+#include <unordered_set>
 
 namespace Mimir {
 namespace Serialization {
@@ -22,6 +24,11 @@ bool SafeTensorsReader::load(
     std::string* error
 ) {
     try {
+        const uint16_t endian_probe = 1;
+        if (*reinterpret_cast<const uint8_t*>(&endian_probe) != 1) {
+            if (error) *error = "SafeTensors loading requires little-endian host support";
+            return false;
+        }
         // Check if file exists
         if (!fs::exists(path)) {
             if (error) {
@@ -68,13 +75,20 @@ bool SafeTensorsReader::parse_header(
         
         // Read header length (8 bytes, little-endian)
         uint64_t header_len = read_u64_le(file);
-        if (!file || header_len == 0 || header_len > 100 * 1024 * 1024) {  // Max 100MB header
+        if (!file || header_len == 0 || header_len > 100 * 1024 * 1024 ||
+            header_len > std::numeric_limits<size_t>::max()) {  // Max 100MB header
             if (error) {
                 *error = "Invalid header length";
             }
             return false;
         }
         
+        const uintmax_t file_size = fs::file_size(path);
+        if (header_len > file_size - 8) {
+            if (error) *error = "Header length exceeds file size";
+            return false;
+        }
+
         // Read header JSON
         std::vector<char> header_data(header_len);
         file.read(header_data.data(), header_len);
@@ -85,13 +99,70 @@ bool SafeTensorsReader::parse_header(
             return false;
         }
         
-        // Parse JSON
+        if (header_data.empty() || header_data.front() != '{') {
+            if (error) *error = "SafeTensors header must begin with '{'";
+            return false;
+        }
+
+        // Parse JSON and reject duplicate keys at every object depth.
         std::string header_str(header_data.begin(), header_data.end());
-        header_out = json::parse(header_str);
+        bool duplicate_key = false;
+        std::unordered_map<int, std::unordered_set<std::string>> keys_by_depth;
+        json::parser_callback_t callback =
+            [&](int depth, json::parse_event_t event, json& parsed) {
+                if (event == json::parse_event_t::object_start) {
+                    keys_by_depth[depth].clear();
+                } else if (event == json::parse_event_t::key) {
+                    auto& keys = keys_by_depth[depth - 1];
+                    if (!keys.insert(parsed.get<std::string>()).second) duplicate_key = true;
+                } else if (event == json::parse_event_t::object_end) {
+                    keys_by_depth.erase(depth);
+                }
+                return true;
+            };
+        header_out = json::parse(header_str, callback);
+        if (duplicate_key) {
+            if (error) *error = "Duplicate key in SafeTensors header";
+            return false;
+        }
+        if (!header_out.is_object()) {
+            if (error) *error = "SafeTensors header root must be an object";
+            return false;
+        }
+
+        if (header_out.contains("__metadata__")) {
+            const auto& metadata = header_out["__metadata__"];
+            if (!metadata.is_object()) {
+                if (error) *error = "__metadata__ must be an object";
+                return false;
+            }
+            for (auto it = metadata.begin(); it != metadata.end(); ++it) {
+                if (!it.value().is_string()) {
+                    if (error) *error = "__metadata__ values must all be strings";
+                    return false;
+                }
+            }
+        }
         
         // Data starts after 8-byte length + header
         data_offset_out = 8 + header_len;
         
+        auto checked_element_count = [](const std::vector<size_t>& shape, size_t& count) {
+            count = 1; // [] is a scalar
+            for (const size_t dim : shape) {
+                if (dim != 0 && count > std::numeric_limits<size_t>::max() / dim) return false;
+                count *= dim;
+            }
+            return true;
+        };
+        auto is_official_supported_dtype = [](const std::string& dtype) {
+            return dtype == "F64" || dtype == "F32" || dtype == "F16" ||
+                   dtype == "BF16" || dtype == "I64" || dtype == "I32" ||
+                   dtype == "I16" || dtype == "I8" || dtype == "U64" ||
+                   dtype == "U32" || dtype == "U16" || dtype == "U8" ||
+                   dtype == "BOOL";
+        };
+
         // Extract tensor information
         for (auto it = header_out.begin(); it != header_out.end(); ++it) {
             if (it.key() == "__metadata__") {
@@ -99,6 +170,10 @@ bool SafeTensorsReader::parse_header(
             }
             
             const json& tensor_entry = it.value();
+            if (!tensor_entry.is_object()) {
+                if (error) *error = "Tensor entry must be an object: " + it.key();
+                return false;
+            }
             
             ParsedTensor tensor;
             tensor.name = it.key();
@@ -110,7 +185,15 @@ bool SafeTensorsReader::parse_header(
                 }
                 return false;
             }
-            std::string dtype_str = tensor_entry["dtype"];
+            if (!tensor_entry["dtype"].is_string()) {
+                if (error) *error = "Invalid dtype for tensor: " + tensor.name;
+                return false;
+            }
+            std::string dtype_str = tensor_entry["dtype"].get<std::string>();
+            if (!is_official_supported_dtype(dtype_str)) {
+                if (error) *error = "Unsupported or non-canonical SafeTensors dtype: " + dtype_str;
+                return false;
+            }
             tensor.dtype = string_to_dtype(dtype_str);
             
             // Parse shape
@@ -118,6 +201,10 @@ bool SafeTensorsReader::parse_header(
                 if (error) {
                     *error = "Missing shape for tensor: " + tensor.name;
                 }
+                return false;
+            }
+            if (!tensor_entry["shape"].is_array()) {
+                if (error) *error = "Invalid shape for tensor: " + tensor.name;
                 return false;
             }
             tensor.shape = tensor_entry["shape"].get<std::vector<size_t>>();
@@ -136,15 +223,26 @@ bool SafeTensorsReader::parse_header(
                 }
                 return false;
             }
+            if (!offsets[0].is_number_unsigned() || !offsets[1].is_number_unsigned()) {
+                if (error) *error = "Non-unsigned data_offsets for tensor: " + tensor.name;
+                return false;
+            }
             tensor.data_begin = offsets[0].get<size_t>();
             tensor.data_end = offsets[1].get<size_t>();
+            if (tensor.data_end < tensor.data_begin) {
+                if (error) *error = "Reversed data_offsets for tensor: " + tensor.name;
+                return false;
+            }
             
             // Validate size
-            size_t expected_size = 1;
-            for (size_t dim : tensor.shape) {
-                expected_size *= dim;
+            size_t element_count = 0;
+            if (!checked_element_count(tensor.shape, element_count) ||
+                (dtype_size(tensor.dtype) != 0 &&
+                 element_count > std::numeric_limits<size_t>::max() / dtype_size(tensor.dtype))) {
+                if (error) *error = "Tensor shape size overflow: " + tensor.name;
+                return false;
             }
-            expected_size *= dtype_size(tensor.dtype);
+            const size_t expected_size = element_count * dtype_size(tensor.dtype);
             
             if (tensor.data_end - tensor.data_begin != expected_size) {
                 if (error) {
@@ -154,6 +252,29 @@ bool SafeTensorsReader::parse_header(
             }
             
             tensors_out.push_back(tensor);
+        }
+
+        std::sort(tensors_out.begin(), tensors_out.end(),
+                  [](const ParsedTensor& a, const ParsedTensor& b) {
+                      if (a.data_begin != b.data_begin) return a.data_begin < b.data_begin;
+                      return a.data_end < b.data_end;
+                  });
+        size_t expected_begin = 0;
+        for (const auto& tensor : tensors_out) {
+            if (tensor.data_begin != expected_begin) {
+                if (error) *error = tensor.data_begin < expected_begin
+                    ? "Overlapping tensor data offsets"
+                    : "Hole in tensor data offsets";
+                return false;
+            }
+            expected_begin = tensor.data_end;
+        }
+        const uintmax_t actual_data_size = file_size - data_offset_out;
+        if (expected_begin != actual_data_size) {
+            if (error) *error = expected_begin < actual_data_size
+                ? "Unindexed trailing bytes in SafeTensors buffer"
+                : "Tensor data offsets exceed file size";
+            return false;
         }
         
         return true;

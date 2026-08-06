@@ -6,7 +6,8 @@ Help.auto_exit_help()
 --  TEMPLATE SCRIPT - Mímir Framework v2.4.0
 --  Utilisez ce template pour créer vos propres modèles
 --  
---  📚 Synchronisé avec l'API Lua exposée par src/LuaScripting.cpp
+--  📚 Synchronisé avec l'API enregistrée dans
+--     src/scriptings/Lua/luaScripting/LuaScripting.cpp
 -- ══════════════════════════════════════════════════════════════
 
 ---@type string Tag de run (sert aux chemins de sauvegarde, logs, etc.)
@@ -14,7 +15,7 @@ local RUN_TAG = "my_model"
 
 ---@type ModelType Type du modèle à construire (doit correspondre au registry C++)
 -- Astuce: vous pouvez surcharger l'archi via env:
---   MIMIR_ARCH=ponyxl_sdxl_stub ./bin/mimir --lua scripts/templates/template_new_model.lua
+--   MIMIR_ARCH=vae_conv ./bin/mimir --lua scripts/templates/template_new_model.lua
 -- Valeur par défaut: choisir une archi connue du repo.
 local MODEL_TYPE = os.getenv("MIMIR_ARCH") or "vae_conv"
 

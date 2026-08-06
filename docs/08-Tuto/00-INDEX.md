@@ -1,35 +1,49 @@
-# Tuto - Index
+# Tutoriels
 
-## Pour qui
+Les tutoriels Mímir partent d'un résultat concret et expliquent progressivement
+les mécanismes utilisés. Commencez par le parcours général si vous découvrez le
+framework, puis choisissez un guide selon ce que vous souhaitez construire.
 
-Debutants, etudiants et profils avances qui veulent progresser par niveaux.
+## Apprendre Mímir
 
-## Objectif
+- [Le framework en trois étapes](01-Cours-Framework-3-Etapes.md) propose un
+  parcours débutant, intermédiaire et avancé.
+- [Parcours complet du framework](06-Parcours-Complet-Framework.md) relie
+  modèles, scripts, registre, runtimes et sérialisation.
+- [Parcours par niveau](../01-Getting-Started/06-Learning-Paths.md) aide à
+  sélectionner les pages adaptées à votre expérience.
 
-Donner un parcours simple en 3 etapes pour apprendre le framework Mimir.
+## Modèles et scripts
+
+- [Ajouter un modèle](02-Tuto-Ajouter-Modele.md)
+- [Écrire un script Lua](03-Tuto-Coder-Script.md)
+- [Du registre au checkpoint](08-Tuto-Registre-Pipeline-Checkpoint.md)
+- [Valider VAEConv et son prior appris sans dataset](07-Tuto-VAEConv-Sans-Dataset.md)
+
+## Moteur et runtimes
+
+- [Modifier ou ajouter un runtime](04-Tuto-Modifier-Ou-Ajouter-Runtime.md)
+- [Ajouter une opération](05-Tuto-Ajouter-Op.md)
+
+> **Note**
+> Les tutoriels VAEConv et registre/checkpoint n'utilisent aucun dataset. Les
+> autres tutoriels indiquent leurs dépendances dans leurs prérequis.
 
 ## Avant de commencer
 
-Avoir compile le binaire `mimir` et verifier que le smoketest passe.
+Compilez Mímir et validez le binaire :
 
-## Résultat attendu
+```bash
+./bin/mimir --help
+./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
+```
 
-Tu sais choisir le bon niveau, suivre un plan concret, puis passer au niveau suivant.
+Si cette commande échoue, revenez au
+[guide d'installation](../01-Getting-Started/02-Installation.md) ou au
+[smoketest](../01-Getting-Started/05-Smoketest.md).
 
-## Parcours
+## Étapes suivantes
 
-- Cours en 3 etapes : [docs/08-Tuto/01-Cours-Framework-3-Etapes.md](01-Cours-Framework-3-Etapes.md)
-- Parcours numerote 1 a 5 inclus dans la page du cours
-
-## Tutos pratiques
-
-- Ajouter un modele : [docs/08-Tuto/02-Tuto-Ajouter-Modele.md](02-Tuto-Ajouter-Modele.md)
-- Coder un script : [docs/08-Tuto/03-Tuto-Coder-Script.md](03-Tuto-Coder-Script.md)
-- Modifier ou ajouter un runtime : [docs/08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md](04-Tuto-Modifier-Ou-Ajouter-Runtime.md)
-- Ajouter une OPs : [docs/08-Tuto/05-Tuto-Ajouter-Op.md](05-Tuto-Ajouter-Op.md)
-
-## Prerequis recommandes
-
-1. Quick start : [docs/01-Getting-Started/01-Quick-Start.md](../01-Getting-Started/01-Quick-Start.md)
-2. Lifecycle modele : [docs/02-User-Guide/02-Model-Lifecycle.md](../02-User-Guide/02-Model-Lifecycle.md)
-3. API overview : [docs/03-API-Reference/00-API-Overview.md](../03-API-Reference/00-API-Overview.md)
+Pour comprendre les API utilisées par les tutoriels, consultez la
+[référence Lua](../03-API-Reference/00-API-Overview.md). Pour modifier le code
+C++, poursuivez avec le [guide développeur](../07-Devs/00-INDEX.md).

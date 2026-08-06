@@ -27,6 +27,7 @@
 #include "runtimes/ops_loss_and_grad.hpp"
 #include "Planning/Planner.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
+#include "Models/NLP/CausalAttentionOps.hpp"
 #include "Serialization/Serialization.hpp"
 #include <fstream>
 #include <iomanip>
@@ -34,12 +35,20 @@
 #include <iostream>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <sstream>
 #include <cstdlib>
 
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+
+void framework_log_write_file_only(const char* data, size_t size);
+
+// Racine de capture par thread. Elle reste active jusqu'a consumeVizTaps(),
+// ce qui permet aux sous-modeles executes apres le forward principal (VAE,
+// perception, discriminateur...) de publier dans la meme VIZ.
+static thread_local Model* g_viz_capture_root = nullptr;
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -165,6 +174,17 @@ static inline double mean_abs_adjacent_diff(const std::vector<float>& v) {
     return acc / static_cast<double>(v.size() - 1);
 }
 
+static inline double mean_abs_adjacent_diff_prefix(const std::vector<float>& v, size_t off, size_t count) {
+    if (off >= v.size() || count < 2) return 0.0;
+    const size_t n = std::min(count, v.size() - off);
+    if (n < 2) return 0.0;
+    double acc = 0.0;
+    for (size_t i = 1; i < n; ++i) {
+        acc += std::abs(static_cast<double>(v[off + i]) - static_cast<double>(v[off + i - 1]));
+    }
+    return acc / static_cast<double>(n - 1);
+}
+
 static inline double pearson_corr(const std::vector<float>& a, const std::vector<float>& b) {
     const size_t n = std::min(a.size(), b.size());
     if (n < 2) return 0.0;
@@ -195,10 +215,20 @@ static inline double pearson_corr(const std::vector<float>& a, const std::vector
 #include <cstring>
 #include <algorithm>
 #include <random>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
 #include <cpuid.h>
+#endif
 #include <atomic>
 #include <mutex>
 #include <unordered_set>
+
+#if defined(_MSC_VER)
+#define MIMIR_RESTRICT __restrict
+#else
+#define MIMIR_RESTRICT __restrict__
+#endif
 
 // ============================================================================
 // Registry centralisé (via LayerTypes.hpp)
@@ -215,23 +245,57 @@ using namespace LayerRegistry;
 // ============================================================================
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+static inline bool mimir_get_cpuid(unsigned int leaf, unsigned int* eax, unsigned int* ebx,
+                                   unsigned int* ecx, unsigned int* edx) {
+#if defined(_MSC_VER)
+    int regs[4] = {0, 0, 0, 0};
+    __cpuidex(regs, static_cast<int>(leaf), 0);
+    *eax = static_cast<unsigned int>(regs[0]);
+    *ebx = static_cast<unsigned int>(regs[1]);
+    *ecx = static_cast<unsigned int>(regs[2]);
+    *edx = static_cast<unsigned int>(regs[3]);
+    return true;
+#else
+    return __get_cpuid(leaf, eax, ebx, ecx, edx) != 0;
+#endif
+}
+
+static inline bool mimir_get_cpuid_count(unsigned int leaf, unsigned int subleaf, unsigned int* eax,
+                                         unsigned int* ebx, unsigned int* ecx, unsigned int* edx) {
+#if defined(_MSC_VER)
+    int regs[4] = {0, 0, 0, 0};
+    __cpuidex(regs, static_cast<int>(leaf), static_cast<int>(subleaf));
+    *eax = static_cast<unsigned int>(regs[0]);
+    *ebx = static_cast<unsigned int>(regs[1]);
+    *ecx = static_cast<unsigned int>(regs[2]);
+    *edx = static_cast<unsigned int>(regs[3]);
+    return true;
+#else
+    return __get_cpuid_count(leaf, subleaf, eax, ebx, ecx, edx) != 0;
+#endif
+}
+
 static inline bool mimir_os_supports_avx_state() {
     // Vérifie que l'OS a activé le sauvegarde/restauration XMM/YMM (AVX).
     // Nécessaire pour utiliser AVX/AVX2/FMA/F16C sans #UD.
     unsigned int eax, ebx, ecx, edx;
-    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
+    if (!mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
 
     const bool osxsave = (ecx & (1u << 27)) != 0;
     const bool avx_hw = (ecx & (1u << 28)) != 0;
     if (!osxsave || !avx_hw) return false;
 
     // XGETBV(0): bits 1 (XMM) et 2 (YMM) doivent être à 1
+#if defined(_MSC_VER)
+    const unsigned __int64 xcr0 = _xgetbv(0);
+    return (xcr0 & 0x6ull) == 0x6ull;
+#else
     uint32_t xcr0_lo = 0;
     uint32_t xcr0_hi = 0;
-    // GCC/Clang: xgetbv via asm
     __asm__ volatile ("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
     (void)xcr0_hi;
     return (xcr0_lo & 0x6u) == 0x6u;
+#endif
 }
 #endif
 
@@ -243,7 +307,7 @@ bool Model::hasAVX2() {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
             const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+            if (os_ok && mimir_get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
                 result = (ebx & (1u << 5)) != 0; // EBX bit 5 = AVX2
             } else {
                 result = false;
@@ -263,7 +327,7 @@ bool Model::hasFMA() {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
             const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && __get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+            if (os_ok && mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
                 result = (ecx & (1u << 12)) != 0; // ECX bit 12 = FMA
             } else {
                 result = false;
@@ -283,7 +347,7 @@ bool Model::hasF16C() {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
             const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && __get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+            if (os_ok && mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
                 result = (ecx & (1u << 29)) != 0; // ECX bit 29 = F16C
             } else {
                 result = false;
@@ -302,7 +366,7 @@ bool Model::hasBMI2() {
     if (!detected) {
         #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
             unsigned int eax, ebx, ecx, edx;
-            if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+            if (mimir_get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
                 result = (ebx & (1 << 8)) != 0; // EBX bit 8 = BMI2
             }
         #endif
@@ -427,10 +491,21 @@ void Model::setDefaultDType(const std::string& dtype) {
     if (dt == Mimir::DType::UNKNOWN) {
         throw std::runtime_error("Model.setDefaultDType: dtype non supporté: '" + dtype + "'");
     }
-    default_dtype_ = dtype;
+    default_dtype_ = Mimir::dtype_to_string(dt);
+    const auto accumulation = (dt == Mimir::DType::F64)
+        ? Mimir::DType::F64
+        : Mimir::DType::F32;
+    for (auto& layer : layers) {
+        layer.dtype = dt;
+        layer.accumulation_dtype = accumulation;
+    }
+    if (!Model::frameworkLogsSuppressed()) {
+        std::cerr << "[dtype] default=" << default_dtype_
+                  << " accumulation=" << Mimir::dtype_to_string(accumulation) << std::endl;
+    }
     // Keep a canonical copy in config for serialization/planner/Lua.
     try {
-        modelConfig["dtype"] = dtype;
+        modelConfig["dtype"] = default_dtype_;
     } catch (...) {
     }
 }
@@ -558,7 +633,9 @@ bool Model::initializeComputeEngine() {
     RuntimeConfig cfg = RuntimeConfig::fromEnv("VULKAN");
     cfg.linear_enabled = env_flag_true("MIMIR_VULKAN_LINEAR", true);
     cfg.linear_min_ops = env_int("MIMIR_VULKAN_LINEAR_MIN_OPS", 0);
-    if (cfg.disabled || !cfg.linear_enabled) {
+    cfg.conv_enabled = env_flag_true("MIMIR_VULKAN_CONV", true);
+    cfg.conv_min_ops = env_int("MIMIR_VULKAN_CONV_MIN_OPS", 0);
+    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
         g_compute_available = false;
         g_compute_engine.reset();
         refresh_runtime_router_bindings();
@@ -905,6 +982,17 @@ bool Model::hasTensor(const std::string& name) const {
     return tensor_store.find(name) != tensor_store.end();
 }
 
+const Mimir::TypedTensor& Model::getTypedTensor(const std::string& name) const {
+    auto it = typed_tensor_store.find(name);
+    if (it == typed_tensor_store.end())
+        throw std::runtime_error("Typed tensor not found: " + name);
+    return it->second;
+}
+
+bool Model::hasTypedTensor(const std::string& name) const {
+    return typed_tensor_store.find(name) != typed_tensor_store.end();
+}
+
 const std::vector<int>& Model::getTensorInt(const std::string& name) const {
     auto it = tensor_store_int.find(name);
     if (it == tensor_store_int.end()) {
@@ -953,6 +1041,9 @@ std::vector<float>& Model::getTensorMutable(const std::string& name) {
 
 void Model::storeTensor(const std::string& name, const std::vector<float>& data) {
     tensor_store[name] = data;
+    const auto dtype = Mimir::parse_dtype(default_dtype_);
+    typed_tensor_store.insert_or_assign(
+        name, Mimir::TypedTensor::fromFloat32(data, {static_cast<int>(data.size())}, dtype));
 }
 
 void Model::storeTensorInt(const std::string& name, const std::vector<int>& data) {
@@ -960,6 +1051,9 @@ void Model::storeTensorInt(const std::string& name, const std::vector<int>& data
 }
 
 void Model::storeTensor(const std::string& name, std::vector<float>&& data) {
+    const auto dtype = Mimir::parse_dtype(default_dtype_);
+    typed_tensor_store.insert_or_assign(
+        name, Mimir::TypedTensor::fromFloat32(data, {static_cast<int>(data.size())}, dtype));
     tensor_store[name] = std::move(data);
 }
 
@@ -987,6 +1081,7 @@ std::vector<std::string> Model::getAvailableIntTensors() const {
 
 void Model::clearTensorStore() {
     tensor_store.clear();
+    typed_tensor_store.clear();
 }
 
 void Model::clearTensorStoreInt() {
@@ -1012,245 +1107,19 @@ size_t Model::getKVCacheTokenCount() const {
     return total;
 }
 
-// === Forward pass (tokens int) ===
+// === Forward pass (tokens int -> float delegation) ===
 
 std::vector<float> Model::forwardPass(const std::vector<int> &input_ids, bool training) {
     return forwardPassView(input_ids, training);
 }
 
 const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_ids, bool training) {
-    // Stocker les ids int dans le store dédié, puis exécuter le même graphe.
-    // Les layers Embedding liront tensor_store_int, les autres tensor_store (float).
-    if (layers.empty()) {
-        std::cerr << "⚠️  Cannot perform forward pass: no layers defined" << std::endl;
-        static const std::vector<float> empty;
-        return empty;
+    std::vector<float> input_f;
+    input_f.reserve(input_ids.size());
+    for (int v : input_ids) {
+        input_f.push_back(static_cast<float>(v));
     }
-
-    if (layer_weight_blocks.empty()) {
-        std::cerr << "⚠️  Cannot perform forward pass: weights not allocated" << std::endl;
-        std::cerr << "    Call allocate_params() and init_weights() first" << std::endl;
-        static const std::vector<float> empty;
-        return empty;
-    }
-
-    if (modelConfig.contains("use_kv_cache")) {
-        try {
-            setKVCacheEnabled(modelConfig["use_kv_cache"].get<bool>());
-        } catch (...) {
-        }
-    }
-    if (training) {
-        clearKVCache();
-    }
-
-    clearTensorStore();
-    clearTensorStoreInt();
-    storeTensorInt("x", input_ids);
-    storeTensorInt("__input__", input_ids);
-
-    // Convention: encoder fournit mag/mod (float) pour conditionnement.
-    if (hasEncoder) {
-        const auto& mag = encoder.getMagEmbedding();
-        const auto& mod = encoder.getModEmbedding();
-
-        // Cache du scan O(layers*inputs) : recalculé seulement après un push().
-        if (!uses_mag_mod_cached_) {
-            uses_mag_mod_ = false;
-            for (const auto& lyr : layers) {
-                for (const auto& in : lyr.inputs) {
-                    if (in == "mag" || in == "mod") { uses_mag_mod_ = true; break; }
-                }
-                if (uses_mag_mod_) break;
-            }
-            uses_mag_mod_cached_ = true;
-        }
-
-        if (uses_mag_mod_) {
-            int expected = 0;
-            if (modelConfig.contains("d_model")) expected = std::max(0, modelConfig["d_model"].get<int>());
-            else if (modelConfig.contains("text_d_model")) expected = std::max(0, modelConfig["text_d_model"].get<int>());
-            if (expected > 0) {
-                if (!mag.empty() && static_cast<int>(mag.size()) != expected) {
-                    throw std::runtime_error("ConditioningEncoder mag dim mismatch: have=" + std::to_string(mag.size()) + ", expected=" + std::to_string(expected));
-                }
-                if (!mod.empty() && static_cast<int>(mod.size()) != expected) {
-                    throw std::runtime_error("ConditioningEncoder mod dim mismatch: have=" + std::to_string(mod.size()) + ", expected=" + std::to_string(expected));
-                }
-            }
-        }
-
-        if (!mag.empty()) storeTensor("mag", mag);
-        if (!mod.empty()) storeTensor("mod", mod);
-    }
-
-    if (training) {
-        forward_state.clear();
-        forward_state.is_valid = true;
-    }
-
-    if (training) {
-        forward_state.layer_outputs.clear();
-        forward_state.layer_outputs.reserve(layers.size());
-        forward_state.layer_output_masks.clear();
-        forward_state.layer_output_masks.reserve(layers.size());
-        forward_state.layer_inputs_multi.clear();
-        forward_state.layer_inputs_multi.reserve(layers.size());
-        forward_state.layer_input_names.clear();
-        forward_state.layer_input_names.reserve(layers.size());
-        forward_state.layer_input_sizes_multi.clear();
-        forward_state.layer_input_sizes_multi.reserve(layers.size());
-    }
-
-    auto needs_input_value_snapshot = [](LayerType t) -> bool {
-        switch (t) {
-            case LayerType::Linear:
-            case LayerType::LayerNorm:
-            case LayerType::GELU:
-            case LayerType::GEGLU:
-            case LayerType::MultiHeadAttention:
-            case LayerType::SelfAttention:
-            case LayerType::Embedding:
-                return true;
-            case LayerType::Add:
-            case LayerType::Concat:
-            case LayerType::Dropout:
-            case LayerType::Dropout2d:
-            case LayerType::ReLU:
-            case LayerType::Tanh:
-            case LayerType::Sigmoid:
-            case LayerType::Softmax:
-            case LayerType::LogSoftmax:
-            default:
-                return false;
-        }
-    };
-
-    auto needs_output_mask = [](LayerType t) -> bool {
-        switch (t) {
-            case LayerType::Dropout:
-            case LayerType::Dropout2d:
-                return true;
-            default:
-                return false;
-        }
-    };
-
-    if (!(g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized())) {
-        (void)initializeCpuComputeEngine();
-    }
-
-    static const std::vector<std::string> kDefaultInputNameX = {"x"};
-
-    // VIZ: dernier HxW "connu" pendant ce forward, utile pour les layers
-    // qui ne renseignent pas output_width/output_height (ex: activations).
-    int viz_last_w = 0;
-    int viz_last_h = 0;
-
-    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
-        const auto &layer = layers[layer_idx];
-
-        std::vector<float> layer_output;
-        std::vector<std::vector<float>> runtime_outputs;
-        auto& embedding_ids_tmp = scratch_embedding_ids_tmp_;
-        auto& embedding_ids_fallback = scratch_embedding_ids_fallback_;
-
-        try {
-            const std::vector<std::string>& input_names =
-                (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
-
-            auto& inputs = scratch_input_ptrs_;
-            inputs.clear();
-            inputs.reserve(input_names.size());
-
-            embedding_ids_tmp.clear();
-            for (size_t in_i = 0; in_i < input_names.size(); ++in_i) {
-                const auto& name = input_names[in_i];
-
-                auto itf = tensor_store.find(name);
-                if (itf != tensor_store.end()) {
-                    inputs.push_back(&itf->second);
-                    continue;
-                }
-
-                if (layer.type_enum == LayerType::Embedding && in_i == 0) {
-                    auto iti = tensor_store_int.find(name);
-                    if (iti == tensor_store_int.end()) {
-                        const int L = (layer.seq_len > 0) ? layer.seq_len : 1;
-                        const int pad = (layer.padding_idx >= 0) ? layer.padding_idx : 0;
-                        embedding_ids_fallback.assign(static_cast<size_t>(L), pad);
-                        iti = tensor_store_int.emplace(name, embedding_ids_fallback).first;
-                    }
-                    const std::vector<int>& ids = iti->second;
-                    embedding_ids_tmp.reserve(ids.size());
-                    for (int v : ids) embedding_ids_tmp.push_back(static_cast<float>(v));
-                    inputs.push_back(&embedding_ids_tmp);
-                    continue;
-                }
-
-                RUNTIME_ERROR_STRICT("forwardPass(int): missing input tensor '" + name + "' for layer " + layer.name);
-            }
-
-            if (training) {
-                forward_state.layer_input_names.push_back(input_names);
-
-                std::vector<size_t> sizes;
-                sizes.reserve(inputs.size());
-                for (auto* p : inputs) sizes.push_back(p ? p->size() : 0ULL);
-                forward_state.layer_input_sizes_multi.push_back(std::move(sizes));
-
-                std::vector<std::vector<float>> snap;
-                if (needs_input_value_snapshot(layer.type_enum)) {
-                    snap.reserve(inputs.size());
-                    for (auto* p : inputs) snap.push_back(*p);
-                }
-                forward_state.layer_inputs_multi.push_back(std::move(snap));
-
-                forward_state.layer_outputs.emplace_back();
-                forward_state.layer_output_masks.emplace_back();
-            }
-
-            if (!RuntimeRouter::instance().dispatchForwardLayer(inputs, runtime_outputs, layer, training)) {
-                RUNTIME_ERROR_STRICT(
-                    "forwardPass(int): layer type not supported by runtimes: " + type_to_string(layer.type_enum)
-                );
-            }
-
-            const std::string output_name = layer.output.empty() ? "x" : layer.output;
-            if ((layer.type_enum == LayerType::Split || layer.type_enum == LayerType::Chunk) && runtime_outputs.size() > 1) {
-                for (size_t i = 0; i < runtime_outputs.size(); ++i) {
-                    storeTensor(output_name + "_" + std::to_string(i), std::move(runtime_outputs[i]));
-                }
-                layer_output = getTensor(output_name + "_0");
-            } else {
-                layer_output = std::move(runtime_outputs[0]);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "❌ ERROR in layer " << layer_idx << " (" << layer.name
-                      << ", type: " << type_to_string(layer.type_enum) << "): "
-                      << e.what() << std::endl;
-            throw;
-        }
-
-        std::string output_name = layer.output.empty() ? "x" : layer.output;
-
-        // Masques/snapshots output pour le backward (sans copier toutes les sorties)
-        if (training) {
-            // On a déjà poussé des placeholders (outputs/masks) ci-dessus.
-            if (needs_output_mask(layer.type_enum)) {
-                std::vector<uint8_t> mask;
-                mask.resize(layer_output.size());
-                for (size_t i = 0; i < layer_output.size(); ++i) {
-                    mask[i] = (layer_output[i] != 0.0f) ? 1 : 0;
-                }
-                forward_state.layer_output_masks.back() = std::move(mask);
-            }
-        }
-
-        storeTensor(output_name, std::move(layer_output));
-    }
-
-    return getTensor("x");
+    return forwardPassView(input_f, training);
 }
 
 // === Forward pass (multi-entrées: floats + tokens int) ===
@@ -1304,6 +1173,59 @@ void Model::addVizTapFrame(VizFrame vf) {
 
     // Evict last (best-effort) to guarantee key frames can be shown.
     viz_taps_.back() = std::move(vf);
+}
+
+std::vector<Model::VizFrame> Model::consumeVizTaps() {
+    // Le cache est dédupliqué et mis à jour en place par addVizTapFrame().
+    // Retourner un snapshot complet évite qu'un forward partiel fasse disparaître
+    // de l'interface toutes les couches qui n'ont pas été recapturées ce cycle-ci.
+    auto out = viz_taps_;
+    if (g_viz_capture_root == this) g_viz_capture_root = nullptr;
+    return out;
+}
+
+bool Model::InitVizTips() {
+    return false;
+}
+
+bool Model::UpdateVizTips(const Layer& layer, VizFrame& frame) {
+    return applyVizTipByLayerName(layer, frame);
+}
+
+void Model::clearVizTipsRegistry() {
+    viz_tips_by_layer_name_.clear();
+}
+
+void Model::registerVizTip(const std::string& layer_name, const std::string& tip_label) {
+    auto trim_local = [](const std::string& s) -> std::string {
+        size_t b = 0;
+        while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r')) ++b;
+        if (b >= s.size()) return std::string();
+        size_t e = s.size();
+        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r')) --e;
+        return s.substr(b, e - b);
+    };
+
+    const std::string key = trim_local(layer_name);
+    const std::string val = trim_local(tip_label);
+    if (key.empty() || val.empty()) return;
+    viz_tips_by_layer_name_[key] = val;
+}
+
+bool Model::applyVizTipByLayerName(const Layer& layer, VizFrame& frame) const {
+    if (layer.name.empty()) return false;
+    auto it = viz_tips_by_layer_name_.find(layer.name);
+    if (it == viz_tips_by_layer_name_.end()) return false;
+
+    const std::string& tip = it->second;
+    if (tip.empty()) return false;
+
+    // Le chemin canonique doit rester avant le separateur: le Visualizer le
+    // parse pour reconnaitre le layer dans architecture.json. Le tip humain
+    // est une information secondaire, placee apres "|".
+    if (frame.label.empty()) frame.label = tip;
+    else frame.label += " | " + tip;
+    return true;
 }
 
 const std::vector<float>& Model::forwardPassNamedView(
@@ -1486,6 +1408,19 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
         : 1.0f;
     const float marker_wass_eff = marker_wass_scale * marker_progress;
     const float marker_temp_eff = marker_temp_scale * marker_progress;
+
+    // Appliquer l'hydratation perceptuelle calculee au batch precedent avant
+    // d'executer le graphe. Le prior reste trainable et serialisable.
+    if (!pending_perceptual_prior_.empty()) {
+        Layer* prior = getLayerByName("vae_conv/z_prior_bias");
+        if (prior && prior->getWeights() &&
+            prior->getWeightsSize() == pending_perceptual_prior_.size()) {
+            std::copy(pending_perceptual_prior_.begin(), pending_perceptual_prior_.end(),
+                      prior->getWeights());
+            modelConfig["perceptual_prior_hydrated"] = true;
+        }
+        pending_perceptual_prior_.clear();
+    }
 
     // Forward
     zeroGradients();
@@ -1877,6 +1812,46 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
         const std::vector<float>& f_real_view = aux_perceptual_->forwardPassView(tgt_recon, true);
         std::vector<float> f_real(f_real_view.begin(), f_real_view.end());
 
+        // Hydrater le prior latent avec la perception de l'image reelle.
+        // Les features GAP et le latent n'ont pas la meme dimension: on centre
+        // et normalise les features, puis on les projette cycliquement. Une EMA
+        // preserve les apprentissages deja presents dans le prior.
+        if (!f_real.empty()) {
+            Layer* prior = getLayerByName("vae_conv/z_prior_bias");
+            if (prior && prior->getWeights() && prior->getWeightsSize() > 0) {
+                float momentum = 0.95f;
+                float scale = 0.05f;
+                if (modelConfig.contains("perceptual_prior_momentum")) {
+                    momentum = modelConfig["perceptual_prior_momentum"].get<float>();
+                }
+                if (modelConfig.contains("perceptual_prior_scale")) {
+                    scale = modelConfig["perceptual_prior_scale"].get<float>();
+                }
+                momentum = std::clamp(momentum, 0.0f, 0.9999f);
+                scale = std::max(0.0f, scale);
+
+                double mean = 0.0;
+                for (float v : f_real) mean += static_cast<double>(v);
+                mean /= static_cast<double>(f_real.size());
+                double variance = 0.0;
+                for (float v : f_real) {
+                    const double d = static_cast<double>(v) - mean;
+                    variance += d * d;
+                }
+                variance /= static_cast<double>(f_real.size());
+                const float inv_std = 1.0f / std::sqrt(static_cast<float>(variance) + 1e-6f);
+
+                const size_t prior_n = prior->getWeightsSize();
+                pending_perceptual_prior_.resize(prior_n);
+                const float* current = prior->getWeights();
+                for (size_t i = 0; i < prior_n; ++i) {
+                    const float feature = (f_real[i % f_real.size()] - static_cast<float>(mean)) * inv_std;
+                    const float target = scale * std::clamp(feature, -3.0f, 3.0f);
+                    pending_perceptual_prior_[i] = momentum * current[i] + (1.0f - momentum) * target;
+                }
+            }
+        }
+
         aux_perceptual_->zeroGradients();
         const std::vector<float>& f_fake_view = aux_perceptual_->forwardPassView(pred_recon, true);
         const size_t fn = std::min(f_fake_view.size(), f_real.size());
@@ -1927,6 +1902,10 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
     const double vt = std::max(mt.var, 1e-12);
     const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
     const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+    const float spat = static_cast<float>(std::abs(
+        mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+        mean_abs_adjacent_diff_prefix(x, 0, static_cast<size_t>(recon_n))
+    ));
     const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
     const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
     // Distribution diagnostics: entropy difference (Gaussian approx) and skewness mismatch.
@@ -1988,7 +1967,10 @@ Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& 
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
     stats.grad_norm = grad_norm;
@@ -2130,6 +2112,10 @@ Model::VAEStepStats Model::backwardStepVAE(const std::vector<float>& x, Optimize
     const double vt = std::max(mt.var, 1e-12);
     const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
     const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+    const float spat = static_cast<float>(std::abs(
+        mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+        mean_abs_adjacent_diff_prefix(x, 0, static_cast<size_t>(recon_n))
+    ));
     const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
     const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
     const float entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
@@ -2192,7 +2178,10 @@ Model::VAEStepStats Model::backwardStepVAE(const std::vector<float>& x, Optimize
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
     stats.grad_norm = static_cast<float>(std::sqrt(sum_sq2));
@@ -2505,6 +2494,7 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     // Recon
     double recon = 0.0;
     float wass = 0.0f;
+    float spat = 0.0f;
     float temp = 0.0f;
     float entropy_diff_v = 0.0f;
     float moment_mismatch_v = 0.0f;
@@ -2568,6 +2558,10 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
         const double vt = std::max(mt.var, 1e-12);
         const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
         wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+        spat = static_cast<float>(std::abs(
+            mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+            mean_abs_adjacent_diff_prefix(*target, 0, static_cast<size_t>(recon_n))
+        ));
         temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
         const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
         entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
@@ -2778,7 +2772,10 @@ Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.align = align;
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
@@ -3033,6 +3030,7 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
     // Metrics (unscaled)
     double recon = 0.0;
     float wass = 0.0f;
+    float spat = 0.0f;
     float temp = 0.0f;
     float entropy_diff_v = 0.0f;
     float moment_mismatch_v = 0.0f;
@@ -3083,6 +3081,10 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
         const double vt = std::max(mt.var, 1e-12);
         const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
         wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
+        spat = static_cast<float>(std::abs(
+            mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
+            mean_abs_adjacent_diff_prefix(*target, 0, static_cast<size_t>(recon_n))
+        ));
         temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
         entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
         moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
@@ -3240,7 +3242,10 @@ Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
     stats.mse = static_cast<float>(recon);
     stats.kl = static_cast<float>(kl);
     stats.wass = wass;
+    stats.spatial_coherence = spat;
     stats.temp = temp;
+    const int total_steps = std::max(1, opt.total_steps);
+    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
     stats.align = align;
     stats.kl_beta_effective = beta_eff;
     stats.latent_dim = latent_dim;
@@ -3268,6 +3273,9 @@ void Model::push(const std::string &name, const std::string &type, size_t params
     // Normaliser le type et créer le layer avec enum
     std::string normalized_type = normalize_type(type);
     Layer layer(name, normalized_type, params_count);
+    layer.dtype = Mimir::parse_dtype(default_dtype_);
+    layer.accumulation_dtype = layer.dtype == Mimir::DType::F64
+        ? Mimir::DType::F64 : Mimir::DType::F32;
     
     // Le constructeur Layer a déjà converti string -> enum
     // Vérifier que c'est supporté
@@ -3299,6 +3307,20 @@ void Model::push(const std::string &name, const std::string &type, size_t params
     }
     if (modelConfig.contains("padding")) {
         layer.padding = modelConfig["padding"];
+    }
+    if (normalized_type == "NMS") {
+        if (modelConfig.contains("nms_iou_threshold")) {
+            layer.nms_iou_threshold = modelConfig["nms_iou_threshold"];
+        }
+        if (modelConfig.contains("nms_score_threshold")) {
+            layer.nms_score_threshold = modelConfig["nms_score_threshold"];
+        }
+        if (modelConfig.contains("nms_max_detections")) {
+            layer.nms_max_detections = modelConfig["nms_max_detections"];
+        }
+        if (modelConfig.contains("nms_class_agnostic")) {
+            layer.nms_class_agnostic = modelConfig["nms_class_agnostic"];
+        }
     }
     
     // Calculer les dimensions de sortie pour Conv2D
@@ -3528,12 +3550,20 @@ void Model::setTokenizer(const Tokenizer &t) {
     encoder.ensureVocabSize(tokenizer.getVocabSize());
     encoder.ensureSpecialEmbeddings();
     hasEncoder = true;
+    if (!Model::frameworkLogsSuppressed()) {
+        std::cerr << "[registry] tokenizer attached vocab=" << tokenizer.getVocabSize()
+                  << " encoder_dim=" << encoder.dim << std::endl;
+    }
 }
 
 void Model::setEncoder(const ConditioningEncoder &e) {
     encoder = e;
     encoder.ensureSpecialEmbeddings();
     hasEncoder = true;
+    if (!Model::frameworkLogsSuppressed()) {
+        std::cerr << "[encoder] attached dim=" << encoder.dim
+                  << " vocab=" << encoder.vocab_size << std::endl;
+    }
 }
 
 void Model::forward(std::vector<uint8_t> &out_uint8) const {
@@ -3581,6 +3611,11 @@ void Model::setSerializedOptimizer(Optimizer opt) {
     }
 
     serialized_optimizer_ = std::move(opt);
+    if (!Model::frameworkLogsSuppressed()) {
+        std::cerr << "[memory] optimizer_state step=" << serialized_optimizer_->step
+                  << " m=" << serialized_optimizer_->m.size()
+                  << " v=" << serialized_optimizer_->v.size() << std::endl;
+    }
 }
 
 void Model::applyParamUpdate(float learning_rate) {
@@ -4831,6 +4866,23 @@ std::vector<float> Model::forwardPass(const std::vector<float> &input, bool trai
 }
 
 const std::vector<float>& Model::forwardPassView(const std::vector<float> &input, bool training) {
+    const bool viz_capture_requested = viz_taps_enabled_ && viz_taps_max_frames_ > 0;
+    if (viz_capture_requested && g_viz_capture_root == nullptr) {
+        g_viz_capture_root = this;
+    }
+    Model* const viz_capture_root = g_viz_capture_root;
+    const bool nested_viz_model = viz_capture_root != nullptr && viz_capture_root != this;
+    if (nested_viz_model) {
+        setVizTapsEnabled(true);
+        setVizTapsLimits(viz_capture_root->viz_taps_max_frames_,
+                         viz_capture_root->viz_taps_max_side_);
+        // Reserver aussi la place necessaire dans la racine pour ce graphe
+        // enfant. Une limite historique trop basse ne doit pas masquer des (L).
+        const size_t required = viz_capture_root->viz_taps_.size() + layers.size() + 64ULL;
+        viz_capture_root->viz_taps_max_frames_ = std::max(
+            viz_capture_root->viz_taps_max_frames_,
+            static_cast<int>(std::min(required, static_cast<size_t>(std::numeric_limits<int>::max()))));
+    }
     // Vérifications préliminaires
     if (layers.empty()) {
         std::cerr << "⚠️  Cannot perform forward pass: no layers defined" << std::endl;
@@ -4871,7 +4923,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
 
         // Convention: "seq" = sortie tokenizer (ids). Alias utile pour modèles existants.
-        // PonyXL et d'autres utilisent "text_ids".
+        // Les modèles texte utilisent "text_ids".
         const auto it_seq = pending_int_inputs_->find("seq");
         if (it_seq != pending_int_inputs_->end()) {
             // store under both keys (safe overwrite ok)
@@ -4951,6 +5003,19 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     const bool planner_enabled = env_flag_true("MIMIR_ENABLE_PLANNER", true);
     const bool fusion_enabled = env_flag_true("MIMIR_ENABLE_FUSION", true);
     const bool fusion_in_training = env_flag_true("MIMIR_ENABLE_FUSION_TRAIN", false);
+    // Par défaut, la planification reste silencieuse dans le terminal.
+    // Opt-in explicite via MIMIR_PLANNER_STDOUT=1 (compatibilité conservée avec l'ancien nom).
+    const bool planner_to_terminal = env_flag_true(
+        "MIMIR_PLANNER_STDOUT",
+        env_flag_true("MIMIR_PLANNER_TERMINAL", false)
+    );
+    auto emit_planner_line = [&](const std::string& line) {
+        if (planner_to_terminal) {
+            std::cerr << line << std::endl;
+        } else {
+            framework_log_write_file_only((line + "\n").c_str(), line.size() + 1);
+        }
+    };
     if (planner_enabled) {
         if (!static_plan_.built ||
             static_plan_.built_for_training != training ||
@@ -4967,25 +5032,31 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             size_t generic_activation_fusions = 0;
             size_t generic_unary_fusions = 0;
             size_t generic_split_fusions = 0;
+            size_t generic_chain_edges = 0;
             for (size_t i = 0; i < static_plan_.execution.fuse_activation_consumer.size(); ++i) {
                 if (static_plan_.execution.fuse_activation_consumer[i] >= 0) ++generic_activation_fusions;
                 if (static_plan_.execution.fuse_unary_consumer[i] >= 0) ++generic_unary_fusions;
                 if (static_plan_.execution.fuse_split_consumer[i] >= 0) ++generic_split_fusions;
             }
-            std::cerr << "[planner] tensors=" << lifetimes.size()
-                      << " generic_activation_fusions=" << generic_activation_fusions
-                      << " generic_unary_fusions=" << generic_unary_fusions
-                      << " generic_split_fusions=" << generic_split_fusions
-                      << " conv2d_scratch_bytes={wT=" << scratch.wT_bytes
-                      << ", xcol=" << scratch.xcol_bytes
-                      << ", c=" << scratch.c_bytes
-                      << "}"
-                      << std::endl;
+            for (size_t i = 0; i < static_plan_.execution.fuse_chain_next.size(); ++i) {
+                if (static_plan_.execution.fuse_chain_next[i] >= 0) ++generic_chain_edges;
+            }
+            std::ostringstream planner_summary;
+            planner_summary << "[planner] tensors=" << lifetimes.size()
+                            << " generic_activation_fusions=" << generic_activation_fusions
+                            << " generic_unary_fusions=" << generic_unary_fusions
+                            << " generic_split_fusions=" << generic_split_fusions
+                            << " generic_chain_edges=" << generic_chain_edges
+                            << " conv2d_scratch_bytes={wT=" << scratch.wT_bytes
+                            << ", xcol=" << scratch.xcol_bytes
+                            << ", c=" << scratch.c_bytes
+                            << "}";
+            emit_planner_line(planner_summary.str());
         }
     }
 
-    const bool runtime_verbose = env_flag_true("MIMIR_ACCEL_VERBOSE", false) && !Model::frameworkLogsSuppressed();
-    const bool runtime_trace = env_flag_true("MIMIR_RUNTIME_TRACE", false) && !Model::frameworkLogsSuppressed();
+    const bool runtime_verbose = !Model::frameworkLogsSuppressed();
+    const bool runtime_trace = runtime_verbose;
     if (runtime_verbose) {
         auto join_strings = [](const std::vector<std::string>& items, const char* sep) -> std::string {
             if (items.empty()) return std::string();
@@ -5019,6 +5090,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 case LayerType::RMSNorm:
                 case LayerType::MatMul:
                 case LayerType::BatchMatMul:
+                case LayerType::NMS:
                 case LayerType::SelfAttention:
                 case LayerType::MultiHeadAttention:
                 case LayerType::CrossAttention:
@@ -5089,6 +5161,12 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         std::vector<int> fused_into(layers.size(), -1);
         if (planner_enabled && static_plan_.built) {
             const auto& plan = static_plan_.execution;
+            for (size_t i = 0; i < plan.fuse_chain_next.size(); ++i) {
+                const int consumer = plan.fuse_chain_next[i];
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) {
+                    fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
+                }
+            }
             for (size_t i = 0; i < plan.fuse_activation_consumer.size(); ++i) {
                 const int consumer = plan.fuse_activation_consumer[i];
                 if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
@@ -5137,7 +5215,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             if (planner_enabled && static_plan_.built) {
                 const auto& plan = static_plan_.execution;
-                std::cerr << "[runtime] planner_map begin" << std::endl;
+                emit_planner_line("[runtime] planner_map begin");
                 for (size_t i = 0; i < layers.size(); ++i) {
                     const auto& layer = layers[i];
                     const auto& input_names = Mimir::Planning::planner_inputs_for(layer);
@@ -5166,22 +5244,25 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         fusion = fusion_to_string(plan.ops[i].fusion);
                     }
 
-                    std::cerr << "[runtime] planner_map layer#" << i
-                              << " name='" << layer.name
-                              << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
-                              << "' inputs=[" << join_strings(io_parts, ",")
-                              << "] output='" << Mimir::Planning::planner_output_name_for(layer)
-                              << "' fusion=" << fusion
-                              << " call=" << call_path
-                              << std::endl;
+                    std::ostringstream planner_line;
+                    planner_line << "[runtime] planner_map layer#" << i
+                                 << " name='" << layer.name
+                                 << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
+                                 << "' inputs=[" << join_strings(io_parts, ",")
+                                 << "] output='" << Mimir::Planning::planner_output_name_for(layer)
+                                 << "' fusion=" << fusion
+                                 << " call=" << call_path;
+                    emit_planner_line(planner_line.str());
                 }
-                std::cerr << "[runtime] planner_map end" << std::endl;
+                emit_planner_line("[runtime] planner_map end");
             } else {
-                std::cerr << "[runtime] planner_map unavailable (planner disabled)" << std::endl;
+                emit_planner_line("[runtime] planner_map unavailable (planner disabled)");
             }
         }
     }
     
+    RuntimeRouter::instance().planForwardLayerRoutes(layers);
+
     // État du forward
     if (training) {
         forward_state.clear();
@@ -5246,6 +5327,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     const size_t guard_mb = guard.getLimit() / (1024ULL * 1024ULL);
     const size_t cap_mb = (max_ram_mb_ > 0) ? max_ram_mb_ : guard_mb;
     RuntimeAllocator allocator(guard, cap_mb);
+    const bool allocator_log = env_flag_true("MIMIR_ALLOCATOR_LOG", false);
+    const bool allocator_log_verbose = env_flag_true("MIMIR_ALLOCATOR_LOG_VERBOSE", false);
+    RuntimeAllocator::BackendMemoryAttribution backend_mem_attrib{};
 
     static const std::vector<std::string> kDefaultInputNameX = {"x"};
 
@@ -5372,8 +5456,18 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         data = getTensor(output_base + "_0");
     };
     
+    const bool exhaustive_model_viz = viz_taps_enabled_ && viz_taps_max_frames_ > 0;
+    if (exhaustive_model_viz) {
+        viz_taps_max_frames_ = std::max(
+            viz_taps_max_frames_,
+            static_cast<int>(std::min(layers.size() + static_cast<size_t>(64),
+                                      static_cast<size_t>(std::numeric_limits<int>::max()))));
+    }
+
     for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
-        if (planner_enabled && static_plan_.built &&
+        // Une fusion retire les consumers du parcours. En mode VIZ exhaustif,
+        // executer chaque noeud garantit une vignette (L) par layer.
+        if (!exhaustive_model_viz && planner_enabled && static_plan_.built &&
             layer_idx < static_plan_.execution.skip_layer.size() &&
             static_plan_.execution.skip_layer[layer_idx] != 0) {
             if (runtime_trace) {
@@ -5485,6 +5579,18 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Dispatch runtime générique (CUDA/ROCm) pour les layers supportés via forwardLayer().
         // Retourne true si un runtime a produit une sortie valide (outputs[0]).
         auto try_runtime_forward_layer = [&](std::vector<float>& out) -> bool {
+            const bool has_preplanned_route = RuntimeRouter::instance().hasForwardRouteForLayer(layer);
+            if (!has_preplanned_route) {
+                if (runtime_trace) {
+                    std::cerr << "[runtime-fallback] layer#" << layer_idx
+                              << " name='" << layer.name
+                              << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
+                              << "' reason=unsupported_by_preplanned_route"
+                              << std::endl;
+                }
+                return false;
+            }
+
             std::vector<std::vector<float>> runtime_outputs;
             AbstractRuntime* selected_runtime = nullptr;
             if (!RuntimeRouter::instance().dispatchForwardLayer(inputs, runtime_outputs, layer, training, &selected_runtime)) {
@@ -5517,7 +5623,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                     const char* reason = active_runtimes.empty()
                         ? "no_active_runtime"
-                        : "unsupported_or_runtime_rejected";
+                        : "runtime_execution_error_route_pruned";
 
                     std::cerr << "[runtime-fallback] layer#" << layer_idx
                               << " name='" << layer.name
@@ -5540,7 +5646,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         
         try {
             switch (layer.type_enum) {
-    
+
     // ====================================================================
     // CONVOLUTION
     // ====================================================================
@@ -5669,7 +5775,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             const float* bias_ptr = layer.use_bias ? (layer_weights + w_need) : nullptr;
 
             const bool dense_input = (x.size() == static_cast<size_t>(in_channels) * static_cast<size_t>(height) * static_cast<size_t>(width));
-            const float* __restrict__ xptr = dense_input ? x.data() : nullptr;
+            const float* MIMIR_RESTRICT xptr = dense_input ? x.data() : nullptr;
             const int HW = height * width;
 
             // Choix d'une tuile M pour limiter la mémoire (X_col et C_tile).
@@ -5683,7 +5789,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             float* wT = wT_buf.data();
             #pragma omp parallel for if(static_cast<long long>(out_channels) * static_cast<long long>(K) > omp_work_threshold()) schedule(static)
             for (int oc = 0; oc < out_channels; ++oc) {
-                const float* __restrict__ w_oc = layer_weights + static_cast<size_t>(oc) * static_cast<size_t>(K);
+                const float* MIMIR_RESTRICT w_oc = layer_weights + static_cast<size_t>(oc) * static_cast<size_t>(K);
                 for (int k = 0; k < K; ++k) {
                     wT[static_cast<size_t>(k) * static_cast<size_t>(out_channels) + static_cast<size_t>(oc)] = w_oc[static_cast<size_t>(k)];
                 }
@@ -5708,7 +5814,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     const int m = m0 + r;
                     const int oh = m / out_width;
                     const int ow = m - oh * out_width;
-                    float* __restrict__ row = Xcol + static_cast<size_t>(r) * static_cast<size_t>(K);
+                    float* MIMIR_RESTRICT row = Xcol + static_cast<size_t>(r) * static_cast<size_t>(K);
 
                     int col = 0;
                     if (dense_input) {
@@ -5884,6 +5990,24 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // ====================================================================
     
     case LayerType::Linear: {
+        if (!layer.shared_weights_from.empty()) {
+            Layer* source = getLayerByName(layer.shared_weights_from);
+            RUNTIME_CHECK(source && source->getWeights(), "Linear: shared weight source unavailable");
+            const int in_f = layer.in_features;
+            const int out_f = layer.out_features;
+            RUNTIME_CHECK(in_f > 0 && out_f > 0 && x.size() % static_cast<size_t>(in_f) == 0,
+                          "Linear: invalid tied projection dimensions");
+            const int rows = static_cast<int>(x.size() / static_cast<size_t>(in_f));
+            layer_output.assign(static_cast<size_t>(rows) * out_f, 0.0f);
+            const float* weights = source->getWeights();
+            for (int row = 0; row < rows; ++row)
+                for (int out = 0; out < out_f; ++out)
+                    for (int in = 0; in < in_f; ++in)
+                        layer_output[static_cast<size_t>(row) * out_f + out] +=
+                            x[static_cast<size_t>(row) * in_f + in] *
+                            weights[static_cast<size_t>(out) * in_f + in];
+            break;
+        }
         executed_call = "runtime_router.dispatchForwardLayer";
         if (try_runtime_forward_layer(layer_output)) {
             break;
@@ -6655,6 +6779,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
         break;
     }
+
+    case LayerType::NMS: {
+        RUNTIME_CHECK(
+            try_runtime_forward_layer(layer_output),
+            "NMS is not supported by any active runtime"
+        );
+        break;
+    }
     
     // ====================================================================
     // ATTENTION
@@ -6663,8 +6795,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     case LayerType::SelfAttention:
     case LayerType::MultiHeadAttention: {
         static bool accel_logged_attention = false;
+        const bool advanced_attention = layer.num_kv_heads > 0 || layer.rope_theta > 0.0f;
 
-        if (try_runtime_forward_layer(layer_output)) {
+        if (!advanced_attention && try_runtime_forward_layer(layer_output)) {
             break;
         }
 
@@ -6699,6 +6832,16 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         bool causal = layer.causal;
         
         const float* weights = layer.getWeights();
+        if (advanced_attention) {
+            const int kv_heads = layer.num_kv_heads > 0 ? layer.num_kv_heads : num_heads;
+            RUNTIME_CHECK(
+                CausalAttentionOps::run(x, {}, seq_len, embed_dim, num_heads, kv_heads,
+                                        causal, layer.rope_theta, weights, nullptr,
+                                        layer_output, nullptr),
+                "GQA/RoPE attention: invalid dimensions"
+            );
+            break;
+        }
         int qkv_size = embed_dim * embed_dim * 3;
         int out_size = embed_dim * embed_dim;
         int qkv_bias_size = embed_dim * 3;
@@ -7317,6 +7460,12 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // (ex: activations). On garde un "dernier HxW connu" pour afficher plus de blocs
         // sans modifier les builders.
         if (viz_taps_enabled_ && viz_taps_max_frames_ > 0) {
+            if (!viz_tips_init_done_) {
+                clearVizTipsRegistry();
+                viz_tips_custom_enabled_ = InitVizTips();
+                viz_tips_init_done_ = true;
+            }
+
             auto is_viz_candidate_layer = [&](LayerType t) {
                 switch (t) {
                     // Spatial ops (déjà supportés)
@@ -7381,49 +7530,10 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         return true;
 
                     default:
-                        return false;
+                        // La VIZ demande une vue exhaustive du graphe. Les
+                        // sorties non spatiales utiliseront la heatmap vectorielle.
+                        return exhaustive_model_viz && t != LayerType::UNKNOWN;
                 }
-            };
-
-            auto split_path = [](const std::string& s, char sep) {
-                std::vector<std::string> parts;
-                size_t start = 0;
-                while (start < s.size()) {
-                    size_t end = s.find(sep, start);
-                    if (end == std::string::npos) end = s.size();
-                    if (end > start) parts.push_back(s.substr(start, end - start));
-                    start = end + 1;
-                }
-                return parts;
-            };
-
-            auto block_label_for = [&](const Layer& lyr) -> std::string {
-                // Convention de nommage (pour le visualizer):
-                //   <model>/blocks/<path>/<LayerType>
-                // - stable et lisible (hiérarchique)
-                // - évite le suffixe "/activation" (sinon masqué si hide_activation_blocks=true)
-                if (lyr.name.empty()) return {};
-
-                const auto parts = split_path(lyr.name, '/');
-                if (parts.size() < 1) return {};
-                const std::string& model = parts[0];
-
-                std::string path;
-                // On saute le préfixe modèle, puis on garde le chemin complet du layer.
-                for (size_t i = 1; i < parts.size(); ++i) {
-                    if (parts[i].empty()) continue;
-                    if (!path.empty()) path += "/";
-                    path += parts[i];
-                }
-                if (path.empty()) path = "root";
-
-                std::string type = type_to_string(lyr.type_enum);
-                if (type.empty()) type = "Layer";
-
-                // IMPORTANT: ne jamais finir par "/activation".
-                if (type == "activation") type = "act";
-
-                return model + "/blocks/" + path + "/" + type;
             };
 
             const bool is_packed_output_concat =
@@ -7432,7 +7542,50 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                  layer.name.find("out_pack") != std::string::npos ||
                  layer.output == "x");
 
-            if (is_viz_candidate_layer(layer.type_enum) && !is_packed_output_concat) {
+            if (is_viz_candidate_layer(layer.type_enum) && (!is_packed_output_concat || exhaustive_model_viz)) {
+
+                auto canonical_viz_label = [&]() -> std::string {
+                    std::string model_key = modelConfig.value("type", std::string());
+                    if (model_key.empty()) model_key = getModelName();
+                    if (model_key.empty()) model_key = "model";
+                    const std::string layer_key = layer.name.empty()
+                        ? ("layer_" + std::to_string(layer_idx))
+                        : layer.name;
+                    return model_key + "/blocks/" + layer_key + "/" +
+                           type_to_string(layer.type_enum);
+                };
+
+                auto resize_viz_frame_nearest = [&](VizFrame& vf, int target_w, int target_h) {
+                    if (target_w <= 0 || target_h <= 0) return;
+                    if (vf.w <= 0 || vf.h <= 0 || vf.channels <= 0) return;
+                    if (vf.w == target_w && vf.h == target_h) return;
+
+                    const int ch = vf.channels;
+                    const size_t expected = static_cast<size_t>(vf.w) * static_cast<size_t>(vf.h) * static_cast<size_t>(ch);
+                    if (vf.pixels.size() != expected) return;
+
+                    std::vector<uint8_t> up;
+                    up.resize(static_cast<size_t>(target_w) * static_cast<size_t>(target_h) * static_cast<size_t>(ch));
+                    for (int y = 0; y < target_h; ++y) {
+                        const int sy = (target_h > 1) ? ((y * vf.h) / target_h) : 0;
+                        for (int x = 0; x < target_w; ++x) {
+                            const int sx = (target_w > 1) ? ((x * vf.w) / target_w) : 0;
+                            const size_t src_base = (static_cast<size_t>(sy) * static_cast<size_t>(vf.w) + static_cast<size_t>(sx)) * static_cast<size_t>(ch);
+                            const size_t dst_base = (static_cast<size_t>(y) * static_cast<size_t>(target_w) + static_cast<size_t>(x)) * static_cast<size_t>(ch);
+                            for (int cidx = 0; cidx < ch; ++cidx) {
+                                up[dst_base + static_cast<size_t>(cidx)] = vf.pixels[src_base + static_cast<size_t>(cidx)];
+                            }
+                        }
+                    }
+
+                    vf.pixels = std::move(up);
+                    vf.w = target_w;
+                    vf.h = target_h;
+
+                    if (!vf.pixels_real.empty()) {
+                        vf.pixels_real.clear();
+                    }
+                };
 
                 auto viz_preview_prefers_chw = [&](const Layer& lyr) -> bool {
                     switch (lyr.type_enum) {
@@ -7887,25 +8040,20 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             vf.channels = 1;
                         }
 
-                        const std::string block_label = block_label_for(layer);
-                        vf.label = !block_label.empty()
-                            ? block_label
-                            : (layer.name.empty()
-                                ? (type_to_string(layer.type_enum) + "#" + std::to_string(layer_idx))
-                                : layer.name);
-
-                        // Déduplication: 1 vignette par label (on garde la dernière vue).
-                        // Si on est plein, on évince (comme addVizTapFrame) pour laisser apparaître d'autres layers.
-                        auto it = std::find_if(viz_taps_.begin(), viz_taps_.end(), [&](const VizFrame& existing) {
-                            return existing.label == vf.label;
-                        });
-                        if (it != viz_taps_.end()) {
-                            *it = std::move(vf);
-                        } else if (static_cast<int>(viz_taps_.size()) < viz_taps_max_frames_) {
-                            viz_taps_.push_back(std::move(vf));
-                        } else if (!viz_taps_.empty()) {
-                            viz_taps_.back() = std::move(vf);
+                        // UX: forcer toutes les vignettes tips en format carré XxX,
+                        // avec X = largeur courante de la preview.
+                        // Exemples: 32x3x3 -> 32x32x3, 128x36x3 -> 128x128x3.
+                        if (vf.w > 0 && vf.h != vf.w) {
+                            resize_viz_frame_nearest(vf, vf.w, vf.w);
                         }
+
+                        vf.label = canonical_viz_label();
+
+                        if (viz_tips_custom_enabled_) {
+                            (void)UpdateVizTips(layer, vf);
+                        }
+
+                        addVizTapFrame(std::move(vf));
                     }
                 } else {
                     // Fallback vectoriel: projeter le tenseur 1D sur une petite heatmap 2D.
@@ -7946,23 +8094,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     vf.h = vh;
                     vf.channels = 1;
 
-                    const std::string block_label = block_label_for(layer);
-                    vf.label = !block_label.empty()
-                        ? (block_label + "/vec")
-                        : (layer.name.empty()
-                            ? (type_to_string(layer.type_enum) + "#" + std::to_string(layer_idx) + "/vec")
-                            : (layer.name + "/vec"));
+                    vf.label = canonical_viz_label() + "/vec";
 
-                    auto it = std::find_if(viz_taps_.begin(), viz_taps_.end(), [&](const VizFrame& existing) {
-                        return existing.label == vf.label;
-                    });
-                    if (it != viz_taps_.end()) {
-                        *it = std::move(vf);
-                    } else if (static_cast<int>(viz_taps_.size()) < viz_taps_max_frames_) {
-                        viz_taps_.push_back(std::move(vf));
-                    } else if (!viz_taps_.empty()) {
-                        viz_taps_.back() = std::move(vf);
+                    if (viz_tips_custom_enabled_) {
+                        (void)UpdateVizTips(layer, vf);
                     }
+
+                    addVizTapFrame(std::move(vf));
                 }
             }
         }
@@ -7973,30 +8111,54 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         
         std::string output_name = layer.output.empty() ? "x" : layer.output;
 
-        if (fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
+        if (!exhaustive_model_viz && fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
             const auto& plan = static_plan_.execution;
-            if (layer_idx < plan.fuse_activation_consumer.size()) {
-                const int activation_idx = plan.fuse_activation_consumer[layer_idx];
-                if (activation_idx >= 0) {
-                    const Layer& activation_layer = layers[static_cast<size_t>(activation_idx)];
-                    apply_fused_standalone_activation(layer_output, activation_layer);
-                    output_name = activation_layer.output.empty() ? "x" : activation_layer.output;
+            if (layer_idx < plan.fuse_chain_next.size()) {
+                int chain_idx = plan.fuse_chain_next[layer_idx];
+                while (chain_idx >= 0) {
+                    const size_t fused_idx = static_cast<size_t>(chain_idx);
+                    if (fused_idx >= layers.size()) break;
+
+                    const Layer& fused_layer = layers[fused_idx];
+                    if (Mimir::Planning::is_fusible_activation_layer(fused_layer)) {
+                        apply_fused_standalone_activation(layer_output, fused_layer);
+                    } else if (Mimir::Planning::is_fusible_unary_shape_layer(fused_layer)) {
+                        apply_fused_unary_shape(layer_output, fused_layer);
+                    } else if (Mimir::Planning::is_fusible_split_layer(fused_layer)) {
+                        apply_fused_split_or_chunk(layer_output, fused_layer);
+                    } else {
+                        break;
+                    }
+
+                    output_name = fused_layer.output.empty() ? "x" : fused_layer.output;
+
+                    if (fused_idx >= plan.fuse_chain_next.size()) break;
+                    chain_idx = plan.fuse_chain_next[fused_idx];
                 }
-            }
-            if (layer_idx < plan.fuse_unary_consumer.size()) {
-                const int unary_idx = plan.fuse_unary_consumer[layer_idx];
-                if (unary_idx >= 0) {
-                    const Layer& unary_layer = layers[static_cast<size_t>(unary_idx)];
-                    apply_fused_unary_shape(layer_output, unary_layer);
-                    output_name = unary_layer.output.empty() ? "x" : unary_layer.output;
+            } else {
+                if (layer_idx < plan.fuse_activation_consumer.size()) {
+                    const int activation_idx = plan.fuse_activation_consumer[layer_idx];
+                    if (activation_idx >= 0) {
+                        const Layer& activation_layer = layers[static_cast<size_t>(activation_idx)];
+                        apply_fused_standalone_activation(layer_output, activation_layer);
+                        output_name = activation_layer.output.empty() ? "x" : activation_layer.output;
+                    }
                 }
-            }
-            if (layer_idx < plan.fuse_split_consumer.size()) {
-                const int split_idx = plan.fuse_split_consumer[layer_idx];
-                if (split_idx >= 0) {
-                    const Layer& split_layer = layers[static_cast<size_t>(split_idx)];
-                    apply_fused_split_or_chunk(layer_output, split_layer);
-                    output_name = split_layer.output.empty() ? "x" : split_layer.output;
+                if (layer_idx < plan.fuse_unary_consumer.size()) {
+                    const int unary_idx = plan.fuse_unary_consumer[layer_idx];
+                    if (unary_idx >= 0) {
+                        const Layer& unary_layer = layers[static_cast<size_t>(unary_idx)];
+                        apply_fused_unary_shape(layer_output, unary_layer);
+                        output_name = unary_layer.output.empty() ? "x" : unary_layer.output;
+                    }
+                }
+                if (layer_idx < plan.fuse_split_consumer.size()) {
+                    const int split_idx = plan.fuse_split_consumer[layer_idx];
+                    if (split_idx >= 0) {
+                        const Layer& split_layer = layers[static_cast<size_t>(split_idx)];
+                        apply_fused_split_or_chunk(layer_output, split_layer);
+                        output_name = split_layer.output.empty() ? "x" : split_layer.output;
+                    }
                 }
             }
         }
@@ -8020,12 +8182,28 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
         storeTensor(output_name, std::move(layer_output));
 
+        const auto& layer_out_view = getTensor(output_name);
+
+        const size_t layer_out_bytes = hasTypedTensor(output_name)
+            ? getTypedTensor(output_name).size_bytes()
+            : layer_out_view.size() * sizeof(float);
+        if (executed_backend.find("VULKAN") != std::string::npos) {
+            backend_mem_attrib.vulkan_bytes += layer_out_bytes;
+        } else if (executed_backend.find("CUDA") != std::string::npos) {
+            backend_mem_attrib.cuda_bytes += layer_out_bytes;
+        } else if (executed_backend.find("ROCM") != std::string::npos) {
+            backend_mem_attrib.rocm_bytes += layer_out_bytes;
+        } else if (executed_backend.find("CPU") != std::string::npos || executed_backend == "cpu_switch_kernel") {
+            backend_mem_attrib.cpu_bytes += layer_out_bytes;
+        } else {
+            backend_mem_attrib.other_bytes += layer_out_bytes;
+        }
+
         if (training && has_branches) {
-            all_layer_outputs.push_back(getTensor(output_name));
+            all_layer_outputs.push_back(layer_out_view);
         }
 
         if (runtime_trace) {
-            const auto& layer_out_view = getTensor(output_name);
             std::cerr << "[runtime-trace] layer#" << layer_idx
                       << " name='" << layer.name
                       << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
@@ -8187,6 +8365,18 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
         // resdiff: |recon - input| en image-space (HWC)
         add_resdiff_frame("vae_conv");
+    }
+
+    if (allocator_log) {
+        allocator.log_stats(training ? "forward(training)" : "forward(inference)", allocator_log_verbose, &backend_mem_attrib);
+    }
+
+    if (nested_viz_model && viz_capture_root != nullptr) {
+        auto child_frames = std::move(viz_taps_);
+        viz_taps_.clear();
+        for (auto& frame : child_frames) {
+            viz_capture_root->addVizTapFrame(std::move(frame));
+        }
     }
 
     return getTensor("x");
@@ -8674,6 +8864,12 @@ static bool backward_cross_attention(
 } // namespace
 
 Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
+    const auto model_dtype = Mimir::parse_dtype(default_dtype_);
+    if (!Mimir::dtype_is_floating(model_dtype)) {
+        throw std::runtime_error(
+            std::string("Model::backwardPass: dtype '") +
+            Mimir::dtype_to_string(model_dtype) + "' is not differentiable");
+    }
     if (params_frozen_) {
         throw std::runtime_error("Model::backwardPass: parameters are frozen");
     }
@@ -8694,6 +8890,8 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
     const size_t guard_mb = guard.getLimit() / (1024ULL * 1024ULL);
     const size_t cap_mb = (max_ram_mb_ > 0) ? max_ram_mb_ : guard_mb;
     RuntimeAllocator allocator(guard, cap_mb);
+    const bool allocator_log = env_flag_true("MIMIR_ALLOCATOR_LOG", false);
+    const bool allocator_log_verbose = env_flag_true("MIMIR_ALLOCATOR_LOG_VERBOSE", false);
 
     auto accumulate_grad = [](std::vector<float>& dst, const std::vector<float>& src) {
         if (dst.empty()) {
@@ -8837,6 +9035,18 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             accumulate_grad(grad_store[input_names[0]], grad_out);
 
         } else if (layer.type == "Constant") {
+            if (layer.trainable_parameter) {
+                if (grad_out.size() != layer.getWeightsSize()) {
+                    std::cerr << "⚠️  Constant parameter backward shape mismatch (" << layer.name << ")" << std::endl;
+                    continue;
+                }
+                if (layer.grad_weights.size() != layer.getWeightsSize()) {
+                    layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+                }
+                for (size_t i = 0; i < grad_out.size(); ++i) {
+                    layer.grad_weights[i] += grad_out[i];
+                }
+            }
             continue;
 
         } else if (layer.type == "Concat") {
@@ -9101,12 +9311,14 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             std::vector<float> g_mu(grad_out.size(), 0.0f);
             std::vector<float> g_logvar(grad_out.size(), 0.0f);
             for (size_t i = 0; i < grad_out.size(); ++i) {
-                const float lv = std::clamp(logvar[i], -20.0f, 20.0f);
+                const float lv_raw = logvar[i];
+                const float lv = std::clamp(lv_raw, -20.0f, 20.0f);
                 const float stdv = std::exp(0.5f * lv);
                 const float inv_std = (stdv > 1e-12f) ? (1.0f / stdv) : 0.0f;
                 const float eps = (z[i] - mu[i]) * inv_std;
                 g_mu[i] = grad_out[i];
-                g_logvar[i] = grad_out[i] * eps * stdv * 0.5f;
+                const float clamp_grad = (lv_raw >= -20.0f && lv_raw <= 20.0f) ? 1.0f : 0.0f;
+                g_logvar[i] = grad_out[i] * eps * stdv * 0.5f * clamp_grad;
             }
             accumulate_grad(grad_store[input_names[0]], g_mu);
             accumulate_grad(grad_store[input_names[1]], g_logvar);
@@ -9786,8 +9998,13 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 }
             }
             const int num_heads = std::max(1, layer.num_heads);
+            const int kv_heads = layer.num_kv_heads > 0 ? layer.num_kv_heads : num_heads;
+            const bool advanced_attention = layer.num_kv_heads > 0 || layer.rope_theta > 0.0f;
 
-            const int qkv_size = embed_dim * embed_dim * 3;
+            const int kv_dim = kv_heads * (embed_dim / num_heads);
+            const int qkv_size = advanced_attention
+                ? embed_dim * (embed_dim + 2 * kv_dim)
+                : embed_dim * embed_dim * 3;
             const int out_size = embed_dim * embed_dim;
             const size_t expected = static_cast<size_t>(qkv_size + out_size);
             if (layer.getWeights() == nullptr || layer.getWeightsSize() < expected) {
@@ -9804,8 +10021,19 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             float* dWout = layer.grad_weights.data() + qkv_size;
 
             std::vector<float> dx;
-            if (!backward_self_attention(layer_input0, grad_out, seq_len, embed_dim, num_heads, layer.causal,
-                                         Wqkv, Wout, dWqkv, dWout, dx)) {
+            bool backward_ok = false;
+            if (advanced_attention) {
+                std::vector<float> ignored;
+                backward_ok = CausalAttentionOps::run(
+                    layer_input0, grad_out, seq_len, embed_dim, num_heads, kv_heads,
+                    layer.causal, layer.rope_theta, layer.getWeights(),
+                    layer.grad_weights.data(), ignored, &dx);
+            } else {
+                backward_ok = backward_self_attention(
+                    layer_input0, grad_out, seq_len, embed_dim, num_heads, layer.causal,
+                    Wqkv, Wout, dWqkv, dWout, dx);
+            }
+            if (!backward_ok) {
                 std::cerr << "⚠️  Attention backward failed (" << layer.name << ")" << std::endl;
                 continue;
             }
@@ -10725,11 +10953,19 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                 continue;
             }
 
-            if (layer.grad_weights.size() != layer.getWeightsSize()) {
-                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+            Layer* weight_owner = &layer;
+            if (!layer.shared_weights_from.empty()) {
+                weight_owner = getLayerByName(layer.shared_weights_from);
+                if (!weight_owner || !weight_owner->getWeights()) {
+                    throw std::runtime_error("Linear backward: shared weight source unavailable");
+                }
+            }
+            if (weight_owner->grad_weights.size() != weight_owner->getWeightsSize()) {
+                weight_owner->grad_weights.assign(weight_owner->getWeightsSize(), 0.0f);
             }
 
-            const float* W = layer.getWeights();
+            const float* W = weight_owner->getWeights();
+            std::vector<float>& linear_grad_weights = weight_owner->grad_weights;
             const bool use_bias = layer.use_bias;
             const size_t w_count = static_cast<size_t>(in_f) * static_cast<size_t>(out_f);
 
@@ -10747,10 +10983,10 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                         const float g = go[static_cast<size_t>(o)];
                         const size_t row_off = static_cast<size_t>(o) * static_cast<size_t>(in_f);
                         for (int i = 0; i < in_f; ++i) {
-                            layer.grad_weights[row_off + static_cast<size_t>(i)] += g * x[static_cast<size_t>(i)];
+                            linear_grad_weights[row_off + static_cast<size_t>(i)] += g * x[static_cast<size_t>(i)];
                         }
-                        if (use_bias && layer.grad_weights.size() >= w_count + static_cast<size_t>(out_f)) {
-                            layer.grad_weights[w_count + static_cast<size_t>(o)] += g;
+                        if (use_bias && linear_grad_weights.size() >= w_count + static_cast<size_t>(out_f)) {
+                            linear_grad_weights[w_count + static_cast<size_t>(o)] += g;
                         }
                     }
 
@@ -10773,14 +11009,14 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
                     const float go = grad_out[static_cast<size_t>(o)];
                     const size_t row_off = static_cast<size_t>(o) * static_cast<size_t>(in_f);
                     for (int i = 0; i < in_f; ++i) {
-                        layer.grad_weights[row_off + static_cast<size_t>(i)] += go * layer_input0[static_cast<size_t>(i)];
+                        linear_grad_weights[row_off + static_cast<size_t>(i)] += go * layer_input0[static_cast<size_t>(i)];
                     }
                 }
 
                 // db += grad_out
-                if (use_bias && layer.grad_weights.size() >= w_count + static_cast<size_t>(out_f)) {
+                if (use_bias && linear_grad_weights.size() >= w_count + static_cast<size_t>(out_f)) {
                     for (int o = 0; o < out_f; ++o) {
-                        layer.grad_weights[w_count + static_cast<size_t>(o)] += grad_out[static_cast<size_t>(o)];
+                        linear_grad_weights[w_count + static_cast<size_t>(o)] += grad_out[static_cast<size_t>(o)];
                     }
                 }
 
@@ -11378,13 +11614,9 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             }
             accumulate_grad(grad_store[input_names[0]], grad_in);
         } else {
-            // Fallback: si non géré, on essaie au moins de propager sur l'input principal
-            if (grad_out.size() == input0_size) {
-                accumulate_grad(grad_store[input_names[0]], grad_out);
-            } else {
-                std::cerr << "⚠️  Backward not implemented for layer type '" << layer.type
-                          << "' (" << layer.name << ")" << std::endl;
-            }
+            throw std::runtime_error(
+                "Backward not implemented for layer type '" + layer.type +
+                "' (" + layer.name + "): refusing identity-gradient fallback");
         }
     }
 
@@ -11395,6 +11627,10 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
     if (it_in != grad_store.end()) {
         last_input_gradient_ = it_in->second;
         has_last_input_gradient_ = true;
+    }
+
+    if (allocator_log) {
+        allocator.log_stats("backward", allocator_log_verbose);
     }
 
     return grads;

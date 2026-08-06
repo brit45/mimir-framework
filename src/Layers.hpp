@@ -11,6 +11,7 @@
 
 // Needed for inline access to weight_block storage
 #include "tensors.hpp"
+#include "DType.hpp"
 
 // ============================================================================
 // Énumérations et structures
@@ -88,9 +89,12 @@ struct Layer {
     std::string type;  // String type for backward compat
     LayerType type_enum = LayerType::UNKNOWN;  // Enum type (NEW)
     size_t params_count;
+    Mimir::DType dtype = Mimir::DType::F32;
+    Mimir::DType accumulation_dtype = Mimir::DType::F32;
     
     // NOUVEAU: Pointeur vers le tensor de poids unifié pour ce layer
     tensor* weight_block = nullptr;  // Tous les poids du layer dans un seul tensor
+    std::string shared_weights_from; // Optional source layer for tied parameters
     
     // Données des paramètres (weights, bias) - conservé pour compatibilité
     std::vector<float> weights;
@@ -99,6 +103,10 @@ struct Layer {
     // Gradients (pour backprop)
     std::vector<float> grad_weights;
     std::vector<float> grad_bias;
+
+    // Les couches Constant sont fixes par défaut. Une Constant marquée
+    // trainable_parameter se comporte comme un tenseur paramètre sans entrée.
+    bool trainable_parameter = false;
     
     // État interne (pour BatchNorm, etc.)
     std::vector<float> running_mean;
@@ -153,6 +161,14 @@ struct Layer {
     // === Softmax / LogSoftmax ===
     int axis = -1;                // Axis pour softmax (default: dernier)
     bool use_mask = false;        // Causal mask pour attention
+
+    // === Non-Maximum Suppression ===
+    // Entrées: boxes [N,4] en xyxy, scores [N], classes [N] optionnelles.
+    // Sortie: indices originaux conservés, encodés en float.
+    float nms_iou_threshold = 0.5f;
+    float nms_score_threshold = 0.0f;
+    int nms_max_detections = 0;       // 0 = aucune limite
+    bool nms_class_agnostic = false;   // classes ignorées si true
     
     // === Reshape / View ===
     std::vector<int> target_shape;  // Shape cible pour reshape
@@ -173,9 +189,11 @@ struct Layer {
     
     // === Attention ===
     int num_heads = 8;            // Multi-head attention
+    int num_kv_heads = 0;         // 0 = num_heads; smaller enables GQA
     int head_dim = 64;            // Dimension par head
     int seq_len = 0;              // Sequence length pour attention
     bool causal = false;          // Causal mask
+    float rope_theta = 0.0f;      // > 0 applies RoPE to Q and K
 
     // === Custom: PatchEmbed (projection learnable des patches) ===
     int patch_dim = 0;            // Dimension d'un patch aplati (p*p)

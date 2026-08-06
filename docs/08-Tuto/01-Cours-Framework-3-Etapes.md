@@ -1,35 +1,37 @@
-# Tuto - Cours framework en 3 etapes
-
-## Pour qui
-
-- Debutants (college, lycee)
-- Etudiants (ingenierie, prof, autodidactes techniques)
-- Niveau avance (fac, scientifique, dev senior)
-
-## Objectif
+# Apprendre le framework en trois étapes
 
 Apprendre a utiliser Mimir de facon progressive, du premier modele jusqu'a l'optimisation et l'extension du framework.
 
-## Avant de commencer
+**Public concerné :** - Debutants (college, lycee)
+- Etudiants (ingenierie, prof, autodidactes techniques)
+- Niveau avance (fac, scientifique, dev senior)
 
-1. Compiler Mimir (voir [docs/01-Getting-Started/02-Installation.md](../01-Getting-Started/02-Installation.md)).
-2. Verifier l'environnement avec le smoketest (voir [docs/01-Getting-Started/05-Smoketest.md](../01-Getting-Started/05-Smoketest.md)).
-3. Savoir lancer une commande terminal simple.
-
-## Résultat attendu
-
-A la fin de ce cours, tu peux:
+> **Prérequis**
+>
+> 1. Compiler Mimir (voir [docs/01-Getting-Started/02-Installation.md](../01-Getting-Started/02-Installation.md)).
+> 2. Verifier l'environnement avec le smoketest (voir [docs/01-Getting-Started/05-Smoketest.md](../01-Getting-Started/05-Smoketest.md)).
+> 3. Savoir lancer une commande terminal simple.
 
 - creer un script de base,
 - lancer entrainement et inference,
 - diagnostiquer un probleme de performance ou de memoire,
-- choisir la documentation adaptee a ton niveau.
+- choisir la documentation adaptee a votre niveau.
+
+## Sur cette page
+
+- [Parcours numerote 1 a 5](#parcours-numerote-1-a-5)
+- [Etape 1 - Debutants (college, lycee)](#etape-1---debutants-college-lycee)
+- [Etape 2 - Etudiants (ingenierie, prof, etc.)](#etape-2---etudiants-ingenierie-prof-etc)
+- [Etape 3 - Avance (fac, scientifique, dev senior)](#etape-3---avance-fac-scientifique-dev-senior)
+- [Conseils de progression](#conseils-de-progression)
+- [Suite logique](#suite-logique)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Parcours numerote 1 a 5
 
 1. Installer et verifier l'environnement
 2. Lancer un premier modele qui fonctionne
-3. Faire un mini entrainement puis une inference
+3. Distinguer construction, entraînement et inférence
 4. Sauvegarder, recharger et comparer les resultats
 5. Mesurer, optimiser, puis valider la non-regression
 
@@ -57,10 +59,11 @@ Comprendre ce qu'est un modele, lancer un script qui marche, et lire une sortie.
 
 ### Exercices
 
-1. Lancer un template modele:
+1. Construire le plus petit modèle enregistré :
 
 ```bash
-./bin/mimir --lua scripts/templates/template_new_model.lua
+./bin/mimir --lua scripts/templates/template_pipeline_args.lua -- \
+  --from-registry --arch basic_mlp --no-train
 ```
 
 2. Identifier dans les logs:
@@ -72,11 +75,11 @@ Comprendre ce qu'est un modele, lancer un script qui marche, et lire une sortie.
 
 ### Validation de fin d'etape
 
-Tu valides l'etape si:
+Vous validez l'etape si:
 
-- tu lances un script sans crash,
-- tu expliques en une phrase le role de `forward`,
-- tu sais ou regarder en cas d'erreur de lancement.
+- vous lancez un script sans crash,
+- vous expliquez en une phrase le role de `forward`,
+- vous savez ou regarder en cas d'erreur de lancement.
 
 ---
 
@@ -84,11 +87,13 @@ Tu valides l'etape si:
 
 ### Mission
 
-Construire une petite experience ML complete: donnees, entrainement, checkpoint, inference.
+Construire et sérialiser un modèle, puis comprendre séparément ce qu'exige un
+véritable entraînement.
 
 ### Notions a retenir
 
-- Le cycle de vie complet d'un modele (`create/build/allocate/init/forward/backward`).
+- Le cycle moderne : `create` construit le graphe, `build` reste un no-op de
+  compatibilité, puis viennent `allocate`, `init`, `forward` et `backward`.
 - Le role du dataset, des hyperparametres et des checkpoints.
 - La difference entre entrainement et inference.
 
@@ -102,23 +107,26 @@ Construire une petite experience ML complete: donnees, entrainement, checkpoint,
 
 ### Exercices
 
-1. Lancer un script d'entrainement existant:
+1. Exécuter le parcours registre vers checkpoint, qui ne demande aucun dataset :
 
 ```bash
-./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua -- --help
+./bin/mimir --lua scripts/templates/template_pipeline_args.lua -- \
+  --from-registry --arch basic_mlp --no-train \
+  --save /tmp/mimir_course_basic_mlp.safetensors
 ```
 
-2. Faire un run court (peu d'iterations), sauvegarder un checkpoint.
-3. Recharger le checkpoint et comparer une metrique simple (loss ou temps).
-4. Documenter 3 hypotheses expliquant une baisse ou une hausse de performance.
+2. Inspecter le checkpoint avec `scripts/tools/analyze_model.lua`.
+3. Lire l'aide d'un script d'entraînement adapté à votre architecture.
+4. Si vous disposez ensuite des données requises, faire un run court et
+   documenter dataset, seed, configuration et métrique.
 
 ### Validation de fin d'etape
 
-Tu valides l'etape si:
+Vous validez l'etape si:
 
-- tu reproduis un mini-run de train + reload checkpoint,
-- tu sais expliquer la difference train/inference,
-- tu peux partager un protocole d'experience simple et reproductible.
+- vous reproduisez un cycle build, sauvegarde et inspection,
+- vous savez expliquer la difference train/inference,
+- vous savez identifier les prérequis supplémentaires d'un entraînement réel.
 
 ---
 
@@ -145,35 +153,48 @@ Analyser le framework en profondeur, optimiser les performances, et etendre les 
 
 ### Exercices
 
-1. Mesurer un benchmark de reference:
+1. Mesurer d'abord les tests runtime ciblés :
 
 ```bash
-./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1
+ctest --test-dir build --output-on-failure \
+  -R 'RuntimeTest.MathLinear|RuntimeTest.MathConv2d|RuntimeTest.MathNorms'
 ```
 
 2. Proposer une optimisation (memoire, layout, batch, precision dtype).
 3. Implementer un changement minimal et mesurer avant/apres.
 4. Ecrire une note technique: objectif, methode, resultats, limites.
 
+> **Attention**
+> `benchmark_official.lua --safe` inclut actuellement les profils Warmup,
+> Small, Medium et Large. Même avec `--iters 1`, il peut approcher la limite
+> mémoire de 10 Go. Ne l'utilisez qu'après avoir vérifié sa configuration dans
+> le script et la mémoire disponible.
+
 ### Validation de fin d'etape
 
-Tu valides l'etape si:
+Vous validez l'etape si:
 
-- tu produis une mesure avant/apres argumentee,
-- tu relies ton resultat a des choix runtime/memoire,
-- tu identifies un risque de regression et un test de non-regression.
+- vous produisez une mesure avant/apres argumentee,
+- vous reliez votre resultat a des choix runtime/memoire,
+- vous identifiez un risque de regression et un test de non-regression.
 
 ---
 
 ## Conseils de progression
 
-1. Ne saute pas les etapes: la base accelere vraiment le niveau avance.
-2. Garde un journal d'experiences (commande, config, resultat).
-3. Utilise les checkpoints pour comparer proprement les changements.
-4. Si un run echoue, reduis l'experience (taille plus petite) et isole le probleme.
+1. Ne sautez pas les étapes : la base accélère réellement le niveau avancé.
+2. Gardez un journal d'expériences avec commande, config et résultat.
+3. Utilisez les checkpoints pour comparer proprement les changements.
+4. Si un run échoue, réduisez l'expérience et isolez le problème.
 
 ## Suite logique
 
 - Approfondir VAEText: [docs/02-User-Guide/11-VAEText.md](../02-User-Guide/11-VAEText.md)
 - Approfondir Transformer/GPT: [docs/02-User-Guide/12-Transformer-GPT.md](../02-User-Guide/12-Transformer-GPT.md)
 - Approfondir diffusion: [docs/02-User-Guide/13-Diffusion.md](../02-User-Guide/13-Diffusion.md)
+
+## Étapes suivantes
+
+- [Page précédente : Tutoriels](00-INDEX.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Tuto - Ajouter un modele](02-Tuto-Ajouter-Modele.md)

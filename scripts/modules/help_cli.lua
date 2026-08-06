@@ -100,6 +100,11 @@ local function infer_options(path)
   for key in data:gmatch('Args%.get_%w+%s*%([^\n]-"([%w%-%_]+)"') do
     add_option(set, key)
   end
+  -- Convention des scripts qui centralisent les getters dans un helper :
+  -- apply_cli(section, "field", "cli-name", Args.get_int)
+  for key in data:gmatch('apply_cli%s*%([^\n]-"[%w%-%_]+"%s*,%s*"([%w%-%_]+)"') do
+    add_option(set, key)
+  end
   for key in data:gmatch('opts%s*%[%s*"([%w%-%_]+)"%s*%]') do
     add_option(set, key)
   end

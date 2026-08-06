@@ -1,20 +1,12 @@
-# API : `Mimir.Layers` (ops)
-
-## Pour qui
-
-Développeur et utilisateur intermédiaire/avancé.
-
-## Objectif
+# `Mimir.Layers` (ops)
 
 Trouver rapidement le contrat API réel et les paramètres utilisables.
 
-## Avant de commencer
+**Public concerné :** Développeur et utilisateur intermédiaire/avancé.
 
-Connaître les commandes de base de Mímir.
-
-## Résultat attendu
-
-Tu peux appeler l'API sans ambiguïté de signature ou de comportement.
+> **Prérequis**
+>
+> Connaître les commandes de base de Mímir.
 
 ## Diagramme d'explication
 
@@ -60,3 +52,9 @@ Pour tester des ops de manière réaliste, le chemin supporté est :
 2) `Mimir.Model.create(...)`
 3) `Mimir.Model.allocate_params()` + `Mimir.Model.init_weights(...)` (ou `Mimir.Serialization.load(...)`)
 4) `Mimir.Model.forward(...)`
+
+## Étapes suivantes
+
+- [Page précédente : sérialisation](16-Serialization.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Globals & aliases](19-Globals.md)

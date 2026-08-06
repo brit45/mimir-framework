@@ -1,25 +1,30 @@
-# Internals : `Helpers.hpp` (helpers C++)
-
-## Pour qui
-
-Développeur avancé qui modifie le moteur C/C++.
-
-## Objectif
+# Helpers C++
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
-## Avant de commencer
+**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
 
-Connaître les bases C++ et la structure du dépôt.
-
-## Résultat attendu
-
-Tu peux modifier le code interne en limitant les régressions.
+> **Prérequis**
+>
+> Connaître les bases C++ et la structure du dépôt.
 
 
 Cette page documente le contenu de `src/Helpers.hpp`.
 
 Objectif: donner une carte précise des helpers “transverses” (IO, hashing, dataset, image utils) et de leurs propriétés (déterminisme, perfs, limites).
+
+## Sur cette page
+
+- [Rôle du header](#rôle-du-header)
+- [IO: fichiers et buffers](#io-fichiers-et-buffers)
+- [Image utils](#image-utils)
+- [Modalités / hashing / MagicToken](#modalités-hashing-magictoken)
+- [Nettoyage texte](#nettoyage-texte)
+- [Dataset: structures et lazy-loading](#dataset-structures-et-lazy-loading)
+- [Dataset: indexation](#dataset-indexation)
+- [Dataset: cache d’index](#dataset-cache-dindex)
+- [Correspondance Lua](#correspondance-lua)
+- [Étapes suivantes](#étapes-suivantes)
 
 ## Rôle du header
 
@@ -209,3 +214,9 @@ Modes:
 Le binding Lua `Mimir.Dataset.load(dir)` utilise le loader `loadDataset(dir)` (pas `loadDatasetCached`).
 
 Pour l’API user, voir `docs/02-User-Guide/03-Data.md`.
+
+## Étapes suivantes
+
+- [Page précédente : Internals : classe `Model` (C++)](10-Model-Class.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Internals : stockage `tensor` + allocation dynamique (C++)](12-Tensor-Storage.md)

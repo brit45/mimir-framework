@@ -5,6 +5,7 @@
 #endif
 
 #include "Layers.hpp"
+#include "runtimes/LayerOps.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -65,6 +66,40 @@ bool VulkanRuntime::isInitialized() const {
     return impl_ && impl_->initialized;
 }
 
+bool VulkanRuntime::supportsForwardLayerType(const LayerType type) const {
+    switch (config_.disabled) {
+        case true:
+            return false;
+        case false:
+            break;
+    }
+
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Conv2d:
+        case LayerType::ConvTranspose2d:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool VulkanRuntime::linearForward(
     const float* input,
     const float* weights,
@@ -95,6 +130,7 @@ bool VulkanRuntime::forwardLayer(
 #else
     if (!isInitialized() || !impl_) return false;
     if (config_.disabled) return false;
+    if (!supportsForwardLayerType(layer.type_enum)) return false;
 
     switch (layer.type_enum) {
         case LayerType::Linear: {
@@ -172,10 +208,10 @@ bool VulkanRuntime::forwardLayer(
 
             const int in_c = std::max(1, layer.in_channels);
             const int out_c = std::max(1, layer.out_channels);
-            const int k = std::max(1, layer.kernel_h > 0 ? layer.kernel_h : layer.get_kernel_h());
-            const int stride = std::max(1, layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h());
-            const int pad = std::max(0, layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h());
-            const int dilation = std::max(1, layer.dilation_h > 0 ? layer.dilation_h : 1);
+            const int k = std::max(1, layer.get_kernel_h());
+            const int stride = std::max(1, layer.get_stride_h());
+            const int pad = std::max(0, layer.get_pad_h());
+            const int dilation = std::max(1, (layer.dilation_h != 1) ? layer.dilation_h : layer.dilation);
 
             int in_h = std::max(1, layer.input_height);
             int in_w = std::max(1, layer.input_width);
@@ -232,10 +268,10 @@ bool VulkanRuntime::forwardLayer(
 
             const int in_c = std::max(1, layer.in_channels);
             const int out_c = std::max(1, layer.out_channels);
-            const int k = std::max(1, layer.kernel_h > 0 ? layer.kernel_h : layer.get_kernel_h());
-            const int stride = std::max(1, layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h());
-            const int pad = std::max(0, layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h());
-            const int dilation = std::max(1, layer.dilation_h > 0 ? layer.dilation_h : 1);
+            const int k = std::max(1, layer.get_kernel_h());
+            const int stride = std::max(1, layer.get_stride_h());
+            const int pad = std::max(0, layer.get_pad_h());
+            const int dilation = std::max(1, (layer.dilation_h != 1) ? layer.dilation_h : layer.dilation);
 
             int in_h = std::max(1, layer.input_height);
             int in_w = std::max(1, layer.input_width);
@@ -305,6 +341,21 @@ bool VulkanRuntime::forwardLayer(
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.mulForward(A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()));
         }
+        case LayerType::Subtract:
+        case LayerType::Divide: {
+            if (inputs.size() < 2 || !inputs[0] || !inputs[1]) return false;
+            const std::vector<float>& A = *inputs[0];
+            const std::vector<float>& B = *inputs[1];
+            if (A.size() != B.size() || A.empty()) return false;
+            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+
+            int op = 0;
+            if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op)) return false;
+
+            outputs.resize(1);
+            RuntimeLayerOps::binaryForwardHost(A, B, outputs[0], op);
+            return true;
+        }
         case LayerType::ReLU: {
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
@@ -349,6 +400,24 @@ bool VulkanRuntime::forwardLayer(
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.tanhForward(A.data(), outputs[0].data(), static_cast<int>(A.size()));
+        }
+        case LayerType::LeakyReLU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish: {
+            if (inputs.empty() || !inputs[0]) return false;
+            const std::vector<float>& A = *inputs[0];
+            if (A.empty()) return false;
+            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+
+            int op = 0;
+            float alpha = 0.01f;
+            if (!RuntimeLayerOps::resolveUnaryOp(layer.type_enum, layer, op, alpha)) return false;
+
+            outputs.resize(1);
+            RuntimeLayerOps::unaryForwardHost(A, outputs[0], op, alpha);
+            return true;
         }
         default:
             return false;

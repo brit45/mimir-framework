@@ -61,9 +61,7 @@
 <text x="1055.0" y="342" class="small" text-anchor="middle">4 entrées</text>
 <path d="M900,220 L1055,300" class="edgeB"/>
 <rect x="935" y="405" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1055.0" y="430" class="label" text-anchor="middle">ldm_unet</text>
 <rect x="935" y="461" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1055.0" y="486" class="label" text-anchor="middle">ponyxl_ddpm</text>
 <rect x="935" y="517" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
 <text x="1055.0" y="542" class="label" text-anchor="middle">sd3_5</text>
 <rect x="935" y="573" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>

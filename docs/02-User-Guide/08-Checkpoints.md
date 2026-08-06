@@ -1,20 +1,12 @@
-# Checkpoints / reprise d’entraînement
-
-## Pour qui
-
-Débutant à intermédiaire.
-
-## Objectif
+# Checkpoints et reprise d’entraînement
 
 Sauvegarder, charger et reprendre sans perdre d'état utile.
 
-## Avant de commencer
+**Public concerné :** Débutant à intermédiaire.
 
-Avoir un modèle en mémoire (créé ou entraîné).
-
-## Résultat attendu
-
-Tu peux reprendre un run de manière fiable.
+> **Prérequis**
+>
+> Avoir un modèle en mémoire (créé ou entraîné).
 
 ## Diagrammes d'explication
 
@@ -74,3 +66,9 @@ Bon pattern :
 - reprendre via `scripts/modules/checkpoint_resume.lua`
 
 VAEText : voir `scripts/training/train_vae_texte.lua`.
+
+## Étapes suivantes
+
+- [Page précédente : Tokenizer & ConditioningEncoder](07-Tokenizer-Encoder.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : Mode `--conf`: Config-Driven Scripting](08-Config-Driven-Scripting.md)

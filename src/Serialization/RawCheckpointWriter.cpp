@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <sstream>
 #include <ctime>
+#include <iostream>
 
 namespace Mimir {
 namespace Serialization {
@@ -26,6 +27,10 @@ bool RawCheckpointWriter::save(
 ) {
     try {
         fs::path root(path);
+        std::cerr << "[serialization] raw save path=" << root.string()
+                  << " save_tokenizer=" << options.save_tokenizer
+                  << " save_encoder=" << options.save_encoder
+                  << " save_optimizer=" << options.save_optimizer << std::endl;
         
         // Create directory structure
         if (!create_structure(root.string(), error)) {
@@ -89,6 +94,7 @@ bool RawCheckpointWriter::create_structure(
 ) {
     try {
         fs::path root_path(root);
+        std::cerr << "[serialization] raw create_structure root=" << root_path.string() << std::endl;
         
         // Create directories
         fs::create_directories(root_path);
@@ -283,6 +289,9 @@ bool RawCheckpointWriter::save_tensor(
         fs::path root_path(root);
         fs::path bin_path = root_path / "tensors" / (tensor.name + ".bin");
         fs::path json_path = root_path / "tensors" / (tensor.name + ".json");
+        std::cerr << "[serialization] raw save_tensor name=" << tensor.name
+                  << " dtype=" << dtype_to_string(tensor.dtype)
+                  << " bytes=" << tensor.byte_size << std::endl;
 
         // Ensure directories exist (tensor.name may contain subpaths like "vae/enc_fc0_weights")
         fs::create_directories(bin_path.parent_path());
@@ -341,12 +350,19 @@ bool RawCheckpointWriter::save_architecture(
 ) {
     try {
         fs::path arch_path = fs::path(root) / "model" / "architecture.json";
+        std::cerr << "[serialization] raw save_architecture path=" << arch_path.string() << std::endl;
         
         json arch;
         arch["model_name"] = model.getModelName();
         arch["total_params"] = model.totalParamCount();
         arch["num_layers"] = model.getLayers().size();
         arch["model_config"] = model.modelConfig;
+        try {
+            if (model.modelConfig.contains("type") && model.modelConfig["type"].is_string()) {
+                arch["model_type"] = model.modelConfig["type"].get<std::string>();
+            }
+        } catch (...) {
+        }
         {
             DType dt = DType::Float32;
             try { dt = string_to_dtype(model.getDefaultDType()); } catch (...) {}
@@ -362,6 +378,7 @@ bool RawCheckpointWriter::save_architecture(
             layer_obj["name"] = layer.name;
             layer_obj["type"] = layer.type;
             layer_obj["params_count"] = layer.params_count;
+            layer_obj["trainable_parameter"] = layer.trainable_parameter;
             layer_obj["inputs"] = layer.inputs;
             layer_obj["output"] = layer.output;
             // Common shape fields
@@ -414,6 +431,7 @@ bool RawCheckpointWriter::save_tokenizer(
 ) {
     try {
         fs::path tok_path = fs::path(root) / "tokenizer" / "tokenizer.json";
+        std::cerr << "[serialization] raw save_tokenizer path=" << tok_path.string() << std::endl;
         
         const auto& tokenizer = model.getTokenizer();
         json tok_json = tokenizer.to_json();
@@ -446,6 +464,7 @@ bool RawCheckpointWriter::save_encoder(
 ) {
     try {
         fs::path enc_path = fs::path(root) / "encoder" / "encoder.json";
+        std::cerr << "[serialization] raw save_encoder path=" << enc_path.string() << std::endl;
         
         const auto& encoder = model.getEncoder();
         json enc_json = encoder.to_json();
@@ -479,6 +498,8 @@ bool RawCheckpointWriter::save_manifest(
 ) {
     try {
         fs::path manifest_path = fs::path(root) / "manifest.json";
+        std::cerr << "[serialization] raw save_manifest path=" << manifest_path.string()
+                  << " tensors=" << tensors.size() << std::endl;
         
         json manifest;
         manifest["format"] = "mimir_raw_checkpoint";

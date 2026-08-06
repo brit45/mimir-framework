@@ -34,8 +34,8 @@ local function dump_head(vec, n)
 end
 
 local opts = Args.parse(arg)
-local checkpoint = Args.get_str(opts, "checkpoint", "../ponyxl.safetensors")
-local mapping_json = Args.get_str(opts, "mapping-json", "tools/ponyxl_unet_transformer_block_mapping.json")
+local checkpoint = Args.get_str(opts, "checkpoint", "../model.safetensors")
+local mapping_json = Args.get_str(opts, "mapping-json", "tools/unet_transformer_block_mapping.json")
 local q_len = Args.get_int(opts, "q-len", 64)
 local kv_len = Args.get_int(opts, "kv-len", 77)
 local d_model = Args.get_int(opts, "d-model", 640)

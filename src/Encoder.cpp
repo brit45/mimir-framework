@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <iostream>
 #include <omp.h>
 json ConditioningEncoder::to_json() const {
     json j;
@@ -79,6 +80,7 @@ ConditioningEncoder::ConditioningEncoder(int d, int Size_Vo)
     if (dim <= 0) dim = 64;
     if (Size_Vo > 0) token_embeddings.reserve(static_cast<size_t>(Size_Vo) * static_cast<size_t>(dim));
     // leave vocab_size == 0 until ensureVocabSize is called
+    std::cerr << "[encoder] create dim=" << dim << " reserve_vocab=" << Size_Vo << std::endl;
 }
 
 ConditioningEncoder::~ConditioningEncoder() = default;
@@ -158,6 +160,8 @@ void ConditioningEncoder::sgdUpdateSpecialEmbeddings(const std::vector<float>& g
 void ConditioningEncoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
 {
     if (new_vocab_size <= static_cast<size_t>(vocab_size)) return;
+    std::cerr << "[encoder] resize_vocab old=" << vocab_size << " new=" << new_vocab_size
+              << " dim=" << dim << " seed=" << seed << std::endl;
     const size_t old   = static_cast<size_t>(vocab_size);
     const size_t dim_t = static_cast<size_t>(dim);
     token_embeddings.resize(new_vocab_size * dim_t);
@@ -269,6 +273,7 @@ void ConditioningEncoder::setMagEmbedding(const std::vector<float> &v)
 
 std::vector<float> ConditioningEncoder::encode(const std::vector<int> &tokens, uint32_t /*seed*/) const
 {
+    std::cerr << "[encoder] encode tokens=" << tokens.size() << " dim=" << dim << std::endl;
     std::vector<float> out(static_cast<size_t>(dim), 0.0f);
     encodeInto(out, tokens);
     return out;
@@ -285,21 +290,27 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
     const bool has_mod = (mod_embedding.size() == dim_t);
     const bool has_mag = (mag_embedding.size() == dim_t);
 
-    float* __restrict__ dst = out.data();
+    #if defined(_MSC_VER)
+    #define MIMIR_RESTRICT __restrict
+    #else
+    #define MIMIR_RESTRICT __restrict__
+    #endif
+
+    float* MIMIR_RESTRICT dst = out.data();
 
     if (tokens.empty()) {
         if (has_seq) {
-            const float* __restrict__ s = seq_embedding.data();
+            const float* MIMIR_RESTRICT s = seq_embedding.data();
             #pragma omp simd
             for (int d = 0; d < dim; ++d) dst[d] += s[d];
         }
         if (has_mod) {
-            const float* __restrict__ s = mod_embedding.data();
+            const float* MIMIR_RESTRICT s = mod_embedding.data();
             #pragma omp simd
             for (int d = 0; d < dim; ++d) dst[d] += s[d];
         }
         if (has_mag) {
-            const float* __restrict__ s = mag_embedding.data();
+            const float* MIMIR_RESTRICT s = mag_embedding.data();
             #pragma omp simd
             for (int d = 0; d < dim; ++d) dst[d] += s[d];
         }
@@ -314,7 +325,7 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
 
         const float w = (static_cast<int>(pos) < magik_prefix_count && magik_prefix_weight > 0.0f)
                         ? magik_prefix_weight : 1.0f;
-        const float* __restrict__ row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
+        const float* MIMIR_RESTRICT row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += row[d] * w;
         weight_sum += w;
@@ -327,17 +338,17 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
     }
 
     if (has_seq) {
-        const float* __restrict__ s = seq_embedding.data();
+        const float* MIMIR_RESTRICT s = seq_embedding.data();
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
     if (has_mod) {
-        const float* __restrict__ s = mod_embedding.data();
+        const float* MIMIR_RESTRICT s = mod_embedding.data();
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
     if (has_mag) {
-        const float* __restrict__ s = mag_embedding.data();
+        const float* MIMIR_RESTRICT s = mag_embedding.data();
         #pragma omp simd
         for (int d = 0; d < dim; ++d) dst[d] += s[d];
     }
@@ -346,12 +357,14 @@ void ConditioningEncoder::encodeInto(std::vector<float>& out, const std::vector<
 void ConditioningEncoder::trainOnTextTokens(const std::vector<int> &token_ids, const std::vector<float> &target, float lr)
 {
     if (token_ids.empty() || static_cast<int>(target.size()) != dim || lr == 0.0f) return;
+    std::cerr << "[encoder] train_text tokens=" << token_ids.size() << " dim=" << dim
+              << " lr=" << lr << std::endl;
     const size_t dim_t = static_cast<size_t>(dim);
-    const float* __restrict__ tgt = target.data();
+    const float* MIMIR_RESTRICT tgt = target.data();
     for (int id : token_ids) {
         if (id <= 4) continue; // PAD(0), négatifs, tokens spéciaux (0-4)
         if (id >= vocab_size) continue;
-        float* __restrict__ row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
+        float* MIMIR_RESTRICT row = token_embeddings.data() + static_cast<size_t>(id) * dim_t;
         // SGD fusé : row += lr * (target - row)  =>  row = (1-lr)*row + lr*target
         #pragma omp simd
         for (int d = 0; d < dim; ++d) {
@@ -359,6 +372,8 @@ void ConditioningEncoder::trainOnTextTokens(const std::vector<int> &token_ids, c
         }
     }
 }
+
+#undef MIMIR_RESTRICT
 
 void ConditioningEncoder::fillImageVectorSingleModality(const std::vector<float>& image_feature,
                                                         float lr,

@@ -5,6 +5,7 @@
 #endif
 
 #include "Layers.hpp"
+#include "runtimes/LayerOps.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
 
 #include <algorithm>
@@ -65,6 +66,76 @@ bool OpenCLRuntime::isInitialized() const {
     return impl_ && impl_->initialized;
 }
 
+bool OpenCLRuntime::supportsForwardLayerType(const LayerType type) const {
+    switch (config_.disabled) {
+        case true:
+            return false;
+        case false:
+            break;
+    }
+
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool OpenCLRuntime::supportsBackwardLayerType(const LayerType type) const {
+    switch (config_.disabled) {
+        case true:
+            return false;
+        case false:
+            break;
+    }
+
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+        case LayerType::MaxPool2d:
+        case LayerType::MaxPool1d:
+        case LayerType::AvgPool2d:
+        case LayerType::AvgPool1d:
+        case LayerType::GlobalAvgPool2d:
+        case LayerType::AdaptiveAvgPool2d:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool OpenCLRuntime::linearForward(
     const float* input,
     const float* weights,
@@ -96,6 +167,7 @@ bool OpenCLRuntime::forwardLayer(
 #else
     if (!isInitialized() || !impl_) return false;
     if (config_.disabled) return false;
+    if (!supportsForwardLayerType(layer.type_enum)) return false;
 
     switch (layer.type_enum) {
         case LayerType::Linear: {
@@ -178,17 +250,15 @@ bool OpenCLRuntime::forwardLayer(
             if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
 
             int op = 0;
-            if (layer.type_enum == LayerType::Subtract) {
-                op = 1;
-            } else if (layer.type_enum == LayerType::Multiply) {
-                op = 2;
-            } else if (layer.type_enum == LayerType::Divide) {
-                op = 3;
-            }
+            if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op)) return false;
 
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
-            return impl_->engine.binaryForward(A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()), op);
+            if (impl_->engine.binaryForward(A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()), op)) {
+                return true;
+            }
+            RuntimeLayerOps::binaryForwardHost(A, B, outputs[0], op);
+            return true;
         }
         case LayerType::ReLU:
         case LayerType::LeakyReLU:
@@ -208,30 +278,15 @@ bool OpenCLRuntime::forwardLayer(
 
             int op = 0;
             float alpha = 0.01f;
-            if (layer.type_enum == LayerType::LeakyReLU) {
-                op = 1;
-                alpha = layer.leaky_relu_alpha > 0.0f ? layer.leaky_relu_alpha : 0.01f;
-            } else if (layer.type_enum == LayerType::Sigmoid) {
-                op = 2;
-            } else if (layer.type_enum == LayerType::Tanh) {
-                op = 3;
-            } else if (layer.type_enum == LayerType::SiLU) {
-                op = 4;
-            } else if (layer.type_enum == LayerType::GELU) {
-                op = 5;
-            } else if (layer.type_enum == LayerType::Softplus) {
-                op = 6;
-            } else if (layer.type_enum == LayerType::Mish) {
-                op = 7;
-            } else if (layer.type_enum == LayerType::HardSigmoid) {
-                op = 8;
-            } else if (layer.type_enum == LayerType::HardSwish) {
-                op = 9;
-            }
+            if (!RuntimeLayerOps::resolveUnaryOp(layer.type_enum, layer, op, alpha)) return false;
 
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
-            return impl_->engine.unaryForward(A.data(), outputs[0].data(), static_cast<int>(A.size()), op, alpha);
+            if (impl_->engine.unaryForward(A.data(), outputs[0].data(), static_cast<int>(A.size()), op, alpha)) {
+                return true;
+            }
+            RuntimeLayerOps::unaryForwardHost(A, outputs[0], op, alpha);
+            return true;
         }
         default:
             return false;
@@ -256,6 +311,7 @@ bool OpenCLRuntime::backwardLayer(
 #else
     if (!isInitialized() || !impl_) return false;
     if (config_.disabled) return false;
+    if (!supportsBackwardLayerType(layer.type_enum)) return false;
 
     switch (layer.type_enum) {
         case LayerType::Linear:
@@ -276,6 +332,13 @@ bool OpenCLRuntime::backwardLayer(
         case LayerType::HardSigmoid:
         case LayerType::HardSwish:
             if (!config_.linear_enabled) return false;
+            break;
+        case LayerType::MaxPool2d:
+        case LayerType::MaxPool1d:
+        case LayerType::AvgPool2d:
+        case LayerType::AvgPool1d:
+        case LayerType::GlobalAvgPool2d:
+        case LayerType::AdaptiveAvgPool2d:
             break;
         default:
             return false;

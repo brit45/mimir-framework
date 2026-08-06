@@ -1,22 +1,40 @@
 # Accélération GPU
 
-## Pour qui
-
-Utilisateur intermédiaire à avancé.
-
-## Objectif
-
 Optimiser, diagnostiquer et stabiliser des runs complexes.
 
-## Avant de commencer
+**Public concerné :** Utilisateur intermédiaire à avancé.
 
-Avoir déjà exécuté au moins un pipeline complet.
+> **Prérequis**
+>
+> Avoir déjà exécuté au moins un pipeline complet.
 
-## Résultat attendu
+## Sur cette page
 
-Tu peux investiguer les problèmes de perf et de stabilité.
+- [Lecture rapide](#lecture-rapide)
+- [Comment ça marche](#comment-ça-marche)
+- [Prérequis](#prérequis)
+- [Activation pas à pas](#activation-pas-à-pas)
+- [Comprendre les seuils d'opérations](#comprendre-les-seuils-dopérations)
+- [Matrice de couverture runtime (etat actuel)](#matrice-de-couverture-runtime-etat-actuel)
+- [Recettes par modèle](#recettes-par-modèle)
+- [Diagnostic guidé](#diagnostic-guidé)
+- [Sélection du device GPU](#sélection-du-device-gpu)
+- [Diagnostic](#diagnostic)
+- [Problèmes courants](#problèmes-courants)
+- [Voir aussi](#voir-aussi)
+- [Étapes suivantes](#étapes-suivantes)
 
-Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles — PonyXL, VAEConv 512 px, Transformers profonds — le CPU devient rapidement le goulot d'étranglement.
+## Lecture rapide
+
+Choix recommandé :
+
+1. Vous voulez la stabilité maximale: commence en CPU-only.
+2. Vous voulez accélérer progressivement: active d'abord `Linear`, puis `Conv2d`, puis `Attention`.
+3. Vous voulez diagnostiquer: active les traces runtime.
+
+Ce guide est volontairement pratique: chaque section te donne une action concrète et un résultat attendu.
+
+Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles, comme VAEConv 512 px ou les Transformers profonds, le CPU devient rapidement le goulot d'étranglement.
 
 Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécution spécialisés qui délèguent les opérations lourdes (multiplications matricielles, convolutions, attention) à cuBLAS (NVIDIA) ou rocBLAS (AMD). Le reste des layers continue de s'exécuter sur CPU, sans aucun changement dans vos scripts Lua.
 
@@ -42,6 +60,8 @@ Pour chaque layer à exécuter, le runtime le plus prioritaire *tente* de le pre
 2. **La taille du tenseur dépasse-t-elle le seuil minimal ?** (en dessous du seuil, le transfert mémoire host↔device coûterait plus que le calcul lui-même)
 
 Si l'une des deux conditions échoue, le runtime passe la main au suivant. Ce **fallback est silencieux et automatique** — vous n'avez pas à le gérer.
+
+Point clé : l'objectif n'est pas de forcer "100% GPU", mais d'obtenir le meilleur compromis perf/stabilité par type de layer.
 
 **Exemple :**
 
@@ -86,6 +106,12 @@ cmake --build . -j$(nproc)
 
 > **Avertissement :** si le build n'inclut pas `ENABLE_CUDA` ou `ENABLE_ROCM`, les variables d'environnement correspondantes seront ignorées sans message d'erreur. Vérifiez la sortie de `cmake` pour confirmer que le backend est activé.
 
+Checklist rapide avant toute investigation performance :
+
+1. Le backend est compilé (`ENABLE_*`).
+2. Le binaire démarre sans crash en CPU-only.
+3. Les scripts smoke passent avant activation GPU.
+
 ### Pour Vulkan
 
 Vulkan est disponible via le runtime routeur avec des kernels compute dédiés.
@@ -95,6 +121,8 @@ Scope actuel Vulkan (forward):
 - `Linear`
 - `MatMul`
 - `BatchMatMul`
+- `Conv2d`
+- `ConvTranspose2d`
 - `Add`
 - `Multiply`
 - `ReLU`
@@ -118,7 +146,7 @@ export MIMIR_CUDA_CONV=1       # Conv2d → im2col + SGEMM
 export MIMIR_CUDA_NORM=1       # LayerNorm/RMSNorm → hybride GPU
 export MIMIR_CUDA_ATTENTION=1  # Attention → multi-SGEMM
 
-./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua
+./bin/mimir --lua scripts/training/train_vae_conv.lua
 ```
 
 ### Activer tous les fast-paths sur ROCm
@@ -129,10 +157,19 @@ export MIMIR_ROCM_CONV=1
 export MIMIR_ROCM_NORM=1
 export MIMIR_ROCM_ATTENTION=1
 
-./bin/mimir --lua scripts/training/ponyxl_ddpm_train.lua
+./bin/mimir --lua scripts/training/train_vae_conv.lua
 ```
 
 > **Conseil :** ajoutez ces exports dans votre script de lancement (`.sh`) ou dans votre `.env` pour ne pas les réécrire à chaque fois. Voir `run_mimir.sh` à la racine du projet comme exemple.
+
+Parcours de mise en route conseillé :
+
+1. Activer un seul backend GPU.
+2. Activer `Linear` uniquement.
+3. Mesurer.
+4. Ajouter `Conv2d`.
+5. Mesurer à nouveau.
+6. Ajouter `Attention` en dernier.
 
 ---
 
@@ -157,6 +194,13 @@ export MIMIR_CUDA_CONV_MIN_OPS=16384     # 16 K au lieu de 256 K
 ```
 
 > **Note :** des seuils trop bas sur des micro-layers peuvent dégrader les performances à cause de l'overhead de synchronisation (`cudaDeviceSynchronize`). En cas de doute, comparez les temps d'exécution avec et sans les réductions de seuil.
+
+Méthode simple de tuning :
+
+1. Commencer avec les seuils par défaut.
+2. Baisser un seul seuil à la fois.
+3. Rejouer le même script (mêmes entrées, même seed).
+4. Garder la valeur seulement si le temps global baisse de manière stable.
 
 ---
 
@@ -217,20 +261,15 @@ Notes de lecture importantes:
 - Cote CPU, les familles backward Reparameterize, Dropout, Attention, RNN, Constant et Lambda sont maintenant implementees explicitement dans le runtime.
 - Vulkan n'override pas `backwardLayer`, donc backward Vulkan est **Absent** (retour `false` de l'implementation par defaut).
 
+Comment utiliser la matrice :
+
+1. Vérifier d'abord le support forward de la famille d'ops dominante de votre modèle.
+2. Si vous entraînez le modèle, vérifiez ensuite le support de la passe arrière.
+3. En absence de support GPU backward, prévoir fallback CPU explicite.
+
 ---
 
 ## Recettes par modèle
-
-### PonyXL / DDPM (recommandé)
-
-PonyXL est le modèle qui bénéficie le plus de l'accélération GPU : il contient de nombreux blocs `SelfAttention`, `CrossAttention` et des couches `Linear` larges dans les blocs UNet.
-
-```bash
-export MIMIR_CUDA_LINEAR=1
-export MIMIR_CUDA_ATTENTION=1
-export MIMIR_CUDA_NORM=1
-export MIMIR_CUDA_CONV=1
-```
 
 ### VAEConv (encodeur/décodeur convolutionnel)
 
@@ -250,6 +289,21 @@ Ce modèle mélange Conv2d (feature extraction) et Linear (classifier).
 export MIMIR_CUDA_CONV=1
 export MIMIR_CUDA_LINEAR=1
 ```
+
+## Diagnostic guidé
+
+Activer les logs pour comprendre le dispatch réel :
+
+```bash
+export MIMIR_ACCEL_VERBOSE=1
+export MIMIR_RUNTIME_TRACE=1
+```
+
+Interprétation rapide :
+
+1. Si un layer reste CPU: vérifier support op et seuil.
+2. Si un backend échoue tôt: vérifier son initialisation et ses bibliothèques.
+3. Si les performances empirent: relever les seuils pour éviter les petits offloads coûteux.
 
 ---
 
@@ -341,3 +395,9 @@ cmake -DENABLE_CUDA=ON -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda ..
 - [Architecture des backends hardware](../04-Architecture-Internals/03-Hardware-Backends.md) — détails d'implémentation C++
 - [Internals GPU Runtimes](../04-Architecture-Internals/21-GPU-Runtimes.md) — guide pour étendre les runtimes
 - [Entraînement](../02-User-Guide/04-Training.md) — workflow d'entraînement complet
+
+## Étapes suivantes
+
+- [Page précédente : Advanced — Carte du code source (C/C++)](04-Source-Code-Map.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Revenir à la documentation](../00-INDEX.md)

@@ -122,10 +122,15 @@ std::string dtype_to_string(DType dtype) {
         case DType::Float16: return "F16";
         case DType::BFloat16: return "BF16";
         case DType::Float64: return "F64";
+        case DType::Int8: return "I8";
         case DType::Int32: return "I32";
         case DType::Int16: return "I16";
-        case DType::Uint16: return "U16";
+        case DType::Int64: return "I64";
         case DType::Uint8: return "U8";
+        case DType::Uint16: return "U16";
+        case DType::Uint32: return "U32";
+        case DType::Uint64: return "U64";
+        case DType::Bool: return "BOOL";
         default: return "UNKNOWN";
     }
 }
@@ -139,10 +144,15 @@ DType string_to_dtype(const std::string& str) {
         case Mimir::DType::F16: return DType::Float16;
         case Mimir::DType::BF16: return DType::BFloat16;
         case Mimir::DType::F64: return DType::Float64;
+        case Mimir::DType::I8: return DType::Int8;
         case Mimir::DType::I32: return DType::Int32;
         case Mimir::DType::I16: return DType::Int16;
-        case Mimir::DType::U16: return DType::Uint16;
+        case Mimir::DType::I64: return DType::Int64;
         case Mimir::DType::U8: return DType::Uint8;
+        case Mimir::DType::U16: return DType::Uint16;
+        case Mimir::DType::U32: return DType::Uint32;
+        case Mimir::DType::U64: return DType::Uint64;
+        case Mimir::DType::BOOL: return DType::Bool;
         default: break;
     }
 
@@ -155,10 +165,15 @@ DType string_to_dtype(const std::string& str) {
     if (s == "F16") return DType::Float16;
     if (s == "BF16") return DType::BFloat16;
     if (s == "F64") return DType::Float64;
+    if (s == "I8") return DType::Int8;
     if (s == "I32") return DType::Int32;
     if (s == "I16") return DType::Int16;
-    if (s == "U16") return DType::Uint16;
+    if (s == "I64") return DType::Int64;
     if (s == "U8") return DType::Uint8;
+    if (s == "U16") return DType::Uint16;
+    if (s == "U32") return DType::Uint32;
+    if (s == "U64") return DType::Uint64;
+    if (s == "BOOL") return DType::Bool;
 
     throw std::runtime_error("Unknown dtype string: " + str);
 }
@@ -169,10 +184,15 @@ size_t dtype_size(DType dtype) {
         case DType::Float16: return 2;
         case DType::BFloat16: return 2;
         case DType::Float64: return 8;
+        case DType::Int8: return 1;
         case DType::Int32: return 4;
         case DType::Int16: return 2;
-        case DType::Uint16: return 2;
+        case DType::Int64: return 8;
         case DType::Uint8: return 1;
+        case DType::Uint16: return 2;
+        case DType::Uint32: return 4;
+        case DType::Uint64: return 8;
+        case DType::Bool: return 1;
         default: return 0;
     }
 }

@@ -1,20 +1,12 @@
-# Debugging & stabilité numérique
-
-## Pour qui
-
-Utilisateur intermédiaire à avancé.
-
-## Objectif
+# Débogage et stabilité numérique
 
 Optimiser, diagnostiquer et stabiliser des runs complexes.
 
-## Avant de commencer
+**Public concerné :** Utilisateur intermédiaire à avancé.
 
-Avoir déjà exécuté au moins un pipeline complet.
-
-## Résultat attendu
-
-Tu peux investiguer les problèmes de perf et de stabilité.
+> **Prérequis**
+>
+> Avoir déjà exécuté au moins un pipeline complet.
 
 
 Objectif : isoler rapidement si le problème vient de la **mémoire**, de la **stabilité numérique**, ou d’un **chemin API** (Lua → C++).
@@ -116,3 +108,9 @@ Usage conseillé :
 - faire un dump juste avant le step qui casse
 - activer `include_gradients` uniquement si nécessaire (volume plus gros)
 - comparer deux dumps successifs (avant/après) sur min/max/mean
+
+## Étapes suivantes
+
+- [Page précédente : Performance (CPU)](01-Performance.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Page suivante : LLM readiness (état réel)](03-LLM-Readiness.md)

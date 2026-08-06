@@ -1,12 +1,30 @@
 # Référence : variables d'environnement
 
-## Objectif
+Cette page répertorie les variables d'environnement effectivement lues par le
+runtime Mímir. Utilisez-la pour configurer le dispatch, les fast-paths et les
+limites propres à chaque backend sans recompiler le projet.
 
-Cette page centralise les variables d'environnement réellement lues/écrites par Mímir côté runtime C++ et bridges de scripting.
+## Sur cette page
 
-Conventions:
+- [1) Runtime global et dispatch](#1-runtime-global-et-dispatch)
+- [2) Configuration par backend (CPU/CUDA/ROCM)](#2-configuration-par-backend-cpucudarocm)
+- [3) Vulkan/OpenCL (offload Linear/MatMul + Conv2d/ConvTranspose2d)](#3-vulkanopencl-offload-linearmatmul-conv2dconvtranspose2d)
+- [4) Planner et fusion](#4-planner-et-fusion)
+- [4.1) Verbose runtime et cartographie planner](#41-verbose-runtime-et-cartographie-planner)
+- [5) Bridge scripting (injectées par Mímir)](#5-bridge-scripting-injectées-par-mímir)
+- [6) Variables système utilisées](#6-variables-système-utilisées)
+- [7) Variables utilisées côté scripts Lua (scripts/)](#7-variables-utilisées-côté-scripts-lua-scripts)
+- [8) Non-env (souvent confondu)](#8-non-env-souvent-confondu)
+- [9) Références code](#9-références-code)
+- [Étapes suivantes](#étapes-suivantes)
 
-- Pour les booléens, utilise préférentiellement `0` ou `1`.
+> **Attention**
+> Une variable inconnue est généralement ignorée. Vérifiez son nom dans cette
+> page et dans la source indiquée avant de conclure qu'un backend l'a appliquée.
+
+Conventions :
+
+- Pour les booléens, utilisez préférentiellement `0` ou `1`.
 - Dans les parsers principaux (`RuntimeConfig::fromEnv`), les valeurs `0`, `false`, `no`, `off` désactivent; toute autre valeur non vide active.
 - Les variables marquées "injectée" sont posées par Mímir pour les bridges, pas destinées à être fixées manuellement dans un usage standard.
 
@@ -16,11 +34,19 @@ Conventions:
 | --- | --- | --- | --- |
 | `MIMIR_ACCEL_VERBOSE` | bool | `0` | Active des logs de décision d'accélération (CPU/GPU/offload). |
 | `MIMIR_RUNTIME_TRACE` | bool | `0` | Active une trace d'exécution layer-par-layer (backend réellement utilisé, chemin d'appel, taille de sortie). |
+| `MIMIR_ALLOCATOR_LOG` | bool | `0` | Émet un résumé des métriques `RuntimeAllocator` en fin de `forward` et `backward` (allocations, total alloué, usage courant/pic, pool scratchpad, fuite potentielle). |
+| `MIMIR_ALLOCATOR_LOG_VERBOSE` | bool | `0` | Ajoute le détail des buffers du pool scratchpad (`tag`, taille) quand `MIMIR_ALLOCATOR_LOG=1`. |
 | `MIMIR_DISABLE_CPU` | bool | `0` | Désactive explicitement le runtime CPU. |
 | `MIMIR_DISABLE_CUDA` | bool | `0` | Désactive explicitement le runtime CUDA. |
 | `MIMIR_DISABLE_ROCM` | bool | `0` | Désactive explicitement le runtime ROCm. |
 | `MIMIR_DISABLE_VULKAN` | bool | `0` | Désactive le backend Vulkan Compute. |
 | `MIMIR_DISABLE_OPENCL` | bool | `0` | Désactive le backend OpenCL Compute. |
+
+Notes sur les colonnes allocator (quand `MIMIR_ALLOCATOR_LOG=1`) :
+
+- Attribution mémoire par backend sur le forward : `backend_cpu_*`, `backend_vulkan_*`, `backend_cuda_*`, `backend_rocm_*`, `backend_other_*`.
+- Les métriques sont disponibles en MB et en bytes (`*_mb`, `*_bytes`) pour éviter les faux zéros sur petits runs.
+- Les champs `guard_*` et `dyn_*` reflètent la mémoire globale suivie par `MemoryGuard` et `DynamicTensorAllocator`.
 
 ## 2) Configuration par backend (CPU/CUDA/ROCM)
 
@@ -56,19 +82,21 @@ Important:
 - Il n'existe pas de variable globale `MIMIR_CUDA=1` ou `MIMIR_ROCM=1` dans le code actuel. L'activation se fait par les flags de fast-path (`MIMIR_CUDA_*`, `MIMIR_ROCM_*`) et les kill-switch `MIMIR_DISABLE_*`.
 - Par défaut, les fast-paths sont auto-activés. Pour forcer un mode CPU-only, utilisez `MIMIR_DISABLE_CUDA=1`, `MIMIR_DISABLE_ROCM=1`, `MIMIR_DISABLE_VULKAN=1`, `MIMIR_DISABLE_OPENCL=1`.
 
-## 3) Vulkan/OpenCL (offload Linear + MatMul)
+## 3) Vulkan/OpenCL (offload Linear/MatMul + Conv2d/ConvTranspose2d)
 
 | Variable | Type | Défaut | Effet |
 | --- | --- | --- | --- |
 | `MIMIR_VULKAN_LINEAR` | bool | `1` | Active offload `Linear` (et gating MatMul/BatchMatMul du runtime) vers Vulkan. |
 | `MIMIR_VULKAN_LINEAR_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour Vulkan `Linear`/MatMul. |
+| `MIMIR_VULKAN_CONV` | bool | `1` | Active offload `Conv2d` et `ConvTranspose2d` vers Vulkan. |
+| `MIMIR_VULKAN_CONV_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour Vulkan `Conv2d`/`ConvTranspose2d`. |
 | `MIMIR_VULKAN_LINEAR_SPV` | path | auto | Chemin explicite du shader SPIR-V `linear_forward.comp.spv` (Linear). |
 | `MIMIR_OPENCL_LINEAR` | bool | `1` | Active offload `Linear` (et gating MatMul/BatchMatMul du runtime) vers OpenCL. |
 | `MIMIR_OPENCL_LINEAR_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour OpenCL `Linear`/MatMul. |
 
 Notes Vulkan SPIR-V:
 
-- Le build compile aussi `add_forward.comp.spv`, `mul_forward.comp.spv` et `relu_forward.comp.spv` pour les fast-paths Vulkan `Add`, `Multiply`, `ReLU`.
+- Le build compile aussi `add_forward.comp.spv`, `mul_forward.comp.spv`, `relu_forward.comp.spv`, `conv2d_forward.comp.spv` et `conv_transpose2d_forward.comp.spv`.
 - Ces shaders sont chargés automatiquement depuis `bin/shaders`/`build/shaders` (pas de variable d'environnement dédiée nécessaire pour ces trois kernels).
 
 ## 4) Planner et fusion
@@ -170,14 +198,26 @@ Ces variables ne pilotent pas le runtime C++ directement; elles servent de param
 - `MIMIR_BENCH_VOCAB`
 - `MIMIR_BENCH_RAM_GB`
 - `MIMIR_BENCH_COMPRESS`
+- `MIMIR_NMS_BOXES`
+- `MIMIR_NMS_CLASSES`
+- `MIMIR_NMS_WARMUP`
+- `MIMIR_NMS_ITERS`
+- `MIMIR_NMS_IOU`
+- `MIMIR_NMS_SCORE`
+- `MIMIR_NMS_MAX_DETECTIONS`
+- `MIMIR_NMS_CLASS_AGNOSTIC`
 
-### Variables tokenizer / PonyXL tooling
+Les variables `MIMIR_NMS_*` pilotent
+`scripts/benchmarks/benchmark_nms.lua`. Ce benchmark fabrique ses boîtes en
+mémoire et ne lit aucun dataset.
+
+### Variables tokenizer / SafeTensors externe
 
 - `MIMIR_BASE_TOKENIZER`
 - `MIMIR_BASE_TOKENIZER_MAX_VOCAB`
 - `MIMIR_REQUIRE_BASE_TOKENIZER`
-- `MIMIR_PONYXL_INCLUDE`
-- `MIMIR_PONYXL_SAFETENSORS`
+- `MIMIR_EXTERNAL_SAFETENSORS_INCLUDE`
+- `MIMIR_EXTERNAL_SAFETENSORS`
 - `MIMIR_MAX_TENSORS`
 
 ### Variables système lues par scripts
@@ -200,3 +240,9 @@ Ces variables ne pilotent pas le runtime C++ directement; elles servent de param
 - `src/scriptings/JavaScript/jsScripting/JSScripting.cpp`
 - `src/scriptings/CSharp/csharpScripting/CSharpScripting.cpp`
 - `src/scriptings/Rust/rustScripting/RustScripting.cpp`
+
+## Étapes suivantes
+
+- [Page précédente : API : `Mimir.IO`](21-IO.md)
+- [Index de la documentation](../00-INDEX.md)
+- [Revenir à la documentation](../00-INDEX.md)

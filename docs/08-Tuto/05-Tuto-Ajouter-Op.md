@@ -1,127 +1,164 @@
-# Tuto - Ajouter une OPs
+# Ajouter une opération
 
-## Pour qui
+Ce tutoriel utilise l'opération existante `Multiply` comme trace de référence.
+Il montre tous les endroits réellement impliqués dans une opération
+entraînable, sans prétendre qu'un type fictif est déjà disponible.
 
-Developpeur avance qui veut ajouter une nouvelle operation (OP) au moteur.
+## Sources de vérité
 
-## Objectif
+- `src/LayerTypes.hpp`
+- `src/Layers.hpp`
+- `src/runtimes/cpu/RuntimeLayerDispatch.hpp`
+- `src/runtimes/LayerOps.hpp` et `src/runtimes/LayerOps.cpp`
+- `src/runtimes/cpu/LayerOpsExt.hpp`
+- `src/runtimes/AbstractRuntime.hpp`
+- `Tests/test_autograd_numerical.cpp`
+- `Tests/CMakeLists.txt`
 
-Ajouter une OP proprement: definition, execution, integration, puis validation.
+## Étape 1 — Écrire le contrat mathématique
 
-## Avant de commencer
+Pour `Multiply`, avec deux entrées de même taille :
 
-1. Lecture conseillee:
-- [docs/07-Devs/02-Building-Models-And-Layers.md](../07-Devs/02-Building-Models-And-Layers.md)
-- [docs/04-Architecture-Internals/14-Layers-And-Ops.md](../04-Architecture-Internals/14-Layers-And-Ops.md)
-2. Comprendre que `Mimir.Layers` est surtout un module de stubs pour des appels standalone (voir [docs/03-API-Reference/18-Layers-Module.md](../03-API-Reference/18-Layers-Module.md)).
+\[
+y_i = a_i b_i
+\]
 
-## Résultat attendu
+La passe arrière est :
 
-Ta nouvelle OP fonctionne dans le graphe modele (forward/backward si necessaire) et passe les tests de base.
+\[
+\frac{\partial L}{\partial a_i}
+=
+\frac{\partial L}{\partial y_i} b_i,
+\qquad
+\frac{\partial L}{\partial b_i}
+=
+\frac{\partial L}{\partial y_i} a_i.
+\]
 
-## Etape 1 - Definir l'OP
+Avant de coder une nouvelle opération, fixez :
 
-Questions a fixer d'abord:
-1. nom exact de l'OP,
-2. entree(s)/sortie(s),
-3. contraintes shape/dtype,
-4. comportement numerique attendu.
+- le nombre d'entrées et de sorties ;
+- les formes acceptées et les règles de broadcasting éventuelles ;
+- le comportement pour une entrée vide ;
+- les paramètres entraînables ;
+- la dérivée ou le statut « inférence uniquement ».
 
-Regle: ecrire ce contrat avant de coder.
+## Étape 2 — Déclarer le type
 
-## Etape 2 - Integrer au chemin des layers
+`src/LayerTypes.hpp` contient trois éléments à garder synchronisés :
 
-Objectif technique:
-1. ajouter le type d'operation dans les enums/structures de layer,
-2. ajouter les parametres necessaires,
-3. brancher l'execution dans le moteur (`forwardLayer` ou chemin equivalent),
-4. gerer les erreurs shape/dtype proprement.
+1. la valeur dans `enum class LayerType` ;
+2. la table texte vers enum de `LayerRegistry` ;
+3. la conversion enum vers texte et les familles de types supportés.
 
-## Etape 3 - Ajouter backward (si OP entrainable)
+`Model::push` reçoit un nom de type sous forme de chaîne. Si
+`LayerRegistry::string_to_type` ne connaît pas cette chaîne, le nouveau layer ne
+sera pas routé correctement.
 
-Si l'OP participe a l'entrainement:
-1. definir le gradient attendu,
-2. implementer backward,
-3. verifier gradient numerique sur un mini cas.
+Ajoutez dans `src/Layers.hpp` uniquement les attributs réellement nécessaires
+à l'opération. Une opération sans état, comme `Multiply`, n'a pas besoin de
+champ supplémentaire.
 
-Si l'OP est inference-only, documenter clairement la limite.
+## Étape 3 — Implémenter la passe avant CPU
 
-## Etape 4 - Exposer dans scripts/config
+La référence CPU se trouve dans le grand `switch` de
+`RuntimeLayerDispatch::cpu_forward_layer`. Le cas actuel de `Multiply` vérifie
+la seconde entrée, crée une sortie et appelle
+`LayerOps::multiply_forward`.
 
-1. ajouter la creation de cette OP dans le chemin de construction du modele,
-2. ajouter un mini exemple script ou config,
-3. verifier qu'un modele de demo peut l'executer.
+Pour une nouvelle opération :
 
-## Etape 5 - Validation minimale
+1. refusez les entrées invalides avec `false` ;
+2. redimensionnez `outputs` selon le nombre de sorties contractuel ;
+3. effectuez le calcul complet ;
+4. retournez `true` seulement après production de la sortie.
 
-1. test shape valide -> resultat correct,
-2. test shape invalide -> erreur claire,
-3. test precision numerique vs reference,
-4. test integration dans un mini modele,
-5. test non-regression sur un script existant.
+Le runtime CPU est le dernier fallback. Une opération utilisable par un modèle
+doit donc y être implémentée, sauf si elle est explicitement limitée à un
+backend particulier.
 
-## Erreurs frequentes
+## Étape 4 — Implémenter la passe arrière
 
-1. Oublier un check shape avant calcul.
-2. Ecrire une sortie partielle puis retourner succes.
-3. Ne pas gerer le dtype correctement.
-4. Ajouter l'OP sans doc ni exemple.
+Le même fichier contient `RuntimeLayerDispatch::cpu_backward_layer`. Le cas
+`Multiply` :
 
-## Exemple pratique
+- exige deux entrées et un gradient de sortie ;
+- vérifie que les trois vecteurs ont la même taille ;
+- produit exactement deux gradients d'entrée ;
+- applique les deux dérivées données plus haut.
 
-### Contexte
+Si le layer possède des paramètres, accumulez aussi `grad_weights` ou
+`grad_bias` selon la disposition décrite par `Layer`. Ne mettez pas à jour les
+poids dans `backwardLayer` : cette responsabilité appartient à
+`optimizerStep`.
 
-Tu veux ajouter une OP simple et verifiable rapidement avant d'ajouter des cas plus complexes.
+## Étape 5 — Mettre à jour les votes runtime
 
-### Code commente
+Vérifiez `supportsForwardLayerType` et `supportsBackwardLayerType` pour chaque
+backend concerné. Un vote positif sans implémentation peut créer une route
+inutile ou trompeuse. Un vote négatif empêche le routeur de proposer
+l'opération au backend.
 
-Exemple conceptuel pour une OP `Scale` (sortie = entree * facteur):
+Les kernels CUDA, ROCm, Vulkan et OpenCL sont optionnels. Ajoutez-les seulement
+après avoir établi la référence CPU et les tests numériques.
+
+## Étape 6 — Utiliser l'opération dans un modèle
+
+Une opération binaire existante se câble par noms de tenseurs :
 
 ```cpp
-// 1) Nouveau type d'operation (enum).
-enum class LayerType {
-	// ...
-	Scale
-};
-
-// 2) Parametre minimal dans la couche.
-struct Layer {
-	LayerType type;
-	float scale = 1.0f; // facteur multiplicatif pour l'OP Scale
-	// ...
-};
-
-// 3) Execution forward: checks puis calcul.
-bool runScale(const std::vector<float>& in, std::vector<float>& out, float factor) {
-	if (in.empty()) return false; // check simple (exemple)
-	out.resize(in.size());
-	for (size_t i = 0; i < in.size(); ++i) {
-		out[i] = in[i] * factor;
-	}
-	return true;
-}
-
-// 4) Branch dans forwardLayer (pseudo-code).
-if (layer.type == LayerType::Scale) {
-	return runScale(inputTensor, outputTensor, layer.scale);
+model.push("example/multiply", "Multiply", 0);
+if (auto* layer = model.getLayerByName("example/multiply")) {
+    layer->inputs = {"example/a", "example/b"};
+    layer->output = "x";
 }
 ```
 
-### Explication
+`params_count` vaut zéro parce que `Multiply` ne possède aucun poids.
 
-1. contrat simple (entree, sortie, parametre),
-2. chemin execution explicite,
-3. base claire pour ajouter ensuite backward + tests.
+`Mimir.Layers` n'est pas le chemin principal d'exécution des graphes de modèle.
+Le chemin réel passe par les `Layer` construits en C++, puis par
+`RuntimeRouter`.
 
-### Test rapide
+## Étape 7 — Tester mathématiquement
+
+Ajoutez trois niveaux de tests :
+
+1. passe avant sur de petits vecteurs connus ;
+2. passe arrière analytique ;
+3. vérification par différences finies.
+
+Pour une composante \(x_i\), une approximation centrée est :
+
+\[
+\frac{\partial L}{\partial x_i}
+\approx
+\frac{L(x_i+\varepsilon)-L(x_i-\varepsilon)}{2\varepsilon}.
+\]
+
+Choisissez une tolérance compatible avec `float32` et documentez `epsilon`.
+Les tests existants dans `Tests/test_autograd_numerical.cpp` montrent le
+pattern attendu.
 
 ```bash
-./bin/mimir --lua scripts/templates/template_new_model.lua
+cmake --build build -j2
+ctest --test-dir build --output-on-failure \
+  -R 'Autograd|Math|Runtime'
 ```
 
-Verification attendue: le modele de demo passe le forward sans erreur de shape/dtype apres integration de l'OP.
+## Checklist complète
 
-## Suite
+- Type présent dans toutes les conversions de `LayerTypes.hpp`.
+- Attributs du layer initialisés avec une valeur sûre.
+- Passe avant CPU correcte.
+- Passe arrière correcte ou limitation explicitement documentée.
+- Votes runtime cohérents.
+- Modèle de test câblé avec les bons noms de tenseurs.
+- Test nominal, formes invalides et différences finies.
+- Documentation de la forme, du dtype et des paramètres.
 
-- Layers/Ops internals: [docs/04-Architecture-Internals/14-Layers-And-Ops.md](../04-Architecture-Internals/14-Layers-And-Ops.md)
-- Dev model wiring: [docs/07-Devs/02-Building-Models-And-Layers.md](../07-Devs/02-Building-Models-And-Layers.md)
+## Étapes suivantes
+
+- [Modifier ou ajouter un runtime](04-Tuto-Modifier-Ou-Ajouter-Runtime.md)
+- [Internals des layers](../04-Architecture-Internals/14-Layers-And-Ops.md)
+- [Autograd et gradients](../04-Architecture-Internals/13-Autograd-Gradients.md)

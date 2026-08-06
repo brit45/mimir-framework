@@ -1,12 +1,24 @@
 #include "runtimes/AbstractRuntime.hpp"
 
+#include "Layers.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <climits>
+#include <cmath>
 #include <cstring>
 
 namespace {
+static bool tensors_are_finite(const std::vector<std::vector<float>>& tensors) {
+    for (const auto& tensor : tensors) {
+        for (const float value : tensor) {
+            if (!std::isfinite(value)) return false;
+        }
+    }
+    return true;
+}
+
 static inline bool env_flag_true(const char* name, bool default_value) {
     const char* v = std::getenv(name);
     if (!v) return default_value;
@@ -110,6 +122,16 @@ bool AbstractRuntime::backwardLayer(
     return false;
 }
 
+bool AbstractRuntime::supportsForwardLayerType(LayerType type) const {
+    (void)type;
+    return false;
+}
+
+bool AbstractRuntime::supportsBackwardLayerType(LayerType type) const {
+    (void)type;
+    return false;
+}
+
 bool AbstractRuntime::dispatchForwardLayer(
     const std::vector<AbstractRuntime*>& runtime_priority,
     const std::vector<const std::vector<float>*>& inputs,
@@ -122,14 +144,30 @@ bool AbstractRuntime::dispatchForwardLayer(
     outputs.clear();
 
     for (AbstractRuntime* rt : runtime_priority) {
-        if (!rt) continue;
-        if (!rt->isInitialized()) continue;
+        switch (rt == nullptr) {
+            case true:
+                continue;
+            case false:
+                break;
+        }
+        switch (rt->isInitialized()) {
+            case true:
+                break;
+            case false:
+                continue;
+        }
+        switch (rt->supportsForwardLayerType(layer.type_enum)) {
+            case true:
+                break;
+            case false:
+                continue;
+        }
 
         std::vector<std::vector<float>> local_outputs;
         if (!rt->forwardLayer(inputs, local_outputs, layer, training)) {
             continue;
         }
-        if (local_outputs.empty()) {
+        if (local_outputs.empty() || !tensors_are_finite(local_outputs)) {
             continue;
         }
 
@@ -154,14 +192,30 @@ bool AbstractRuntime::dispatchBackwardLayer(
     grad_inputs.clear();
 
     for (AbstractRuntime* rt : runtime_priority) {
-        if (!rt) continue;
-        if (!rt->isInitialized()) continue;
+        switch (rt == nullptr) {
+            case true:
+                continue;
+            case false:
+                break;
+        }
+        switch (rt->isInitialized()) {
+            case true:
+                break;
+            case false:
+                continue;
+        }
+        switch (rt->supportsBackwardLayerType(layer.type_enum)) {
+            case true:
+                break;
+            case false:
+                continue;
+        }
 
         std::vector<std::vector<float>> local_grad_inputs;
         if (!rt->backwardLayer(inputs, grad_outputs, local_grad_inputs, layer, training)) {
             continue;
         }
-        if (local_grad_inputs.empty()) {
+        if (local_grad_inputs.empty() || !tensors_are_finite(local_grad_inputs)) {
             continue;
         }
 

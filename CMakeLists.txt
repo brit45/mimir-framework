@@ -22,12 +22,14 @@ option(ENABLE_OPENCL "Enable OpenCL GPU compute" ON)
 option(ENABLE_CUDA "Enable CUDA GPU compute (cuBLAS)" OFF)
 option(ENABLE_ROCM "Enable ROCm GPU compute (rocBLAS/HIP)" OFF)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
+option(ENABLE_FFMPEG "Enable FFmpeg-backed audio/video loading" ON)
 option(ENABLE_SFML "Enable SFML visualization" ON)
 option(ENABLE_SCRIPTING_REST "Enable REST scripting bridge" OFF)
 option(ENABLE_SCRIPTING_RUST "Enable Rust scripting bridge" ON)
 option(ENABLE_SCRIPTING_JS "Enable JavaScript scripting bridge" ON)
 option(ENABLE_SCRIPTING_CSHARP "Enable C# scripting bridge" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
+option(MIMIR_ENABLE_FACE_RECOGNITION_TOOL "Build OpenCV face detection/recognition tool" OFF)
 
 if(ENABLE_SCRIPTING_REST)
     message(WARNING "ENABLE_SCRIPTING_REST=ON demandé, mais aucun bridge REST natif n'est implémenté dans ce dépôt. Option forcée à OFF.")
@@ -186,119 +188,35 @@ if(ENABLE_VULKAN)
         set(MIMIR_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
         file(MAKE_DIRECTORY "${MIMIR_SHADER_OUT_DIR}")
 
-        set(SHADER_LINEAR_SRC "${MIMIR_SHADER_SRC_DIR}/linear_forward.comp")
-        set(SHADER_LINEAR_SPV "${MIMIR_SHADER_OUT_DIR}/linear_forward.comp.spv")
-        set(SHADER_ADD_SRC "${MIMIR_SHADER_SRC_DIR}/add_forward.comp")
-        set(SHADER_ADD_SPV "${MIMIR_SHADER_OUT_DIR}/add_forward.comp.spv")
-        set(SHADER_MUL_SRC "${MIMIR_SHADER_SRC_DIR}/mul_forward.comp")
-        set(SHADER_MUL_SPV "${MIMIR_SHADER_OUT_DIR}/mul_forward.comp.spv")
-        set(SHADER_RELU_SRC "${MIMIR_SHADER_SRC_DIR}/relu_forward.comp")
-        set(SHADER_RELU_SPV "${MIMIR_SHADER_OUT_DIR}/relu_forward.comp.spv")
-        set(SHADER_SILU_SRC "${MIMIR_SHADER_SRC_DIR}/silu_forward.comp")
-        set(SHADER_SILU_SPV "${MIMIR_SHADER_OUT_DIR}/silu_forward.comp.spv")
-        set(SHADER_GELU_SRC "${MIMIR_SHADER_SRC_DIR}/gelu_forward.comp")
-        set(SHADER_GELU_SPV "${MIMIR_SHADER_OUT_DIR}/gelu_forward.comp.spv")
-        set(SHADER_SIGMOID_SRC "${MIMIR_SHADER_SRC_DIR}/sigmoid_forward.comp")
-        set(SHADER_SIGMOID_SPV "${MIMIR_SHADER_OUT_DIR}/sigmoid_forward.comp.spv")
-        set(SHADER_TANH_SRC "${MIMIR_SHADER_SRC_DIR}/tanh_forward.comp")
-        set(SHADER_TANH_SPV "${MIMIR_SHADER_OUT_DIR}/tanh_forward.comp.spv")
-        set(SHADER_CONV2D_SRC "${MIMIR_SHADER_SRC_DIR}/conv2d_forward.comp")
-        set(SHADER_CONV2D_SPV "${MIMIR_SHADER_OUT_DIR}/conv2d_forward.comp.spv")
-        set(SHADER_CONVTRANSPOSE2D_SRC "${MIMIR_SHADER_SRC_DIR}/conv_transpose2d_forward.comp")
-        set(SHADER_CONVTRANSPOSE2D_SPV "${MIMIR_SHADER_OUT_DIR}/conv_transpose2d_forward.comp.spv")
-
-        add_custom_command(
-            OUTPUT "${SHADER_LINEAR_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_LINEAR_SRC}" -o "${SHADER_LINEAR_SPV}"
-            DEPENDS "${SHADER_LINEAR_SRC}"
-            COMMENT "Compiling Vulkan shader linear_forward.comp -> SPIR-V"
-            VERBATIM
+        set(MIMIR_VULKAN_SHADER_NAMES
+            linear_forward
+            add_forward
+            mul_forward
+            relu_forward
+            silu_forward
+            gelu_forward
+            sigmoid_forward
+            tanh_forward
+            conv2d_forward
+            conv_transpose2d_forward
         )
 
-        add_custom_command(
-            OUTPUT "${SHADER_ADD_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_ADD_SRC}" -o "${SHADER_ADD_SPV}"
-            DEPENDS "${SHADER_ADD_SRC}"
-            COMMENT "Compiling Vulkan shader add_forward.comp -> SPIR-V"
-            VERBATIM
-        )
+        set(MIMIR_VULKAN_SHADER_SPV_OUTPUTS)
+        foreach(_shader_name IN LISTS MIMIR_VULKAN_SHADER_NAMES)
+            set(_shader_src "${MIMIR_SHADER_SRC_DIR}/${_shader_name}.comp")
+            set(_shader_spv "${MIMIR_SHADER_OUT_DIR}/${_shader_name}.comp.spv")
+            list(APPEND MIMIR_VULKAN_SHADER_SPV_OUTPUTS "${_shader_spv}")
 
-        add_custom_command(
-            OUTPUT "${SHADER_MUL_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_MUL_SRC}" -o "${SHADER_MUL_SPV}"
-            DEPENDS "${SHADER_MUL_SRC}"
-            COMMENT "Compiling Vulkan shader mul_forward.comp -> SPIR-V"
-            VERBATIM
-        )
+            add_custom_command(
+                OUTPUT "${_shader_spv}"
+                COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${_shader_src}" -o "${_shader_spv}"
+                DEPENDS "${_shader_src}"
+                COMMENT "Compiling Vulkan shader ${_shader_name}.comp -> SPIR-V"
+                VERBATIM
+            )
+        endforeach()
 
-        add_custom_command(
-            OUTPUT "${SHADER_RELU_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_RELU_SRC}" -o "${SHADER_RELU_SPV}"
-            DEPENDS "${SHADER_RELU_SRC}"
-            COMMENT "Compiling Vulkan shader relu_forward.comp -> SPIR-V"
-            VERBATIM
-        )
-
-        add_custom_command(
-            OUTPUT "${SHADER_SILU_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_SILU_SRC}" -o "${SHADER_SILU_SPV}"
-            DEPENDS "${SHADER_SILU_SRC}"
-            COMMENT "Compiling Vulkan shader silu_forward.comp -> SPIR-V"
-            VERBATIM
-        )
-
-        add_custom_command(
-            OUTPUT "${SHADER_GELU_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_GELU_SRC}" -o "${SHADER_GELU_SPV}"
-            DEPENDS "${SHADER_GELU_SRC}"
-            COMMENT "Compiling Vulkan shader gelu_forward.comp -> SPIR-V"
-            VERBATIM
-        )
-
-        add_custom_command(
-            OUTPUT "${SHADER_SIGMOID_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_SIGMOID_SRC}" -o "${SHADER_SIGMOID_SPV}"
-            DEPENDS "${SHADER_SIGMOID_SRC}"
-            COMMENT "Compiling Vulkan shader sigmoid_forward.comp -> SPIR-V"
-            VERBATIM
-        )
-
-        add_custom_command(
-            OUTPUT "${SHADER_TANH_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_TANH_SRC}" -o "${SHADER_TANH_SPV}"
-            DEPENDS "${SHADER_TANH_SRC}"
-            COMMENT "Compiling Vulkan shader tanh_forward.comp -> SPIR-V"
-            VERBATIM
-        )
-
-        add_custom_command(
-            OUTPUT "${SHADER_CONV2D_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_CONV2D_SRC}" -o "${SHADER_CONV2D_SPV}"
-            DEPENDS "${SHADER_CONV2D_SRC}"
-            COMMENT "Compiling Vulkan shader conv2d_forward.comp -> SPIR-V"
-            VERBATIM
-        )
-
-        add_custom_command(
-            OUTPUT "${SHADER_CONVTRANSPOSE2D_SPV}"
-            COMMAND ${_MIMIR_GLSLANG_VALIDATOR_CMD} -V "${SHADER_CONVTRANSPOSE2D_SRC}" -o "${SHADER_CONVTRANSPOSE2D_SPV}"
-            DEPENDS "${SHADER_CONVTRANSPOSE2D_SRC}"
-            COMMENT "Compiling Vulkan shader conv_transpose2d_forward.comp -> SPIR-V"
-            VERBATIM
-        )
-
-        add_custom_target(mimir_shaders ALL DEPENDS
-            "${SHADER_LINEAR_SPV}"
-            "${SHADER_ADD_SPV}"
-            "${SHADER_MUL_SPV}"
-            "${SHADER_RELU_SPV}"
-            "${SHADER_SILU_SPV}"
-            "${SHADER_GELU_SPV}"
-            "${SHADER_SIGMOID_SPV}"
-            "${SHADER_TANH_SPV}"
-            "${SHADER_CONV2D_SPV}"
-            "${SHADER_CONVTRANSPOSE2D_SPV}"
-        )
+        add_custom_target(mimir_shaders ALL DEPENDS ${MIMIR_VULKAN_SHADER_SPV_OUTPUTS})
         if(TARGET glslang-standalone)
             add_dependencies(mimir_shaders glslang-standalone)
         endif()
@@ -318,12 +236,32 @@ if(ENABLE_LZ4)
     endif()
 endif()
 
+# FFmpeg (audio/video decoding)
+if(ENABLE_FFMPEG)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
+            libavformat
+            libavcodec
+            libavutil
+            libswscale
+            libswresample
+        )
+    endif()
+
+    if(FFMPEG_FOUND)
+        message(STATUS "FFmpeg found: ${FFMPEG_VERSION}")
+    else()
+        message(WARNING "FFmpeg not found - audio/video loading will fall back to raw bytes")
+    endif()
+endif()
+
 # Threads
 find_package(Threads REQUIRED)
 
 # SFML (visualisation)
 if(ENABLE_SFML)
-    find_package(SFML 2.5 COMPONENTS graphics window system)
+    find_package(SFML COMPONENTS Graphics Window System)
     if(SFML_FOUND)
         message(STATUS "SFML found: ${SFML_VERSION}")
     else()
@@ -438,6 +376,7 @@ set(MIMIR_SOURCES
     src/Models/NLP/HFCLIPTextEncoder2Model.cpp
     src/Models/Vision/HFVaeDecoderModel.cpp
     src/Models/NLP/TransformerModel.cpp
+    src/Models/NLP/CausalLMModel.cpp
     src/Models/NLP/VAETextModel.cpp
     src/Models/Vision/ViTModel.cpp
     src/Models/Vision/VAEModel.cpp
@@ -454,7 +393,6 @@ set(MIMIR_SOURCES
     src/Models/Diffusion/CondDiffusionModel.cpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.cpp
     src/Models/Diffusion/SD35Model.cpp
-    src/Models/Diffusion/PonyXLDDPMModel.cpp
     src/Serialization/Serialization.cpp
     src/Serialization/SafeTensorsWriter.cpp
     src/Serialization/SafeTensorsReader.cpp
@@ -469,6 +407,7 @@ set(MIMIR_HEADERS
     src/Tokenizer.hpp
     src/Visualizer.hpp
     src/tensors.hpp
+    src/TypedTensor.hpp
     src/Sha256.hpp
     src/scriptings/ScriptingRuntime.hpp
     src/scriptings/ScriptingContext.hpp
@@ -483,6 +422,7 @@ set(MIMIR_HEADERS
     src/runtimes/opencl/OpenCLCompute.hpp
     src/runtimes/AbstractRuntime.hpp
     src/runtimes/RuntimeRouter.hpp
+    src/runtimes/LayerOps.hpp
     src/runtimes/ops_loss_and_grad.hpp
     src/runtimes/cpu/CpuRuntime.hpp
     src/runtimes/cuda/CudaRuntime.hpp
@@ -495,6 +435,7 @@ set(MIMIR_HEADERS
     src/AsyncMonitor.hpp
     src/HtopDisplay.hpp
     src/runtimes/cpu/RuntimeAllocator.hpp
+    src/runtimes/cpu/TypedKernels.hpp
     src/runtimes/cpu/LayerOpsExt.hpp
     src/runtimes/cpu/RuntimeLayerDispatch.hpp
     src/Models/Registry/ModelArchitectures.hpp
@@ -504,6 +445,8 @@ set(MIMIR_HEADERS
     src/Models/NLP/HFCLIPTextEncoder2Model.hpp
     src/Models/Vision/HFVaeDecoderModel.hpp
     src/Models/NLP/TransformerModel.hpp
+    src/Models/NLP/CausalLMModel.hpp
+    src/Models/NLP/CausalAttentionOps.hpp
     src/Models/NLP/VAETextModel.hpp
     src/Models/Vision/ViTModel.hpp
     src/Models/Vision/VAEModel.hpp
@@ -519,7 +462,6 @@ set(MIMIR_HEADERS
     src/Models/Diffusion/CondDiffusionModel.hpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.hpp
     src/Models/Diffusion/SD35Model.hpp
-    src/Models/Diffusion/PonyXLDDPMModel.hpp
     src/Serialization/Serialization.hpp
     src/Serialization/SafeTensorsWriter.hpp
     src/Serialization/SafeTensorsReader.hpp
@@ -560,9 +502,21 @@ if(ENABLE_OPENCL AND OPENCL_LIBRARY)
     list(APPEND MIMIR_SOURCES src/runtimes/opencl/OpenCLRuntime.cpp)
 endif()
 
+list(APPEND MIMIR_SOURCES src/runtimes/LayerOps.cpp)
+
 # Variante de sources sans SFML (utile pour builds headless / statiques)
 set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})
 list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML src/Visualizer.cpp)
+
+# Variante stricte pour build statique: sans runtimes GPU afin d'eviter des
+# dependances dynamiques (Vulkan/OpenCL/CUDA/ROCm) lors du linkage statique.
+set(MIMIR_SOURCES_STATIC ${MIMIR_SOURCES_NO_SFML})
+list(REMOVE_ITEM MIMIR_SOURCES_STATIC
+    src/runtimes/vulkan/VulkanRuntime.cpp
+    src/runtimes/opencl/OpenCLRuntime.cpp
+    src/runtimes/cuda/CudaRuntime.cpp
+    src/runtimes/rocm/RocmRuntime.cpp
+)
 
 # ============================================================================
 # Bibliothèque principale Mímir
@@ -572,16 +526,12 @@ if(ENABLE_SFML AND SFML_FOUND)
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES}
         ${MIMIR_HEADERS}
-        src/runtimes/ops_loss_and_grad.hpp
-        src/runtimes/cpu/DynamicTensorAllocator.hpp
-        src/scriptings/ScriptingContext.hpp
     )
     target_compile_definitions(mimir_core PUBLIC ENABLE_SFML)
 else()
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES_NO_SFML}
         ${MIMIR_HEADERS}
-        src/runtimes/opencl/OpenCLRuntime.hpp
     )
 endif()
 
@@ -657,13 +607,19 @@ if(ENABLE_LZ4 AND LZ4_LIBRARY)
     target_link_libraries(mimir_core PUBLIC ${LZ4_LIBRARY})
 endif()
 
-# SFML (visualisation)
-if(ENABLE_SFML AND SFML_FOUND)
-    target_link_libraries(mimir_core PUBLIC sfml-graphics sfml-window sfml-system)
+if(ENABLE_FFMPEG AND FFMPEG_FOUND)
+    target_compile_definitions(mimir_core PUBLIC MIMIR_ENABLE_FFMPEG)
+    target_link_libraries(mimir_core PUBLIC PkgConfig::FFMPEG)
 endif()
 
-# OpenCL (calcul GPU)
-# (déjà géré via ENABLE_OPENCL)
+# SFML (visualisation)
+if(ENABLE_SFML AND SFML_FOUND)
+    if(TARGET SFML::Graphics)
+        target_link_libraries(mimir_core PUBLIC SFML::Graphics SFML::Window SFML::System)
+    else()
+        target_link_libraries(mimir_core PUBLIC sfml-graphics sfml-window sfml-system)
+    endif()
+endif()
 
 # ============================================================================
 # Exécutable principal
@@ -678,36 +634,9 @@ if(TARGET mimir_shaders)
     add_dependencies(mimir mimir_shaders)
     add_custom_command(TARGET mimir POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:mimir>/shaders"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/linear_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/linear_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/add_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/add_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/mul_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/mul_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/relu_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/relu_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/silu_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/silu_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/gelu_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/gelu_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/sigmoid_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/sigmoid_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/tanh_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/tanh_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/conv2d_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/conv2d_forward.comp.spv"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_BINARY_DIR}/shaders/conv_transpose2d_forward.comp.spv"
-            "$<TARGET_FILE_DIR:mimir>/shaders/conv_transpose2d_forward.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_BINARY_DIR}/shaders"
+            "$<TARGET_FILE_DIR:mimir>/shaders"
         COMMENT "Copy Vulkan shaders to bin/shaders"
     )
 endif()
@@ -734,10 +663,10 @@ if(BUILD_MIMIR_STATIC)
         message(STATUS "Lua static library: ${LUA_STATIC_LIBRARY}")
     endif()
 
-    # Variante minimale de la lib (évite Vulkan/SFML/OpenCL/LZ4/OpenMP par défaut)
+    # Variante minimale de la lib (sans SFML ni runtimes GPU)
     # pour maximiser les chances d'un lien 100% statique.
     add_library(mimir_core_static STATIC
-        ${MIMIR_SOURCES_NO_SFML}
+        ${MIMIR_SOURCES_STATIC}
         ${MIMIR_HEADERS}
     )
 
@@ -761,6 +690,11 @@ if(BUILD_MIMIR_STATIC)
 
     if(MIMIR_ENABLE_LEGACY_PARAMS)
         target_compile_definitions(mimir_core_static PRIVATE MIMIR_ENABLE_LEGACY_PARAMS)
+    endif()
+
+    if(ENABLE_FFMPEG AND FFMPEG_FOUND)
+        target_compile_definitions(mimir_core_static PUBLIC MIMIR_ENABLE_FFMPEG)
+        target_link_libraries(mimir_core_static PUBLIC PkgConfig::FFMPEG)
     endif()
 
     if(LUA_STATIC_LIBRARY)
@@ -794,6 +728,23 @@ if(BUILD_MIMIR_STATIC)
 endif()
 
 message(STATUS "Tests/exemples désactivés (obsolètes)")
+
+# ============================================================================
+# Outil C++ de détection/reconnaissance faciale (OpenCV)
+# ============================================================================
+
+if(MIMIR_ENABLE_FACE_RECOGNITION_TOOL)
+    find_package(OpenCV QUIET COMPONENTS core imgproc imgcodecs objdetect highgui videoio dnn)
+    if(OpenCV_FOUND)
+        add_executable(face_recognition_tool examples/face_recognition_tool.cpp)
+        target_link_libraries(face_recognition_tool PRIVATE ${OpenCV_LIBS})
+        target_include_directories(face_recognition_tool PRIVATE ${OpenCV_INCLUDE_DIRS})
+        set_target_properties(face_recognition_tool PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+        )
+        message(STATUS "Face recognition tool: enabled (${OpenCV_VERSION})")
+    endif()
+endif()
 
 # ============================================================================
 # Tests unitaires (CTest)

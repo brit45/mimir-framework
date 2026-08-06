@@ -12,6 +12,10 @@
 static const char* kVizUISettingsFile = "viz_ui_settings.json";
 
 namespace {
+static inline sf::FloatRect make_rect(float x, float y, float w, float h) {
+    return sf::FloatRect(sf::Vector2f(x, y), sf::Vector2f(w, h));
+}
+
 struct ParsedVizLabel {
     std::string raw;
     std::string path;
@@ -373,7 +377,7 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
     out.raw = label_raw;
 
     // Convention: une partie "chemin" peut être suivie d'extra après " | ".
-    // Ex: "ponyxl_sdxl/input/dataset/rgb | /path/file.png"
+    // Ex: "vae_conv/input/dataset/rgb | /path/file.png"
     const std::string s = label_raw;
     const size_t bar = s.find("|");
     if (bar != std::string::npos) {
@@ -443,6 +447,11 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
             out.tag = "L";
             out.headline = "Layer";
         }
+
+        // Toute entree au format <model>/blocks/<layer>/<type> correspond a
+        // un vrai noeud du graphe et porte le badge uniforme (L).
+        out.tag = "L";
+        out.headline = "Layer";
 
         const size_t start = static_cast<size_t>(idx_blocks + 1);
         const size_t end = (out.parts.size() > drop) ? (out.parts.size() - drop) : start;
@@ -559,15 +568,15 @@ static void position_sprite_centered_in_box(sf::Sprite& sprite, float x, float y
     // sprite est déjà mis à l'échelle par createImageTexture().
     const auto lb = sprite.getLocalBounds();
     const auto sc = sprite.getScale();
-    const float dw = lb.width * sc.x;
-    const float dh = lb.height * sc.y;
+    const float dw = lb.size.x * sc.x;
+    const float dh = lb.size.y * sc.y;
     const float ox = (box_size - dw) * 0.5f;
     const float oy = (box_size - dh) * 0.5f;
     // Ajuster avec left/top au cas où localBounds n'est pas (0,0).
-    const float px = x + ox - lb.left * sc.x;
-    const float py = y + oy - lb.top * sc.y;
+    const float px = x + ox - lb.position.x * sc.x;
+    const float py = y + oy - lb.position.y * sc.y;
     // Snap pixel pour éviter les artefacts d'alignement/sub-pixel dans les grilles.
-    sprite.setPosition(std::round(px), std::round(py));
+    sprite.setPosition(sf::Vector2f(std::round(px), std::round(py)));
 }
 
 static bool is_layer_block_preview_smoothing_candidate(const ParsedVizLabel& p, int channels) {
@@ -657,7 +666,7 @@ static float clamp01(float t) {
     return std::clamp(t, 0.0f, 1.0f);
 }
 
-static float lr_from_t(float t) {
+[[maybe_unused]] static float lr_from_t(float t) {
     const float tt = clamp01(t);
     const float logmin = std::log10(kLiveLRMin);
     const float logmax = std::log10(kLiveLRMax);
@@ -676,7 +685,7 @@ static float t_from_lr(float lr) {
     return clamp01((lv - logmin) / denom);
 }
 
-static int warmup_from_t(float t) {
+[[maybe_unused]] static int warmup_from_t(float t) {
     const float tt = clamp01(t);
     const float v = tt * static_cast<float>(kLiveWarmupMax);
     return std::max(0, static_cast<int>(std::lround(v)));
@@ -687,7 +696,7 @@ static float t_from_warmup(int steps) {
     return clamp01(static_cast<float>(s) / static_cast<float>(kLiveWarmupMax));
 }
 
-static float klbeta_from_t(float t) {
+[[maybe_unused]] static float klbeta_from_t(float t) {
     return clamp01(t); // 0..1
 }
 
@@ -704,7 +713,7 @@ static uint64_t steady_now_ms() {
             .count());
 }
 
-static bool is_live_input_char(uint32_t cp) {
+[[maybe_unused]] static bool is_live_input_char(uint32_t cp) {
     if (cp >= static_cast<uint32_t>('0') && cp <= static_cast<uint32_t>('9')) return true;
     return cp == static_cast<uint32_t>('.') ||
            cp == static_cast<uint32_t>('e') ||
@@ -783,13 +792,19 @@ Visualizer::Visualizer(const json& config)
         loss_log_file = viz.value("loss_log_file", loss_log_file);
 
         hide_activation_blocks = viz.value("hide_activation_blocks", false);
+        hide_normalisation_blocks = viz.value("hide_normalisation_blocks", false);
         architecture_path = viz.value("architecture_path", std::string());
     }
+    std::cerr << "[viz] config enabled=" << enabled
+              << " window=" << window_width << "x" << window_height
+              << " title='" << window_title << "'"
+              << " loss_log='" << loss_log_file << "'" << std::endl;
 }
 
 void Visualizer::setLossLogFile(const std::string& filepath) {
     if (filepath.empty()) return;
     loss_log_file = filepath;
+    std::cerr << "[viz] loss_log_file=" << loss_log_file << std::endl;
 }
 
 Visualizer::~Visualizer() {
@@ -797,6 +812,10 @@ Visualizer::~Visualizer() {
 }
 
 void Visualizer::shutdown() {
+    if (pending_loss_log_flush_ && !loss_log_file.empty()) {
+        saveLossHistory(loss_log_file);
+        pending_loss_log_flush_ = false;
+    }
     if (window) {
         if (window->isOpen()) {
             window->close();
@@ -812,7 +831,7 @@ bool Visualizer::initialize() {
 
     try {
         window = std::make_unique<sf::RenderWindow>(
-            sf::VideoMode(window_width, window_height),
+            sf::VideoMode(sf::Vector2u(static_cast<unsigned>(window_width), static_cast<unsigned>(window_height))),
             window_title,
             sf::Style::Titlebar | sf::Style::Close
         );
@@ -831,15 +850,15 @@ bool Visualizer::initialize() {
                     // On force une taille standard (64x64) via downscale nearest-neighbor.
                     const unsigned target = 64;
                     sf::Image icon_img;
-                    icon_img.create(target, target);
+                    icon_img.resize(sf::Vector2u(target, target));
                     for (unsigned yy = 0; yy < target; ++yy) {
                         for (unsigned xx = 0; xx < target; ++xx) {
                             const unsigned sx = (sz.x > 0) ? (xx * sz.x) / target : 0;
                             const unsigned sy = (sz.y > 0) ? (yy * sz.y) / target : 0;
-                            icon_img.setPixel(xx, yy, logo_img.getPixel(sx, sy));
+                            icon_img.setPixel(sf::Vector2u(static_cast<unsigned int>(xx), static_cast<unsigned int>(yy)), logo_img.getPixel(sf::Vector2u(static_cast<unsigned int>(sx), static_cast<unsigned int>(sy))));
                         }
                     }
-                    window->setIcon(target, target, icon_img.getPixelsPtr());
+                    window->setIcon(icon_img);
                 }
                 if (logo_texture_.loadFromImage(logo_img)) {
                     logo_sprite_.setTexture(logo_texture_, true);
@@ -876,7 +895,7 @@ bool Visualizer::initialize() {
             "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
         };
         for (const auto& path : font_candidates) {
-            if (font.loadFromFile(path)) {
+            if (font.openFromFile(path)) {
                 font_loaded = true;
                 break;
             }
@@ -896,15 +915,21 @@ bool Visualizer::initialize() {
                 if (settings.contains("last")) {
                     chosen = &settings["last"];
                     chosen_name = "last";
+        std::cerr << "[viz] config enabled=" << enabled
+                  << " window=" << window_width << "x" << window_height
+                  << " title='" << window_title << "'"
+                  << " loss_log='" << loss_log_file << "'" << std::endl;
                 } else if (settings.contains("slot1")) {
                     // Compat: certains fichiers peuvent exposer un slot nommé "slot1" au top-level.
                     chosen = &settings["slot1"];
                     chosen_name = "slot1";
                 } else if (settings.contains("slots") && settings["slots"].is_object() && settings["slots"].contains("1")) {
+        std::cerr << "[viz] loss_log_file=" << loss_log_file << std::endl;
                     chosen = &settings["slots"]["1"];
                     chosen_name = "slots[1]";
                 }
 
+            std::cerr << "[viz] initialize skipped (disabled)" << std::endl;
                 if (chosen && chosen->is_object()) {
                     // Appliquer la taille de fenêtre AVANT le layout (sinon clamp sur mauvaise taille).
                     try {
@@ -953,6 +978,9 @@ json Visualizer::serializeUILayout() const {
     out["show_loss_graph"] = show_loss_graph;
     out["show_prompt_text"] = show_prompt_text_;
     out["heatmap_palette"] = static_cast<int>(heatmap_palette_);
+    out["hide_activation_blocks"] = hide_activation_blocks;
+    out["hide_normalisation_blocks"] = hide_normalisation_blocks;
+    out["blocks_tips_visible_limit"] = std::max(0, blocks_tips_visible_limit_);
 
     // Taille de fenêtre (utile pour restaurer un slot de layout)
     out["window_width"] = window_width;
@@ -985,6 +1013,11 @@ bool Visualizer::applyUILayout(const json& layout) {
         if (layout.contains("show_training_progress")) show_training_progress = layout["show_training_progress"].get<bool>();
         if (layout.contains("show_loss_graph")) show_loss_graph = layout["show_loss_graph"].get<bool>();
         if (layout.contains("show_prompt_text")) show_prompt_text_ = layout["show_prompt_text"].get<bool>();
+        if (layout.contains("hide_activation_blocks")) hide_activation_blocks = layout["hide_activation_blocks"].get<bool>();
+        if (layout.contains("hide_normalisation_blocks")) hide_normalisation_blocks = layout["hide_normalisation_blocks"].get<bool>();
+        if (layout.contains("blocks_tips_visible_limit")) {
+            blocks_tips_visible_limit_ = std::max(0, layout["blocks_tips_visible_limit"].get<int>());
+        }
         if (layout.contains("heatmap_palette")) {
             const int pid = std::clamp(layout["heatmap_palette"].get<int>(), 0, 3);
             heatmap_palette_ = static_cast<Visualizer::HeatmapPalette>(pid);
@@ -1142,8 +1175,8 @@ void Visualizer::syncUIView() {
     // On la force explicitement pour éviter toute déformation au resize.
     const float ww = static_cast<float>(std::max(1, window_width));
     const float hh = static_cast<float>(std::max(1, window_height));
-    sf::View v(sf::FloatRect(0.f, 0.f, ww, hh));
-    v.setViewport(sf::FloatRect(0.f, 0.f, 1.f, 1.f));
+    sf::View v(make_rect(0.f, 0.f, ww, hh));
+    v.setViewport(make_rect(0.f, 0.f, 1.f, 1.f));
     window->setView(v);
 }
 
@@ -1176,12 +1209,12 @@ sf::Color Visualizer::panelAccent(PanelId id) const {
 
 sf::FloatRect Visualizer::panelRect(PanelId id) const {
     const auto& p = panels_[static_cast<size_t>(id)];
-    return sf::FloatRect(p.pos.x, p.pos.y, p.size.x, p.size.y);
+    return make_rect(p.pos.x, p.pos.y, p.size.x, p.size.y);
 }
 
 sf::FloatRect Visualizer::panelTitleRect(PanelId id) const {
     const auto& p = panels_[static_cast<size_t>(id)];
-    return sf::FloatRect(p.pos.x, p.pos.y, p.size.x, std::min(kPanelTitleH, p.size.y));
+    return make_rect(p.pos.x, p.pos.y, p.size.x, std::min(kPanelTitleH, p.size.y));
 }
 
 sf::FloatRect Visualizer::panelContentRect(PanelId id) const {
@@ -1189,7 +1222,7 @@ sf::FloatRect Visualizer::panelContentRect(PanelId id) const {
     const float top = p.pos.y + std::min(kPanelTitleH, p.size.y);
     const float inner_w = std::max(0.f, p.size.x - 2.f * kPanelPad);
     const float inner_h = std::max(0.f, p.size.y - std::min(kPanelTitleH, p.size.y) - 2.f * kPanelPad);
-    return sf::FloatRect(p.pos.x + kPanelPad, top + kPanelPad, inner_w, inner_h);
+    return make_rect(p.pos.x + kPanelPad, top + kPanelPad, inner_w, inner_h);
 }
 
 sf::FloatRect Visualizer::panelResizeHandleRect(PanelId id) const {
@@ -1197,15 +1230,15 @@ sf::FloatRect Visualizer::panelResizeHandleRect(PanelId id) const {
     const float w = std::max(0.f, p.size.x);
     const float h = std::max(0.f, p.size.y);
     const float hs = std::min(kPanelResizeHandle, std::min(w, h));
-    return sf::FloatRect(p.pos.x + w - hs, p.pos.y + h - hs, hs, hs);
+    return make_rect(p.pos.x + w - hs, p.pos.y + h - hs, hs, hs);
 }
 
 sf::FloatRect Visualizer::panelCloseButtonRect(PanelId id) const {
     const auto tr = panelTitleRect(id);
-    const float s = std::max(10.f, std::min(18.f, tr.height - 4.f));
-    const float x = tr.left + tr.width - s - 4.f;
-    const float y = tr.top + (tr.height - s) * 0.5f;
-    return sf::FloatRect(x, y, s, s);
+    const float s = std::max(10.f, std::min(18.f, tr.size.y - 4.f));
+    const float x = tr.position.x + tr.size.x - s - 4.f;
+    const float y = tr.position.y + (tr.size.y - s) * 0.5f;
+    return make_rect(x, y, s, s);
 }
 
 std::optional<Visualizer::PanelId> Visualizer::hitTestPanelTitle(const sf::Vector2f& mouse) const {
@@ -1244,11 +1277,16 @@ std::optional<Visualizer::PanelId> Visualizer::hitTestPanelCloseButton(const sf:
 void Visualizer::initCursorsIfNeeded() {
     if (cursors_loaded_) return;
     // Best-effort: certains backends peuvent refuser certains curseurs.
-    cursor_ok_arrow_ = cursor_arrow_.loadFromSystem(sf::Cursor::Arrow);
-    cursor_ok_hand_ = cursor_hand_.loadFromSystem(sf::Cursor::Hand);
-    cursor_ok_cross_ = cursor_cross_.loadFromSystem(sf::Cursor::Cross);
+    cursor_arrow_ = sf::Cursor::createFromSystem(sf::Cursor::Type::Arrow);
+    cursor_hand_ = sf::Cursor::createFromSystem(sf::Cursor::Type::Hand);
+    cursor_cross_ = sf::Cursor::createFromSystem(sf::Cursor::Type::Cross);
     // Diagonal resize (NW-SE) pour handle bottom-right.
-    cursor_ok_resize_ = cursor_resize_.loadFromSystem(sf::Cursor::SizeTopLeftBottomRight);
+    cursor_resize_ = sf::Cursor::createFromSystem(sf::Cursor::Type::SizeTopLeftBottomRight);
+
+    cursor_ok_arrow_ = cursor_arrow_.has_value();
+    cursor_ok_hand_ = cursor_hand_.has_value();
+    cursor_ok_cross_ = cursor_cross_.has_value();
+    cursor_ok_resize_ = cursor_resize_.has_value();
     cursors_loaded_ = true;
 }
 
@@ -1258,10 +1296,10 @@ void Visualizer::setCursor(CursorKind kind) {
     initCursorsIfNeeded();
 
     const sf::Cursor* c = nullptr;
-    if (kind == CursorKind::Hand && cursor_ok_hand_) c = &cursor_hand_;
-    else if (kind == CursorKind::Cross && cursor_ok_cross_) c = &cursor_cross_;
-    else if (kind == CursorKind::Resize && cursor_ok_resize_) c = &cursor_resize_;
-    else if (cursor_ok_arrow_) c = &cursor_arrow_;
+    if (kind == CursorKind::Hand && cursor_ok_hand_ && cursor_hand_.has_value()) c = &(*cursor_hand_);
+    else if (kind == CursorKind::Cross && cursor_ok_cross_ && cursor_cross_.has_value()) c = &(*cursor_cross_);
+    else if (kind == CursorKind::Resize && cursor_ok_resize_ && cursor_resize_.has_value()) c = &(*cursor_resize_);
+    else if (cursor_ok_arrow_ && cursor_arrow_.has_value()) c = &(*cursor_arrow_);
 
     if (c) {
         window->setMouseCursor(*c);
@@ -1331,12 +1369,18 @@ void Visualizer::drawPanelChrome(PanelId id) {
     title.setFillColor(with_alpha(accent, 120));
     window->draw(title);
 
+    if (id == PanelId::Blocks) {
+        last_blocks_hide_act_box_.reset();
+        last_blocks_hide_norm_box_.reset();
+        last_blocks_tips_limit_box_.reset();
+    }
+
     if (font_loaded && !p.title.empty()) {
-        sf::Text t;
+        sf::Text t(font);
         t.setFont(font);
         t.setCharacterSize(14);
         t.setFillColor(sf::Color(235, 235, 240));
-        t.setPosition(p.pos.x + 8.f, p.pos.y + 2.f);
+        t.setPosition(sf::Vector2f(p.pos.x + 8.f, p.pos.y + 2.f));
         t.setString(sf::String::fromUtf8(p.title.begin(), p.title.end()));
         window->draw(t);
 
@@ -1369,67 +1413,144 @@ void Visualizer::drawPanelChrome(PanelId id) {
             const float mode_w = (badge == "HEATMAP") ? 84.f : 58.f;
             const float smooth_w = 98.f;
             const float pal_w = 100.f;
+            const float filt_act_w = 84.f;
+            const float filt_norm_w = 92.f;
+            const float tips_w = 98.f;
             const float gap = 6.f;
-            const float total_w = mode_w + gap + smooth_w + gap + pal_w;
+            const float total_w = mode_w + gap + smooth_w + gap + pal_w + gap + filt_act_w + gap + filt_norm_w + gap + tips_w;
             const float base_x = p.pos.x + std::max(8.f, p.size.x - total_w - 28.f);
             const float badge_y = p.pos.y + (th - badge_h) * 0.5f;
 
             const float mode_x = base_x;
             const float smooth_x = base_x + mode_w + gap;
             const float pal_x = smooth_x + smooth_w + gap;
+            const float act_x = pal_x + pal_w + gap;
+            const float norm_x = act_x + filt_act_w + gap;
+            const float tips_x = norm_x + filt_norm_w + gap;
 
             sf::RectangleShape b(sf::Vector2f(mode_w, badge_h));
-            b.setPosition(mode_x, badge_y);
+            b.setPosition(sf::Vector2f(mode_x, badge_y));
             b.setFillColor(badge_fill);
             b.setOutlineColor(badge_outline);
             b.setOutlineThickness(1.f);
             window->draw(b);
 
-            sf::Text bt;
+            sf::Text bt(font);
             bt.setFont(font);
             bt.setCharacterSize(12);
             bt.setFillColor(sf::Color(245, 245, 248));
-            bt.setPosition(mode_x + 7.f, badge_y - 1.f);
+            bt.setPosition(sf::Vector2f(mode_x + 7.f, badge_y - 1.f));
             bt.setString(sf::String::fromUtf8(badge.begin(), badge.end()));
             window->draw(bt);
 
             sf::RectangleShape sb(sf::Vector2f(smooth_w, badge_h));
-            sb.setPosition(smooth_x, badge_y);
+            sb.setPosition(sf::Vector2f(smooth_x, badge_y));
             sb.setFillColor(smooth_fill);
             sb.setOutlineColor(smooth_outline);
             sb.setOutlineThickness(1.f);
             window->draw(sb);
 
-            sf::Text st;
+            sf::Text st(font);
             st.setFont(font);
             st.setCharacterSize(12);
             st.setFillColor(sf::Color(245, 245, 248));
-            st.setPosition(smooth_x + 6.f, badge_y - 1.f);
+            st.setPosition(sf::Vector2f(smooth_x + 6.f, badge_y - 1.f));
             st.setString(sf::String::fromUtf8(smooth_badge.begin(), smooth_badge.end()));
             window->draw(st);
 
             sf::RectangleShape pb(sf::Vector2f(pal_w, badge_h));
-            pb.setPosition(pal_x, badge_y);
+            pb.setPosition(sf::Vector2f(pal_x, badge_y));
             pb.setFillColor(pal_fill);
             pb.setOutlineColor(pal_outline);
             pb.setOutlineThickness(1.f);
             window->draw(pb);
 
-            sf::Text pt;
+            sf::Text pt(font);
             pt.setFont(font);
             pt.setCharacterSize(12);
             pt.setFillColor(sf::Color(245, 245, 248));
-            pt.setPosition(pal_x + 6.f, badge_y - 1.f);
+            pt.setPosition(sf::Vector2f(pal_x + 6.f, badge_y - 1.f));
             pt.setString(sf::String::fromUtf8(pal_badge.begin(), pal_badge.end()));
             window->draw(pt);
+
+            auto draw_filter_badge = [&](float x, float w, const std::string& label, bool hidden,
+                                         std::optional<sf::FloatRect>& out_rect) {
+                const sf::Color fill = hidden ? sf::Color(145, 84, 84, 220)
+                                              : sf::Color(70, 116, 86, 220);
+                const sf::Color outline = hidden ? sf::Color(240, 154, 154, 235)
+                                                 : sf::Color(154, 226, 186, 235);
+                sf::RectangleShape fb(sf::Vector2f(w, badge_h));
+                fb.setPosition(sf::Vector2f(x, badge_y));
+                fb.setFillColor(fill);
+                fb.setOutlineColor(outline);
+                fb.setOutlineThickness(1.f);
+                window->draw(fb);
+
+                sf::Text ft(font);
+                ft.setFont(font);
+                ft.setCharacterSize(12);
+                ft.setFillColor(sf::Color(245, 245, 248));
+                ft.setPosition(sf::Vector2f(x + 6.f, badge_y - 1.f));
+                ft.setString(sf::String::fromUtf8(label.begin(), label.end()));
+                window->draw(ft);
+
+                out_rect = make_rect(x, badge_y, w, badge_h);
+            };
+
+            draw_filter_badge(act_x, filt_act_w,
+                              hide_activation_blocks ? "ACT OFF" : "ACT ON",
+                              hide_activation_blocks,
+                              last_blocks_hide_act_box_);
+            draw_filter_badge(norm_x, filt_norm_w,
+                              hide_normalisation_blocks ? "NORM OFF" : "NORM ON",
+                              hide_normalisation_blocks,
+                              last_blocks_hide_norm_box_);
+
+            {
+                const sf::Color tips_fill = blocks_tips_limit_editing_
+                    ? sf::Color(76, 98, 146, 220)
+                    : sf::Color(74, 74, 92, 220);
+                const sf::Color tips_outline = blocks_tips_limit_editing_
+                    ? sf::Color(166, 208, 255, 235)
+                    : sf::Color(168, 168, 188, 235);
+
+                sf::RectangleShape tb(sf::Vector2f(tips_w, badge_h));
+                tb.setPosition(sf::Vector2f(tips_x, badge_y));
+                tb.setFillColor(tips_fill);
+                tb.setOutlineColor(tips_outline);
+                tb.setOutlineThickness(1.f);
+                window->draw(tb);
+
+                std::string tips_value;
+                if (blocks_tips_limit_editing_) {
+                    tips_value = blocks_tips_limit_input_;
+                } else if (blocks_tips_visible_limit_ > 0) {
+                    tips_value = std::to_string(blocks_tips_visible_limit_);
+                } else {
+                    tips_value = "ALL";
+                }
+                if (tips_value.empty()) tips_value = "_";
+
+                const std::string tips_badge = "TIPS " + tips_value;
+
+                sf::Text tt(font);
+                tt.setFont(font);
+                tt.setCharacterSize(12);
+                tt.setFillColor(sf::Color(245, 245, 248));
+                tt.setPosition(sf::Vector2f(tips_x + 6.f, badge_y - 1.f));
+                tt.setString(sf::String::fromUtf8(tips_badge.begin(), tips_badge.end()));
+                window->draw(tt);
+
+                last_blocks_tips_limit_box_ = make_rect(tips_x, badge_y, tips_w, badge_h);
+            }
         }
     }
 
     // Poignée de redimensionnement (bas-droite)
     {
         const auto r = panelResizeHandleRect(id);
-        sf::RectangleShape h(sf::Vector2f(r.width, r.height));
-        h.setPosition(r.left, r.top);
+        sf::RectangleShape h(sf::Vector2f(r.size.x, r.size.y));
+        h.setPosition(sf::Vector2f(r.position.x, r.position.y));
         h.setFillColor(sf::Color(80, 80, 95, 210));
         window->draw(h);
     }
@@ -1437,19 +1558,19 @@ void Visualizer::drawPanelChrome(PanelId id) {
     // Bouton close [X]
     {
         const auto r = panelCloseButtonRect(id);
-        sf::RectangleShape b(sf::Vector2f(r.width, r.height));
-        b.setPosition(r.left, r.top);
+        sf::RectangleShape b(sf::Vector2f(r.size.x, r.size.y));
+        b.setPosition(sf::Vector2f(r.position.x, r.position.y));
         b.setFillColor(sf::Color(90, 40, 40, 220));
         b.setOutlineColor(sf::Color(180, 80, 80, 230));
         b.setOutlineThickness(1);
         window->draw(b);
 
         if (font_loaded) {
-            sf::Text t;
+            sf::Text t(font);
             t.setFont(font);
             t.setCharacterSize(14);
             t.setFillColor(sf::Color(245, 240, 240));
-            t.setPosition(r.left + 4.f, r.top - 2.f);
+            t.setPosition(sf::Vector2f(r.position.x + 4.f, r.position.y - 2.f));
             t.setString("X");
             window->draw(t);
         }
@@ -1460,526 +1581,425 @@ void Visualizer::processEvents() {
     if (!window) return;
 
     // Garantir que les coordonnées UI (pixels) sont actives avant tout hit-test.
-    // Sinon mapPixelToCoords() peut utiliser une view différente (ex: clipping du panel Blocks)
-    // et les clics ne tombent pas dans les hitboxes.
     syncUIView();
 
-    sf::Event event;
-    while (window->pollEvent(event)) {
-        if (event.type == sf::Event::Closed) {
-            window->close();
-        } else if (event.type == sf::Event::Resized) {
-            window_width = static_cast<int>(event.size.width);
-            window_height = static_cast<int>(event.size.height);
-            // IMPORTANT: si la view n'est pas mise à jour, SFML étire le rendu.
-            syncUIView();
-            // NOTE: les panneaux sont indépendants de la taille de fenêtre.
-            // On ne recale (clamp) pas automatiquement leurs positions/dimensions.
-        } else if (event.type == sf::Event::MouseWheelScrolled) {
-            if (zoom_active_ || dragging_panel_ || resizing_panel_) {
-                continue;
-            }
+    auto publish_live_params = [&](bool bump_version) {
+        live_lr_.store(std::clamp(live_ui_lr_, kLiveLRMin, kLiveLRMax), std::memory_order_relaxed);
+        live_lr_warmup_steps_.store(std::max(0, live_ui_lr_warmup_steps_), std::memory_order_relaxed);
+        live_kl_beta_.store(std::clamp(live_ui_kl_beta_, 0.0f, 1.0f), std::memory_order_relaxed);
+        live_kl_warmup_steps_.store(std::max(0, live_ui_kl_warmup_steps_), std::memory_order_relaxed);
+        live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
+        if (bump_version) {
+            live_params_version_.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
 
+    auto apply_live_slider_from_mouse = [&](LiveDragTarget target, const sf::Vector2f& mouse) {
+        auto apply_t_on_track = [&](const std::optional<sf::FloatRect>& track, auto fn) {
+            if (!track.has_value()) return;
+            const float denom = std::max(1.0f, track->size.x);
+            const float t = clamp01((mouse.x - track->position.x) / denom);
+            fn(t);
+        };
+
+        if (target == LiveDragTarget::LR) {
+            apply_t_on_track(last_live_lr_track_, [&](float t) { live_ui_lr_ = lr_from_t(t); });
+        } else if (target == LiveDragTarget::LRWarmup) {
+            apply_t_on_track(last_live_lrwu_track_, [&](float t) { live_ui_lr_warmup_steps_ = warmup_from_t(t); });
+        } else if (target == LiveDragTarget::KLBeta) {
+            apply_t_on_track(last_live_klb_track_, [&](float t) { live_ui_kl_beta_ = klbeta_from_t(t); });
+        } else if (target == LiveDragTarget::KLWarmup) {
+            apply_t_on_track(last_live_klwu_track_, [&](float t) { live_ui_kl_warmup_steps_ = warmup_from_t(t); });
+        }
+    };
+
+    auto trim_local = [](const std::string& s) -> std::string {
+        size_t a = 0;
+        while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+        size_t b = s.size();
+        while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+        return s.substr(a, b - a);
+    };
+
+    auto commit_blocks_tips_limit = [&]() {
+        const std::string trimmed = trim_local(blocks_tips_limit_input_);
+        if (trimmed.empty() || trimmed == "ALL" || trimmed == "all" || trimmed == "0") {
+            blocks_tips_visible_limit_ = 0;
+        } else {
+            try {
+                const int v = std::stoi(trimmed);
+                blocks_tips_visible_limit_ = std::max(0, v);
+            } catch (...) {
+                // Entrée invalide: conserver l'ancienne valeur.
+            }
+        }
+        blocks_tips_limit_editing_ = false;
+        blocks_tips_limit_input_.clear();
+        saveUILayoutToLast();
+    };
+
+    auto commit_live_input = [&]() {
+        if (live_input_target_ == LiveInputTarget::None) return;
+        const std::string trimmed = trim_local(live_input_buffer_);
+        bool ok = false;
+
+        try {
+            if (live_input_target_ == LiveInputTarget::LR) {
+                const float v = std::stof(trimmed);
+                if (std::isfinite(v)) {
+                    live_ui_lr_ = std::clamp(v, kLiveLRMin, kLiveLRMax);
+                    ok = true;
+                }
+            } else if (live_input_target_ == LiveInputTarget::KLBeta) {
+                const float v = std::stof(trimmed);
+                if (std::isfinite(v)) {
+                    live_ui_kl_beta_ = std::clamp(v, 0.0f, 1.0f);
+                    ok = true;
+                }
+            } else if (live_input_target_ == LiveInputTarget::LRWarmup) {
+                const int v = std::stoi(trimmed);
+                live_ui_lr_warmup_steps_ = std::clamp(v, 0, kLiveWarmupMax);
+                ok = true;
+            } else if (live_input_target_ == LiveInputTarget::KLWarmup) {
+                const int v = std::stoi(trimmed);
+                live_ui_kl_warmup_steps_ = std::clamp(v, 0, kLiveWarmupMax);
+                ok = true;
+            }
+        } catch (...) {
+            ok = false;
+        }
+
+        if (ok) {
+            live_overrides_enabled_.store(true, std::memory_order_relaxed);
+            publish_live_params(true);
+            live_input_target_ = LiveInputTarget::None;
+            live_input_buffer_.clear();
+            live_input_error_until_ms_ = 0;
+        } else {
+            live_input_error_until_ms_ = steady_now_ms() + 900;
+        }
+    };
+
+    while (const std::optional<sf::Event> event_opt = window->pollEvent()) {
+        const sf::Event& event = *event_opt;
+
+        if (event.is<sf::Event::Closed>()) {
+            window->close();
+            continue;
+        }
+
+        if (const auto* resized = event.getIf<sf::Event::Resized>()) {
+            window_width = static_cast<int>(resized->size.x);
+            window_height = static_cast<int>(resized->size.y);
+            syncUIView();
+            continue;
+        }
+
+        if (const auto* mb = event.getIf<sf::Event::MouseButtonPressed>()) {
             initDefaultPanelsIfNeeded();
             syncUIView();
-            const sf::Vector2f mouse = window->mapPixelToCoords(sf::Vector2i(event.mouseWheelScroll.x, event.mouseWheelScroll.y));
+            const sf::Vector2f mouse = window->mapPixelToCoords(mb->position);
 
-            // Scroll uniquement dans Blocks/Layers (layers)
-            if (isPanelVisible(PanelId::Blocks)) {
-                const auto content = panelContentRect(PanelId::Blocks);
-                if (content.contains(mouse)) {
-                    const float delta = event.mouseWheelScroll.delta;
-                    blocks_scroll_y_ -= delta * kBlocksScrollSpeed;
-                    blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
-                    continue;
-                }
-            }
-        } else if (event.type == sf::Event::MouseButtonPressed) {
-            if (event.mouseButton.button == sf::Mouse::Left) {
-                initDefaultPanelsIfNeeded();
-                syncUIView();
-                const sf::Vector2f mouse = window->mapPixelToCoords(sf::Vector2i(event.mouseButton.x, event.mouseButton.y));
-
-                // Si une saisie live est active et qu'on clique ailleurs, on quitte l'édition.
-                if (live_input_target_ != LiveInputTarget::None) {
-                    const bool hit_any_value_box =
-                        (last_live_lr_value_box_.has_value() && last_live_lr_value_box_->contains(mouse)) ||
-                        (last_live_lrwu_value_box_.has_value() && last_live_lrwu_value_box_->contains(mouse)) ||
-                        (last_live_klb_value_box_.has_value() && last_live_klb_value_box_->contains(mouse)) ||
-                        (last_live_klwu_value_box_.has_value() && last_live_klwu_value_box_->contains(mouse));
-                    if (!hit_any_value_box) {
-                        live_input_target_ = LiveInputTarget::None;
-                        live_input_buffer_.clear();
-                        live_input_error_until_ms_ = 0;
-                    }
-                }
-
-                // STOP training button (dans le panneau Metrics)
-                if (isPanelVisible(PanelId::Metrics) && last_stop_button_rect_.has_value() && last_stop_button_rect_->contains(mouse)) {
+            if (mb->button == sf::Mouse::Button::Left) {
+                if (last_stop_button_rect_.has_value() && last_stop_button_rect_->contains(mouse)) {
                     requestStopTraining();
                     continue;
                 }
 
-                // Live tuning controls (Metrics): click/drag updates atomics + bumps version.
-                if (isPanelVisible(PanelId::Metrics) && !zoom_active_) {
-                    auto commit_live = [&]() {
-                        // Toute interaction avec les contrôles active le mode LIVE.
-                        live_overrides_enabled_.store(true, std::memory_order_relaxed);
-                        live_lr_.store(live_ui_lr_, std::memory_order_relaxed);
-                        live_lr_warmup_steps_.store(live_ui_lr_warmup_steps_, std::memory_order_relaxed);
-                        live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
-                        live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
-                        live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
-                        live_params_version_.fetch_add(1, std::memory_order_relaxed);
-                    };
+                if (last_live_overrides_box_.has_value() && last_live_overrides_box_->contains(mouse)) {
+                    const bool next = !live_overrides_enabled_.load(std::memory_order_relaxed);
+                    live_overrides_enabled_.store(next, std::memory_order_relaxed);
+                    publish_live_params(true);
+                    continue;
+                }
 
-                    auto start_value_edit = [&](LiveInputTarget tgt, const std::optional<sf::FloatRect>& value_rect, const std::string& initial_value) -> bool {
-                        if (!value_rect.has_value()) return false;
-                        if (!value_rect->contains(mouse)) return false;
-                        live_input_target_ = tgt;
-                        live_input_buffer_ = initial_value;
-                        live_input_error_until_ms_ = 0;
-                        live_dragging_ = LiveDragTarget::None;
-                        return true;
-                    };
+                if (last_live_kl_enable_box_.has_value() && last_live_kl_enable_box_->contains(mouse)) {
+                    live_ui_kl_enabled_ = !live_ui_kl_enabled_;
+                    live_overrides_enabled_.store(true, std::memory_order_relaxed);
+                    publish_live_params(true);
+                    continue;
+                }
 
-                    if (start_value_edit(LiveInputTarget::LR, last_live_lr_value_box_, format_decimal(live_ui_lr_, 10))) continue;
-                    if (start_value_edit(LiveInputTarget::LRWarmup, last_live_lrwu_value_box_, std::to_string(live_ui_lr_warmup_steps_))) continue;
-                    if (start_value_edit(LiveInputTarget::KLBeta, last_live_klb_value_box_, format_decimal(live_ui_kl_beta_, 8))) continue;
-                    if (start_value_edit(LiveInputTarget::KLWarmup, last_live_klwu_value_box_, std::to_string(live_ui_kl_warmup_steps_))) continue;
+                auto begin_live_text_edit = [&](LiveInputTarget target, const std::string& initial_value) {
+                    live_input_target_ = target;
+                    live_input_buffer_ = initial_value;
+                    live_input_error_until_ms_ = 0;
+                };
 
-                    // Toggle LIVE/NATIVE
-                    if (last_live_overrides_box_.has_value() && last_live_overrides_box_->contains(mouse)) {
-                        const bool cur = live_overrides_enabled_.load(std::memory_order_relaxed);
-                        live_overrides_enabled_.store(!cur, std::memory_order_relaxed);
-                        live_params_version_.fetch_add(1, std::memory_order_relaxed);
-                        // Ne change pas les valeurs UI; le training décidera d'appliquer/ignorer.
-                        continue;
-                    }
+                if (last_live_lr_value_box_.has_value() && last_live_lr_value_box_->contains(mouse)) {
+                    begin_live_text_edit(LiveInputTarget::LR, format_decimal(live_ui_lr_, 10));
+                    continue;
+                }
+                if (last_live_lrwu_value_box_.has_value() && last_live_lrwu_value_box_->contains(mouse)) {
+                    begin_live_text_edit(LiveInputTarget::LRWarmup, std::to_string(live_ui_lr_warmup_steps_));
+                    continue;
+                }
+                if (last_live_klb_value_box_.has_value() && last_live_klb_value_box_->contains(mouse)) {
+                    begin_live_text_edit(LiveInputTarget::KLBeta, format_decimal(live_ui_kl_beta_, 8));
+                    continue;
+                }
+                if (last_live_klwu_value_box_.has_value() && last_live_klwu_value_box_->contains(mouse)) {
+                    begin_live_text_edit(LiveInputTarget::KLWarmup, std::to_string(live_ui_kl_warmup_steps_));
+                    continue;
+                }
 
-                    auto t_from_mouse_x = [&](const sf::FloatRect& track) -> float {
-                        const float denom = std::max(1.f, track.width);
-                        return clamp01((mouse.x - track.left) / denom);
-                    };
-
-                    // Checkbox KL enable
-                    if (last_live_kl_enable_box_.has_value() && last_live_kl_enable_box_->contains(mouse)) {
-                        live_ui_kl_enabled_ = !live_ui_kl_enabled_;
-                        commit_live();
-                        continue;
-                    }
-
-                    auto start_drag = [&](LiveDragTarget target,
-                                          const std::optional<sf::FloatRect>& track_opt,
-                                          const std::optional<sf::FloatRect>& thumb_opt) -> bool {
-                        if (!track_opt.has_value()) return false;
-                        const bool hit = track_opt->contains(mouse) || (thumb_opt.has_value() && thumb_opt->contains(mouse));
-                        if (!hit) return false;
+                auto begin_live_drag_if_hit = [&](LiveDragTarget target,
+                                                  const std::optional<sf::FloatRect>& track,
+                                                  const std::optional<sf::FloatRect>& thumb) -> bool {
+                    if ((thumb.has_value() && thumb->contains(mouse)) || (track.has_value() && track->contains(mouse))) {
                         live_dragging_ = target;
-                        const float t = t_from_mouse_x(*track_opt);
-                        if (target == LiveDragTarget::LR) {
-                            const float new_lr = lr_from_t(t);
-                            if (std::fabs(new_lr - live_ui_lr_) > 0.0f) {
-                                live_ui_lr_ = new_lr;
-                                commit_live();
-                            }
-                        } else if (target == LiveDragTarget::LRWarmup) {
-                            const int new_steps = warmup_from_t(t);
-                            if (new_steps != live_ui_lr_warmup_steps_) {
-                                live_ui_lr_warmup_steps_ = new_steps;
-                                commit_live();
-                            }
-                        } else if (target == LiveDragTarget::KLBeta) {
-                            const float new_beta = klbeta_from_t(t);
-                            if (std::fabs(new_beta - live_ui_kl_beta_) > 1e-6f) {
-                                live_ui_kl_beta_ = new_beta;
-                                commit_live();
-                            }
-                        } else if (target == LiveDragTarget::KLWarmup) {
-                            const int new_steps = warmup_from_t(t);
-                            if (new_steps != live_ui_kl_warmup_steps_) {
-                                live_ui_kl_warmup_steps_ = new_steps;
-                                commit_live();
-                            }
-                        }
+                        live_overrides_enabled_.store(true, std::memory_order_relaxed);
+                        apply_live_slider_from_mouse(target, mouse);
+                        publish_live_params(true);
                         return true;
-                    };
+                    }
+                    return false;
+                };
 
-                    if (start_drag(LiveDragTarget::LR, last_live_lr_track_, last_live_lr_thumb_)) continue;
-                    if (start_drag(LiveDragTarget::LRWarmup, last_live_lrwu_track_, last_live_lrwu_thumb_)) continue;
-                    if (start_drag(LiveDragTarget::KLBeta, last_live_klb_track_, last_live_klb_thumb_)) continue;
-                    if (start_drag(LiveDragTarget::KLWarmup, last_live_klwu_track_, last_live_klwu_thumb_)) continue;
-                }
+                if (begin_live_drag_if_hit(LiveDragTarget::LR, last_live_lr_track_, last_live_lr_thumb_)) continue;
+                if (begin_live_drag_if_hit(LiveDragTarget::LRWarmup, last_live_lrwu_track_, last_live_lrwu_thumb_)) continue;
+                if (begin_live_drag_if_hit(LiveDragTarget::KLBeta, last_live_klb_track_, last_live_klb_thumb_)) continue;
+                if (begin_live_drag_if_hit(LiveDragTarget::KLWarmup, last_live_klwu_track_, last_live_klwu_thumb_)) continue;
 
-                // Le zoom overlay est modal: on bloque les interactions de layout,
-                // mais on laisse le STOP fonctionner (géré au-dessus).
-                if (zoom_active_) {
+                if (last_blocks_hide_act_box_.has_value() && last_blocks_hide_act_box_->contains(mouse)) {
+                    hide_activation_blocks = !hide_activation_blocks;
+                    requestResync();
+                    saveUILayoutToLast();
                     continue;
                 }
-
-                // Close button
-                if (const auto hit_close = hitTestPanelCloseButton(mouse); hit_close.has_value()) {
-                    const PanelId id = *hit_close;
-                    panels_[static_cast<size_t>(id)].visible = false;
-                    // Si le panneau est lié à un toggle, le refléter.
-                    if (id == PanelId::Graph) show_loss_graph = false;
-                    if (id == PanelId::Training) show_training_progress = false;
-                    if (id == PanelId::Generated) show_generated_images = false;
-                    dragging_panel_ = false;
-                    resizing_panel_ = false;
+                if (last_blocks_hide_norm_box_.has_value() && last_blocks_hide_norm_box_->contains(mouse)) {
+                    hide_normalisation_blocks = !hide_normalisation_blocks;
+                    requestResync();
+                    saveUILayoutToLast();
                     continue;
                 }
-
-                // Scrollbar (slicer) dans Blocks/Layers (prioritaire sur drag panneau)
-                if (isPanelVisible(PanelId::Blocks) && blocks_scroll_max_ > 0.0f) {
-                    const auto content = panelContentRect(PanelId::Blocks);
-                    if (content.contains(mouse)) {
-                        if (last_blocks_scroll_thumb_rect_.contains(mouse)) {
-                            dragging_blocks_scrollbar_ = true;
-                            blocks_scroll_drag_grab_y_ = mouse.y - last_blocks_scroll_thumb_rect_.top;
-                            continue;
-                        }
-                        if (last_blocks_scroll_track_rect_.contains(mouse)) {
-                            // Click sur la track: jump au ratio correspondant (thumb centré sous le curseur)
-                            const float track_h = std::max(1.0f, last_blocks_scroll_track_rect_.height);
-                            const float thumb_h = std::max(1.0f, last_blocks_scroll_thumb_rect_.height);
-                            const float denom = std::max(1.0f, track_h - thumb_h);
-                            const float y_in_track = std::clamp(mouse.y - last_blocks_scroll_track_rect_.top - thumb_h * 0.5f, 0.0f, denom);
-                            const float t = y_in_track / denom;
-                            blocks_scroll_y_ = t * blocks_scroll_max_;
-                            blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
-                            dragging_blocks_scrollbar_ = true;
-                            blocks_scroll_drag_grab_y_ = thumb_h * 0.5f;
-                            continue;
-                        }
-                    }
+                if (last_blocks_tips_limit_box_.has_value() && last_blocks_tips_limit_box_->contains(mouse)) {
+                    blocks_tips_limit_editing_ = true;
+                    blocks_tips_limit_input_ = (blocks_tips_visible_limit_ > 0) ? std::to_string(blocks_tips_visible_limit_) : std::string();
+                    continue;
+                }
+                if (blocks_tips_limit_editing_) {
+                    commit_blocks_tips_limit();
                 }
 
-                // Sélection images au clic (Context / Generated / Blocks)
-                // Note: on s'appuie sur les rects calculés au rendu précédent.
-                bool handled_click = false;
-                if (isPanelVisible(PanelId::Context)) {
-                    if (last_dataset_rect_.has_value() && last_dataset_rect_->contains(mouse)) {
-                        focus_target_ = FocusTarget::Dataset;
-                        handled_click = true;
-                    }
-                    if (last_projection_rect_.has_value() && last_projection_rect_->contains(mouse)) {
-                        focus_target_ = FocusTarget::Projection;
-                        handled_click = true;
-                    }
-                    if (last_understanding_rect_.has_value() && last_understanding_rect_->contains(mouse)) {
-                        focus_target_ = FocusTarget::Understanding;
-                        handled_click = true;
-                    }
-                }
-
-                if (isPanelVisible(PanelId::Generated) && !last_generated_rects_.empty() && last_generated_rects_.size() == last_generated_indices_.size()) {
-                    for (size_t i = 0; i < last_generated_rects_.size(); ++i) {
-                        if (last_generated_rects_[i].contains(mouse)) {
-                            focus_target_ = FocusTarget::Generated;
-                            focus_generated_index_ = std::max(0, last_generated_indices_[i]);
-                            handled_click = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (isPanelVisible(PanelId::Blocks) && !last_block_rects_.empty()) {
-                    for (size_t i = 0; i < last_block_rects_.size(); ++i) {
-                        if (last_block_rects_[i].contains(mouse)) {
+                // Sélection directe par clic sur les vignettes de tips (panel Blocks).
+                bool selected_tip = false;
+                if (!last_block_rects_.empty()) {
+                    for (int i = static_cast<int>(last_block_rects_.size()) - 1; i >= 0; --i) {
+                        const auto& r = last_block_rects_[static_cast<size_t>(i)];
+                        if (r.size.x <= 0.f || r.size.y <= 0.f) continue;
+                        if (r.contains(mouse)) {
                             focus_target_ = FocusTarget::LayerBlock;
-                            focus_block_index_ = static_cast<int>(i);
-                            handled_click = true;
+                            focus_block_index_ = i;
+                            selected_tip = true;
                             break;
                         }
                     }
                 }
+                if (selected_tip) continue;
 
-                if (handled_click) {
+                // Sélection directe des images générées au clic.
+                bool selected_generated = false;
+                if (!last_generated_rects_.empty() && last_generated_rects_.size() == last_generated_indices_.size()) {
+                    for (int i = static_cast<int>(last_generated_rects_.size()) - 1; i >= 0; --i) {
+                        const auto& r = last_generated_rects_[static_cast<size_t>(i)];
+                        if (r.size.x <= 0.f || r.size.y <= 0.f) continue;
+                        if (r.contains(mouse)) {
+                            focus_target_ = FocusTarget::Generated;
+                            focus_generated_index_ = std::max(0, last_generated_indices_[static_cast<size_t>(i)]);
+                            selected_generated = true;
+                            break;
+                        }
+                    }
+                }
+                if (selected_generated) continue;
+
+                if (const auto close_hit = hitTestPanelCloseButton(mouse)) {
+                    const PanelId id = *close_hit;
+                    if (id == PanelId::Generated) show_generated_images = false;
+                    else if (id == PanelId::Training) show_training_progress = false;
+                    else if (id == PanelId::Graph) show_loss_graph = false;
+                    panels_[static_cast<size_t>(id)].visible = false;
+                    saveUILayoutToLast();
                     continue;
                 }
 
-                // Priorité au resize-handle
-                const auto hit_resize = hitTestPanelResizeHandle(mouse);
-                if (hit_resize.has_value()) {
-                    resized_panel_ = *hit_resize;
+                if (isPanelVisible(PanelId::Blocks) && last_blocks_scroll_thumb_rect_.contains(mouse)) {
+                    dragging_blocks_scrollbar_ = true;
+                    blocks_scroll_drag_grab_y_ = mouse.y - last_blocks_scroll_thumb_rect_.position.y;
+                    continue;
+                }
+                if (isPanelVisible(PanelId::Blocks) && last_blocks_scroll_track_rect_.contains(mouse)) {
+                    const float thumb_h = std::max(1.0f, last_blocks_scroll_thumb_rect_.size.y);
+                    const float t = clamp01((mouse.y - last_blocks_scroll_track_rect_.position.y - thumb_h * 0.5f) /
+                                            std::max(1.0f, last_blocks_scroll_track_rect_.size.y - thumb_h));
+                    blocks_scroll_y_ = t * std::max(0.0f, blocks_scroll_max_);
+                    continue;
+                }
+
+                if (const auto resize_hit = hitTestPanelResizeHandle(mouse)) {
                     resizing_panel_ = true;
+                    resized_panel_ = *resize_hit;
                     resize_start_mouse_ = mouse;
-                    const auto& p = panels_[static_cast<size_t>(resized_panel_)];
-                    resize_start_size_ = p.size;
-                } else {
-                    const auto hit = hitTestPanelTitle(mouse);
-                    if (hit.has_value()) {
-                        dragged_panel_ = *hit;
-                        dragging_panel_ = true;
-                        const auto& p = panels_[static_cast<size_t>(dragged_panel_)];
-                        drag_grab_offset_ = sf::Vector2f(mouse.x - p.pos.x, mouse.y - p.pos.y);
-                    }
+                    resize_start_size_ = panels_[static_cast<size_t>(resized_panel_)].size;
+                    setCursor(CursorKind::Resize);
+                    continue;
+                }
+
+                if (const auto drag_hit = hitTestPanelTitle(mouse)) {
+                    dragging_panel_ = true;
+                    dragged_panel_ = *drag_hit;
+                    const auto& p = panels_[static_cast<size_t>(dragged_panel_)];
+                    drag_grab_offset_ = sf::Vector2f(mouse.x - p.pos.x, mouse.y - p.pos.y);
+                    setCursor(CursorKind::Hand);
+                    continue;
                 }
             }
-        } else if (event.type == sf::Event::MouseButtonReleased) {
-            if (event.mouseButton.button == sf::Mouse::Left) {
+            continue;
+        }
+
+        if (const auto* mm = event.getIf<sf::Event::MouseMoved>()) {
+            const sf::Vector2f mouse = window->mapPixelToCoords(mm->position);
+
+            if (dragging_panel_) {
+                auto& p = panels_[static_cast<size_t>(dragged_panel_)];
+                p.pos = sf::Vector2f(mouse.x - drag_grab_offset_.x, mouse.y - drag_grab_offset_.y);
+                clampPanelsToWindow();
+            }
+
+            if (resizing_panel_) {
+                auto& p = panels_[static_cast<size_t>(resized_panel_)];
+                const float dx = mouse.x - resize_start_mouse_.x;
+                const float dy = mouse.y - resize_start_mouse_.y;
+                p.size.x = std::max(kPanelMinW, resize_start_size_.x + dx);
+                p.size.y = std::max(kPanelMinH, resize_start_size_.y + dy);
+                clampPanelsToWindow();
+            }
+
+            if (dragging_blocks_scrollbar_ && isPanelVisible(PanelId::Blocks)) {
+                const float thumb_h = std::max(1.0f, last_blocks_scroll_thumb_rect_.size.y);
+                const float rel = mouse.y - last_blocks_scroll_track_rect_.position.y - blocks_scroll_drag_grab_y_;
+                const float denom = std::max(1.0f, last_blocks_scroll_track_rect_.size.y - thumb_h);
+                const float t = clamp01(rel / denom);
+                blocks_scroll_y_ = t * std::max(0.0f, blocks_scroll_max_);
+            }
+
+            if (live_dragging_ != LiveDragTarget::None) {
+                apply_live_slider_from_mouse(live_dragging_, mouse);
+                publish_live_params(true);
+            }
+
+            if (dragging_panel_) {
+                setCursor(CursorKind::Hand);
+            } else if (resizing_panel_ || dragging_blocks_scrollbar_) {
+                setCursor(CursorKind::Resize);
+            } else {
+                bool is_hand = false;
+                if (isPanelVisible(PanelId::Blocks) &&
+                    (last_blocks_scroll_thumb_rect_.contains(mouse) || last_blocks_scroll_track_rect_.contains(mouse))) {
+                    is_hand = true;
+                }
+                if (!is_hand && (hitTestPanelResizeHandle(mouse).has_value() || hitTestPanelTitle(mouse).has_value())) {
+                    is_hand = true;
+                }
+                setCursor(is_hand ? CursorKind::Hand : CursorKind::Arrow);
+            }
+            continue;
+        }
+
+        if (const auto* mb_rel = event.getIf<sf::Event::MouseButtonReleased>()) {
+            if (mb_rel->button == sf::Mouse::Button::Left) {
+                if (dragging_panel_ || resizing_panel_ || dragging_blocks_scrollbar_) {
+                    saveUILayoutToLast();
+                }
                 dragging_panel_ = false;
                 resizing_panel_ = false;
                 dragging_blocks_scrollbar_ = false;
                 live_dragging_ = LiveDragTarget::None;
             }
-        } else if (event.type == sf::Event::MouseMoved) {
-            syncUIView();
-            const sf::Vector2f mouse = window->mapPixelToCoords(sf::Vector2i(event.mouseMove.x, event.mouseMove.y));
+            continue;
+        }
 
-            // Drag live tuning controls (Metrics)
-            if (!zoom_active_ && live_dragging_ != LiveDragTarget::None) {
-                auto commit_live = [&]() {
-                    live_overrides_enabled_.store(true, std::memory_order_relaxed);
-                    live_lr_.store(live_ui_lr_, std::memory_order_relaxed);
-                    live_lr_warmup_steps_.store(live_ui_lr_warmup_steps_, std::memory_order_relaxed);
-                    live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
-                    live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
-                    live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
-                    live_params_version_.fetch_add(1, std::memory_order_relaxed);
-                };
+        if (const auto* txt = event.getIf<sf::Event::TextEntered>()) {
+            const uint32_t cp = static_cast<uint32_t>(txt->unicode);
 
-                auto t_from_mouse_x = [&](const sf::FloatRect& track) -> float {
-                    const float denom = std::max(1.f, track.width);
-                    return clamp01((mouse.x - track.left) / denom);
-                };
-
-                bool changed = false;
-                if (live_dragging_ == LiveDragTarget::LR && last_live_lr_track_.has_value()) {
-                    const float new_lr = lr_from_t(t_from_mouse_x(*last_live_lr_track_));
-                    if (std::fabs(new_lr - live_ui_lr_) > 0.0f) {
-                        live_ui_lr_ = new_lr;
-                        changed = true;
-                    }
-                } else if (live_dragging_ == LiveDragTarget::LRWarmup && last_live_lrwu_track_.has_value()) {
-                    const int new_steps = warmup_from_t(t_from_mouse_x(*last_live_lrwu_track_));
-                    if (new_steps != live_ui_lr_warmup_steps_) {
-                        live_ui_lr_warmup_steps_ = new_steps;
-                        changed = true;
-                    }
-                } else if (live_dragging_ == LiveDragTarget::KLBeta && last_live_klb_track_.has_value()) {
-                    const float new_beta = klbeta_from_t(t_from_mouse_x(*last_live_klb_track_));
-                    if (std::fabs(new_beta - live_ui_kl_beta_) > 1e-6f) {
-                        live_ui_kl_beta_ = new_beta;
-                        changed = true;
-                    }
-                } else if (live_dragging_ == LiveDragTarget::KLWarmup && last_live_klwu_track_.has_value()) {
-                    const int new_steps = warmup_from_t(t_from_mouse_x(*last_live_klwu_track_));
-                    if (new_steps != live_ui_kl_warmup_steps_) {
-                        live_ui_kl_warmup_steps_ = new_steps;
-                        changed = true;
-                    }
+            if (blocks_tips_limit_editing_) {
+                if (cp == 8u) {
+                    if (!blocks_tips_limit_input_.empty()) blocks_tips_limit_input_.pop_back();
+                } else if (cp >= static_cast<uint32_t>('0') && cp <= static_cast<uint32_t>('9')) {
+                    blocks_tips_limit_input_.push_back(static_cast<char>(cp));
                 }
-
-                if (changed) commit_live();
-                setCursor(CursorKind::Hand);
                 continue;
             }
 
-            // Drag scrollbar Blocks/Layers
-            if (dragging_blocks_scrollbar_ && !zoom_active_) {
-                const float track_h = std::max(1.0f, last_blocks_scroll_track_rect_.height);
-                const float thumb_h = std::max(1.0f, last_blocks_scroll_thumb_rect_.height);
-                const float denom = std::max(1.0f, track_h - thumb_h);
-                const float y_in_track = std::clamp(mouse.y - last_blocks_scroll_track_rect_.top - blocks_scroll_drag_grab_y_, 0.0f, denom);
-                const float t = y_in_track / denom;
-                blocks_scroll_y_ = t * blocks_scroll_max_;
-                blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
-                setCursor(CursorKind::Hand);
-                continue;
-            }
-
-            // Curseur responsive si pas en interaction
-            if (!zoom_active_ && !dragging_panel_ && !resizing_panel_) {
-                // Hover scrollbar Blocks/Layers
-                if (isPanelVisible(PanelId::Blocks) && blocks_scroll_max_ > 0.0f &&
-                    (last_blocks_scroll_thumb_rect_.contains(mouse) || last_blocks_scroll_track_rect_.contains(mouse))) {
-                    setCursor(CursorKind::Hand);
-                } else if (isPanelVisible(PanelId::Metrics) &&
-                           ((last_live_overrides_box_.has_value() && last_live_overrides_box_->contains(mouse)) ||
-                            (last_live_kl_enable_box_.has_value() && last_live_kl_enable_box_->contains(mouse)) ||
-                            (last_live_lr_track_.has_value() && last_live_lr_track_->contains(mouse)) ||
-                            (last_live_lr_thumb_.has_value() && last_live_lr_thumb_->contains(mouse)) ||
-                            (last_live_lr_value_box_.has_value() && last_live_lr_value_box_->contains(mouse)) ||
-                            (last_live_lrwu_track_.has_value() && last_live_lrwu_track_->contains(mouse)) ||
-                            (last_live_lrwu_thumb_.has_value() && last_live_lrwu_thumb_->contains(mouse)) ||
-                            (last_live_lrwu_value_box_.has_value() && last_live_lrwu_value_box_->contains(mouse)) ||
-                            (last_live_klb_track_.has_value() && last_live_klb_track_->contains(mouse)) ||
-                            (last_live_klb_thumb_.has_value() && last_live_klb_thumb_->contains(mouse)) ||
-                            (last_live_klb_value_box_.has_value() && last_live_klb_value_box_->contains(mouse)) ||
-                            (last_live_klwu_track_.has_value() && last_live_klwu_track_->contains(mouse)) ||
-                            (last_live_klwu_thumb_.has_value() && last_live_klwu_thumb_->contains(mouse)) ||
-                            (last_live_klwu_value_box_.has_value() && last_live_klwu_value_box_->contains(mouse)))) {
-                    setCursor(CursorKind::Hand);
-                } else if (hitTestPanelCloseButton(mouse).has_value()) {
-                    setCursor(CursorKind::Cross);
-                } else if (hitTestPanelResizeHandle(mouse).has_value()) {
-                    setCursor(CursorKind::Resize);
-                } else if (hitTestPanelTitle(mouse).has_value()) {
-                    setCursor(CursorKind::Hand);
-                } else {
-                    setCursor(CursorKind::Arrow);
-                }
-            }
-
-            if (resizing_panel_ && !zoom_active_) {
-                setCursor(CursorKind::Resize);
-                auto& p = panels_[static_cast<size_t>(resized_panel_)];
-                const sf::Vector2f delta(mouse.x - resize_start_mouse_.x, mouse.y - resize_start_mouse_.y);
-                p.size.x = std::max(kPanelMinW, resize_start_size_.x + delta.x);
-                p.size.y = std::max(kPanelMinH, resize_start_size_.y + delta.y);
-                // Pas de clamp automatique à la fenêtre: taille/panneau indépendant.
-            } else if (dragging_panel_ && !zoom_active_) {
-                setCursor(CursorKind::Hand);
-                auto& p = panels_[static_cast<size_t>(dragged_panel_)];
-                p.pos = sf::Vector2f(mouse.x - drag_grab_offset_.x, mouse.y - drag_grab_offset_.y);
-                // On peut clamp pendant un drag, pour éviter de perdre un panneau.
-                clampPanelsToWindow();
-            }
-        } else if (event.type == sf::Event::TextEntered) {
             if (live_input_target_ != LiveInputTarget::None) {
-                const uint32_t cp = event.text.unicode;
-                if (is_live_input_char(cp)) {
-                    live_input_buffer_.push_back(static_cast<char>(cp));
-                    live_input_error_until_ms_ = 0;
-                }
-                continue;
-            }
-        } else if (event.type == sf::Event::KeyPressed) {
-            if (live_input_target_ != LiveInputTarget::None) {
-                auto commit_live = [&]() {
-                    live_overrides_enabled_.store(true, std::memory_order_relaxed);
-                    live_lr_.store(live_ui_lr_, std::memory_order_relaxed);
-                    live_lr_warmup_steps_.store(live_ui_lr_warmup_steps_, std::memory_order_relaxed);
-                    live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
-                    live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
-                    live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
-                    live_params_version_.fetch_add(1, std::memory_order_relaxed);
-                };
-
-                if (event.key.code == sf::Keyboard::BackSpace) {
+                if (cp == 8u) {
                     if (!live_input_buffer_.empty()) live_input_buffer_.pop_back();
-                    continue;
+                } else if (is_live_input_char(cp)) {
+                    live_input_buffer_.push_back(static_cast<char>(cp));
                 }
-                if (event.key.code == sf::Keyboard::Escape) {
+                continue;
+            }
+        }
+
+        if (const auto* wheel = event.getIf<sf::Event::MouseWheelScrolled>()) {
+            if (zoom_active_ || dragging_panel_ || resizing_panel_) continue;
+            initDefaultPanelsIfNeeded();
+            syncUIView();
+            const sf::Vector2f mouse = window->mapPixelToCoords(wheel->position);
+            if (isPanelVisible(PanelId::Blocks)) {
+                const auto content = panelContentRect(PanelId::Blocks);
+                if (content.contains(mouse)) {
+                    blocks_scroll_y_ -= wheel->delta * kBlocksScrollSpeed;
+                    blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
+                }
+            }
+            continue;
+        }
+
+        if (const auto* key = event.getIf<sf::Event::KeyPressed>()) {
+            const sf::Keyboard::Key code = key->code;
+            const bool ctrl = key->control;
+            const bool shift = key->shift;
+
+            if (blocks_tips_limit_editing_) {
+                if (code == sf::Keyboard::Key::Enter) {
+                    commit_blocks_tips_limit();
+                } else if (code == sf::Keyboard::Key::Escape) {
+                    blocks_tips_limit_editing_ = false;
+                    blocks_tips_limit_input_.clear();
+                }
+                continue;
+            }
+
+            if (live_input_target_ != LiveInputTarget::None) {
+                if (code == sf::Keyboard::Key::Enter) {
+                    commit_live_input();
+                } else if (code == sf::Keyboard::Key::Escape) {
                     live_input_target_ = LiveInputTarget::None;
                     live_input_buffer_.clear();
                     live_input_error_until_ms_ = 0;
-                    continue;
                 }
-                if (event.key.code == sf::Keyboard::Enter || event.key.code == sf::Keyboard::Return) {
-                    bool ok = false;
-                    try {
-                        size_t pos = 0;
-                        const float v = std::stof(live_input_buffer_, &pos);
-                        if (pos == live_input_buffer_.size() && std::isfinite(v)) {
-                            if (live_input_target_ == LiveInputTarget::LR) {
-                                live_ui_lr_ = std::clamp(v, kLiveLRMin, kLiveLRMax);
-                                ok = true;
-                            } else if (live_input_target_ == LiveInputTarget::KLBeta) {
-                                live_ui_kl_beta_ = std::clamp(v, 0.0f, 1.0f);
-                                ok = true;
-                            } else if (live_input_target_ == LiveInputTarget::LRWarmup) {
-                                live_ui_lr_warmup_steps_ = std::clamp(static_cast<int>(std::lround(v)), 0, kLiveWarmupMax);
-                                ok = true;
-                            } else if (live_input_target_ == LiveInputTarget::KLWarmup) {
-                                live_ui_kl_warmup_steps_ = std::clamp(static_cast<int>(std::lround(v)), 0, kLiveWarmupMax);
-                                ok = true;
-                            }
-                        }
-                    } catch (...) {
-                        ok = false;
-                    }
-
-                    if (ok) {
-                        commit_live();
-                        live_input_target_ = LiveInputTarget::None;
-                        live_input_buffer_.clear();
-                        live_input_error_until_ms_ = 0;
-                    } else {
-                        live_input_error_until_ms_ = steady_now_ms() + 1500;
-                    }
-                    continue;
-                }
-
-                // Bloquer les raccourcis globaux tant qu'une cellule est en édition.
                 continue;
             }
 
-            const bool ctrl = event.key.control;
-            const bool shift = event.key.shift;
-
-            // Chord S / S+num
-            auto key_to_digit = [](sf::Keyboard::Key k) -> int {
-                if (k >= sf::Keyboard::Num0 && k <= sf::Keyboard::Num9) return (int)k - (int)sf::Keyboard::Num0;
-                if (k >= sf::Keyboard::Numpad0 && k <= sf::Keyboard::Numpad9) return (int)k - (int)sf::Keyboard::Numpad0;
-                return -1;
-            };
-            const int digit = key_to_digit(event.key.code);
-
-            if (event.key.code == sf::Keyboard::S) {
-                save_chord_armed_ = true;
-                save_chord_consumed_ = false;
-                save_chord_armed_ms_ = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                        .count());
-            }
-
-            // Slots UI:
-            //  - S+0..9 : sauvegarder un slot
-            //  - 0..9   : charger un slot
-            if (digit >= 0) {
-                const bool s_down = sf::Keyboard::isKeyPressed(sf::Keyboard::S);
-                const uint64_t now_ms = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                        .count());
-                const bool chord_active = s_down || (save_chord_armed_ && (now_ms - save_chord_armed_ms_) < 800);
-
-                initDefaultPanelsIfNeeded();
-                if (chord_active) {
-                    saveUILayoutToSlot(digit);
-                    save_chord_consumed_ = true;
-                } else {
-                    loadUILayoutFromSlot(digit);
-                }
-                continue; // ne pas déclencher d'autres binds sur les chiffres
-            }
-
-            // Help
-            if (event.key.code == sf::Keyboard::H) {
-                show_help_overlay_ = !show_help_overlay_;
-            }
-
-            // Toggle graph
-            if (event.key.code == sf::Keyboard::G) {
+            if (code == sf::Keyboard::Key::H) show_help_overlay_ = !show_help_overlay_;
+            if (code == sf::Keyboard::Key::G) {
                 show_loss_graph = !show_loss_graph;
                 panels_[static_cast<size_t>(PanelId::Graph)].visible = show_loss_graph;
             }
-
-            // Toggle prompt text panel
-            if (event.key.code == sf::Keyboard::P) {
-                show_prompt_text_ = !show_prompt_text_;
-            }
-
-            if (event.key.code == sf::Keyboard::A) {
+            if (code == sf::Keyboard::Key::P) show_prompt_text_ = !show_prompt_text_;
+            if (code == sf::Keyboard::Key::A) {
                 smooth_layer_block_previews_ = !smooth_layer_block_previews_;
                 rebuildAllTextures();
             }
-
-            // Toggle heatmap / couleurs naturelles pour Blocks/Layers
-            if (event.key.code == sf::Keyboard::M) {
+            if (code == sf::Keyboard::Key::M) {
                 heatmap_mode_ = !heatmap_mode_;
-                // Swap pixels actifs / alternatifs pour chaque block
                 for (auto& img : layer_block_images) {
                     if (!img.pixels_alt.empty()) {
                         std::swap(img.pixels, img.pixels_alt);
                         std::swap(img.channels, img.channels_alt);
                     }
-                    // En mode heatmap, recoloriser immédiatement les tips mono-canal
-                    // à partir de la source grise (pixels_alt après swap).
                     if (heatmap_mode_ && img.channels == 1) {
                         img.pixels_alt = img.pixels;
                         img.channels_alt = 1;
@@ -1989,14 +2009,9 @@ void Visualizer::processEvents() {
                 }
                 rebuildLayerBlockTextures();
             }
-
-            // Changer la palette de heatmap (CLASSIC -> TURBO -> INFERNO -> VIRIDIS)
-            if (event.key.code == sf::Keyboard::K) {
+            if (code == sf::Keyboard::Key::K) {
                 const int pid = (static_cast<int>(heatmap_palette_) + 1) % 4;
                 heatmap_palette_ = static_cast<Visualizer::HeatmapPalette>(pid);
-
-                // Appliquer la nouvelle palette immédiatement sans attendre
-                // la prochaine update de step.
                 if (heatmap_mode_) {
                     for (auto& img : layer_block_images) {
                         if (img.channels_alt == 1 && !img.pixels_alt.empty()) {
@@ -2005,21 +2020,12 @@ void Visualizer::processEvents() {
                         }
                     }
                 }
-
                 rebuildLayerBlockTextures();
                 saveUILayoutToLast();
             }
-
-            // Zoom overlay
-            if (event.key.code == sf::Keyboard::Z || event.key.code == sf::Keyboard::Enter) {
-                zoom_active_ = !zoom_active_;
-            }
-            if (event.key.code == sf::Keyboard::Escape) {
-                zoom_active_ = false;
-            }
-
-            // Refresh (rebuild textures + reload architecture hints)
-            if (event.key.code == sf::Keyboard::R) {
+            if (code == sf::Keyboard::Key::Z || code == sf::Keyboard::Key::Enter) zoom_active_ = !zoom_active_;
+            if (code == sf::Keyboard::Key::Escape) zoom_active_ = false;
+            if (code == sf::Keyboard::Key::R) {
                 requestResync();
                 rebuildAllTextures();
                 architecture_loaded = false;
@@ -2027,62 +2033,93 @@ void Visualizer::processEvents() {
                 arch_tensor_outputs.clear();
                 arch_tensor_sinks.clear();
             }
-
-            // Focus target
-            if (event.key.code == sf::Keyboard::Tab) {
+            if (code == sf::Keyboard::Key::Tab) {
                 if (focus_target_ == FocusTarget::Dataset) focus_target_ = FocusTarget::Projection;
                 else if (focus_target_ == FocusTarget::Projection) focus_target_ = FocusTarget::Understanding;
                 else if (focus_target_ == FocusTarget::Understanding) focus_target_ = FocusTarget::LayerBlock;
                 else if (focus_target_ == FocusTarget::LayerBlock) focus_target_ = FocusTarget::Generated;
                 else focus_target_ = FocusTarget::Dataset;
             }
-            if (event.key.code == sf::Keyboard::F1) focus_target_ = FocusTarget::Dataset;
-            if (event.key.code == sf::Keyboard::F2) focus_target_ = FocusTarget::Projection;
-            if (event.key.code == sf::Keyboard::F3) focus_target_ = FocusTarget::Understanding;
-            if (event.key.code == sf::Keyboard::F4) focus_target_ = FocusTarget::LayerBlock;
-            if (event.key.code == sf::Keyboard::F5) focus_target_ = FocusTarget::Generated;
+            if (code == sf::Keyboard::Key::F1) focus_target_ = FocusTarget::Dataset;
+            if (code == sf::Keyboard::Key::F2) focus_target_ = FocusTarget::Projection;
+            if (code == sf::Keyboard::Key::F3) focus_target_ = FocusTarget::Understanding;
+            if (code == sf::Keyboard::Key::F4) focus_target_ = FocusTarget::LayerBlock;
+            if (code == sf::Keyboard::Key::F5) focus_target_ = FocusTarget::Generated;
 
-            // Resize window (X/Y)
-            if (ctrl && (event.key.code == sf::Keyboard::Left || event.key.code == sf::Keyboard::Right ||
-                         event.key.code == sf::Keyboard::Up || event.key.code == sf::Keyboard::Down)) {
+            if (ctrl && (code == sf::Keyboard::Key::Left || code == sf::Keyboard::Key::Right ||
+                         code == sf::Keyboard::Key::Up || code == sf::Keyboard::Key::Down)) {
                 const int step = shift ? 128 : 64;
-                auto sz = window->getSize();
+                const auto sz = window->getSize();
                 int ww = static_cast<int>(sz.x);
                 int hh = static_cast<int>(sz.y);
-                if (event.key.code == sf::Keyboard::Left) ww -= step;
-                if (event.key.code == sf::Keyboard::Right) ww += step;
-                if (event.key.code == sf::Keyboard::Up) hh -= step;
-                if (event.key.code == sf::Keyboard::Down) hh += step;
+                if (code == sf::Keyboard::Key::Left) ww -= step;
+                if (code == sf::Keyboard::Key::Right) ww += step;
+                if (code == sf::Keyboard::Key::Up) hh -= step;
+                if (code == sf::Keyboard::Key::Down) hh += step;
                 ww = std::max(640, ww);
                 hh = std::max(480, hh);
                 window->setSize(sf::Vector2u(static_cast<unsigned>(ww), static_cast<unsigned>(hh)));
                 window_width = ww;
                 window_height = hh;
-                // Même quand on resize par code, resynchroniser la view.
                 syncUIView();
-                // Ne pas modifier les panneaux au resize de fenêtre.
             } else {
-                // Navigate layer blocks when focused
                 if (focus_target_ == FocusTarget::LayerBlock &&
-                    (event.key.code == sf::Keyboard::Left || event.key.code == sf::Keyboard::Right)) {
+                    (code == sf::Keyboard::Key::Left || code == sf::Keyboard::Key::Right)) {
                     const int n = static_cast<int>(layer_block_images.size());
                     if (n > 0) {
-                        if (event.key.code == sf::Keyboard::Left) focus_block_index_ = (focus_block_index_ - 1 + n) % n;
-                        if (event.key.code == sf::Keyboard::Right) focus_block_index_ = (focus_block_index_ + 1) % n;
+                        if (code == sf::Keyboard::Key::Left) focus_block_index_ = (focus_block_index_ - 1 + n) % n;
+                        if (code == sf::Keyboard::Key::Right) focus_block_index_ = (focus_block_index_ + 1) % n;
                     }
                 } else if (focus_target_ == FocusTarget::Generated &&
-                           (event.key.code == sf::Keyboard::Left || event.key.code == sf::Keyboard::Right)) {
+                           (code == sf::Keyboard::Key::Left || code == sf::Keyboard::Key::Right)) {
                     const int n = static_cast<int>(generated_images.size());
                     if (n > 0) {
                         focus_generated_index_ = std::clamp(focus_generated_index_, 0, n - 1);
-                        if (event.key.code == sf::Keyboard::Left) focus_generated_index_ = (focus_generated_index_ - 1 + n) % n;
-                        if (event.key.code == sf::Keyboard::Right) focus_generated_index_ = (focus_generated_index_ + 1) % n;
+                        if (code == sf::Keyboard::Key::Left) focus_generated_index_ = (focus_generated_index_ - 1 + n) % n;
+                        if (code == sf::Keyboard::Key::Right) focus_generated_index_ = (focus_generated_index_ + 1) % n;
                     }
                 }
             }
+
+            if (code == sf::Keyboard::Key::S) {
+                save_chord_armed_ = true;
+                save_chord_consumed_ = false;
+                save_chord_armed_ms_ = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count());
+            }
+
+            auto key_to_digit = [](sf::Keyboard::Key k) -> int {
+                if (k >= sf::Keyboard::Key::Num0 && k <= sf::Keyboard::Key::Num9) {
+                    return static_cast<int>(k) - static_cast<int>(sf::Keyboard::Key::Num0);
+                }
+                if (k >= sf::Keyboard::Key::Numpad0 && k <= sf::Keyboard::Key::Numpad9) {
+                    return static_cast<int>(k) - static_cast<int>(sf::Keyboard::Key::Numpad0);
+                }
+                return -1;
+            };
+            const int digit = key_to_digit(code);
+            if (digit >= 0) {
+                const bool s_down = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S);
+                const uint64_t now_ms = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count());
+                const bool chord_active = s_down || (save_chord_armed_ && (now_ms - save_chord_armed_ms_) < 800);
+                initDefaultPanelsIfNeeded();
+                if (chord_active) {
+                    saveUILayoutToSlot(digit);
+                    save_chord_consumed_ = true;
+                } else {
+                    loadUILayoutFromSlot(digit);
+                }
+            }
+            continue;
         }
-        else if (event.type == sf::Event::KeyReleased) {
-            if (event.key.code == sf::Keyboard::S) {
+
+        if (const auto* key_rel = event.getIf<sf::Event::KeyReleased>()) {
+            if (key_rel->code == sf::Keyboard::Key::S) {
                 if (save_chord_armed_ && !save_chord_consumed_) {
                     initDefaultPanelsIfNeeded();
                     saveUILayoutToLast();
@@ -2090,6 +2127,7 @@ void Visualizer::processEvents() {
                 save_chord_armed_ = false;
                 save_chord_consumed_ = false;
             }
+            continue;
         }
     }
 }
@@ -2142,7 +2180,7 @@ void Visualizer::update() {
     }
 
     // Auto-réparation: si certains blocks ont encore une texture invalide,
-    // retenter un rebuild sans attendre une interaction clavier.
+    // retenter un rebuild, mais jamais a chaque frame pour garder une UI fluide.
     if (has_layer_blocks && !layer_block_images.empty()) {
         bool has_invalid_block_tex = false;
         for (const auto& img : layer_block_images) {
@@ -2153,22 +2191,10 @@ void Visualizer::update() {
             }
         }
         if (has_invalid_block_tex) {
-            rebuildLayerBlockTextures();
-        }
-
-        // Reset/recolorisation demandée: à chaque update, on reconstruit la vue
-        // heatmap à partir de la source grise de référence (pixels_alt).
-        if (heatmap_mode_) {
-            bool recolored = false;
-            for (auto& img : layer_block_images) {
-                if (img.channels_alt == 1 && !img.pixels_alt.empty()) {
-                    img.pixels = colorize_gray_heatmap_rgb(img.pixels_alt, static_cast<int>(heatmap_palette_));
-                    img.channels = 3;
-                    recolored = true;
-                }
-            }
-            if (recolored) {
+            const uint64_t now_ms = steady_now_ms();
+            if (last_block_texture_rebuild_ms_ == 0 || (now_ms - last_block_texture_rebuild_ms_) >= 250) {
                 rebuildLayerBlockTextures();
+                last_block_texture_rebuild_ms_ = now_ms;
             }
         }
     }
@@ -2295,7 +2321,7 @@ void Visualizer::renderFocusOutline() {
     }
 
     if (!r.has_value()) return;
-    if (r->width <= 0.f || r->height <= 0.f) return;
+    if (r->size.x <= 0.f || r->size.y <= 0.f) return;
 
     // Accent selon la zone focusée
     sf::Color col = sf::Color(245, 245, 250, 230);
@@ -2314,28 +2340,27 @@ void Visualizer::renderFocusOutline() {
         const float ww = static_cast<float>(std::max(1, window_width));
         const float hh = static_cast<float>(std::max(1, window_height));
 
-        const float left = std::clamp(area.left, 0.0f, ww);
-        const float top = std::clamp(area.top, 0.0f, hh);
-        const float right = std::clamp(area.left + area.width, 0.0f, ww);
-        const float bottom = std::clamp(area.top + area.height, 0.0f, hh);
+        const float left = std::clamp(area.position.x, 0.0f, ww);
+        const float top = std::clamp(area.position.y, 0.0f, hh);
+        const float right = std::clamp(area.position.x + area.size.x, 0.0f, ww);
+        const float bottom = std::clamp(area.position.y + area.size.y, 0.0f, hh);
         const float w = std::max(0.0f, right - left);
         const float h = std::max(0.0f, bottom - top);
         if (w <= 0.0f || h <= 0.0f) return;
 
-        const sf::FloatRect clip(left, top, w, h);
-        sf::FloatRect inter;
-        if (!clip.intersects(*r, inter)) {
+        const sf::FloatRect clip = make_rect(left, top, w, h);
+        if (!clip.findIntersection(*r).has_value()) {
             // Hors zone visible => désactiver l'overline.
             return;
         }
 
         const sf::View old_view = window->getView();
-        sf::View v(sf::FloatRect(left, top, w, h));
-        v.setViewport(sf::FloatRect(left / ww, top / hh, w / ww, h / hh));
+        sf::View v(make_rect(left, top, w, h));
+        v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
         window->setView(v);
 
-        sf::RectangleShape outline(sf::Vector2f(r->width, r->height));
-        outline.setPosition(r->left, r->top);
+        sf::RectangleShape outline(sf::Vector2f(r->size.x, r->size.y));
+        outline.setPosition(sf::Vector2f(r->position.x, r->position.y));
         outline.setFillColor(sf::Color::Transparent);
         outline.setOutlineColor(col);
         outline.setOutlineThickness(3);
@@ -2345,8 +2370,8 @@ void Visualizer::renderFocusOutline() {
         return;
     }
 
-    sf::RectangleShape outline(sf::Vector2f(r->width, r->height));
-    outline.setPosition(r->left, r->top);
+    sf::RectangleShape outline(sf::Vector2f(r->size.x, r->size.y));
+    outline.setPosition(sf::Vector2f(r->position.x, r->position.y));
     outline.setFillColor(sf::Color::Transparent);
     outline.setOutlineColor(col);
     outline.setOutlineThickness(3);
@@ -2377,7 +2402,7 @@ void Visualizer::renderHelpOverlay() {
     if (!window) return;
 
     sf::RectangleShape bg(sf::Vector2f(static_cast<float>(window_width), static_cast<float>(window_height)));
-    bg.setPosition(0, 0);
+    bg.setPosition(sf::Vector2f(0, 0));
     bg.setFillColor(sf::Color(0, 0, 0, 160));
     window->draw(bg);
 
@@ -2386,11 +2411,11 @@ void Visualizer::renderHelpOverlay() {
     int y = 24;
     const int lh = 18;
     auto line = [&](const std::string& s) {
-        sf::Text t;
+        sf::Text t(font);
         t.setFont(font);
         t.setCharacterSize(14);
         t.setFillColor(sf::Color(235, 235, 240));
-        t.setPosition(static_cast<float>(x), static_cast<float>(y));
+        t.setPosition(sf::Vector2f(static_cast<float>(x), static_cast<float>(y)));
         t.setString(sf::String::fromUtf8(s.begin(), s.end()));
         window->draw(t);
         y += lh;
@@ -2417,6 +2442,7 @@ void Visualizer::renderHelpOverlay() {
     line("Glisser-déposer sur le titre d'un panneau pour le déplacer");
     line("Glisser la poignée en bas-droite pour redimensionner un panneau");
     line("Cliquer sur [X] dans l'entête pour fermer un panneau");
+    line("Blocks: cliquer sur \"TIPS ...\" pour saisir une limite d'items visibles (Enter=valider, vide=ALL)");
 }
 
 void Visualizer::renderZoomOverlay() {
@@ -2456,7 +2482,7 @@ void Visualizer::renderZoomOverlay() {
     }
 
     sf::RectangleShape bg(sf::Vector2f(static_cast<float>(window_width), static_cast<float>(window_height)));
-    bg.setPosition(0, 0);
+    bg.setPosition(sf::Vector2f(0, 0));
     bg.setFillColor(sf::Color(0, 0, 0, 200));
     window->draw(bg);
 
@@ -2465,25 +2491,24 @@ void Visualizer::renderZoomOverlay() {
     const float box_h = static_cast<float>(window_height) - 2.0f * pad - 28.0f;
     const float box = std::min(box_w, box_h);
 
-    sf::Sprite spr;
-    spr.setTexture(img->texture, true);
+    sf::Sprite spr(img->texture);
     const float sx = box / std::max(1.0f, static_cast<float>(ts.x));
     const float sy = box / std::max(1.0f, static_cast<float>(ts.y));
     const float sc = std::min(sx, sy);
-    spr.setScale(sc, sc);
+    spr.setScale(sf::Vector2f(sc, sc));
 
     const float dw = static_cast<float>(ts.x) * sc;
     const float dh = static_cast<float>(ts.y) * sc;
-    spr.setPosition((static_cast<float>(window_width) - dw) * 0.5f,
-                    (static_cast<float>(window_height) - dh) * 0.5f);
+    spr.setPosition(sf::Vector2f((static_cast<float>(window_width) - dw) * 0.5f,
+                                 (static_cast<float>(window_height) - dh) * 0.5f));
     window->draw(spr);
 
     if (font_loaded && !label.empty()) {
-        sf::Text t;
+        sf::Text t(font);
         t.setFont(font);
         t.setCharacterSize(14);
         t.setFillColor(sf::Color(235, 235, 240));
-        t.setPosition(pad, pad);
+        t.setPosition(sf::Vector2f(pad, pad));
         const std::string s = clamp_text_end(label, 120);
         t.setString(sf::String::fromUtf8(s.begin(), s.end()));
         window->draw(t);
@@ -2634,12 +2659,13 @@ void Visualizer::setDatasetImage(const std::vector<uint8_t>& pixels, int w, int 
     has_dataset_image = true;
 }
 
-void Visualizer::setDatasetText(const std::string& raw_text, const std::string& tokenized, const std::string& encoded) {
+void Visualizer::setDatasetText(const std::string& raw_text, const std::string& tags, const std::string& tokenized, const std::string& encoded) {
     if (!enabled) return;
     dataset_text_raw = raw_text;
+    dataset_text_tags = tags;
     dataset_text_tokens = tokenized;
     dataset_text_encoded = encoded;
-    has_dataset_text = (!dataset_text_raw.empty() || !dataset_text_tokens.empty() || !dataset_text_encoded.empty());
+    has_dataset_text = (!dataset_text_raw.empty() || !dataset_text_tags.empty() || !dataset_text_tokens.empty() || !dataset_text_encoded.empty());
 }
 
 void Visualizer::setProjectionImage(const std::vector<uint8_t>& pixels, int w, int h, int channels, const std::string& label) {
@@ -2710,8 +2736,23 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
         const auto p = parse_viz_label(f.label);
 
         // PS (user): ne pas afficher les blocs d'activation.
-        if (hide_activation_blocks) {
+        const bool exhaustive_model_layer = !p.model.empty() && p.tag == "L" &&
+                                            f.label.find("/blocks/") != std::string::npos;
+        if (hide_activation_blocks && !exhaustive_model_layer) {
             if (p.tag == "ACT" || f.label.find("/activation") != std::string::npos) {
+                continue;
+            }
+        }
+
+        // PS (user): ne pas afficher les blocs de normalisation.
+        if (hide_normalisation_blocks && !exhaustive_model_layer) {
+            if (p.tag == "N" || p.headline == "Norm" ||
+                f.label.find("/norm") != std::string::npos ||
+                f.label.find("/gn") != std::string::npos ||
+                f.label.find("/ln") != std::string::npos ||
+                f.label.find("/bn") != std::string::npos ||
+                f.label.find("/in") != std::string::npos ||
+                f.label.find("/rms") != std::string::npos) {
                 continue;
             }
         }
@@ -2724,7 +2765,7 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
 
         // Le vecteur packé final (ex: recon||mu||logvar) n'est pas un tip image utile.
         // L'afficher comme pseudo-image carrée produit un bruit trompeur dans Outputs.
-        if (f.label.find("/vec") != std::string::npos &&
+        if (!exhaustive_model_layer && f.label.find("/vec") != std::string::npos &&
             (p.layer_path.find("out_concat") != std::string::npos ||
              p.layer_path.find("out_pack") != std::string::npos)) {
             continue;
@@ -2732,8 +2773,8 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
 
         // Les concat de packing final (ex: recon||z||logvar) ne sont pas des images
         // stables à afficher: elles provoquent des artefacts visuels (répétitions/décalage).
-        if (p.layer_path.find("out_concat") != std::string::npos ||
-            p.layer_path.find("out_pack") != std::string::npos) {
+        if (!exhaustive_model_layer && (p.layer_path.find("out_concat") != std::string::npos ||
+            p.layer_path.find("out_pack") != std::string::npos)) {
             continue;
         }
 
@@ -2918,8 +2959,14 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     record.val_step_id = val_ok ? val_step  : -1;
     full_loss_history.push_back(record);
     
-    // Sauvegarder automatiquement l'historique après chaque ajout
-    saveLossHistory(loss_log_file);
+    // Flush CSV throttle: eviter une ecriture disque a chaque metric tick.
+    pending_loss_log_flush_ = true;
+    const uint64_t now_ms = steady_now_ms();
+    if (!loss_log_file.empty() && (last_loss_log_flush_ms_ == 0 || (now_ms - last_loss_log_flush_ms_) >= 1000)) {
+        saveLossHistory(loss_log_file);
+        last_loss_log_flush_ms_ = now_ms;
+        pending_loss_log_flush_ = false;
+    }
 }
 
 void Visualizer::addLossPoint(float loss) {
@@ -2955,13 +3002,13 @@ void Visualizer::renderBackground() {
     line.setFillColor(sf::Color(40, 40, 45, 100));
     
     for (int x = 0; x < window_width; x += 50) {
-        line.setPosition(x, 0);
+        line.setPosition(sf::Vector2f(x, 0));
         window->draw(line);
     }
 
     line.setSize(sf::Vector2f(window_width, 1));
     for (int y = 0; y < window_height; y += 50) {
-        line.setPosition(0, y);
+        line.setPosition(sf::Vector2f(0, y));
         window->draw(line);
     }
 
@@ -2970,16 +3017,16 @@ void Visualizer::renderBackground() {
         const float t = logo_clock_.getElapsedTime().asSeconds();
         if (t >= 0.0f && t < logo_splash_seconds_) {
             const auto lb = logo_sprite_.getLocalBounds();
-            const float iw = std::max(1.0f, lb.width);
-            const float ih = std::max(1.0f, lb.height);
+            const float iw = std::max(1.0f, lb.size.x);
+            const float ih = std::max(1.0f, lb.size.y);
             const float desired = std::min<float>(
                 std::min<float>(window_width, window_height) * 0.35f,
                 320.0f
             );
             const float scale = desired / std::max(iw, ih);
-            logo_sprite_.setScale(scale, scale);
-            logo_sprite_.setOrigin(lb.left + iw * 0.5f, lb.top + ih * 0.5f);
-            logo_sprite_.setPosition(window_width * 0.5f, window_height * 0.5f);
+            logo_sprite_.setScale(sf::Vector2f(scale, scale));
+            logo_sprite_.setOrigin(sf::Vector2f(lb.position.x + iw * 0.5f, lb.position.y + ih * 0.5f));
+            logo_sprite_.setPosition(sf::Vector2f(window_width * 0.5f, window_height * 0.5f));
             window->draw(logo_sprite_);
         }
     }
@@ -2990,8 +3037,8 @@ void Visualizer::renderContextImages() {
     const int img_display_size = 200;
     const int margin = 16;
     const auto area = panelContentRect(PanelId::Context);
-    const int start_x = static_cast<int>(area.left);
-    const int start_y = static_cast<int>(area.top);
+    const int start_x = static_cast<int>(area.position.x);
+    const int start_y = static_cast<int>(area.position.y);
     const int label_h = 20;
 
     // Clip au contenu du panneau (overflow: clip)
@@ -3007,16 +3054,16 @@ void Visualizer::renderContextImages() {
         const float ww = static_cast<float>(std::max(1, window_width));
         const float hh = static_cast<float>(std::max(1, window_height));
 
-        const float left = std::clamp(area.left, 0.0f, ww);
-        const float top = std::clamp(area.top, 0.0f, hh);
-        const float right = std::clamp(area.left + area.width, 0.0f, ww);
-        const float bottom = std::clamp(area.top + area.height, 0.0f, hh);
+        const float left = std::clamp(area.position.x, 0.0f, ww);
+        const float top = std::clamp(area.position.y, 0.0f, hh);
+        const float right = std::clamp(area.position.x + area.size.x, 0.0f, ww);
+        const float bottom = std::clamp(area.position.y + area.size.y, 0.0f, hh);
         const float w = std::max(0.0f, right - left);
         const float h = std::max(0.0f, bottom - top);
 
         if (w > 0.0f && h > 0.0f) {
-            sf::View v(sf::FloatRect(left, top, w, h));
-            v.setViewport(sf::FloatRect(left / ww, top / hh, w / ww, h / hh));
+            sf::View v(make_rect(left, top, w, h));
+            v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
             window->setView(v);
         }
     }
@@ -3028,13 +3075,13 @@ void Visualizer::renderContextImages() {
     auto drawPanel = [&](int x, int y, ImageData& img, const std::string& label_text, sf::Color outline) -> sf::FloatRect {
         // Cadre
         sf::RectangleShape frame(sf::Vector2f(img_display_size + 4, img_display_size + 4));
-        frame.setPosition(x - 2, y - 2);
+        frame.setPosition(sf::Vector2f(x - 2, y - 2));
         frame.setFillColor(sf::Color::Transparent);
         frame.setOutlineColor(outline);
         frame.setOutlineThickness(2);
         window->draw(frame);
 
-        const sf::FloatRect frame_rect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(img_display_size + 4), static_cast<float>(img_display_size + 4));
+        const sf::FloatRect frame_rect = make_rect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(img_display_size + 4), static_cast<float>(img_display_size + 4));
 
         // Image
         position_sprite_centered_in_box(img.sprite, static_cast<float>(x), static_cast<float>(y), static_cast<float>(img_display_size));
@@ -3042,16 +3089,16 @@ void Visualizer::renderContextImages() {
 
         // Label bar
         sf::RectangleShape label(sf::Vector2f(img_display_size, label_h));
-        label.setPosition(static_cast<float>(x), static_cast<float>(y + img_display_size + 5));
+        label.setPosition(sf::Vector2f(static_cast<float>(x), static_cast<float>(y + img_display_size + 5)));
         label.setFillColor(sf::Color(50, 50, 60, 200));
         window->draw(label);
 
         if (font_loaded) {
-            sf::Text t;
+            sf::Text t(font);
             t.setFont(font);
             t.setCharacterSize(14);
             t.setFillColor(sf::Color(230, 230, 235));
-            t.setPosition(static_cast<float>(x + 6), static_cast<float>(y + img_display_size + 3));
+            t.setPosition(sf::Vector2f(static_cast<float>(x + 6), static_cast<float>(y + img_display_size + 3)));
             t.setString(toSfUtf8(label_text));
             window->draw(t);
         }
@@ -3087,14 +3134,14 @@ void Visualizer::renderContextImages() {
     int y = start_y;
     auto advance = [&]() {
         x += img_display_size + margin;
-        if (x + img_display_size > static_cast<int>(area.left + area.width)) {
+        if (x + img_display_size > static_cast<int>(area.position.x + area.size.x)) {
             x = start_x;
             y += img_display_size + label_h + margin;
         }
     };
 
     auto fits_row = [&]() {
-        return (y + img_display_size + label_h) <= static_cast<int>(area.top + area.height);
+        return (y + img_display_size + label_h) <= static_cast<int>(area.position.y + area.size.y);
     };
 
     if (!fits_row()) return;
@@ -3146,17 +3193,17 @@ void Visualizer::renderLayerBlocks() {
     const int thumb = 120;
     const int margin = 14;
     const auto area = panelContentRect(PanelId::Blocks);
-    const int start_x = static_cast<int>(area.left);
-    const int start_y = static_cast<int>(area.top);
+    const int start_x = static_cast<int>(area.position.x);
+    const int start_y = static_cast<int>(area.position.y);
 
     const int label_h = 18;
     const int section_h = 22;
     const int section_gap = 8;
-    const int max_cols = std::max(1, static_cast<int>(area.width) / (thumb + margin));
+    const int max_cols = std::max(1, static_cast<int>(area.size.x) / (thumb + margin));
     const int cell_h = thumb + label_h + margin;
 
     // Focus rectangles doivent correspondre aux vrais blocks (index = layer_block_images idx).
-    last_block_rects_.assign(static_cast<size_t>(std::max(0, blocks_count)), sf::FloatRect(0.f, 0.f, 0.f, 0.f));
+    last_block_rects_.assign(static_cast<size_t>(std::max(0, blocks_count)), make_rect(0.f, 0.f, 0.f, 0.f));
 
     // Clip au contenu du panneau (évite de dessiner en dehors de la zone visible pendant le scroll)
     const sf::View old_view = window->getView();
@@ -3165,16 +3212,16 @@ void Visualizer::renderLayerBlocks() {
         const float hh = static_cast<float>(std::max(1, window_height));
 
         // Clamp à la partie visible dans la fenêtre (le panneau peut être resizé hors écran)
-        const float left = std::clamp(area.left, 0.0f, ww);
-        const float top = std::clamp(area.top, 0.0f, hh);
-        const float right = std::clamp(area.left + area.width, 0.0f, ww);
-        const float bottom = std::clamp(area.top + area.height, 0.0f, hh);
+        const float left = std::clamp(area.position.x, 0.0f, ww);
+        const float top = std::clamp(area.position.y, 0.0f, hh);
+        const float right = std::clamp(area.position.x + area.size.x, 0.0f, ww);
+        const float bottom = std::clamp(area.position.y + area.size.y, 0.0f, hh);
         const float w = std::max(0.0f, right - left);
         const float h = std::max(0.0f, bottom - top);
 
         if (w > 0.0f && h > 0.0f) {
-            sf::View v(sf::FloatRect(left, top, w, h));
-            v.setViewport(sf::FloatRect(left / ww, top / hh, w / ww, h / hh));
+            sf::View v(make_rect(left, top, w, h));
+            v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
             window->setView(v);
         }
     }
@@ -3221,6 +3268,10 @@ void Visualizer::renderLayerBlocks() {
     auto section_color = [&](const std::string& section) -> sf::Color {
         if (section == "Inputs") return sf::Color(110, 145, 205, 210);
         if (section == "Text / Cond") return sf::Color(122, 188, 142, 210);
+        if (section == "UNet") return sf::Color(104, 164, 216, 210);
+        if (section == "VAE") return sf::Color(214, 126, 166, 210);
+        if (section == "Diffusion") return sf::Color(146, 136, 222, 210);
+        if (section == "Reconstruction") return sf::Color(226, 162, 106, 210);
         if (section == "ConditioningEncoder") return sf::Color(96, 168, 214, 210);
         if (section == "Down Blocks") return sf::Color(88, 176, 198, 210);
         if (section == "Bottleneck") return sf::Color(160, 118, 220, 210);
@@ -3276,6 +3327,15 @@ void Visualizer::renderLayerBlocks() {
         bool has_diff_prefix = false;
         bool has_diff_substr = false;
 
+        bool has_unet_exact = false;
+        bool has_unet_substr = false;
+        bool has_vae_exact = false;
+        bool has_vae_substr = false;
+        bool has_diffusion_exact = false;
+        bool has_diffusion_substr = false;
+        bool has_recon_exact = false;
+        bool has_recon_substr = false;
+
         for (const auto& part : parts) {
             if (part == "mu" || part == "logvar" || part == "latent" || part == "z") has_latent_exact = true;
             if (starts_with(part, "mu") || starts_with(part, "logvar") || starts_with(part, "latent") || starts_with(part, "reparam")) has_latent_prefix = true;
@@ -3324,6 +3384,24 @@ void Visualizer::renderLayerBlocks() {
             if (part.find("diff") != std::string::npos || part.find("err") != std::string::npos) {
                 has_diff_substr = true;
             }
+
+            if (part == "unet" || part == "unet2d") has_unet_exact = true;
+            if (part.find("unet") != std::string::npos) has_unet_substr = true;
+
+            if (part == "vae" || part == "vae_conv" || part == "vae_text") has_vae_exact = true;
+            if (part.find("vae") != std::string::npos || part.find("decoder") != std::string::npos || part.find("encoder") != std::string::npos) {
+                has_vae_substr = true;
+            }
+
+            if (part == "diffusion" || part == "ddpm") has_diffusion_exact = true;
+            if (part.find("diffusion") != std::string::npos || part.find("ddpm") != std::string::npos || part.find("denoise") != std::string::npos || part.find("noise") != std::string::npos) {
+                has_diffusion_substr = true;
+            }
+
+            if (part == "recon" || part == "reconstruction") has_recon_exact = true;
+            if (part.find("recon") != std::string::npos || part.find("resdiff") != std::string::npos) {
+                has_recon_substr = true;
+            }
         }
 
         const bool is_latent = p.tag == "LAT" || has_latent_exact || has_latent_prefix || has_latent_substr;
@@ -3338,6 +3416,15 @@ void Visualizer::renderLayerBlocks() {
         const bool is_head = has_head_exact || has_head_prefix || has_head_substr;
         const bool is_diff = has_diff_exact || has_diff_prefix || has_diff_substr;
         const bool is_output = p.tag == "OUT" || has_output_exact || has_output_prefix || has_output_substr || is_diff || last == "tanh";
+        const bool is_unet = has_unet_exact || has_unet_substr;
+        const bool is_vae = has_vae_exact || has_vae_substr;
+        const bool is_diffusion = has_diffusion_exact || has_diffusion_substr;
+        const bool is_recon = has_recon_exact || has_recon_substr;
+
+        if (is_recon) return "Reconstruction";
+        if (is_diffusion) return "Diffusion";
+        if (is_unet) return "UNet";
+        if (is_vae) return "VAE";
 
         if (is_latent) {
             return "Latent";
@@ -3480,6 +3567,35 @@ void Visualizer::renderLayerBlocks() {
         entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(i), std::move(recon));
     }
 
+    if (blocks_tips_visible_limit_ > 0) {
+        int remaining = blocks_tips_visible_limit_;
+        std::vector<BlockPanelEntry> limited;
+        limited.reserve(entries.size());
+
+        std::optional<BlockPanelEntry> pending_header;
+        for (const auto& entry : entries) {
+            if (entry.is_header) {
+                pending_header = entry;
+                continue;
+            }
+
+            const bool keep = entry.is_extra || (remaining > 0);
+            if (!keep) continue;
+
+            if (pending_header.has_value()) {
+                limited.push_back(*pending_header);
+                pending_header.reset();
+            }
+
+            limited.push_back(entry);
+            if (!entry.is_extra && remaining > 0) {
+                --remaining;
+            }
+        }
+
+        entries.swap(limited);
+    }
+
     if (entries.empty()) return;
 
     std::vector<sf::Vector2f> entry_positions;
@@ -3514,7 +3630,7 @@ void Visualizer::renderLayerBlocks() {
     const float prev_max = blocks_scroll_max_;
     const float prev_y = blocks_scroll_y_;
 
-    blocks_scroll_max_ = std::max(0.0f, content_h - area.height);
+    blocks_scroll_max_ = std::max(0.0f, content_h - area.size.y);
     if (!dragging_blocks_scrollbar_ && prev_max > 1e-6f) {
         const float t = std::clamp(prev_y / prev_max, 0.0f, 1.0f);
         blocks_scroll_y_ = t * blocks_scroll_max_;
@@ -3528,29 +3644,29 @@ void Visualizer::renderLayerBlocks() {
         const int y = base_y - static_cast<int>(std::lround((double)blocks_scroll_y_));
 
         if (entry.is_header) {
-            if ((y - section_h) > static_cast<int>(area.top + area.height)) continue;
-            if ((y + section_h + section_gap) < static_cast<int>(area.top)) continue;
+            if ((y - section_h) > static_cast<int>(area.position.y + area.size.y)) continue;
+            if ((y + section_h + section_gap) < static_cast<int>(area.position.y)) continue;
 
-            const float bar_w = std::max(80.0f, area.width - 12.0f);
+            const float bar_w = std::max(80.0f, area.size.x - 12.0f);
             sf::RectangleShape bar(sf::Vector2f(bar_w, static_cast<float>(section_h)));
-            bar.setPosition(static_cast<float>(start_x), static_cast<float>(y));
+            bar.setPosition(sf::Vector2f(static_cast<float>(start_x), static_cast<float>(y)));
             bar.setFillColor(sf::Color(28, 30, 38, 220));
             bar.setOutlineColor(section_color(entry.section));
             bar.setOutlineThickness(1.0f);
             window->draw(bar);
 
             sf::RectangleShape accent(sf::Vector2f(8.0f, static_cast<float>(section_h)));
-            accent.setPosition(static_cast<float>(start_x), static_cast<float>(y));
+            accent.setPosition(sf::Vector2f(static_cast<float>(start_x), static_cast<float>(y)));
             accent.setFillColor(section_color(entry.section));
             window->draw(accent);
 
             if (font_loaded) {
-                sf::Text t;
+                sf::Text t(font);
                 t.setFont(font);
                 t.setCharacterSize(13);
                 t.setStyle(sf::Text::Bold);
                 t.setFillColor(sf::Color(236, 236, 240));
-                t.setPosition(static_cast<float>(start_x + 14), static_cast<float>(y + 2));
+                t.setPosition(sf::Vector2f(static_cast<float>(start_x + 14), static_cast<float>(y + 2)));
                 t.setString(sf::String::fromUtf8(entry.section.begin(), entry.section.end()));
                 window->draw(t);
             }
@@ -3560,14 +3676,14 @@ void Visualizer::renderLayerBlocks() {
         if (!entry.img) continue;
 
         // Cull (best-effort) pour limiter les draws
-        if ((y - cell_h) > static_cast<int>(area.top + area.height)) continue;
-        if ((y + 2 * cell_h) < static_cast<int>(area.top)) continue;
+        if ((y - cell_h) > static_cast<int>(area.position.y + area.size.y)) continue;
+        if ((y + 2 * cell_h) < static_cast<int>(area.position.y)) continue;
 
         const std::string use_tag = entry.is_extra ? entry.tag_override : entry.parsed.tag;
 
         // Frame
         sf::RectangleShape frame(sf::Vector2f(thumb + 4, thumb + 4));
-        frame.setPosition(static_cast<float>(x - 2), static_cast<float>(y - 2));
+        frame.setPosition(sf::Vector2f(static_cast<float>(x - 2), static_cast<float>(y - 2)));
         frame.setFillColor(sf::Color::Transparent);
         frame.setOutlineColor(color_for_tag(use_tag));
         frame.setOutlineThickness(1);
@@ -3576,7 +3692,7 @@ void Visualizer::renderLayerBlocks() {
         if (!entry.is_extra) {
             const int bi = entry.block_index;
             if (bi >= 0 && bi < blocks_count) {
-                last_block_rects_[static_cast<size_t>(bi)] = sf::FloatRect(
+                last_block_rects_[static_cast<size_t>(bi)] = make_rect(
                     static_cast<float>(x - 2),
                     static_cast<float>(y - 2),
                     static_cast<float>(thumb + 4),
@@ -3588,16 +3704,16 @@ void Visualizer::renderLayerBlocks() {
         window->draw(entry.img->sprite);
 
         sf::RectangleShape label(sf::Vector2f(static_cast<float>(thumb), static_cast<float>(label_h)));
-        label.setPosition(static_cast<float>(x), static_cast<float>(y + thumb + 3));
+        label.setPosition(sf::Vector2f(static_cast<float>(x), static_cast<float>(y + thumb + 3)));
         label.setFillColor(sf::Color(50, 50, 60, 200));
         window->draw(label);
 
         if (font_loaded) {
-            sf::Text t;
+            sf::Text t(font);
             t.setFont(font);
             t.setCharacterSize(12);
             t.setFillColor(sf::Color(230, 230, 235));
-            t.setPosition(static_cast<float>(x + 4), static_cast<float>(y + thumb + 1));
+            t.setPosition(sf::Vector2f(static_cast<float>(x + 4), static_cast<float>(y + thumb + 1)));
 
             std::string text;
             if (entry.is_extra) {
@@ -3618,31 +3734,31 @@ void Visualizer::renderLayerBlocks() {
 
     // Scrollbar (slicer) cliquable (dessiné dans l'UI normale, hors view clipping)
     // NB: rects en coordonnées UI (pixels)
-    last_blocks_scroll_track_rect_ = sf::FloatRect(0.f, 0.f, 0.f, 0.f);
-    last_blocks_scroll_thumb_rect_ = sf::FloatRect(0.f, 0.f, 0.f, 0.f);
+    last_blocks_scroll_track_rect_ = make_rect(0.f, 0.f, 0.f, 0.f);
+    last_blocks_scroll_thumb_rect_ = make_rect(0.f, 0.f, 0.f, 0.f);
     if (blocks_scroll_max_ > 0.0f) {
         const float track_w = 10.0f;
         const float pad = 2.0f;
-        const float tx = area.left + std::max(0.0f, area.width - track_w - pad);
-        const float ty = area.top;
-        const float th = std::max(0.0f, area.height);
-        last_blocks_scroll_track_rect_ = sf::FloatRect(tx, ty, track_w, th);
+        const float tx = area.position.x + std::max(0.0f, area.size.x - track_w - pad);
+        const float ty = area.position.y;
+        const float th = std::max(0.0f, area.size.y);
+        last_blocks_scroll_track_rect_ = make_rect(tx, ty, track_w, th);
 
-        const float content_h2 = area.height + blocks_scroll_max_;
-        const float visible_ratio = (content_h2 > 1.0f) ? std::clamp(area.height / content_h2, 0.05f, 1.0f) : 1.0f;
+        const float content_h2 = area.size.y + blocks_scroll_max_;
+        const float visible_ratio = (content_h2 > 1.0f) ? std::clamp(area.size.y / content_h2, 0.05f, 1.0f) : 1.0f;
         const float thumb_h = std::max(24.0f, th * visible_ratio);
         const float denom = std::max(1.0f, th - thumb_h);
         const float t = (blocks_scroll_max_ > 0.0f) ? std::clamp(blocks_scroll_y_ / blocks_scroll_max_, 0.0f, 1.0f) : 0.0f;
         const float thumb_y = ty + t * denom;
-        last_blocks_scroll_thumb_rect_ = sf::FloatRect(tx, thumb_y, track_w, thumb_h);
+        last_blocks_scroll_thumb_rect_ = make_rect(tx, thumb_y, track_w, thumb_h);
 
         sf::RectangleShape track(sf::Vector2f(track_w, th));
-        track.setPosition(tx, ty);
+        track.setPosition(sf::Vector2f(tx, ty));
         track.setFillColor(sf::Color(35, 35, 42, 200));
         window->draw(track);
 
         sf::RectangleShape thumb(sf::Vector2f(track_w, thumb_h));
-        thumb.setPosition(tx, thumb_y);
+        thumb.setPosition(sf::Vector2f(tx, thumb_y));
         thumb.setFillColor(sf::Color(90, 90, 110, 220));
         window->draw(thumb);
     }
@@ -3655,13 +3771,13 @@ void Visualizer::renderGeneratedImages() {
 
     const int img_display_size = 200; // Taille d'affichage
     const int margin = 20;
-    const int start_x = static_cast<int>(area.left);
-    const int start_y = static_cast<int>(area.top);
+    const int start_x = static_cast<int>(area.position.x);
+    const int start_y = static_cast<int>(area.position.y);
 
     const int cell_w = img_display_size + margin;
     const int cell_h = img_display_size + margin + 26;
-    const int cols = std::max(1, static_cast<int>(area.width) / std::max(1, cell_w));
-    const int rows = std::max(1, static_cast<int>(area.height) / std::max(1, cell_h));
+    const int cols = std::max(1, static_cast<int>(area.size.x) / std::max(1, cell_w));
+    const int rows = std::max(1, static_cast<int>(area.size.y) / std::max(1, cell_h));
     const int max_items = std::max(1, cols * rows);
 
     const size_t n = std::min(generated_images.size(), static_cast<size_t>(max_items));
@@ -3678,16 +3794,16 @@ void Visualizer::renderGeneratedImages() {
         const float ww = static_cast<float>(std::max(1, window_width));
         const float hh = static_cast<float>(std::max(1, window_height));
 
-        const float left = std::clamp(area.left, 0.0f, ww);
-        const float top = std::clamp(area.top, 0.0f, hh);
-        const float right = std::clamp(area.left + area.width, 0.0f, ww);
-        const float bottom = std::clamp(area.top + area.height, 0.0f, hh);
+        const float left = std::clamp(area.position.x, 0.0f, ww);
+        const float top = std::clamp(area.position.y, 0.0f, hh);
+        const float right = std::clamp(area.position.x + area.size.x, 0.0f, ww);
+        const float bottom = std::clamp(area.position.y + area.size.y, 0.0f, hh);
         const float w = std::max(0.0f, right - left);
         const float h = std::max(0.0f, bottom - top);
 
         if (w > 0.0f && h > 0.0f) {
-            sf::View v(sf::FloatRect(left, top, w, h));
-            v.setViewport(sf::FloatRect(left / ww, top / hh, w / ww, h / hh));
+            sf::View v(make_rect(left, top, w, h));
+            v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
             window->setView(v);
         }
     }
@@ -3703,13 +3819,13 @@ void Visualizer::renderGeneratedImages() {
 
         // Cadre
         sf::RectangleShape frame(sf::Vector2f(img_display_size + 4, img_display_size + 4));
-        frame.setPosition(x - 2, y - 2);
+        frame.setPosition(sf::Vector2f(x - 2, y - 2));
         frame.setFillColor(sf::Color::Transparent);
         frame.setOutlineColor(sf::Color(100, 150, 200));
         frame.setOutlineThickness(2);
         window->draw(frame);
 
-        last_generated_rects_.push_back(sf::FloatRect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(img_display_size + 4), static_cast<float>(img_display_size + 4)));
+        last_generated_rects_.push_back(make_rect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(img_display_size + 4), static_cast<float>(img_display_size + 4)));
         last_generated_indices_.push_back(static_cast<int>(start_idx + i));
 
         // Image
@@ -3718,7 +3834,7 @@ void Visualizer::renderGeneratedImages() {
 
         // Titre (simulé avec rectangle - nécessite police pour texte)
         sf::RectangleShape label(sf::Vector2f(img_display_size, 20));
-        label.setPosition(x, y + img_display_size + 5);
+        label.setPosition(sf::Vector2f(x, y + img_display_size + 5));
         label.setFillColor(sf::Color(50, 50, 60, 200));
         window->draw(label);
     }
@@ -3728,13 +3844,13 @@ void Visualizer::renderGeneratedImages() {
 
 void Visualizer::renderTrainingProgress() {
     const auto area = panelContentRect(PanelId::Training);
-    const int bar_x = static_cast<int>(area.left);
-    const int bar_width = std::max(10, static_cast<int>(area.width));
-    const int global_h = std::clamp(static_cast<int>(area.height * 0.34f), 14, 24);
-    const int batch_h = std::clamp(static_cast<int>(area.height * 0.22f), 10, 16);
+    const int bar_x = static_cast<int>(area.position.x);
+    const int bar_width = std::max(10, static_cast<int>(area.size.x));
+    const int global_h = std::clamp(static_cast<int>(area.size.y * 0.34f), 14, 24);
+    const int batch_h = std::clamp(static_cast<int>(area.size.y * 0.22f), 10, 16);
     const int gap = 8;
     const int stack_h = global_h + gap + batch_h;
-    const int global_y = static_cast<int>(area.top + std::max(0.0f, (area.height - static_cast<float>(stack_h)) * 0.5f));
+    const int global_y = static_cast<int>(area.position.y + std::max(0.0f, (area.size.y - static_cast<float>(stack_h)) * 0.5f));
     const int batch_y = global_y + global_h + gap;
 
     const bool has_epoch_info = (current_total_epochs > 0);
@@ -3782,7 +3898,7 @@ void Visualizer::renderTrainingProgress() {
 
     // Barre globale (epochs)
     sf::RectangleShape progress_bg(sf::Vector2f(static_cast<float>(bar_width), static_cast<float>(global_h)));
-    progress_bg.setPosition(static_cast<float>(bar_x), static_cast<float>(global_y));
+    progress_bg.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(global_y)));
     progress_bg.setFillColor(sf::Color(50, 50, 60, 230));
     progress_bg.setOutlineColor(sf::Color(88, 88, 102, 235));
     progress_bg.setOutlineThickness(1.5f);
@@ -3791,14 +3907,14 @@ void Visualizer::renderTrainingProgress() {
     const float epoch_w = static_cast<float>(bar_width) * progress_epoch_display_;
     if (epoch_w > 0.0f) {
         sf::RectangleShape progress_bar(sf::Vector2f(epoch_w, static_cast<float>(global_h)));
-        progress_bar.setPosition(static_cast<float>(bar_x), static_cast<float>(global_y));
+        progress_bar.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(global_y)));
         progress_bar.setFillColor(sf::Color(96, 184, 112, 240));
         window->draw(progress_bar);
     }
 
     // Barre batch (courant) sous la barre globale.
     sf::RectangleShape batch_bg(sf::Vector2f(static_cast<float>(bar_width), static_cast<float>(batch_h)));
-    batch_bg.setPosition(static_cast<float>(bar_x), static_cast<float>(batch_y));
+    batch_bg.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(batch_y)));
     batch_bg.setFillColor(sf::Color(42, 42, 52, 230));
     batch_bg.setOutlineColor(sf::Color(78, 78, 94, 220));
     batch_bg.setOutlineThickness(1.0f);
@@ -3808,7 +3924,7 @@ void Visualizer::renderTrainingProgress() {
         const float batch_w = static_cast<float>(bar_width) * progress_batch_display_;
         if (batch_w > 0.0f) {
             sf::RectangleShape batch_fg(sf::Vector2f(batch_w, static_cast<float>(batch_h)));
-            batch_fg.setPosition(static_cast<float>(bar_x), static_cast<float>(batch_y));
+            batch_fg.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(batch_y)));
             batch_fg.setFillColor(batch_speed_color(current_batch_time_ms));
             window->draw(batch_fg);
         }
@@ -3821,7 +3937,7 @@ void Visualizer::renderTrainingProgress() {
         const float seg_w = std::max(24.0f, static_cast<float>(bar_width) * 0.18f);
         const float x = static_cast<float>(bar_x) + (static_cast<float>(bar_width) + seg_w) * phase - seg_w;
         sf::RectangleShape ind(sf::Vector2f(seg_w, static_cast<float>(global_h)));
-        ind.setPosition(x, static_cast<float>(global_y));
+        ind.setPosition(sf::Vector2f(x, static_cast<float>(global_y)));
         ind.setFillColor(sf::Color(110, 165, 215, 120));
         window->draw(ind);
     }
@@ -3833,18 +3949,18 @@ void Visualizer::renderTrainingProgress() {
         if (has_epoch_info) {
             txt_global = std::to_string(pct) + "%";
         } else {
-            txt_global = "running";
+            txt_global = "Initialisation";
         }
 
-        sf::Text tg;
+        sf::Text tg(font);
         tg.setFont(font);
         tg.setCharacterSize(12);
         tg.setFillColor(sf::Color(235, 235, 240));
         tg.setString(sf::String::fromUtf8(txt_global.begin(), txt_global.end()));
         const auto bg = tg.getLocalBounds();
-        const float txg = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bg.width) * 0.5f - bg.left;
-        const float tyg = static_cast<float>(global_y) + (static_cast<float>(global_h) - bg.height) * 0.5f - bg.top - 1.0f;
-        tg.setPosition(std::round(txg), std::round(tyg));
+        const float txg = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bg.size.x) * 0.5f - bg.position.x;
+        const float tyg = static_cast<float>(global_y) + (static_cast<float>(global_h) - bg.size.y) * 0.5f - bg.position.y - 1.0f;
+        tg.setPosition(sf::Vector2f(std::round(txg), std::round(tyg)));
         window->draw(tg);
 
         std::string txt_batch;
@@ -3854,15 +3970,15 @@ void Visualizer::renderTrainingProgress() {
         } else {
             txt_batch = "batch --";
         }
-        sf::Text tb;
+        sf::Text tb(font);
         tb.setFont(font);
         tb.setCharacterSize(11);
         tb.setFillColor(sf::Color(220, 228, 210));
         tb.setString(sf::String::fromUtf8(txt_batch.begin(), txt_batch.end()));
         const auto bb = tb.getLocalBounds();
-        const float txb = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bb.width) * 0.5f - bb.left;
-        const float tyb = static_cast<float>(batch_y) + (static_cast<float>(batch_h) - bb.height) * 0.5f - bb.top - 1.0f;
-        tb.setPosition(std::round(txb), std::round(tyb));
+        const float txb = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bb.size.x) * 0.5f - bb.position.x;
+        const float tyb = static_cast<float>(batch_y) + (static_cast<float>(batch_h) - bb.size.y) * 0.5f - bb.position.y - 1.0f;
+        tb.setPosition(sf::Vector2f(std::round(txb), std::round(tyb)));
         window->draw(tb);
     }
 }
@@ -3874,14 +3990,14 @@ void Visualizer::renderLossGraph() {
     if (!have_full && loss_history.empty()) return;
 
     const auto area = panelContentRect(PanelId::Graph);
-    const int graph_x = static_cast<int>(area.left);
-    const int graph_y = static_cast<int>(area.top);
-    const int graph_width = std::max(120, static_cast<int>(area.width));
-    const int graph_height = std::max(120, static_cast<int>(area.height));
+    const int graph_x = static_cast<int>(area.position.x);
+    const int graph_y = static_cast<int>(area.position.y);
+    const int graph_width = std::max(120, static_cast<int>(area.size.x));
+    const int graph_height = std::max(120, static_cast<int>(area.size.y));
 
     // Fond du graphique
     sf::RectangleShape graph_bg(sf::Vector2f(static_cast<float>(graph_width), static_cast<float>(graph_height)));
-    graph_bg.setPosition(static_cast<float>(graph_x), static_cast<float>(graph_y));
+    graph_bg.setPosition(sf::Vector2f(static_cast<float>(graph_x), static_cast<float>(graph_y)));
     graph_bg.setFillColor(sf::Color(20, 20, 25, 220));
     graph_bg.setOutlineColor(sf::Color(100, 100, 120));
     graph_bg.setOutlineThickness(2);
@@ -3918,7 +4034,7 @@ void Visualizer::renderLossGraph() {
         const float y = plot_y + (1.f - t) * plot_h;
 
         sf::RectangleShape grid(sf::Vector2f(plot_w, 1.f));
-        grid.setPosition(plot_x, y);
+        grid.setPosition(sf::Vector2f(plot_x, y));
         grid.setFillColor(sf::Color(70, 70, 80, (i == 0 || i == ticks - 1) ? 120 : 70));
         window->draw(grid);
 
@@ -3927,11 +4043,11 @@ void Visualizer::renderLossGraph() {
             std::ostringstream ss;
             ss << std::fixed << std::setprecision(4) << v;
             const std::string label = ss.str();
-            sf::Text txt;
+            sf::Text txt(font);
             txt.setFont(font);
             txt.setCharacterSize(12);
             txt.setFillColor(sf::Color(220, 220, 228));
-            txt.setPosition(static_cast<float>(graph_x) + 6.f, y - 8.f);
+            txt.setPosition(sf::Vector2f(static_cast<float>(graph_x) + 6.f, y - 8.f));
             txt.setString(sf::String::fromUtf8(label.begin(), label.end()));
             window->draw(txt);
         }
@@ -3950,7 +4066,7 @@ void Visualizer::renderLossGraph() {
         return loss_history[idx];
     };
 
-    sf::VertexArray line(sf::LineStrip, n_draw);
+    sf::VertexArray line(sf::PrimitiveType::LineStrip, n_draw);
     for (size_t i = 0; i < n_draw; ++i) {
         const size_t idx = (n_draw <= 1) ? 0 : (i * (n_total - 1)) / (n_draw - 1);
         const float loss = loss_at(idx);
@@ -3968,11 +4084,11 @@ void Visualizer::renderLossGraph() {
         const size_t start_step = 0;
         const size_t end_step = (n_total > 0) ? (n_total - 1) : 0;
         auto drawSmall = [&](float x, float y, const std::string& s) {
-            sf::Text t;
+            sf::Text t(font);
             t.setFont(font);
             t.setCharacterSize(12);
             t.setFillColor(sf::Color(220, 220, 228));
-            t.setPosition(x, y);
+            t.setPosition(sf::Vector2f(x, y));
             t.setString(sf::String::fromUtf8(s.begin(), s.end()));
             window->draw(t);
         };
@@ -3993,9 +4109,9 @@ void Visualizer::renderLossGraph() {
 void Visualizer::renderMetrics() {
     // Affichage des métriques textuelles (simulé avec rectangles colorés)
     const auto area = panelContentRect(PanelId::Metrics);
-    const int panel_w = std::max(120, static_cast<int>(area.width));
-    int metrics_x = static_cast<int>(area.left);
-    int metrics_y = static_cast<int>(area.top);
+    const int panel_w = std::max(120, static_cast<int>(area.size.x));
+    int metrics_x = static_cast<int>(area.position.x);
+    int metrics_y = static_cast<int>(area.position.y);
     int line_height = 25;
 
     // Bouton stop: hitbox recalculée à chaque frame.
@@ -4019,7 +4135,7 @@ void Visualizer::renderMetrics() {
 
     auto drawMetricBox = [&](int y_offset, sf::Color color) {
         sf::RectangleShape box(sf::Vector2f(static_cast<float>(panel_w), 20));
-        box.setPosition(metrics_x, metrics_y + y_offset);
+        box.setPosition(sf::Vector2f(metrics_x, metrics_y + y_offset));
         box.setFillColor(color);
         window->draw(box);
     };
@@ -4048,20 +4164,20 @@ void Visualizer::renderMetrics() {
         const bool stop_requested = stop_training_requested_.load(std::memory_order_relaxed);
 
         sf::RectangleShape b(sf::Vector2f((float)btn_w, (float)btn_h));
-        b.setPosition((float)btn_x, (float)btn_y);
+        b.setPosition(sf::Vector2f((float)btn_x, (float)btn_y));
         b.setFillColor(stop_requested ? sf::Color(180, 55, 55, 235) : sf::Color(140, 40, 40, 230));
         b.setOutlineColor(stop_requested ? sf::Color(245, 150, 150, 245) : sf::Color(210, 90, 90, 240));
         b.setOutlineThickness(1);
         window->draw(b);
 
-        last_stop_button_rect_ = sf::FloatRect((float)btn_x, (float)btn_y, (float)btn_w, (float)btn_h);
+        last_stop_button_rect_ = make_rect((float)btn_x, (float)btn_y, (float)btn_w, (float)btn_h);
 
         if (font_loaded) {
-            sf::Text t;
+            sf::Text t(font);
             t.setFont(font);
             t.setCharacterSize(13);
             t.setFillColor(sf::Color(245, 240, 240));
-            t.setPosition((float)btn_x + 8.f, (float)btn_y + 1.f);
+            t.setPosition(sf::Vector2f((float)btn_x + 8.f, (float)btn_y + 1.f));
             t.setString(stop_requested ? "STOP demandé" : "STOP training");
             window->draw(t);
         }
@@ -4098,11 +4214,11 @@ void Visualizer::renderMetrics() {
         };
 
         auto drawText = [&](int y_offset, const std::string& s) {
-            sf::Text t;
+            sf::Text t(font);
             t.setFont(font);
             t.setCharacterSize(14);
             t.setFillColor(sf::Color(230, 230, 235));
-            t.setPosition(static_cast<float>(metrics_x + 6), static_cast<float>(metrics_y + y_offset - 2));
+            t.setPosition(sf::Vector2f(static_cast<float>(metrics_x + 6), static_cast<float>(metrics_y + y_offset - 2)));
             t.setString(sf::String::fromUtf8(s.begin(), s.end()));
             window->draw(t);
         };
@@ -4178,11 +4294,11 @@ void Visualizer::renderMetrics() {
 
             // Label
             {
-                sf::Text tt;
+                sf::Text tt(font);
                 tt.setFont(font);
                 tt.setCharacterSize(13);
                 tt.setFillColor(sf::Color(225, 225, 235));
-                tt.setPosition(x0, y - 2.f);
+                tt.setPosition(sf::Vector2f(x0, y - 2.f));
                 tt.setString(sf::String::fromUtf8(label.begin(), label.end()));
                 window->draw(tt);
             }
@@ -4191,14 +4307,14 @@ void Visualizer::renderMetrics() {
             const float tt = clamp01(t);
             const float track_y = y + 7.f;
             sf::RectangleShape track(sf::Vector2f(w_track, track_h));
-            track.setPosition(x_track, track_y);
+            track.setPosition(sf::Vector2f(x_track, track_y));
             track.setFillColor(sf::Color(55, 55, 60, 210));
             track.setOutlineColor(sf::Color(90, 90, 95, 220));
             track.setOutlineThickness(1);
             window->draw(track);
 
             sf::RectangleShape fill(sf::Vector2f(w_track * tt, track_h));
-            fill.setPosition(x_track, track_y);
+            fill.setPosition(sf::Vector2f(x_track, track_y));
             fill.setFillColor(sf::Color(90, 140, 200, 220));
             window->draw(fill);
 
@@ -4207,39 +4323,39 @@ void Visualizer::renderMetrics() {
                 const float gt = static_cast<float>(gi) / 4.0f;
                 const float gx = x_track + gt * w_track;
                 sf::RectangleShape tick(sf::Vector2f(1.0f, 5.0f));
-                tick.setPosition(gx, track_y + track_h + 1.0f);
+                tick.setPosition(sf::Vector2f(gx, track_y + track_h + 1.0f));
                 tick.setFillColor(sf::Color(145, 145, 160, 210));
                 window->draw(tick);
             }
 
             if (font_loaded) {
-                sf::Text tmin;
+                sf::Text tmin(font);
                 tmin.setFont(font);
                 tmin.setCharacterSize(10);
                 tmin.setFillColor(sf::Color(178, 178, 190));
-                tmin.setPosition(x_track, track_y + track_h + 7.0f);
+                tmin.setPosition(sf::Vector2f(x_track, track_y + track_h + 7.0f));
                 tmin.setString(sf::String::fromUtf8(min_label.begin(), min_label.end()));
                 window->draw(tmin);
 
-                sf::Text tmax;
+                sf::Text tmax(font);
                 tmax.setFont(font);
                 tmax.setCharacterSize(10);
                 tmax.setFillColor(sf::Color(178, 178, 190));
-                tmax.setPosition(x_track + w_track - 8.0f * static_cast<float>(max_label.size()), track_y + track_h + 7.0f);
+                tmax.setPosition(sf::Vector2f(x_track + w_track - 8.0f * static_cast<float>(max_label.size()), track_y + track_h + 7.0f));
                 tmax.setString(sf::String::fromUtf8(max_label.begin(), max_label.end()));
                 window->draw(tmax);
             }
 
             const float thumb_x = x_track + w_track * tt - thumb_w * 0.5f;
             sf::RectangleShape thumb(sf::Vector2f(thumb_w, thumb_h));
-            thumb.setPosition(thumb_x, track_y + track_h * 0.5f - thumb_h * 0.5f);
+            thumb.setPosition(sf::Vector2f(thumb_x, track_y + track_h * 0.5f - thumb_h * 0.5f));
             thumb.setFillColor(sf::Color(210, 210, 220, 235));
             thumb.setOutlineColor(sf::Color(30, 30, 30, 220));
             thumb.setOutlineThickness(1);
             window->draw(thumb);
 
-            out_track = sf::FloatRect(x_track, track_y, w_track, track_h);
-            out_thumb = sf::FloatRect(thumb.getPosition().x, thumb.getPosition().y, thumb_w, thumb_h);
+            out_track = make_rect(x_track, track_y, w_track, track_h);
+            out_thumb = make_rect(thumb.getPosition().x, thumb.getPosition().y, thumb_w, thumb_h);
 
             // Cellule de saisie valeur (clic pour éditer)
             {
@@ -4249,19 +4365,19 @@ void Visualizer::renderMetrics() {
                 const float vb_y = y + 1.0f;
 
                 sf::RectangleShape vb(sf::Vector2f(static_cast<float>(value_w), vb_h));
-                vb.setPosition(x_value, vb_y);
+                vb.setPosition(sf::Vector2f(x_value, vb_y));
                 vb.setFillColor(editing ? sf::Color(44, 58, 74, 225) : sf::Color(34, 36, 44, 215));
                 vb.setOutlineColor(invalid ? sf::Color(230, 110, 110, 235) : sf::Color(98, 104, 120, 225));
                 vb.setOutlineThickness(1.0f);
                 window->draw(vb);
 
-                out_value_box = sf::FloatRect(x_value, vb_y, static_cast<float>(value_w), vb_h);
+                out_value_box = make_rect(x_value, vb_y, static_cast<float>(value_w), vb_h);
 
-                sf::Text tt;
+                sf::Text tt(font);
                 tt.setFont(font);
                 tt.setCharacterSize(13);
                 tt.setFillColor(sf::Color(225, 225, 235));
-                tt.setPosition(x_value + 4.0f, y - 1.f);
+                tt.setPosition(sf::Vector2f(x_value + 4.0f, y - 1.f));
 
                 std::string shown = editing ? live_input_buffer_ : value;
                 if (editing) shown += "_";
@@ -4280,29 +4396,29 @@ void Visualizer::renderMetrics() {
             const float box_y = y;
 
             sf::RectangleShape b(sf::Vector2f(box_w, box_h));
-            b.setPosition(box_x, box_y);
+            b.setPosition(sf::Vector2f(box_x, box_y));
             b.setFillColor(live_on ? sf::Color(50, 110, 70, 220) : sf::Color(60, 60, 65, 210));
             b.setOutlineColor(live_on ? sf::Color(130, 220, 160, 235) : sf::Color(100, 100, 105, 220));
             b.setOutlineThickness(1);
             window->draw(b);
 
-            last_live_overrides_box_ = sf::FloatRect(box_x, box_y, box_w, box_h);
+            last_live_overrides_box_ = make_rect(box_x, box_y, box_w, box_h);
 
-            sf::Text tt;
+            sf::Text tt(font);
             tt.setFont(font);
             tt.setCharacterSize(12);
             tt.setFillColor(sf::Color(245, 245, 248));
-            tt.setPosition(box_x + 6.f, box_y + 1.f);
+            tt.setPosition(sf::Vector2f(box_x + 6.f, box_y + 1.f));
             tt.setString(live_on ? "LIVE (click -> NATIVE)" : "NATIVE (click -> LIVE)");
             window->draw(tt);
 
             // Petit suffixe version (debug visuel)
             const uint64_t ver = live_params_version_.load(std::memory_order_relaxed);
-            sf::Text vv;
+            sf::Text vv(font);
             vv.setFont(font);
             vv.setCharacterSize(12);
             vv.setFillColor(sf::Color(210, 210, 215));
-            vv.setPosition(box_x + box_w - 48.f, box_y + 1.f);
+            vv.setPosition(sf::Vector2f(box_x + box_w - 48.f, box_y + 1.f));
             vv.setString("v=" + std::to_string(ver));
             window->draw(vv);
         }
@@ -4371,16 +4487,16 @@ void Visualizer::renderMetrics() {
             const float box_x = static_cast<float>(metrics_x + label_w);
             const float box_y = y + 4.f;
 
-            sf::Text tt;
+            sf::Text tt(font);
             tt.setFont(font);
             tt.setCharacterSize(13);
             tt.setFillColor(sf::Color(225, 225, 235));
-            tt.setPosition(x0, y - 2.f);
+            tt.setPosition(sf::Vector2f(x0, y - 2.f));
             tt.setString("KL");
             window->draw(tt);
 
             sf::RectangleShape cb(sf::Vector2f(box, box));
-            cb.setPosition(box_x, box_y);
+            cb.setPosition(sf::Vector2f(box_x, box_y));
             cb.setFillColor(sf::Color(55, 55, 60, 210));
             cb.setOutlineColor(sf::Color(90, 90, 95, 220));
             cb.setOutlineThickness(1);
@@ -4388,18 +4504,18 @@ void Visualizer::renderMetrics() {
 
             if (live_ui_kl_enabled_) {
                 sf::RectangleShape mark(sf::Vector2f(box - 4.f, box - 4.f));
-                mark.setPosition(box_x + 2.f, box_y + 2.f);
+                mark.setPosition(sf::Vector2f(box_x + 2.f, box_y + 2.f));
                 mark.setFillColor(sf::Color(90, 200, 120, 220));
                 window->draw(mark);
             }
 
-            last_live_kl_enable_box_ = sf::FloatRect(box_x, box_y, box, box);
+            last_live_kl_enable_box_ = make_rect(box_x, box_y, box, box);
 
-            sf::Text st;
+            sf::Text st(font);
             st.setFont(font);
             st.setCharacterSize(13);
             st.setFillColor(sf::Color(225, 225, 235));
-            st.setPosition(box_x + box + 8.f, y - 2.f);
+            st.setPosition(sf::Vector2f(box_x + box + 8.f, y - 2.f));
             st.setString(live_ui_kl_enabled_ ? "enabled" : "disabled");
             window->draw(st);
         }
@@ -4453,7 +4569,7 @@ void Visualizer::renderMetrics() {
         // Texte dataset (si dispo): prompt brut + tokens + résumé encodage.
         if (show_prompt_text_ && has_dataset_text) {
             int y = extra_y + 8 * line_height;
-            const int y_max = static_cast<int>(area.top + area.height) - line_height;
+            const int y_max = static_cast<int>(area.position.y + area.size.y) - line_height;
             const size_t wrap_chars = static_cast<size_t>(std::max(30, panel_w / 8));
 
             auto drawWrapped = [&](const std::string& s, int max_lines_hint) {
@@ -4471,6 +4587,7 @@ void Visualizer::renderMetrics() {
             // Afficher autant que possible sans tronquer la source.
             // (La zone visible est bornée par la hauteur de la fenêtre.)
             drawWrapped("prompt: " + dataset_text_raw, 0);
+            drawWrapped("tags: " + dataset_text_tags, 4);
             drawWrapped("tokens: " + dataset_text_tokens, 4);
             drawWrapped("enc: " + dataset_text_encoded, 3);
         }
@@ -4493,7 +4610,7 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
     img_data.display_size = display_size;
 
     sf::Image sfml_image;
-    sfml_image.create(static_cast<unsigned>(w), static_cast<unsigned>(h));
+    sfml_image.resize(sf::Vector2u(static_cast<unsigned>(w), static_cast<unsigned>(h)));
 
     // Si la taille ne colle pas exactement aux canaux annoncés, tenter une correction
     // best-effort pour éviter des previews noires au premier rendu.
@@ -4540,7 +4657,7 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
             } else {
                 c = sf::Color(at(base + 0), at(base + 1), at(base + 2), force_opaque_alpha ? 255 : at(base + 3));
             }
-            sfml_image.setPixel(static_cast<unsigned>(xx), static_cast<unsigned>(yy), c);
+            sfml_image.setPixel(sf::Vector2u(static_cast<unsigned int>(static_cast<unsigned>(xx)), static_cast<unsigned int>(static_cast<unsigned>(yy))), c);
         }
     }
 
@@ -4557,12 +4674,12 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
 
         if (dw != src_w || dh != src_h) {
             sf::Image down;
-            down.create(dw, dh);
+            down.resize(sf::Vector2u(dw, dh));
             for (unsigned yy = 0; yy < dh; ++yy) {
                 const unsigned sy = (yy * src_h) / dh;
                 for (unsigned xx = 0; xx < dw; ++xx) {
                     const unsigned sx = (xx * src_w) / dw;
-                    down.setPixel(xx, yy, sfml_image.getPixel(sx, sy));
+                    down.setPixel(sf::Vector2u(static_cast<unsigned int>(xx), static_cast<unsigned int>(yy)), sfml_image.getPixel(sf::Vector2u(static_cast<unsigned int>(sx), static_cast<unsigned int>(sy))));
                 }
             }
             loaded = img_data.texture.loadFromImage(down);
@@ -4580,7 +4697,7 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
     const float sx = static_cast<float>(display_size) / static_cast<float>(w);
     const float sy = static_cast<float>(display_size) / static_cast<float>(h);
     const float scale = std::min(sx, sy);
-    img_data.sprite.setScale(scale, scale);
+    img_data.sprite.setScale(sf::Vector2f(scale, scale));
 }
 
 sf::Color Visualizer::getLossColor(float loss) {

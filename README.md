@@ -14,7 +14,7 @@
 | `develop` | [![unit-tests develop](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki develop](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 
 Version engine : **3.1.0**
-Révision documentation : **2026-07-01**
+Révision documentation : **2026-07-23**
 
 **Mímir est un AI Engine C++ de conception, d'entraînement et d'analyse de systèmes IA, pilotable par Lua ou JSON, avec runtime, mémoire, dataset, visualisation et sérialisation intégrés, dans une approche CPU-first orientée recherche et expérimentation.**
 
@@ -161,36 +161,94 @@ Schéma des flux d'exécution (SVG):
 ```bash
 ./bin/mimir --lua <script.lua>
 ./bin/mimir --conf <config.json>
+./bin/mimir --conf <config.json> --run <task>
 ./bin/mimir --conf <config.json> --override path.to.key=value
 ```
 
-En mode `--conf`, le runtime injecte automatiquement:
+#### Mode `--conf`
 
-- `CONF` (table Lua contenant tout le JSON),
-- `CONF_PATH` (chemin absolu de la config),
-- `CONF_DIR` (répertoire de la config),
-- `arg` (arguments de script, si définis dans `lua.scripts[i].args`).
+Charge un fichier JSON et exécute la section `lua.scripts` séquentiellement.
 
-Exemple de config minimale `--conf`:
+Le runtime injecte automatiquement dans chaque script Lua :
+
+| Variable Lua | Contenu |
+|---|---|
+| `CONF` | Table Lua contenant l'intégralité du JSON (après overrides) |
+| `CONF_PATH` | Chemin absolu du fichier de conf |
+| `CONF_DIR` | Répertoire du fichier de conf |
+| `arg` | Arguments de script (`lua.scripts[i].args`) |
+
+#### Mode `--run <task>` (avec `--conf`)
+
+Sélectionne une tâche nommée définie dans la section `tasks` du fichier de conf.
+Sans `--run`, la section `lua` racine est utilisée (comportement par défaut).
+
+```bash
+# Tâche par défaut (section lua racine)
+./bin/mimir --conf config.json
+
+# Tâche nommée
+./bin/mimir --conf config.json --run train
+./bin/mimir --conf config.json --run infer
+
+# Tâche + override à la volée
+./bin/mimir --conf config.json --run train --override training.learning_rate=5e-6
+```
+
+Si la tâche est introuvable, mimir liste les tâches disponibles avec leur description.
+
+#### Exemple de config `--conf` avec tâches
 
 ```json
 {
   "lua": {
-    "scripts": [
-      "scripts/templates/template_conf_load_and_train.lua"
-    ]
+    "scripts": ["scripts/training/train_vae_conv.lua"]
+  },
+  "tasks": {
+    "train": {
+      "description": "Entraînement complet",
+      "lua": { "scripts": ["scripts/training/train_vae_conv.lua"] }
+    },
+    "infer": {
+      "description": "Génération d'images",
+      "lua": {
+        "scripts": [{
+          "script": "scripts/inferences/infer_vae_conv.lua",
+          "args": ["--num-samples", "16"]
+        }]
+      }
+    }
   },
   "model": {
-    "architecture": "transformer",
-    "vocab_size": 4096,
-    "seq_len": 128,
-    "d_model": 256,
-    "num_layers": 4,
-    "num_heads": 8,
-    "mlp_hidden": 1024
-  }
+    "architecture": "vae_conv",
+    "image_w": 512, "image_h": 512, "image_c": 3,
+    "latent_h": 64, "latent_w": 64, "latent_c": 128,
+    "base_channels": 8
+  },
+  "training": {
+    "num_epochs": 35,
+    "learning_rate": 1e-5,
+    "optimizer": "adamw"
+  },
+  "visualization": { "enabled": true }
 }
 ```
+
+#### JSON Schema (`--conf`)
+
+Le fichier `configs/conf.schema.json` documente toutes les sections acceptées :
+
+| Section | Rôle |
+|---|---|
+| `lua` | Scripts Lua par défaut (sans `--run`) |
+| `tasks` | Tâches nommées sélectionnables via `--run` |
+| `model` | Config architecture — `architecture` détermine les champs valides |
+| `training` | Hyperparamètres d'entraînement |
+| `dataset` | Chemins et paramètres du dataset |
+| `inference` | Paramètres de génération |
+| `visualization` | Fenêtre SFML (lue par le runtime C++) |
+| `logging` | Affichage console (`show_htop_display`, etc.) |
+| `env` | Documentation des variables d'environnement shell |
 
 ---
 
@@ -221,7 +279,7 @@ Le registre inclut notamment:
 - GAN Latent
 - Transformer
 - Diffusion / Conditional Diffusion
-- SDXL / PonyXL
+- SDXL
 - CLIP
 - modèles HuggingFace
 - modèles externes SafeTensors
@@ -377,6 +435,7 @@ Installation détaillée (Linux/macOS/Windows, options CMake, troubleshooting):
 - **[CLI](./docs/01-Getting-Started/03-CLI.md)**
 - **[Config-driven scripting (`--conf`)](./docs/02-User-Guide/08-Config-Driven-Scripting.md)**
 - **[Cycle de vie modèle](./docs/02-User-Guide/02-Model-Lifecycle.md)**
+- **[Packages d’architecture MPK](./docs/02-User-Guide/15-MPK.md)**
 - **[API Reference](./docs/03-API-Reference/00-API-Overview.md)**
 - **[Index complet](./docs/00-INDEX.md)**
 
