@@ -21,6 +21,19 @@ public:
         AbstractRuntime* opencl,
         AbstractRuntime* cpu
     );
+    void setRuntimes(
+        AbstractRuntime* rocm,
+        AbstractRuntime* cuda,
+        AbstractRuntime* vulkan,
+        AbstractRuntime* opencl,
+        AbstractRuntime* fpga,
+        AbstractRuntime* cpu
+    );
+
+    AbstractRuntime* selectForwardRuntimeForLayer(
+        const Layer& layer, bool allow_host_fallback = false) const;
+    AbstractRuntime* selectBackwardRuntimeForLayer(
+        const Layer& layer, bool allow_host_fallback = false) const;
 
     // Activation callbacks are also ordered [ROCM, CUDA, VULKAN, OPENCL, CPU].
     // They may initialize runtimes lazily before dispatch.
@@ -47,6 +60,17 @@ public:
     bool voteBackwardLayerType(LayerType type) const;
 
     bool dispatchForwardLayer(
+        const std::vector<const std::vector<float>*>& inputs,
+        std::vector<std::vector<float>>& outputs,
+        const Layer& layer,
+        bool training,
+        AbstractRuntime** selected_runtime = nullptr
+    ) const;
+
+    // Execute the planner choice first, then lower native routes without
+    // retrying the failed preferred runtime.
+    bool dispatchForwardLayerPlanned(
+        AbstractRuntime* preferred,
         const std::vector<const std::vector<float>*>& inputs,
         std::vector<std::vector<float>>& outputs,
         const Layer& layer,

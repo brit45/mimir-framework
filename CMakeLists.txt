@@ -50,6 +50,19 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# Le build principal alimente ./bin pour rester compatible avec run_mimir.sh.
+# Les builds secondaires (notamment les builds CPU des tests du planner) gardent
+# leurs exécutables dans leur propre arbre afin de ne jamais écraser le binaire
+# de production avec une configuration matérielle différente.
+if(CMAKE_BINARY_DIR STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/build")
+    set(MIMIR_RUNTIME_OUTPUT_DIRECTORY_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+else()
+    set(MIMIR_RUNTIME_OUTPUT_DIRECTORY_DEFAULT "${CMAKE_BINARY_DIR}/bin")
+endif()
+set(MIMIR_RUNTIME_OUTPUT_DIRECTORY
+    "${MIMIR_RUNTIME_OUTPUT_DIRECTORY_DEFAULT}"
+    CACHE PATH "Directory for Mimir runtime executables")
+
 # ============================================================================
 # Détection des capacités hardware
 # ============================================================================
@@ -643,7 +656,7 @@ endif()
 
 # Installation dans bin/
 set_target_properties(mimir PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+    RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}"
 )
 
 # ==========================================================================
@@ -713,7 +726,7 @@ if(BUILD_MIMIR_STATIC)
     target_link_libraries(mimir_static PRIVATE mimir_core_static)
 
     set_target_properties(mimir_static PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}"
     )
 
     if(UNIX AND NOT APPLE)
@@ -740,7 +753,7 @@ if(MIMIR_ENABLE_FACE_RECOGNITION_TOOL)
         target_link_libraries(face_recognition_tool PRIVATE ${OpenCV_LIBS})
         target_include_directories(face_recognition_tool PRIVATE ${OpenCV_INCLUDE_DIRS})
         set_target_properties(face_recognition_tool PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+            RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}"
         )
         message(STATUS "Face recognition tool: enabled (${OpenCV_VERSION})")
     endif()

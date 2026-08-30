@@ -7,6 +7,7 @@ limites propres à chaque backend sans recompiler le projet.
 ## Sur cette page
 
 - [1) Runtime global et dispatch](#1-runtime-global-et-dispatch)
+- [Configuration JSON `env`](#configuration-json-env)
 - [2) Configuration par backend (CPU/CUDA/ROCM)](#2-configuration-par-backend-cpucudarocm)
 - [3) Vulkan/OpenCL (offload Linear/MatMul + Conv2d/ConvTranspose2d)](#3-vulkanopencl-offload-linearmatmul-conv2dconvtranspose2d)
 - [4) Planner et fusion](#4-planner-et-fusion)
@@ -27,6 +28,32 @@ Conventions :
 - Pour les booléens, utilisez préférentiellement `0` ou `1`.
 - Dans les parsers principaux (`RuntimeConfig::fromEnv`), les valeurs `0`, `false`, `no`, `off` désactivent; toute autre valeur non vide active.
 - Les variables marquées "injectée" sont posées par Mímir pour les bridges, pas destinées à être fixées manuellement dans un usage standard.
+
+## Configuration JSON `env`
+
+Les variables de cette page peuvent être placées dans la section racine `env`
+d'un fichier utilisé avec `--conf` ou `--config` :
+
+```json
+{
+  "env": {
+    "OMP_NUM_THREADS": 8,
+    "MIMIR_ACCEL_VERBOSE": 1,
+    "MIMIR_DISABLE_OPENCL": true
+  }
+}
+```
+
+L'ordre réel est : lecture JSON, application des `--override`, export de `env`,
+puis construction/exécution du run. La config a priorité sur le shell. Les
+valeurs acceptées sont chaîne, nombre ou booléen. `OMP_NUM_THREADS` déclenche en
+plus `omp_set_num_threads()` dans les builds OpenMP.
+
+> **Limitation**
+> Une variable consommée avant le chargement de la config ne peut pas modifier
+> rétroactivement cette phase. Par exemple, la verbosité du tee de logs est
+> choisie au tout début du processus; placez `MIMIR_CONSOLE_VERBOSE=1` dans le
+> shell si vous devez modifier ce démarrage précis.
 
 ## 1) Runtime global et dispatch
 

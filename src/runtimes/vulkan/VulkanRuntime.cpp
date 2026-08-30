@@ -100,6 +100,44 @@ bool VulkanRuntime::supportsForwardLayerType(const LayerType type) const {
     }
 }
 
+RuntimeCapabilityLevel VulkanRuntime::queryForwardCapability(const LayerType type) const {
+#ifndef ENABLE_VULKAN
+    return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
+                                          : RuntimeCapabilityLevel::Unsupported;
+#else
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Conv2d:
+        case LayerType::ConvTranspose2d:
+        case LayerType::Add:
+        case LayerType::Multiply:
+        case LayerType::ReLU:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+            return RuntimeCapabilityLevel::NativeOptimized;
+        case LayerType::Subtract:
+        case LayerType::Divide:
+        case LayerType::LeakyReLU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            return RuntimeCapabilityLevel::HostFallback;
+        default:
+            return RuntimeCapabilityLevel::Unsupported;
+    }
+#endif
+}
+
+RuntimeCapabilityLevel VulkanRuntime::queryBackwardCapability(const LayerType type) const {
+    (void)type;
+    return RuntimeCapabilityLevel::Unsupported;
+}
+
 bool VulkanRuntime::linearForward(
     const float* input,
     const float* weights,
@@ -115,6 +153,35 @@ bool VulkanRuntime::linearForward(
 #else
     if (!isInitialized() || !impl_) return false;
     return impl_->engine.linearForward(input, weights, bias_or_null, output, batch, in_f, out_f);
+#endif
+}
+
+bool VulkanRuntime::unaryChainForwardResident(
+    const float* input,
+    float* output,
+    int elements,
+    const std::vector<LayerType>& operations
+) {
+#ifndef ENABLE_VULKAN
+    (void)input; (void)output; (void)elements; (void)operations;
+    return false;
+#else
+    if (!isInitialized() || !impl_ || !input || !output || elements <= 0 || operations.empty()) {
+        return false;
+    }
+    std::vector<int> op_codes;
+    op_codes.reserve(operations.size());
+    for (const LayerType type : operations) {
+        switch (type) {
+            case LayerType::ReLU: op_codes.push_back(0); break;
+            case LayerType::SiLU: op_codes.push_back(1); break;
+            case LayerType::GELU: op_codes.push_back(2); break;
+            case LayerType::Sigmoid: op_codes.push_back(3); break;
+            case LayerType::Tanh: op_codes.push_back(4); break;
+            default: return false;
+        }
+    }
+    return impl_->engine.unaryChainForwardResident(input, output, elements, op_codes);
 #endif
 }
 

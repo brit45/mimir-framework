@@ -699,6 +699,166 @@ public:
         return runUnaryVectorKernel(tanh_pipe_, tanh_pl_, tanh_dsl_, tanh_dp_, in, out, n);
     }
 
+    // Executes a sequence of unary kernels while the intermediate values stay
+    // in Vulkan buffers. op codes: 0=ReLU, 1=SiLU, 2=GELU, 3=Sigmoid, 4=Tanh.
+    bool unaryChainForwardResident(
+        const float* in,
+        float* out,
+        int n,
+        const std::vector<int>& operations
+    ) {
+        std::lock_guard<std::recursive_mutex> lk(linear_mutex_);
+        if (!initialized || !in || !out || n <= 0 || operations.empty()) return false;
+
+        struct KernelSelection {
+            VkPipeline pipe = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkDescriptorSetLayout descriptors = VK_NULL_HANDLE;
+            VkDescriptorPool pool = VK_NULL_HANDLE;
+        };
+        auto select = [&](const int op, KernelSelection& selected) -> bool {
+            switch (op) {
+                case 0:
+                    if (!ensureReluKernel()) return false;
+                    selected = {relu_pipe_, relu_pl_, relu_dsl_, relu_dp_};
+                    return true;
+                case 1:
+                    if (!ensureSiluKernel()) return false;
+                    selected = {silu_pipe_, silu_pl_, silu_dsl_, silu_dp_};
+                    return true;
+                case 2:
+                    if (!ensureGeluKernel()) return false;
+                    selected = {gelu_pipe_, gelu_pl_, gelu_dsl_, gelu_dp_};
+                    return true;
+                case 3:
+                    if (!ensureSigmoidKernel()) return false;
+                    selected = {sigmoid_pipe_, sigmoid_pl_, sigmoid_dsl_, sigmoid_dp_};
+                    return true;
+                case 4:
+                    if (!ensureTanhKernel()) return false;
+                    selected = {tanh_pipe_, tanh_pl_, tanh_dsl_, tanh_dp_};
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+        VkBuffer buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+        VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+        auto cleanup_buffers = [&]() {
+            for (int i = 0; i < 2; ++i) {
+                if (buffers[i] != VK_NULL_HANDLE) vkDestroyBuffer(device, buffers[i], nullptr);
+                if (memories[i] != VK_NULL_HANDLE) vkFreeMemory(device, memories[i], nullptr);
+                buffers[i] = VK_NULL_HANDLE;
+                memories[i] = VK_NULL_HANDLE;
+            }
+        };
+        auto allocate_buffer = [&](const int index) -> bool {
+            VkBufferCreateInfo bi = {};
+            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bi.size = bytes;
+            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (vkCreateBuffer(device, &bi, nullptr, &buffers[index]) != VK_SUCCESS) return false;
+            VkMemoryRequirements req = {};
+            vkGetBufferMemoryRequirements(device, buffers[index], &req);
+            const uint32_t mt = findMemoryType(
+                physicalDevice, req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (mt == UINT32_MAX) return false;
+            VkMemoryAllocateInfo ai = {};
+            ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            ai.allocationSize = req.size;
+            ai.memoryTypeIndex = mt;
+            if (vkAllocateMemory(device, &ai, nullptr, &memories[index]) != VK_SUCCESS) return false;
+            return vkBindBufferMemory(device, buffers[index], memories[index], 0) == VK_SUCCESS;
+        };
+        if (!allocate_buffer(0) || !allocate_buffer(1)) {
+            cleanup_buffers();
+            return false;
+        }
+        void* mapped = nullptr;
+        if (vkMapMemory(device, memories[0], 0, bytes, 0, &mapped) != VK_SUCCESS) {
+            cleanup_buffers();
+            return false;
+        }
+        std::memcpy(mapped, in, bytes);
+        vkUnmapMemory(device, memories[0]);
+
+        int source = 0;
+        for (const int operation : operations) {
+            const int destination = 1 - source;
+            KernelSelection kernel;
+            if (!select(operation, kernel)) {
+                cleanup_buffers();
+                return false;
+            }
+            VkDescriptorSet ds = VK_NULL_HANDLE;
+            std::vector<VkDescriptorBufferInfo> infos(2);
+            infos[0] = {buffers[source], 0, static_cast<VkDeviceSize>(bytes)};
+            infos[1] = {buffers[destination], 0, static_cast<VkDeviceSize>(bytes)};
+            if (!allocAndWriteDescriptorSet(kernel.pool, kernel.descriptors, infos, ds)) {
+                cleanup_buffers();
+                return false;
+            }
+            VkCommandBufferAllocateInfo cbai = {};
+            cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            cbai.commandPool = cmd_pool_;
+            cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbai.commandBufferCount = 1;
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            if (vkAllocateCommandBuffers(device, &cbai, &cmd) != VK_SUCCESS) {
+                cleanup_buffers();
+                return false;
+            }
+            VkCommandBufferBeginInfo begin = {};
+            begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            bool ok = vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS;
+            if (ok) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, kernel.pipe);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                        kernel.layout, 0, 1, &ds, 0, nullptr);
+                const VecDims dims{static_cast<uint32_t>(n)};
+                vkCmdPushConstants(cmd, kernel.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                                   0, sizeof(VecDims), &dims);
+                vkCmdDispatch(cmd, (static_cast<uint32_t>(n) + 255u) / 256u, 1, 1);
+                ok = vkEndCommandBuffer(cmd) == VK_SUCCESS;
+            }
+            VkFence fence = VK_NULL_HANDLE;
+            if (ok) {
+                VkFenceCreateInfo fci = {};
+                fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+                ok = vkCreateFence(device, &fci, nullptr, &fence) == VK_SUCCESS;
+            }
+            if (ok) {
+                VkSubmitInfo submit = {};
+                submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                submit.commandBufferCount = 1;
+                submit.pCommandBuffers = &cmd;
+                ok = vkQueueSubmit(computeQueue, 1, &submit, fence) == VK_SUCCESS;
+                if (ok) ok = vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+            }
+            if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+            vkFreeCommandBuffers(device, cmd_pool_, 1, &cmd);
+            if (!ok) {
+                cleanup_buffers();
+                return false;
+            }
+            source = destination;
+        }
+
+        if (vkMapMemory(device, memories[source], 0, bytes, 0, &mapped) != VK_SUCCESS) {
+            cleanup_buffers();
+            return false;
+        }
+        std::memcpy(out, mapped, bytes);
+        vkUnmapMemory(device, memories[source]);
+        cleanup_buffers();
+        return true;
+    }
+
     bool conv2dForward(
         const float* in,
         const float* w,

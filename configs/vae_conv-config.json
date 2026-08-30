@@ -1,20 +1,20 @@
 {
-  "$schema": "configs/conf.schema.json",
+  "$schema": "conf.schema.json",
   "description": "Entraînement VAE convolutionnel générique v6 — 512×512, latent 128ch 64×64",
   "_doc": {
-    "usage": "mimir --conf vae_conv-config.json [--run <task>] [--override <key=val> ...]",
+    "usage": "./bin/mimir --conf configs/vae_conv-config.json [--run <task>] [--override <key=val> ...]",
     "tasks_disponibles": {
       "train": "Lancement de l'entraînement complet (tâche par défaut)",
       "infer": "Génération d'images depuis le dernier checkpoint",
       "resume": "Reprise de l'entraînement depuis le dernier checkpoint sauvegardé"
     },
     "exemples": [
-      "mimir --conf vae_conv-config.json",
-      "mimir --conf vae_conv-config.json --run train",
-      "mimir --conf vae_conv-config.json --run infer",
-      "mimir --conf vae_conv-config.json --run resume",
-      "mimir --conf vae_conv-config.json --override training.learning_rate=5e-6",
-      "mimir --conf vae_conv-config.json --run train --override model.base_channels=16"
+      "./bin/mimir --conf configs/vae_conv-config.json",
+      "./bin/mimir --conf configs/vae_conv-config.json --run train",
+      "./bin/mimir --conf configs/vae_conv-config.json --run infer",
+      "./bin/mimir --conf configs/vae_conv-config.json --run resume",
+      "./bin/mimir --conf configs/vae_conv-config.json --override training.learning_rate=5e-6",
+      "./bin/mimir --conf configs/vae_conv-config.json --run train --override model.base_channels=16"
     ],
     "sections": {
       "env": "Variables d'environnement à passer au shell AVANT le lancement (non appliquées par mimir). Servent de documentation / rappel.",
@@ -154,7 +154,7 @@
     "semantic_label_min_df": 2
   },
   "dataset": {
-    "root": "/run/media/brito/e580aa2a-30ca-4577-bc30-240b479f3af4/Images/"
+    "root": "datasets/images"
   },
   "visualization": {
     "enabled": true,

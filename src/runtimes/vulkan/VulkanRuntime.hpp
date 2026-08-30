@@ -31,6 +31,17 @@ public:
     ) override;
 
     bool supportsForwardLayerType(LayerType type) const override;
+    RuntimeCapabilityLevel queryForwardCapability(LayerType type) const override;
+    RuntimeCapabilityLevel queryBackwardCapability(LayerType type) const override;
+
+    // Initial residency slice: one upload, N native Vulkan unary kernels and
+    // one final download. No intermediate std::vector is materialized.
+    bool unaryChainForwardResident(
+        const float* input,
+        float* output,
+        int elements,
+        const std::vector<LayerType>& operations
+    );
 
 private:
     struct Impl;

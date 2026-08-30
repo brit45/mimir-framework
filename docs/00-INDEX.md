@@ -47,6 +47,7 @@ cmake --build build -j"$(nproc)"
 
 ## Prologue
 
+- [État réel du projet et matrice de maturité](00-PROJECT-STATUS.md)
 - [Philosophie du framework](00-Framework-Philosophy.md)
 - [Guide de style de la documentation](00-STYLE.md)
 - [Notes de version](../CHANGELOG.md)
@@ -84,6 +85,7 @@ cmake --build build -j"$(nproc)"
 - [Gestion de la mémoire](02-User-Guide/09-Memory.md)
 - [Scripts et exemples](02-User-Guide/10-Examples.md)
 - [Packages d’architecture MPK](02-User-Guide/15-MPK.md)
+- [Rapports Show-Graph et métriques](02-User-Guide/16-Show-Graph-Metrics.md)
 
 ## Modèles
 
@@ -115,6 +117,7 @@ cmake --build build -j"$(nproc)"
 - [Backends matériels](04-Architecture-Internals/03-Hardware-Backends.md)
 - [Runtimes GPU](04-Architecture-Internals/21-GPU-Runtimes.md)
 - [Accélération GPU](05-Advanced/05-GPU-Acceleration.md)
+- [Étude du runtime FPGA iCESugar Pro](05-Advanced/06-FPGA-iCESugar-Pro-Runtime-Study.md)
 - [Runtime allocator et scratchpads](04-Architecture-Internals/18-RuntimeAllocator-And-Scratchpads.md)
 - [Développer un runtime](07-Devs/04-Runtime-Development.md)
 
@@ -143,6 +146,7 @@ deux notions.
 - [Ajouter une architecture et ses outils](06-Contributing/02-New-Architecture-And-Tools.md)
 - [Étendre modèles, runtimes et fonctionnalités](06-Contributing/03-Extending-Models-Runtimes-And-Features.md)
 - [Ajouter une entrée de scripting](06-Contributing/04-Tutorial-Add-Python-Scripting-Entry.md)
+- [Préparer une publication GitHub](06-Contributing/05-Publishing-GitHub.md)
 
 ## Tutoriels
 
@@ -155,6 +159,7 @@ deux notions.
 - [Parcours complet](08-Tuto/06-Parcours-Complet-Framework.md)
 - [Valider VAEConv sans dataset](08-Tuto/07-Tuto-VAEConv-Sans-Dataset.md)
 - [Du registre au checkpoint](08-Tuto/08-Tuto-Registre-Pipeline-Checkpoint.md)
+- [Créer et inspecter un package MPK](08-Tuto/09-Tuto-Creer-MPK.md)
 
 ## Conventions essentielles
 

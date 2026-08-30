@@ -9,6 +9,11 @@
 #include "AsyncMonitor.hpp"
 #include "VizTextPayload.hpp"
 #include "Helpers.hpp"
+#if defined(MIMIR_ENABLE_FPGA_RUNTIME)
+#include "runtimes/fpga/FpgaRuntime.hpp"
+#include "runtimes/fpga/FpgaValidationRunner.hpp"
+#endif
+#include "training/VaeValidationFeedback.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -898,6 +903,31 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             if (ctx.modelConfig.contains("val_feedback_min_steps")) val_feedback_min_steps = ctx.modelConfig["val_feedback_min_steps"].get<int>();
         } catch (...) {}
 
+        VaeValidationFeedback::Config vae_feedback_config;
+        vae_feedback_config.enabled = val_feedback_enabled;
+        vae_feedback_config.lr_reward_factor = val_reward_factor;
+        vae_feedback_config.lr_penalty_factor = val_penalty_factor;
+        vae_feedback_config.lr_scale_min = val_lr_scale_min;
+        vae_feedback_config.lr_scale_max = val_lr_scale_max;
+        vae_feedback_config.improve_threshold = val_improve_thresh;
+        vae_feedback_config.min_steps = val_feedback_min_steps;
+        vae_feedback_config.initial_kl_beta = baseline_kl_beta;
+        vae_feedback_config.kl_beta_min = baseline_kl_beta * 0.05f;
+        vae_feedback_config.kl_beta_max = baseline_kl_beta * 2.0f;
+        try {
+            if (ctx.modelConfig.contains("val_kl_feedback_enabled")) vae_feedback_config.kl_enabled = ctx.modelConfig["val_kl_feedback_enabled"].get<bool>();
+            if (ctx.modelConfig.contains("val_kl_beta_min")) vae_feedback_config.kl_beta_min = ctx.modelConfig["val_kl_beta_min"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_beta_max")) vae_feedback_config.kl_beta_max = ctx.modelConfig["val_kl_beta_max"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_target_min")) vae_feedback_config.kl_target_min = ctx.modelConfig["val_kl_target_min"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_target_max")) vae_feedback_config.kl_target_max = ctx.modelConfig["val_kl_target_max"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_reward_factor")) vae_feedback_config.kl_reward_factor = ctx.modelConfig["val_kl_reward_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_penalty_factor")) vae_feedback_config.kl_penalty_factor = ctx.modelConfig["val_kl_penalty_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_plateau_factor")) vae_feedback_config.kl_plateau_factor = ctx.modelConfig["val_kl_plateau_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_collapse_factor")) vae_feedback_config.kl_collapse_factor = ctx.modelConfig["val_kl_collapse_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_excess_factor")) vae_feedback_config.kl_excess_factor = ctx.modelConfig["val_kl_excess_factor"].get<float>();
+        } catch (...) {}
+        VaeValidationFeedback vae_validation_feedback(vae_feedback_config);
+
         auto poll_viz_live_params = [&]() {
             if (!ctx.asyncMonitor) return;
             auto viz = ctx.asyncMonitor->getViz();
@@ -954,6 +984,24 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             return base * val_lr_scale;
         };
 
+        auto update_viz_runtime_params = [&](const Model::VAEStepStats* stats = nullptr) {
+            if (!ctx.asyncMonitor) return;
+            auto viz = ctx.asyncMonitor->getViz();
+            if (!viz) return;
+            float kl_beta = 0.0f;
+            int kl_warmup_steps = 0;
+            try {
+                if (ctx.modelConfig.contains("kl_beta")) kl_beta = ctx.modelConfig["kl_beta"].get<float>();
+                else if (ctx.modelConfig.contains("vae_kl_beta")) kl_beta = ctx.modelConfig["vae_kl_beta"].get<float>();
+                if (ctx.modelConfig.contains("kl_warmup_steps")) kl_warmup_steps = ctx.modelConfig["kl_warmup_steps"].get<int>();
+            } catch (...) {}
+            const float displayed_kl_beta = stats
+                ? std::max(0.0f, stats->kl_beta_effective)
+                : std::max(0.0f, kl_beta);
+            viz->updateRuntimeTrainParams(step_learning_rate(), opt.warmup_steps,
+                                          displayed_kl_beta, kl_warmup_steps);
+        };
+
         // Feedback de validation: récompense ou punit le modèle en ajustant val_lr_scale.
         // metric : valeur scalaire (inférieure = meilleure).
         auto apply_val_feedback = [&](float metric, int step) {
@@ -997,6 +1045,45 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             }
         };
 
+        auto apply_vae_val_feedback = [&](float reconstruction, float kl, int step) -> std::string {
+            const auto decision = vae_validation_feedback.update(
+                reconstruction, kl, step, !live_override_active);
+            val_lr_scale = decision.lr_scale;
+            if (decision.kl_changed && !live_override_active) {
+                ctx.modelConfig["kl_beta"] = decision.kl_beta;
+                if (ctx.currentModel) ctx.currentModel->modelConfig["kl_beta"] = decision.kl_beta;
+            }
+            update_viz_runtime_params();
+            if (ctx.asyncMonitor) {
+                auto viz = ctx.asyncMonitor->getViz();
+                if (viz) {
+                    viz->showValidationFeedback(
+                        decision.rewarded ? Visualizer::ValidationFeedbackIcon::Reward :
+                        decision.penalized ? Visualizer::ValidationFeedbackIcon::Penalty :
+                                  Visualizer::ValidationFeedbackIcon::None);
+                }
+            }
+            if (decision.action == VaeValidationFeedback::Action::Ignored) return "none";
+
+            const char* action = "first";
+            switch (decision.action) {
+                case VaeValidationFeedback::Action::Reward: action = "reward"; break;
+                case VaeValidationFeedback::Action::Penalty: action = "penalty"; break;
+                case VaeValidationFeedback::Action::Plateau: action = "plateau"; break;
+                case VaeValidationFeedback::Action::KlCollapse: action = "kl_collapse"; break;
+                case VaeValidationFeedback::Action::KlExcess: action = "kl_excess"; break;
+                default: break;
+            }
+            ctx.addLog(std::string("[vae_val_feedback] action=") + action +
+                       " recon=" + std::to_string(reconstruction) +
+                       " kl=" + std::to_string(kl) +
+                       " rel=" + std::to_string(decision.relative_change) +
+                       " lr_scale=" + std::to_string(decision.lr_scale) +
+                       " kl_beta=" + std::to_string(decision.kl_beta) +
+                       (live_override_active ? " kl_override=viz" : ""));
+            return action;
+        };
+
         // Perf stats pour la viz: time/mem/bps (best-effort).
         // - time: ms entre 2 updates successifs (approx temps/batch)
         // - bps: batches/sec (approx)
@@ -1034,6 +1121,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         auto monitor_step = [&](int epoch_1based, int batch_1based, int total_batches, const Model::VAEStepStats& st) {
             if (!ctx.asyncMonitor) return;
 
+            update_viz_runtime_params(&st);
+
             AsyncMonitor::Metrics m;
             m.epoch = epoch_offset + epoch_1based;
             m.total_epochs = total_epochs_display;
@@ -1041,7 +1130,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             m.total_batches = total_batches;
             m.loss = st.loss;
             m.avg_loss = st.loss;
-            m.lr = opt.getCurrentLR();
+            m.lr = step_learning_rate();
             m.mse = st.mse;
             m.kl = st.kl;
             m.kl_beta_effective = st.kl_beta_effective;
@@ -1252,13 +1341,27 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             float validate_holdout_frac = 0.0f;
             int validate_holdout_items = 0;
             bool validate_holdout = true;
+            bool fpga_validation_enabled = true;
+            int fpga_validation_every_steps = 0;
             try {
                 if (ctx.modelConfig.contains("validate_every_steps")) validate_every_steps = std::max(0, ctx.modelConfig["validate_every_steps"].get<int>());
                 if (ctx.modelConfig.contains("validate_items")) validate_items = std::max(0, ctx.modelConfig["validate_items"].get<int>());
                 if (ctx.modelConfig.contains("validate_holdout_frac")) validate_holdout_frac = ctx.modelConfig["validate_holdout_frac"].get<float>();
                 if (ctx.modelConfig.contains("validate_holdout_items")) validate_holdout_items = std::max(0, ctx.modelConfig["validate_holdout_items"].get<int>());
                 if (ctx.modelConfig.contains("validate_holdout")) validate_holdout = ctx.modelConfig["validate_holdout"].get<bool>();
+                if (ctx.modelConfig.contains("fpga_validation_enabled")) fpga_validation_enabled = ctx.modelConfig["fpga_validation_enabled"].get<bool>();
+                if (ctx.modelConfig.contains("fpga_validation_every_steps")) fpga_validation_every_steps = std::max(0, ctx.modelConfig["fpga_validation_every_steps"].get<int>());
             } catch (...) {
+            }
+            if (fpga_validation_every_steps <= 0) fpga_validation_every_steps = validate_every_steps;
+#if !defined(MIMIR_ENABLE_FPGA_RUNTIME)
+            (void)fpga_validation_enabled;
+#endif
+            if (ctx.asyncMonitor) {
+                if (auto viz = ctx.asyncMonitor->getViz()) {
+                    viz->updateRuntimeValidationEnabled(
+                        validate_every_steps > 0 && validate_items > 0);
+                }
             }
             validate_holdout_frac = std::clamp(validate_holdout_frac, 0.0f, 0.95f);
 
@@ -1412,6 +1515,180 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 }
             }
 
+            // Le probe FPGA faisait partie du snapshot de référence, mais il
+            // dépend de l'extension Model/FpgaRuntime optionnelle. Conserver la
+            // boucle d'entraînement identique et compiler le probe seulement
+            // lorsque cette extension est activée dans le cœur courant.
+#if defined(MIMIR_ENABLE_FPGA_RUNTIME)
+            constexpr size_t fpga_validation_rows = 8;
+            constexpr size_t fpga_validation_columns = 64;
+            std::vector<int8_t> fpga_validation_weights;
+            std::unique_ptr<FpgaValidationRunner> fpga_validation_runner;
+            bool fpga_validation_active = false;
+            std::string fpga_validation_log_path;
+
+            if (fpga_validation_enabled && fpga_validation_every_steps > 0 &&
+                !val_indices.empty() && image_c == 3 && ctx.currentModel &&
+                ctx.currentModel->initializeFpgaComputeEngine()) {
+                FpgaRuntime* fpga_runtime = ctx.currentModel->fpgaComputeEngine();
+                if (fpga_runtime &&
+                    (fpga_runtime->capabilities().operations &
+                     Mimir::FpgaProtocol::ResidentMatrixVectorInt8) != 0) {
+                    fpga_validation_weights.resize(
+                        fpga_validation_rows * fpga_validation_columns
+                    );
+                    for (size_t row = 0; row < fpga_validation_rows; ++row) {
+                        for (size_t column = 0; column < fpga_validation_columns; ++column) {
+                            fpga_validation_weights[row * fpga_validation_columns + column] =
+                                static_cast<int8_t>(
+                                    static_cast<int>((row * 13 + column * 5) % 31) - 15
+                                );
+                        }
+                    }
+                    if (fpga_runtime->uploadInt8Matrix(
+                            fpga_validation_weights.data(),
+                            fpga_validation_rows,
+                            fpga_validation_columns)) {
+                        fpga_validation_runner =
+                            std::make_unique<FpgaValidationRunner>(*fpga_runtime);
+                        fpga_validation_active = true;
+                        const std::filesystem::path log_dir = checkpoint_dir.empty()
+                            ? std::filesystem::path(".")
+                            : std::filesystem::path(checkpoint_dir);
+                        fpga_validation_log_path =
+                            (log_dir / "fpga_validation.jsonl").string();
+                        ctx.addLog(
+                            "FPGA validation probe actif: holdout 8x8 INT8, every=" +
+                            std::to_string(fpga_validation_every_steps) + " steps"
+                        );
+                    }
+                }
+            }
+
+            auto collect_fpga_validation = [&](bool wait) {
+                if (!fpga_validation_runner) return;
+                if (wait) fpga_validation_runner->wait();
+                const auto result = fpga_validation_runner->poll();
+                if (!result) return;
+
+                const bool exact = result->success && result->exact;
+                json event;
+                event["type"] = "fpga_validation_probe";
+                event["training_step"] = result->training_step;
+                event["sample"] = result->sample_id;
+                event["input_checksum"] = result->input_checksum;
+                event["transport_ok"] = result->success;
+                event["exact"] = exact;
+                event["outputs"] = result->outputs;
+                if (!fpga_validation_log_path.empty()) {
+                    try {
+                        const std::filesystem::path log_path(fpga_validation_log_path);
+                        std::error_code ec;
+                        std::filesystem::create_directories(log_path.parent_path(), ec);
+                        std::ofstream log_file(log_path, std::ios::app);
+                        if (log_file) log_file << event.dump() << '\n';
+                    } catch (...) {
+                    }
+                }
+
+                ctx.addLog(
+                    std::string("FPGA validation step=") +
+                    std::to_string(result->training_step) +
+                    " sample=" + result->sample_id +
+                    (exact ? " PASS" : " FAIL")
+                );
+                if (!exact) {
+                    fpga_validation_active = false;
+                    ctx.addLog(
+                        "FPGA validation désactivée pour cette session après un résultat non exact"
+                    );
+                }
+            };
+
+            auto submit_fpga_validation = [&](int step) {
+                if (!fpga_validation_active || !fpga_validation_runner ||
+                    fpga_validation_runner->busy() || val_indices.empty()) {
+                    return;
+                }
+
+                const size_t sample_position =
+                    (static_cast<size_t>(step / std::max(1, fpga_validation_every_steps)) - 1) %
+                    val_indices.size();
+                DatasetItem& fpga_item =
+                    ctx.currentDataset[static_cast<size_t>(val_indices[sample_position])];
+                if (!fpga_item.loadImageRGB(image_w, image_h) ||
+                    !fpga_item.img_loaded ||
+                    fpga_item.img.size() !=
+                        static_cast<size_t>(image_w) * static_cast<size_t>(image_h) * 3) {
+                    return;
+                }
+
+                std::vector<uint8_t> resized(fpga_validation_columns * 3);
+                resizeBicubicRGB_SRGBLinear(
+                    fpga_item.img.data(), image_w, image_h,
+                    resized.data(), 8, 8
+                );
+                FpgaValidationRunner::DatasetInput dataset_input;
+                dataset_input.image_rgb = std::move(resized);
+
+                if ((!fpga_item.text_file.empty() || !fpga_item.text_inline.empty()) &&
+                    !fpga_item.text.has_value()) {
+                    fpga_item.loadText();
+                }
+                if (fpga_item.text.has_value() && ctx.currentTokenizer) {
+                    // Le vocabulaire est compose/hydrate par le chemin dataset
+                    // existant; le probe FPGA ne le modifie pas.
+                    dataset_input.text_token_ids =
+                        ctx.currentTokenizer->tokenize(*fpga_item.text);
+                    dataset_input.tokenizer_vocab_size =
+                        ctx.currentTokenizer->getVocabSize();
+                }
+                if (!fpga_item.audio_file.empty() && !fpga_item.audio_loaded) {
+                    fpga_item.loadAudio();
+                }
+                if (fpga_item.audio_is_pcm_s16le_stereo_48k) {
+                    dataset_input.audio_pcm_s16le_stereo = fpga_item.audio_bytes;
+                }
+                if (!fpga_item.video_file.empty() && !fpga_item.video_loaded) {
+                    fpga_item.loadVideo();
+                }
+                if (fpga_item.video_is_rgb24_first_frame) {
+                    dataset_input.video_rgb = fpga_item.video_bytes;
+                }
+
+                std::vector<float> normalized_input;
+                if (!FpgaValidationRunner::composeDatasetInput(
+                        dataset_input, fpga_validation_columns, normalized_input)) {
+                    return;
+                }
+                std::vector<int32_t> expected(fpga_validation_rows, 0);
+                std::vector<int8_t> input;
+                if (!FpgaValidationRunner::quantizeNormalizedInput(
+                        normalized_input, input)) {
+                    return;
+                }
+                for (size_t column = 0; column < fpga_validation_columns; ++column) {
+                    for (size_t row = 0; row < fpga_validation_rows; ++row) {
+                        expected[row] += static_cast<int32_t>(input[column]) *
+                            static_cast<int32_t>(
+                                fpga_validation_weights[row * fpga_validation_columns + column]
+                            );
+                    }
+                }
+
+                (void)fpga_validation_runner->submit(
+                    static_cast<uint64_t>(step),
+                    std::move(input),
+                    std::move(expected),
+                    fpga_item.image_file
+                );
+            };
+#else
+            bool fpga_validation_active = false;
+            auto collect_fpga_validation = [](bool) {};
+            auto submit_fpga_validation = [](int) {};
+#endif
+
             const int use_n = (int)train_indices.size();
             opt.total_steps = std::max(1, epochs * std::max(1, use_n));
 
@@ -1435,15 +1712,49 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             auto compute_val_recon = [&](const std::vector<float>& pred, const std::vector<float>& target, int recon_n) -> float {
                 if (recon_n <= 0) return 0.0f;
-                double acc = 0.0;
-                if (recon_loss_type == "l1" || recon_loss_type == "mae") {
-                    for (int i = 0; i < recon_n; ++i) {
-                        const double d = (double)pred[(size_t)i] - (double)target[(size_t)i];
-                        acc += std::abs(d);
+                std::string loss_type = recon_loss_type;
+                std::transform(loss_type.begin(), loss_type.end(), loss_type.begin(),
+                               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+                float charbonnier_eps = 1e-3f;
+                float huber_delta = 1.0f;
+                float nll_sigma = 1.0f;
+                try {
+                    if (ctx.modelConfig.contains("charbonnier_eps")) {
+                        charbonnier_eps = std::max(
+                            1e-12f, ctx.modelConfig["charbonnier_eps"].get<float>());
                     }
-                } else {
-                    for (int i = 0; i < recon_n; ++i) {
-                        const double d = (double)pred[(size_t)i] - (double)target[(size_t)i];
+                    if (ctx.modelConfig.contains("huber_delta")) {
+                        huber_delta = std::max(
+                            1e-6f, ctx.modelConfig["huber_delta"].get<float>());
+                    }
+                    if (ctx.modelConfig.contains("nll_sigma")) {
+                        nll_sigma = std::max(
+                            1e-6f, ctx.modelConfig["nll_sigma"].get<float>());
+                    }
+                } catch (...) {
+                }
+
+                double acc = 0.0;
+                for (int i = 0; i < recon_n; ++i) {
+                    const double d = static_cast<double>(pred[static_cast<size_t>(i)]) -
+                                     static_cast<double>(target[static_cast<size_t>(i)]);
+                    if (loss_type == "l1" || loss_type == "mae") {
+                        acc += std::abs(d);
+                    } else if (loss_type == "charbonnier") {
+                        const double eps = static_cast<double>(charbonnier_eps);
+                        acc += std::sqrt(d * d + eps * eps);
+                    } else if (loss_type == "huber" || loss_type == "smoothl1") {
+                        const double abs_d = std::abs(d);
+                        const double delta = static_cast<double>(huber_delta);
+                        acc += abs_d <= delta
+                            ? 0.5 * d * d
+                            : delta * (abs_d - 0.5 * delta);
+                    } else if (loss_type == "gaussian_nll" ||
+                               loss_type == "nll_gaussian") {
+                        const double sigma = static_cast<double>(nll_sigma);
+                        const double variance = sigma * sigma;
+                        acc += 0.5 * (d * d / variance + std::log(variance));
+                    } else {
                         acc += d * d;
                     }
                 }
@@ -1628,7 +1939,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
 
                     // Validation: forward-only sur un petit holdout, puis push dans Generated.
-                    if (validate_every_steps > 0 && validate_items > 0 && !val_indices.empty() && (global_step % validate_every_steps) == 0) {
+                    bool validation_runtime_enabled = validate_every_steps > 0 && validate_items > 0;
+                    if (ctx.asyncMonitor) {
+                        if (auto viz = ctx.asyncMonitor->getViz()) {
+                            // Initialise aussi une Viz apparue après le parsing de la config.
+                            // La méthode respecte ensuite le choix manuel (version > 0).
+                            viz->updateRuntimeValidationEnabled(validation_runtime_enabled);
+                            validation_runtime_enabled = viz->validationEnabledSnapshot();
+                        }
+                    }
+                    if (validation_runtime_enabled && validate_every_steps > 0 && validate_items > 0 && !val_indices.empty() && (global_step % validate_every_steps) == 0) {
                         const int image_dim = (int)expected_u8;
                         int latent_dim = 0;
                         try {
@@ -1652,6 +1972,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         bool val_ok = true;
 
                         for (int vi = 0; vi < (int)val_pick.size(); ++vi) {
+                            if (ctx.asyncMonitor) {
+                                if (auto viz = ctx.asyncMonitor->getViz(); viz && !viz->validationEnabledSnapshot()) {
+                                    val_ok = false;
+                                    break;
+                                }
+                            }
                             if (ctx.asyncMonitor && ctx.asyncMonitor->consumeStopTrainingRequested()) {
                                 val_ok = false;
                                 stop_requested = true;
@@ -1727,10 +2053,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                         const float final_recon = (done > 0) ? (float)(acc_recon / (double)done) : 0.0f;
                         const float final_kl = (done > 0) ? (float)(acc_kl / (double)done) : 0.0f;
-                        if (ctx.asyncMonitor) ctx.asyncMonitor->updateValidation(false, global_step, done, total, true, val_ok, final_recon, final_kl, 0.0f);
-
                         // Calibration: récompense / punition selon l'évolution de la loss de reconstruction VAE.
-                        if (val_ok && done > 0) apply_val_feedback(final_recon, global_step);
+                        std::string val_feedback = "none";
+                        if (val_ok && done > 0) {
+                            val_feedback = apply_vae_val_feedback(final_recon, final_kl, global_step);
+                        }
+                        if (ctx.asyncMonitor) {
+                            ctx.asyncMonitor->updateValidation(false, global_step, done, total,
+                                                               true, val_ok, final_recon, final_kl,
+                                                               0.0f, val_feedback);
+                        }
 
                         // Backbone readiness: heuristique basée sur validation.
                         if (backbone_ready_enabled && val_ok && done > 0 && !backbone_ready_written) {
@@ -1829,6 +2161,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         if (stop_requested) {
                             break;
                         }
+                    }
+
+                    collect_fpga_validation(false);
+                    if (fpga_validation_active && fpga_validation_every_steps > 0 &&
+                        (global_step % fpga_validation_every_steps) == 0) {
+                        submit_fpga_validation(global_step);
                     }
 
                     // VIZ: pousser le contexte dataset + blocs uniquement tous les log_every steps
@@ -1942,6 +2280,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 }
             }
 
+            collect_fpga_validation(true);
+
             if (trained_steps_total == 0) {
                 lua_pushboolean(L, false);
                 lua_pushstring(L, "Aucun batch n'a ete entraine (0 step). Verifiez dataset_root, acces fichiers image, et preload/caching des images.");
@@ -2013,6 +2353,47 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 }
                 // Important UX: même si aucun tap n'est émis, vider les frames précédentes.
                 ctx.asyncMonitor->setLayerBlockImages(frames);
+            };
+
+            auto push_vgg_context_and_output = [&](const DatasetItem& item,
+                                                   const std::vector<float>& features,
+                                                   int dataset_index) {
+                if (!viz_active || !ctx.asyncMonitor || ctx.asyncMonitor->getViz() == nullptr) return;
+
+                // Context: image RGB réellement consommée par ce step.
+                const size_t expected_context_u8 = static_cast<size_t>(image_w) *
+                    static_cast<size_t>(image_h) * static_cast<size_t>(image_c);
+                if (item.img_loaded && item.img.size() == expected_context_u8) {
+                    ctx.asyncMonitor->setDatasetImage(
+                        item.img,
+                        image_w,
+                        image_h,
+                        image_c,
+                        "vgg16_feat/input/dataset/rgb/i=" + std::to_string(dataset_index));
+                }
+
+                // Sortie vgg16_feat: le modèle produit un vecteur perceptuel et non
+                // une image. On le projette en grille carrée 1 canal, normalisée
+                // autour de zéro, pour alimenter Context/compréhension et Sortie.
+                if (features.empty()) return;
+                const int side = std::max(1, static_cast<int>(std::ceil(
+                    std::sqrt(static_cast<double>(features.size())))));
+                std::vector<uint8_t> heatmap(static_cast<size_t>(side * side), 127);
+                float max_abs = 0.0f;
+                for (float value : features) {
+                    if (std::isfinite(value)) max_abs = std::max(max_abs, std::fabs(value));
+                }
+                const float inv = 1.0f / (max_abs + 1e-6f);
+                for (size_t i = 0; i < features.size(); ++i) {
+                    const float value = std::isfinite(features[i]) ? features[i] : 0.0f;
+                    const float normalized = 0.5f + 0.5f * std::tanh(value * inv);
+                    heatmap[i] = static_cast<uint8_t>(std::clamp(
+                        static_cast<int>(std::lround(normalized * 255.0f)), 0, 255));
+                }
+
+                const std::string label = "vgg16_feat/output/perceptual_features";
+                ctx.asyncMonitor->setUnderstandingImage(heatmap, side, side, 1, label);
+                ctx.asyncMonitor->addImage(heatmap, side, side, 1, label);
             };
 
             // Filter usable items
@@ -2170,6 +2551,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                     // Viz taps (throttled)
                     if (viz_taps_every_steps > 0 && (global_step % viz_taps_every_steps) == 0) {
+                        push_vgg_context_and_output(item, pred, indices[(size_t)k]);
                         push_viz_taps();
                     }
 

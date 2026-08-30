@@ -173,6 +173,16 @@ bool CpuRuntime::supportsBackwardLayerType(const LayerType type) const {
     return false;
 }
 
+RuntimeCapabilityLevel CpuRuntime::queryForwardCapability(const LayerType type) const {
+    return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::Native
+                                          : RuntimeCapabilityLevel::Unsupported;
+}
+
+RuntimeCapabilityLevel CpuRuntime::queryBackwardCapability(const LayerType type) const {
+    return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::Native
+                                           : RuntimeCapabilityLevel::Unsupported;
+}
+
 bool CpuRuntime::backwardLayer(
     const std::vector<const std::vector<float>*>& inputs,
     const std::vector<const std::vector<float>*>& grad_outputs,

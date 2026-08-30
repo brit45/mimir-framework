@@ -62,12 +62,41 @@ mimir_add_test(ModelTest.TrainStepFreeze             test_model_train_step_freez
 mimir_add_test(FrameworkTest.DType                   test_dtype.cpp)
 mimir_add_test(FrameworkTest.PlannerLifetimes        test_planner_lifetimes.cpp)
 mimir_add_test(FrameworkTest.PlannerFusionAndScratch test_planner_fusion_and_scratch.cpp)
+mimir_add_test(FrameworkTest.RuntimeCapabilities    test_runtime_capabilities.cpp)
+mimir_add_test(FrameworkTest.ExecutionPlan          test_execution_plan.cpp)
+mimir_add_test(FrameworkTest.PlannerEquivalence     test_planner_equivalence.cpp)
+mimir_add_test(ModelTest.VAEValidationFeedback     test_vae_validation_feedback.cpp)
 
 mimir_add_test(RuntimeTest.MathLinear      test_runtime_math_linear.cpp)
 mimir_add_test(RuntimeTest.MathConv2d     test_runtime_math_conv2d.cpp)
 mimir_add_test(RuntimeTest.MathNorms      test_runtime_math_norms.cpp)
 mimir_add_test(RuntimeTest.MathAttention  test_runtime_math_attention.cpp)
+mimir_add_test(RuntimeTest.PixelShuffle   test_runtime_pixel_shuffle.cpp)
 mimir_add_test(RuntimeTest.NMS            test_runtime_nms.cpp)
 mimir_add_test(AutogradTest.Numerical     test_autograd_numerical.cpp)
 mimir_add_test(ModelTest.VAEConvContract  test_vae_conv_contract.cpp)
 mimir_add_test(ModelTest.VGG16FeatEncNorm test_vgg16_feat_enc_norm.cpp)
+
+# Le runtime FPGA n'est pas encore composé dans le routeur global. Ces tests
+# compilent néanmoins ses composants isolés afin d'éviter que le prototype
+# matériel dérive silencieusement.
+add_executable(RuntimeTest.FpgaDetection
+    test_runtime_fpga_detection.cpp
+    test_log_stub.cpp
+    ../src/runtimes/fpga/FpgaRuntime.cpp
+)
+target_compile_features(RuntimeTest.FpgaDetection PRIVATE cxx_std_17)
+target_link_libraries(RuntimeTest.FpgaDetection PRIVATE mimir_core)
+add_test(NAME RuntimeTest.FpgaDetection COMMAND RuntimeTest.FpgaDetection)
+set_tests_properties(RuntimeTest.FpgaDetection PROPERTIES TIMEOUT 15)
+
+add_executable(RuntimeTest.FpgaValidationRunner
+    test_fpga_validation_runner.cpp
+    test_log_stub.cpp
+    ../src/runtimes/fpga/FpgaRuntime.cpp
+    ../src/runtimes/fpga/FpgaValidationRunner.cpp
+)
+target_compile_features(RuntimeTest.FpgaValidationRunner PRIVATE cxx_std_17)
+target_link_libraries(RuntimeTest.FpgaValidationRunner PRIVATE mimir_core)
+add_test(NAME RuntimeTest.FpgaValidationRunner COMMAND RuntimeTest.FpgaValidationRunner)
+set_tests_properties(RuntimeTest.FpgaValidationRunner PROPERTIES TIMEOUT 15)
