@@ -1,3 +1,4 @@
+---@class MimirCausalTokenizerModule
 local M = {}
 
 local function readable(path)
@@ -51,6 +52,9 @@ local function tokenizer_compatibility(model_vocab, padding_idx, probe_text)
   return true, nil, tokens
 end
 
+---@param options MimirCausalTokenizerOptions
+---@return TokenIds tokens
+---@return MimirCausalTokenizerInfo info
 function M.ensure(options)
   assert(type(options) == "table", "causal tokenizer options must be a table")
   local corpus = assert(options.corpus, "causal tokenizer corpus is required")

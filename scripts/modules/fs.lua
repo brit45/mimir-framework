@@ -1,5 +1,6 @@
 -- Cross-platform filesystem helpers for Lua scripts (Linux/macOS/Windows).
 
+---@class MimirFSModule
 local FS = {}
 
 local path_sep = package.config:sub(1, 1)
