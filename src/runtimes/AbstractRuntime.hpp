@@ -10,6 +10,33 @@
 
 struct Layer;
 
+enum class RuntimeKind : uint8_t {
+    Unknown = 0,
+    CPU,
+    Vulkan,
+    OpenCL,
+    CUDA,
+    ROCm,
+    FPGA,
+};
+
+enum class RuntimeCapabilityLevel : uint8_t {
+    Unsupported = 0,
+    HostFallback,
+    Native,
+    NativeOptimized,
+};
+
+struct RuntimeCapability {
+    RuntimeCapabilityLevel forward = RuntimeCapabilityLevel::Unsupported;
+    RuntimeCapabilityLevel backward = RuntimeCapabilityLevel::Unsupported;
+};
+
+inline bool runtimeCapabilityIsNative(const RuntimeCapabilityLevel level) {
+    return level == RuntimeCapabilityLevel::Native ||
+           level == RuntimeCapabilityLevel::NativeOptimized;
+}
+
 struct RuntimeConfig {
     // Nom du backend (ex: "CUDA", "ROCM", "VULKAN", "OPENCL").
     std::string backend;
@@ -111,6 +138,13 @@ public:
     // la famille d'ops d'un LayerType donné.
     virtual bool supportsForwardLayerType(LayerType type) const;
     virtual bool supportsBackwardLayerType(LayerType type) const;
+
+    virtual RuntimeCapabilityLevel queryForwardCapability(LayerType type) const;
+    virtual RuntimeCapabilityLevel queryBackwardCapability(LayerType type) const;
+    RuntimeCapability queryCapability(LayerType type) const {
+        return {queryForwardCapability(type), queryBackwardCapability(type)};
+    }
+    virtual bool supportsKernelFusion(LayerType producer, LayerType consumer) const;
 
     // Routeur central: interroge les runtimes par ordre de priorité fourni.
     // Sélectionne le premier runtime initialisé qui supporte l'op.

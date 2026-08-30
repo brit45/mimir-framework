@@ -1,7 +1,17 @@
 #!/bin/bash
 
-export MIMIR_ALLOCATOR_LOG=1
-export MIMIR_ALLOCATOR_LOG_VERBOSE=1
+export MIMIR_ALLOCATOR_LOG=0
+export MIMIR_ALLOCATOR_LOG_VERBOSE=0
+
+# Global execution planner (override possible via environment).
+export MIMIR_ENABLE_PLANNER="${MIMIR_ENABLE_PLANNER:-1}"
+export MIMIR_PLANNER_MODE="${MIMIR_PLANNER_MODE:-legacy}" # legacy | static | cost
+export MIMIR_PLANNER_BUFFER_REUSE="${MIMIR_PLANNER_BUFFER_REUSE:-0}"
+export MIMIR_PLANNER_FUSION="${MIMIR_PLANNER_FUSION:-1}"
+export MIMIR_PLANNER_COST_MODEL="${MIMIR_PLANNER_COST_MODEL:-1}"
+export MIMIR_PLANNER_DUMP="${MIMIR_PLANNER_DUMP:-0}"
+export MIMIR_PLANNER_JSON="${MIMIR_PLANNER_JSON:-.mimir-spill/execution-plan.json}"
+export MIMIR_PLANNER_DEVICE_RESIDENCY="${MIMIR_PLANNER_DEVICE_RESIDENCY:-0}"
 
 # OpenCL Rusticl (AMD/Mesa): activer automatiquement sur iGPU AMD.
 # Override possible: RUSTICL_ENABLE=... ./run_mimir.sh
@@ -44,28 +54,25 @@ if [ -z "${MIMIR_DISABLE_ROCM:-}" ]; then
 	fi
 fi
 
-# Afficher la configuration
-echo "╔════════════════════════════════════════════════╗"
-echo "║   LANCEMENT MÍMIR AVEC CONFIGURATION OPTIMALE  ║"
-echo "╚════════════════════════════════════════════════╝"
-echo ""
-echo "Configuration OpenMP:"
-echo "  OMP_NUM_THREADS=$OMP_NUM_THREADS/$NPROC"
-echo "  OMP_PROC_BIND=$OMP_PROC_BIND"
-echo "  OMP_PLACES=$OMP_PLACES"
-echo "  OMP_SCHEDULE=$OMP_SCHEDULE"
-echo "  OMP_NESTED=$OMP_NESTED"
-echo "  OMP_MAX_ACTIVE_LEVELS=$OMP_MAX_ACTIVE_LEVELS"
-echo "  OMP_WAIT_POLICY=$OMP_WAIT_POLICY"
-echo "  OMP_DYNAMIC=$OMP_DYNAMIC"
-echo "  GOMP_CPU_AFFINITY=$GOMP_CPU_AFFINITY"
-echo "  MIMIR_DISABLE_ROCM=$MIMIR_DISABLE_ROCM (override: MIMIR_FORCE_ROCM=1)"
-echo "  RUSTICL_ENABLE=$RUSTICL_ENABLE"
-echo ""
-echo ""
-echo "Vérifier avec: top -p \$(pgrep mimir)"
-echo "Ou: ps -eLf | grep mimir | wc -l  (doit montrer $OMP_NUM_THREADS)"
-echo ""
+# Sortie concise par défaut. MIMIR_LAUNCH_VERBOSE=1 restaure le diagnostic
+# complet du lanceur; MIMIR_CONSOLE_VERBOSE=1 restaure toutes les lignes du
+# framework (les fichiers logs/*.log restent toujours complets).
+if [ "${MIMIR_LAUNCH_VERBOSE:-0}" = "1" ]; then
+	echo "Configuration OpenMP:"
+	echo "  OMP_NUM_THREADS=$OMP_NUM_THREADS/$NPROC"
+	echo "  OMP_PROC_BIND=$OMP_PROC_BIND"
+	echo "  OMP_PLACES=$OMP_PLACES"
+	echo "  OMP_SCHEDULE=$OMP_SCHEDULE"
+	echo "  OMP_NESTED=$OMP_NESTED"
+	echo "  OMP_MAX_ACTIVE_LEVELS=$OMP_MAX_ACTIVE_LEVELS"
+	echo "  OMP_WAIT_POLICY=$OMP_WAIT_POLICY"
+	echo "  OMP_DYNAMIC=$OMP_DYNAMIC"
+	echo "  GOMP_CPU_AFFINITY=$GOMP_CPU_AFFINITY"
+	echo "  MIMIR_DISABLE_ROCM=$MIMIR_DISABLE_ROCM"
+	echo "  RUSTICL_ENABLE=$RUSTICL_ENABLE"
+else
+	echo "Mímir: threads=$OMP_NUM_THREADS/$NPROC rocm_disabled=$MIMIR_DISABLE_ROCM rusticl=$RUSTICL_ENABLE"
+fi
 
 # Lancer mimir
 exec ./bin/mimir "$@"

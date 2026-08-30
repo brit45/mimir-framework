@@ -1,9 +1,9 @@
 {
-  "$schema": "./configs/conf.schema.json",
+  "$schema": "conf.schema.json",
   "description": "Lance les benchmarks Mimir dans l'ordre recommandé et dans des processus isolés.",
 
   "_doc": {
-    "usage": "./bin/mimir --conf benchmarks-config.json [--run <suite>]",
+    "usage": "./bin/mimir --conf configs/benchmarks-config.json [--run <suite>]",
     "suites": {
       "all": "Tous les benchmarks, du contrôle API au stress test (par défaut).",
       "smoke": "Contrôles rapides de l'API, du spill mémoire et de NMS.",

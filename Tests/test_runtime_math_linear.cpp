@@ -301,6 +301,23 @@ int main() {
             TASSERT_NEAR(outputs[0][3], 6.f, 1e-4f);
         }
     }
+
+    // GPU Vulkan : deux kernels unary chaînés avec un seul upload/download.
+    {
+        VulkanRuntime rt;
+        RuntimeConfig cfg;
+        if (rt.initialize(cfg)) {
+            const float x[4] = {-2.f, -0.5f, 0.f, 2.f};
+            float y[4] = {};
+            const bool ok = rt.unaryChainForwardResident(
+                x, y, 4, {LayerType::ReLU, LayerType::Sigmoid});
+            TASSERT_TRUE(ok);
+            TASSERT_NEAR(y[0], 0.5f, 1e-5f);
+            TASSERT_NEAR(y[1], 0.5f, 1e-5f);
+            TASSERT_NEAR(y[2], 0.5f, 1e-5f);
+            TASSERT_NEAR(y[3], 1.f / (1.f + std::exp(-2.f)), 1e-5f);
+        }
+    }
 #endif  // ENABLE_VULKAN
 
     return 0;

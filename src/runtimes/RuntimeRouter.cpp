@@ -75,8 +75,19 @@ void RuntimeRouter::setRuntimes(
     AbstractRuntime* opencl,
     AbstractRuntime* cpu
 ) {
+    setRuntimes(rocm, cuda, vulkan, opencl, nullptr, cpu);
+}
+
+void RuntimeRouter::setRuntimes(
+    AbstractRuntime* rocm,
+    AbstractRuntime* cuda,
+    AbstractRuntime* vulkan,
+    AbstractRuntime* opencl,
+    AbstractRuntime* fpga,
+    AbstractRuntime* cpu
+) {
     runtime_priority_.clear();
-    runtime_priority_.reserve(5);
+    runtime_priority_.reserve(6);
 
     switch (rocm != nullptr) {
         case true: runtime_priority_.push_back(rocm); break;
@@ -94,6 +105,10 @@ void RuntimeRouter::setRuntimes(
         case true: runtime_priority_.push_back(opencl); break;
         case false: break;
     }
+    switch (fpga != nullptr) {
+        case true: runtime_priority_.push_back(fpga); break;
+        case false: break;
+    }
     switch (cpu != nullptr) {
         case true: runtime_priority_.push_back(cpu); break;
         case false: break;
@@ -104,6 +119,36 @@ void RuntimeRouter::setRuntimes(
     backward_layer_routes_.clear();
 
     composeRoutes();
+}
+
+AbstractRuntime* RuntimeRouter::selectForwardRuntimeForLayer(
+    const Layer& layer, const bool allow_host_fallback) const {
+    ensureActivatedAndComposed();
+    AbstractRuntime* fallback = nullptr;
+    for (AbstractRuntime* runtime : runtime_priority_) {
+        if (!runtime || !runtime->isInitialized()) continue;
+        const RuntimeCapabilityLevel capability = runtime->queryForwardCapability(layer.type_enum);
+        if (runtimeCapabilityIsNative(capability)) return runtime;
+        if (allow_host_fallback && !fallback && capability == RuntimeCapabilityLevel::HostFallback) {
+            fallback = runtime;
+        }
+    }
+    return fallback;
+}
+
+AbstractRuntime* RuntimeRouter::selectBackwardRuntimeForLayer(
+    const Layer& layer, const bool allow_host_fallback) const {
+    ensureActivatedAndComposed();
+    AbstractRuntime* fallback = nullptr;
+    for (AbstractRuntime* runtime : runtime_priority_) {
+        if (!runtime || !runtime->isInitialized()) continue;
+        const RuntimeCapabilityLevel capability = runtime->queryBackwardCapability(layer.type_enum);
+        if (runtimeCapabilityIsNative(capability)) return runtime;
+        if (allow_host_fallback && !fallback && capability == RuntimeCapabilityLevel::HostFallback) {
+            fallback = runtime;
+        }
+    }
+    return fallback;
 }
 
 void RuntimeRouter::setActivators(
@@ -167,7 +212,7 @@ std::vector<AbstractRuntime*> RuntimeRouter::buildForwardRouteForLayer(const Lay
     for (AbstractRuntime* rt : base_route) {
         if (!rt) continue;
         if (!rt->isInitialized()) continue;
-        if (!rt->supportsForwardLayerType(layer.type_enum)) continue;
+        if (!runtimeCapabilityIsNative(rt->queryForwardCapability(layer.type_enum))) continue;
         route.push_back(rt);
     }
     return route;
@@ -183,7 +228,7 @@ std::vector<AbstractRuntime*> RuntimeRouter::buildBackwardRouteForLayer(const La
     for (AbstractRuntime* rt : base_route) {
         if (!rt) continue;
         if (!rt->isInitialized()) continue;
-        if (!rt->supportsBackwardLayerType(layer.type_enum)) continue;
+        if (!runtimeCapabilityIsNative(rt->queryBackwardCapability(layer.type_enum))) continue;
         route.push_back(rt);
     }
     return route;
@@ -264,6 +309,42 @@ bool RuntimeRouter::dispatchForwardLayer(
         route.erase(route.begin() + static_cast<std::ptrdiff_t>(i));
     }
 
+    return false;
+}
+
+bool RuntimeRouter::dispatchForwardLayerPlanned(
+    AbstractRuntime* preferred,
+    const std::vector<const std::vector<float>*>& inputs,
+    std::vector<std::vector<float>>& outputs,
+    const Layer& layer,
+    const bool training,
+    AbstractRuntime** selected_runtime
+) const {
+    ensureActivatedAndComposed();
+    if (selected_runtime) *selected_runtime = nullptr;
+    outputs.clear();
+
+    auto execute = [&](AbstractRuntime* runtime) -> bool {
+        if (!runtime || !runtime->isInitialized() ||
+            !runtimeCapabilityIsNative(runtime->queryForwardCapability(layer.type_enum))) return false;
+        std::vector<std::vector<float>> local;
+        if (!runtime->forwardLayer(inputs, local, layer, training) ||
+            local.empty() || !tensorsAreFinite(local)) return false;
+        outputs = std::move(local);
+        if (selected_runtime) *selected_runtime = runtime;
+        return true;
+    };
+
+    if (execute(preferred)) return true;
+
+    auto it = forward_layer_routes_.find(&layer);
+    if (it == forward_layer_routes_.end()) {
+        it = forward_layer_routes_.emplace(&layer, buildForwardRouteForLayer(layer)).first;
+    }
+    for (AbstractRuntime* runtime : it->second) {
+        if (runtime == preferred) continue;
+        if (execute(runtime)) return true;
+    }
     return false;
 }
 

@@ -31,9 +31,11 @@
 #include <chrono>
 #include <ctime>
 #include <cstring>
+#include <cctype>
 #include <iomanip>
 #include <cstdlib>
 #include <cerrno>
+#include <climits>
 #include <sstream>
 #include <array>
 #include <mutex>
@@ -99,8 +101,12 @@ public:
 
             saved_cout_ = std::cout.rdbuf();
             saved_cerr_ = std::cerr.rdbuf();
-            tee_cout_ = std::make_unique<TeeStreamBuf>(saved_cout_, log_file_.rdbuf());
-            tee_cerr_ = std::make_unique<TeeStreamBuf>(saved_cerr_, log_file_.rdbuf());
+            const char* verbose_env = std::getenv("MIMIR_CONSOLE_VERBOSE");
+            const bool concise_console = !verbose_env || std::string(verbose_env) != "1";
+            tee_cout_ = std::make_unique<TeeStreamBuf>(
+                saved_cout_, log_file_.rdbuf(), concise_console);
+            tee_cerr_ = std::make_unique<TeeStreamBuf>(
+                saved_cerr_, log_file_.rdbuf(), concise_console);
             std::cout.rdbuf(tee_cout_.get());
             std::cerr.rdbuf(tee_cerr_.get());
             g_framework_log_stream = &log_file_;
@@ -120,17 +126,32 @@ public:
 private:
     class TeeStreamBuf final : public std::streambuf {
     public:
-        TeeStreamBuf(std::streambuf* primary, std::streambuf* secondary)
-            : primary_(primary), secondary_(secondary) {}
+        TeeStreamBuf(std::streambuf* primary,
+                     std::streambuf* secondary,
+                     bool concise_console)
+            : primary_(primary), secondary_(secondary),
+              concise_console_(concise_console) {}
+
+        ~TeeStreamBuf() override {
+            flushConsoleLine();
+        }
 
     protected:
         std::streamsize xsputn(const char* s, std::streamsize n) override {
             if (n <= 0) return 0;
-            const std::streamsize a = primary_ ? primary_->sputn(s, n) : n;
             const std::streamsize b = secondary_ ? secondary_->sputn(s, n) : n;
-            if (primary_) primary_->pubsync();
             if (secondary_) secondary_->pubsync();
-            return (a < b) ? a : b;
+            if (!primary_) return b;
+            if (!concise_console_) {
+                const std::streamsize a = primary_->sputn(s, n);
+                primary_->pubsync();
+                return (a < b) ? a : b;
+            }
+            for (std::streamsize index = 0; index < n; ++index) {
+                console_line_.push_back(s[index]);
+                if (s[index] == '\n') flushConsoleLine();
+            }
+            return b;
         }
 
         int overflow(int ch) override {
@@ -147,8 +168,58 @@ private:
         }
 
     private:
+        static bool startsWith(const std::string& line, const char* prefix) {
+            return line.rfind(prefix, 0) == 0;
+        }
+
+        static bool showOnConsole(const std::string& line) {
+            if (startsWith(line, "[startup]")) return false;
+            if (startsWith(line, "[memory]")) return false;
+            if (startsWith(line, "[planner]")) return false;
+            if (startsWith(line, "[runtime-trace]")) return false;
+            if (startsWith(line, "[runtime]")) return false;
+            if (startsWith(line, "[allocator]")) return false;
+            if (startsWith(line, "[registry]")) return false;
+            if (startsWith(line, "[encoder]")) return false;
+            if (startsWith(line, "[serialization] raw ")) return false;
+            if (startsWith(line, "[serialization] safetensors ")) return false;
+            if (startsWith(line, "  Layer ")) return false;
+            if (startsWith(line, "Test ")) return false;
+            if (startsWith(line, "  • ")) return false;
+            if (startsWith(line, "🛡️  Vérification")) return false;
+            if (startsWith(line, "✅ Structure legacy")) return false;
+            if (startsWith(line, "🧪 TEST D'INTÉGRITÉ")) return false;
+            if (startsWith(line, "✅ TOUS LES TESTS PASSÉS")) return false;
+            if (startsWith(line, "🔧 OpenMP:")) return false;
+            if (startsWith(line, "🚀 Optimisations hardware:")) return false;
+            if (startsWith(line, "═══════════════════════════")) return false;
+            if (line.find("blocs de poids") != std::string::npos) return false;
+            if (line.find("scratchpad tag=") != std::string::npos) return false;
+            return true;
+        }
+
+        void flushConsoleLine() {
+            if (console_line_.empty()) return;
+            if (showOnConsole(console_line_)) {
+                const bool blank = console_line_.find_first_not_of(" \t\r\n") == std::string::npos;
+                // Les blocs filtrés laissent souvent plusieurs séparateurs
+                // vides consécutifs. En conserver un seul garde le terminal
+                // lisible sans compacter les vraies sections utiles.
+                if (!blank || !previous_console_line_blank_) {
+                    primary_->sputn(console_line_.data(),
+                                    static_cast<std::streamsize>(console_line_.size()));
+                    primary_->pubsync();
+                }
+                previous_console_line_blank_ = blank;
+            }
+            console_line_.clear();
+        }
+
         std::streambuf* primary_ = nullptr;
         std::streambuf* secondary_ = nullptr;
+        bool concise_console_ = true;
+        std::string console_line_;
+        bool previous_console_line_blank_ = false;
     }
     ;
 
@@ -313,6 +384,78 @@ static bool readJsonFile(const std::string& path, json& out, std::string& err)
     } catch (const std::exception& e) {
         err = std::string("Erreur JSON: ") + e.what();
         return false;
+    }
+    return true;
+}
+
+static bool isValidEnvironmentName(const std::string& name)
+{
+    if (name.empty()) return false;
+    const auto is_alpha_or_underscore = [](unsigned char c) {
+        return std::isalpha(c) != 0 || c == '_';
+    };
+    const auto is_alnum_or_underscore = [](unsigned char c) {
+        return std::isalnum(c) != 0 || c == '_';
+    };
+
+    if (!is_alpha_or_underscore(static_cast<unsigned char>(name.front()))) return false;
+    return std::all_of(name.begin() + 1, name.end(), [&](char c) {
+        return is_alnum_or_underscore(static_cast<unsigned char>(c));
+    });
+}
+
+static bool applyConfigEnvironment(const json& conf, std::string& err)
+{
+    if (!conf.contains("env")) return true;
+    if (!conf["env"].is_object()) {
+        err = "La section 'env' doit être un objet JSON";
+        return false;
+    }
+
+    for (const auto& [name, value] : conf["env"].items()) {
+        if (!isValidEnvironmentName(name)) {
+            err = "Nom de variable d'environnement invalide dans 'env': " + name;
+            return false;
+        }
+
+        std::string text;
+        if (value.is_string()) {
+            text = value.get<std::string>();
+        } else if (value.is_boolean()) {
+            text = value.get<bool>() ? "true" : "false";
+        } else if (value.is_number()) {
+            text = value.dump();
+        } else {
+            err = "Valeur invalide pour env." + name + " (chaîne, nombre ou booléen attendu)";
+            return false;
+        }
+
+        int env_error = 0;
+#ifdef _WIN32
+        env_error = _putenv_s(name.c_str(), text.c_str());
+#else
+        if (setenv(name.c_str(), text.c_str(), 1) != 0) env_error = errno;
+#endif
+        if (env_error != 0) {
+            err = "Impossible d'appliquer env." + name + ": " + std::strerror(env_error);
+            return false;
+        }
+
+#ifdef _OPENMP
+        if (name == "OMP_NUM_THREADS") {
+            try {
+                std::size_t parsed = 0;
+                const long threads = std::stol(text, &parsed);
+                if (parsed != text.size() || threads < 1 || threads > INT_MAX) {
+                    throw std::out_of_range("OMP_NUM_THREADS");
+                }
+                omp_set_num_threads(static_cast<int>(threads));
+            } catch (const std::exception&) {
+                err = "Valeur invalide pour env.OMP_NUM_THREADS (entier positif attendu)";
+                return false;
+            }
+        }
+#endif
     }
     return true;
 }
@@ -649,6 +792,18 @@ int main(int argc, char **argv)
             std::cerr << "\n";
         }
 
+        {
+            std::string err;
+            if (!applyConfigEnvironment(conf, err)) {
+                std::cerr << "❌ " << err << "\n";
+                return 1;
+            }
+            if (conf.contains("env")) {
+                std::cerr << "🌐 Environnement appliqué depuis la conf ("
+                          << conf["env"].size() << " variable(s))\n";
+            }
+        }
+
         // ── Résolution de la tâche active ───────────────────────────────────────
         // Sans --run : utilise la section lua racine du fichier (comportement défaut).
         // Avec --run <name> : cherche conf["tasks"][name], qui doit contenir un bloc
@@ -802,6 +957,18 @@ int main(int argc, char **argv)
                 std::cerr << "  • " << o << "\n";
             }
             std::cerr << "\n";
+        }
+
+        {
+            std::string err;
+            if (!applyConfigEnvironment(config, err)) {
+                std::cerr << "❌ " << err << "\n";
+                return 1;
+            }
+            if (config.contains("env")) {
+                std::cerr << "🌐 Environnement appliqué depuis la configuration ("
+                          << config["env"].size() << " variable(s))\n";
+            }
         }
 
         std::string arch_name;

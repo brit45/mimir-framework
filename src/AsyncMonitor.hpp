@@ -131,6 +131,7 @@ public:
         float val_recon = 0.0f;
         float val_kl = 0.0f;
         float val_align = 0.0f;
+        std::string val_feedback;
 
         // Optimizer (for display/debug)
         int opt_type = 0;          // 0=SGD, 1=ADAM, 2=ADAMW
@@ -336,7 +337,38 @@ public:
     // Mettre à jour les métriques (thread-safe)
     void updateMetrics(const Metrics& metrics) {
         std::lock_guard<std::mutex> lock(mutex_);
-        metrics_ = metrics;
+        // Les updates d'entraînement sont construites depuis un Metrics neuf :
+        // leurs champs val_* par défaut ne doivent pas effacer le dernier bilan
+        // de validation juste après la reprise du cycle d'entraînement.
+        // Une update qui transporte explicitement une validation reste prioritaire.
+        if (metrics.val_has || metrics.val_in_progress) {
+            metrics_ = metrics;
+        } else {
+            const bool val_has = metrics_.val_has;
+            const bool val_ok = metrics_.val_ok;
+            const bool val_in_progress = metrics_.val_in_progress;
+            const int val_step = metrics_.val_step;
+            const int val_items = metrics_.val_items;
+            const int val_done = metrics_.val_done;
+            const int val_total = metrics_.val_total;
+            const float val_recon = metrics_.val_recon;
+            const float val_kl = metrics_.val_kl;
+            const float val_align = metrics_.val_align;
+            const std::string val_feedback = metrics_.val_feedback;
+
+            metrics_ = metrics;
+            metrics_.val_has = val_has;
+            metrics_.val_ok = val_ok;
+            metrics_.val_in_progress = val_in_progress;
+            metrics_.val_step = val_step;
+            metrics_.val_items = val_items;
+            metrics_.val_done = val_done;
+            metrics_.val_total = val_total;
+            metrics_.val_recon = val_recon;
+            metrics_.val_kl = val_kl;
+            metrics_.val_align = val_align;
+            metrics_.val_feedback = val_feedback;
+        }
         has_update_ = true;
         metrics_version_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -351,7 +383,8 @@ public:
                           bool ok,
                           float recon,
                           float kl,
-                          float align) {
+                          float align,
+                          const std::string& feedback = std::string()) {
         std::lock_guard<std::mutex> lock(mutex_);
         metrics_.val_in_progress = in_progress;
         metrics_.val_step = step;
@@ -368,6 +401,7 @@ public:
         metrics_.val_recon = recon;
         metrics_.val_kl = kl;
         metrics_.val_align = align;
+        metrics_.val_feedback = feedback;
 
         // Compat UI: val_items représente le volume de validation (total si connu, sinon done).
         if (metrics_.val_total > 0) metrics_.val_items = metrics_.val_total;
@@ -702,7 +736,8 @@ private:
                     local_metrics.val_in_progress,
                     local_metrics.val_done,
                     local_metrics.val_total,
-                    local_metrics.kl_beta_effective
+                    local_metrics.kl_beta_effective,
+                    local_metrics.val_feedback
                 );
                 viz_->addLossPoint(local_metrics.loss);
             }

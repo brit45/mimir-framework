@@ -14,7 +14,11 @@
 | `develop` | [![unit-tests develop](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki develop](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 
 Version engine : **3.1.0**
-Révision documentation : **2026-07-23**
+Révision documentation : **2026-08-30**
+
+Consultez d'abord l'[état réel du projet](./docs/00-PROJECT-STATUS.md) : cette
+page distingue les chemins stables, partiels, expérimentaux, placeholders et
+matériels testés dans le checkout courant.
 
 **Mímir est un AI Engine C++ de conception, d'entraînement et d'analyse de systèmes IA, pilotable par Lua ou JSON, avec runtime, mémoire, dataset, visualisation et sérialisation intégrés, dans une approche CPU-first orientée recherche et expérimentation.**
 
@@ -152,6 +156,11 @@ Mímir expose trois modes principaux:
 2. **Lua** : pilotage des runs (train/inference/tools).
 3. **JSON (`--conf`)** : exécution reproductible et scénarios paramétrés.
 
+La [matrice de maturité](./docs/00-PROJECT-STATUS.md) indique pour chaque
+sous-système s'il est actif, partiel, expérimental, placeholder ou en
+construction. Elle doit être consultée avant toute revendication de support
+GPU, FPGA, modèle externe ou bridge de langage.
+
 Schéma des flux d'exécution (SVG):
 
 ![Workflow Lua JSON CLI](./docs/graphs/04_workflow_lua_json_cli.svg)
@@ -248,7 +257,7 @@ Le fichier `configs/conf.schema.json` documente toutes les sections acceptées :
 | `inference` | Paramètres de génération |
 | `visualization` | Fenêtre SFML (lue par le runtime C++) |
 | `logging` | Affichage console (`show_htop_display`, etc.) |
-| `env` | Documentation des variables d'environnement shell |
+| `env` | Variables appliquées au processus avant le run; elles remplacent les valeurs héritées du shell |
 
 ---
 

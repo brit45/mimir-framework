@@ -15,6 +15,7 @@ Piloter des expériences via JSON avec --conf.
 - [Structure de la config](#structure-de-la-config)
 - [Sections personnalisables](#sections-personnalisables)
 - [Variables injectées](#variables-injectées)
+- [Variables d'environnement actives](#variables-denvironnement-actives)
 - [Override avec --override](#override-avec---override)
 - [Exemples de workflows](#exemples-de-workflows)
 - [Bonnes pratiques](#bonnes-pratiques)
@@ -77,7 +78,10 @@ Une config pour `--conf` doit contenir une section `lua.scripts` qui liste les s
 }
 ```
 
-Chaque script est exécuté dans l'ordre. Les variables globales persisten entre les scripts (même contexte Lua).
+Chaque script est exécuté dans l'ordre. Le binaire construit une nouvelle VM Lua
+pour chaque entrée : les globals Lua ne persistent donc pas entre deux scripts.
+Utilisez des fichiers, checkpoints ou une section de configuration pour échanger
+un état durable entre étapes.
 
 ### Format 2: Scripts avec arguments
 
@@ -87,7 +91,7 @@ Chaque script est exécuté dans l'ordre. Les variables globales persisten entre
     "scripts": [
       {
         "script": "script_with_args.lua",
-        "args": ["value1", "value2", 42, true]
+        "args": ["value1", "value2", "42", "true"]
       }
     ]
   }
@@ -95,6 +99,8 @@ Chaque script est exécuté dans l'ordre. Les variables globales persisten entre
 ```
 
 Les arguments sont accessibles dans le script via `arg[]` (std Lua).
+Le schéma public attend des chaînes. Le runtime sait sérialiser d'autres scalaires,
+mais utiliser des chaînes garde la config valide et le parsing explicite.
 
 ### Format 3: Chemin alternatif (`run.lua.scripts`)
 
@@ -224,6 +230,39 @@ Les overrides sont appliqués en JSON path. Exemples:
 
 **Important:** Les overrides sont appliqués **avant** l'exécution des scripts, donc les scripts verront les valeurs modifiées dans `CONF`.
 
+## Variables d'environnement actives
+
+La section racine `env` n'est pas une annotation : Mímir applique réellement
+ses valeurs au processus après les `--override` et avant de résoudre/exécuter le
+run. Une valeur de config remplace une valeur héritée du shell ou exportée par
+`run_mimir.sh`.
+
+```json
+{
+  "$schema": "./configs/conf.schema.json",
+  "env": {
+    "OMP_NUM_THREADS": 10,
+    "MIMIR_RUNTIME_TRACE": false
+  },
+  "lua": {
+    "scripts": ["scripts/templates/template_conf_load_and_train.lua"]
+  }
+}
+```
+
+Pour `OMP_NUM_THREADS`, Mímir met aussi à jour le runtime OpenMP déjà chargé.
+Les chaînes, nombres et booléens sont acceptés; un objet, un tableau, `null` ou
+un nom de variable invalide arrête le run avec une erreur.
+
+```bash
+# Le shell propose 2, mais la config ci-dessus impose 10.
+OMP_NUM_THREADS=2 ./run_mimir.sh --conf my_exp.json
+```
+
+Les variables sont globales au processus : tous les scripts de la config voient
+la même valeur. Consultez la [référence des variables](../03-API-Reference/22-Environment-Variables.md)
+pour savoir quelles variables sont effectivement lues par chaque sous-système.
+
 ---
 
 ## Exemples de workflows
@@ -284,7 +323,9 @@ Exécute:
 }
 ```
 
-Chaque stage s'exécute dans l'ordre. Les données et variables Lua persistent entre les stages.
+Chaque stage s'exécute dans l'ordre dans une VM Lua distincte. Faites persister
+les résultats nécessaires dans un chemin explicite, puis relisez-les au stage
+suivant.
 
 ### Exemple 3: Hyperparameter sweep
 

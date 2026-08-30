@@ -46,6 +46,12 @@ public:
     void requestStopTraining();
     bool consumeStopTrainingRequested();
 
+    // Validation runtime: la configuration initialise l'état, puis tout clic
+    // utilisateur devient prioritaire jusqu'à la fin de l'entraînement.
+    void updateRuntimeValidationEnabled(bool enabled);
+    bool validationEnabledSnapshot() const;
+    uint64_t validationControlVersion() const;
+
     // Paramètres d'entraînement modifiables en direct depuis l'UI (thread-safe).
     struct LiveTrainParams {
         bool overrides_enabled = false;
@@ -58,6 +64,11 @@ public:
     };
     uint64_t liveTrainParamsVersion() const;
     LiveTrainParams liveTrainParamsSnapshot() const;
+
+    enum class ValidationFeedbackIcon { None = 0, Reward = 1, Penalty = 2 };
+    void updateRuntimeTrainParams(float lr, int lr_warmup_steps,
+                                  float kl_beta, int kl_warmup_steps);
+    void showValidationFeedback(ValidationFeedbackIcon icon);
 
     // Mettre à jour l'affichage
     void update();
@@ -109,7 +120,8 @@ public:
                       bool val_in_progress = false,
                       int val_done = 0,
                       int val_total = 0,
-                      float kl_beta_effective = 0.0f);
+                      float kl_beta_effective = 0.0f,
+                      const std::string& val_feedback = std::string());
 
     // Ajouter un point au graphique de loss
     void addLossPoint(float loss);
@@ -144,6 +156,8 @@ private:
 
     // Flag thread-safe: mis à true quand l'utilisateur demande d'arrêter l'entraînement.
     std::atomic<bool> stop_training_requested_{false};
+    std::atomic<bool> validation_enabled_{false};
+    std::atomic<uint64_t> validation_control_version_{0};
 
     // Paramètres live (écrits par le thread UI, lus par le thread d'entraînement).
     std::atomic<uint64_t> live_params_version_{0};
@@ -153,6 +167,14 @@ private:
     std::atomic<float> live_kl_beta_{0.0f};
     std::atomic<int> live_kl_warmup_steps_{0};
     std::atomic<bool> live_kl_enabled_{false};
+
+    // Valeurs effectivement appliquées par le thread d'entraînement. Elles
+    // alimentent les range-box en mode NATIVE sans publier d'override UI.
+    std::atomic<float> runtime_lr_{0.0f};
+    std::atomic<int> runtime_lr_warmup_steps_{0};
+    std::atomic<float> runtime_kl_beta_{0.0f};
+    std::atomic<int> runtime_kl_warmup_steps_{0};
+    std::atomic<int> validation_feedback_icon_{0};
 
     // État UI live (thread UI uniquement, non atomique).
     bool live_ui_inited_ = false;
@@ -220,6 +242,13 @@ private:
     bool logo_loaded_ = false;
     sf::Clock logo_clock_;
     float logo_splash_seconds_ = 2.5f;
+
+    sf::Texture validation_reward_texture_;
+    sf::Sprite validation_reward_sprite_{validation_reward_texture_};
+    sf::Texture validation_penalty_texture_;
+    sf::Sprite validation_penalty_sprite_{validation_penalty_texture_};
+    bool validation_reward_icon_loaded_ = false;
+    bool validation_penalty_icon_loaded_ = false;
 
     // Données de visualisation
     struct ImageData {
@@ -303,7 +332,8 @@ private:
     bool has_understanding_image = false;
     std::string understanding_label;
 
-    // Dernière "sortie" (on réutilise la dernière image générée)
+    // Dernière sortie du modèle et sa vignette Blocks/Layers.
+    ImageData output_image_;
     ImageData output_thumb_;
     bool has_output_thumb_ = false;
     std::string output_thumb_label_;
@@ -314,6 +344,11 @@ private:
     std::string dataset_text_tags;
     std::string dataset_text_tokens;
     std::string dataset_text_encoded;
+    enum class DatasetTextSection { Prompt = 0, Tags = 1, Tokens = 2, Encoder = 3, Count = 4 };
+    std::array<float, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_scroll_y_{};
+    std::array<float, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_scroll_max_{};
+    std::array<sf::FloatRect, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_section_rects_{};
+    static constexpr float kDatasetTextScrollSpeed = 32.0f;
 
     std::vector<ImageData> layer_block_images;
     std::vector<std::string> layer_block_labels;
@@ -363,6 +398,7 @@ private:
     float current_val_recon;
     float current_val_kl;
     float current_val_align;
+    std::string current_val_feedback;
 
     // Lissage visuel des barres Training (évite les sauts brusques).
     float progress_epoch_display_ = 0.0f;
@@ -409,12 +445,15 @@ private:
         float val_mse         = 0.f;
         int   val_step_id     = -1;  // step global auquel la validation a eu lieu
         bool  is_val          = false;
+        std::string val_feedback;
     };
     std::vector<LossRecord> full_loss_history;
+    int last_recorded_validation_step_ = -1;
 
     // Méthodes de rendu
     void renderBackground();
     void renderContextImages();
+    void renderOutputImage();
     void renderLayerBlocks();
     void renderGeneratedImages();
     void renderTrainingProgress();
@@ -431,13 +470,23 @@ private:
     bool show_prompt_text_ = true;
     bool zoom_active_ = false;
     bool smooth_layer_block_previews_ = true;
-    enum class FocusTarget { Dataset, Projection, Understanding, LayerBlock, Generated };
+    enum class FocusTarget {
+        Dataset,
+        Projection,
+        Understanding,
+        LayerBlock,
+        Generated,
+        Output,
+        Training,
+        Metrics,
+        Graph
+    };
     FocusTarget focus_target_ = FocusTarget::Dataset;
     int focus_block_index_ = 0;
     int focus_generated_index_ = 0;
 
     // Layout: panneaux déplaçables (drag & drop)
-    enum class PanelId { Context = 0, Blocks = 1, Generated = 2, Training = 3, Metrics = 4, Graph = 5, Count = 6 };
+    enum class PanelId { Context = 0, Blocks = 1, Generated = 2, Training = 3, Metrics = 4, Graph = 5, Output = 6, Count = 7 };
     struct Panel {
         sf::Vector2f pos{0.f, 0.f};
         sf::Vector2f size{0.f, 0.f};
@@ -476,6 +525,8 @@ private:
     std::optional<PanelId> hitTestPanelResizeHandle(const sf::Vector2f& mouse) const;
     std::optional<PanelId> hitTestPanelCloseButton(const sf::Vector2f& mouse) const;
     void drawPanelChrome(PanelId id);
+    void setPanelContentHeight(PanelId id, float content_height);
+    void drawPanelScrollbar(PanelId id);
     sf::Color panelAccent(PanelId id) const;
 
     // Cursor
@@ -501,6 +552,7 @@ private:
     std::optional<sf::FloatRect> last_dataset_rect_;
     std::optional<sf::FloatRect> last_projection_rect_;
     std::optional<sf::FloatRect> last_understanding_rect_;
+    std::optional<sf::FloatRect> last_output_rect_;
     std::vector<sf::FloatRect> last_block_rects_;
     std::vector<sf::FloatRect> last_generated_rects_;
     std::vector<int> last_generated_indices_;
@@ -508,6 +560,7 @@ private:
 
     // Stop button (Metrics panel)
     std::optional<sf::FloatRect> last_stop_button_rect_;
+    std::optional<sf::FloatRect> last_validation_button_rect_;
 
     // Scroll (Blocks/Layers panel)
     float blocks_scroll_y_ = 0.0f;
@@ -519,6 +572,16 @@ private:
     float blocks_scroll_drag_grab_y_ = 0.0f;
     sf::FloatRect last_blocks_scroll_track_rect_{};
     sf::FloatRect last_blocks_scroll_thumb_rect_{};
+
+    // Scroll vertical commun aux panneaux hors Blocks/Layers.
+    std::array<float, static_cast<size_t>(PanelId::Count)> panel_scroll_y_{};
+    std::array<float, static_cast<size_t>(PanelId::Count)> panel_scroll_max_{};
+    std::array<sf::FloatRect, static_cast<size_t>(PanelId::Count)> panel_scroll_track_rects_{};
+    std::array<sf::FloatRect, static_cast<size_t>(PanelId::Count)> panel_scroll_thumb_rects_{};
+    bool dragging_panel_scrollbar_ = false;
+    PanelId scrolled_panel_ = PanelId::Context;
+    float panel_scroll_drag_grab_y_ = 0.0f;
+    static constexpr float kPanelScrollSpeed = 48.0f;
 
     // Refresh auto textures (évite le reload UI)
     uint64_t last_auto_texture_refresh_ms_ = 0;
@@ -545,6 +608,12 @@ private:
     bool save_chord_armed_ = false;
     uint64_t save_chord_armed_ms_ = 0;
     bool save_chord_consumed_ = false;
+
+    // Capture PNG demandee par la touche E. Le rendu est effectue dans update()
+    // afin de rester sur le thread qui possede le contexte graphique.
+    bool snapshot_requested_ = false;
+    std::string last_snapshot_path_;
+    bool saveSnapshotPng();
 
     // Mode d'affichage des Blocks/Layers : true = heatmap colorée, false = couleurs naturelles
     bool heatmap_mode_ = true;
@@ -575,6 +644,9 @@ public:
 
     void requestStopTraining() {}
     bool consumeStopTrainingRequested() { return false; }
+    void updateRuntimeValidationEnabled(bool) {}
+    bool validationEnabledSnapshot() const { return false; }
+    uint64_t validationControlVersion() const { return 0; }
 
     struct LiveTrainParams {
         bool overrides_enabled = false;
@@ -587,6 +659,9 @@ public:
     };
     uint64_t liveTrainParamsVersion() const { return 0; }
     LiveTrainParams liveTrainParamsSnapshot() const { return {}; }
+    enum class ValidationFeedbackIcon { None = 0, Reward = 1, Penalty = 2 };
+    void updateRuntimeTrainParams(float, int, float, int) {}
+    void showValidationFeedback(ValidationFeedbackIcon) {}
 
     void addGeneratedImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
 
@@ -621,7 +696,8 @@ public:
                       bool = false,
                       int = 0,
                       int = 0,
-                      float = 0.0f) {}
+                      float = 0.0f,
+                      const std::string& = std::string()) {}
 
     void addLossPoint(float) {}
     void setLossLogFile(const std::string&) {}

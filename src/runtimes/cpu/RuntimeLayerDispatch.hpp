@@ -1020,6 +1020,18 @@ inline bool cpu_forward_layer(
             }
 
             case LayerType::PixelShuffle: {
+                const int r = static_cast<int>(layer.scale_h);
+                const int in_channels = layer.in_channels;
+                const int in_h = layer.input_height;
+                const int in_w = layer.input_width;
+                if (r < 1 || static_cast<float>(r) != layer.scale_h ||
+                    in_channels < 1 || in_h < 1 || in_w < 1 ||
+                    in_channels % (r * r) != 0 ||
+                    x.size() != static_cast<size_t>(in_channels) *
+                                    static_cast<size_t>(in_h) *
+                                    static_cast<size_t>(in_w)) {
+                    return false;
+                }
                 outputs.resize(1);
                 outputs[0] = LayerOpsExt::pixel_shuffle_forward(x, layer);
                 return true;
@@ -3163,7 +3175,8 @@ inline bool cpu_backward_layer(
                 const int in_channels = layer.in_channels > 0 ? layer.in_channels : 0;
                 const int in_h = layer.input_height > 0 ? layer.input_height : 0;
                 const int in_w = layer.input_width > 0 ? layer.input_width : 0;
-                if (r <= 0 || in_channels <= 0 || in_h <= 0 || in_w <= 0) return false;
+                if (r <= 0 || static_cast<float>(r) != layer.scale_h ||
+                    in_channels <= 0 || in_h <= 0 || in_w <= 0) return false;
                 const int out_channels = in_channels / (r * r);
                 const int out_h = in_h * r;
                 const int out_w = in_w * r;

@@ -25,8 +25,10 @@ end
 
 local function opt_bool(k, d)
   local v = opts[k]
-  if v == nil then return d end
+  if v == nil then v = d end
+  if v == nil then return nil end
   if v == true or v == false then return v end
+  if type(v) == "number" then return v ~= 0 end
   v = tostring(v):lower()
   if v == "1" or v == "true" or v == "yes" or v == "on" then return true end
   if v == "0" or v == "false" or v == "no" or v == "off" then return false end
@@ -148,20 +150,24 @@ if Mimir and Mimir.Model and Mimir.Model.set_hardware then
   pcall(Mimir.Model.set_hardware, opt_bool("hw", true))
 end
 
-local dataset_root = opt_str("dataset-root", "./dataset_2")
-local arch = opt_str("arch", opt_str("model", opt_str("model-type", "vae_conv")))
+local conf_model = (type(CONF) == "table" and type(CONF.model) == "table") and CONF.model or {}
+local conf_training = (type(CONF) == "table" and type(CONF.training) == "table") and CONF.training or {}
+local conf_dataset = (type(CONF) == "table" and type(CONF.dataset) == "table") and CONF.dataset or {}
+
+local dataset_root = opt_str("dataset-root", conf_dataset.root or "./dataset_2")
+local arch = opt_str("arch", opt_str("model", opt_str("model-type", conf_model.architecture or "vae_conv")))
 if arch ~= "vae_conv" then
   error("Unknown --arch: " .. tostring(arch) .. " (expected: vae_conv)")
 end
 
 local default_out_dir = "checkpoint/vae_conv_512_latent-64-64-32_base-64"
-local out_dir = opt_str("out-dir", default_out_dir)
+local out_dir = opt_str("out-dir", conf_training.out_dir or default_out_dir)
 local output_model_dir = opt_str("output-model", opt_str("output_model", ""))
 local save_out_dir = ((output_model_dir ~= nil) and (output_model_dir ~= "")) and output_model_dir or out_dir
-local RESUME = opt_bool("resume", false)
-local epochs = opt_int("epochs", 100)
-local lr = opt_num("lr", 3e-5)
-local seed = opt_int("seed", opt_int("init-seed", 4242))
+local RESUME = opt_bool("resume", conf_training.resume or false)
+local epochs = opt_int("epochs", conf_training.num_epochs or 100)
+local lr = opt_num("lr", conf_training.learning_rate or 3e-5)
+local seed = opt_int("seed", opt_int("init-seed", conf_training.seed or 4242))
 
 -- Hint: si on resume réellement (checkpoint trouvé), on évite de changer
 -- la topo du modèle par défaut (sauf si l'utilisateur force explicitement enc_norm).
@@ -170,20 +176,112 @@ if RESUME and Ckpt and Ckpt.resolve_dir then
   resume_dir_hint = Ckpt.resolve_dir(out_dir)
 end
 
+local resume_architecture = nil
+if resume_dir_hint and type(read_json) == "function" then
+  local architecture_path = FS.join(resume_dir_hint, "model", "architecture.json")
+  local ok_arch, architecture = pcall(read_json, architecture_path)
+  if ok_arch and type(architecture) == "table" then
+    resume_architecture = architecture
+  end
+end
+
 local cfg0, err = Mimir.Architectures.default_config(arch)
 assert(type(cfg0) == "table", "default_config(" .. tostring(arch) .. ") failed: " .. tostring(err))
 ---@cast cfg0 table
 local cfg = cfg0
+-- En reprise, reconstruire d'abord la configuration enregistrée. Les options
+-- du fichier de lancement puis la CLI restent prioritaires ci-dessous.
+if resume_architecture and type(resume_architecture.model_config) == "table" then
+  for key, value in pairs(resume_architecture.model_config) do
+    cfg[key] = value
+  end
+end
+for key, value in pairs(conf_model) do
+  if key ~= "architecture" then cfg[key] = value end
+end
+for key, value in pairs(conf_training) do
+  cfg[key] = value
+end
+cfg.resume = RESUME
 
-cfg.image_w = opt_int("image-w", 512)
-cfg.image_h = opt_int("image-h", 512)
-cfg.image_c = opt_int("image-c", 3)
+-- Un checkpoint legacy peut annoncer `dec_norm=groupnorm` dans model_config
+-- alors que son graphe sérialisé ne contient aucune couche de normalisation.
+-- Reconstruire le modèle depuis la seule config ajouterait alors des GroupNorm
+-- neuves (gamma/beta absents du checkpoint et laissés à zéro), ce qui annule
+-- toutes les activations du décodeur après une reprise. La liste des layers est
+-- la source de vérité pour la topologie réellement entraînée.
+local resume_decoder_norm = nil
+if resume_architecture and type(resume_architecture.layers) == "table" then
+    resume_decoder_norm = "none"
+    for _, layer in ipairs(resume_architecture.layers) do
+      local name = tostring(layer.name or "")
+      local layer_type = tostring(layer.type or ""):lower()
+      if name:match("^vae_conv/dec/") then
+        if layer_type == "groupnorm" or name:match("/gn$") then
+          resume_decoder_norm = "groupnorm"
+          break
+        elseif layer_type == "layernorm" or name:match("/ln$") then
+          resume_decoder_norm = "layernorm"
+        end
+      end
+    end
+    cfg.dec_norm = resume_decoder_norm
+end
 
-cfg.latent_h = opt_int("latent-h", 64)
-cfg.latent_w = opt_int("latent-w", 64)
-cfg.latent_c = opt_int("latent-c", 32)
+cfg.image_w = opt_int("image-w", cfg.image_w or 512)
+cfg.image_h = opt_int("image-h", cfg.image_h or 512)
+cfg.image_c = opt_int("image-c", cfg.image_c or 3)
 
-cfg.base_channels = opt_int("base-channels", 64)
+-- Le snapshot de référence conserve les dimensions du fichier de config. Si
+-- seule une dimension d'image est surchargée en CLI, conserver toutefois le
+-- facteur x8 au lieu de laisser un latent historique incompatible.
+local latent_h_explicit = opts["latent-h"] ~= nil or opts["latent_h"] ~= nil
+local latent_w_explicit = opts["latent-w"] ~= nil or opts["latent_w"] ~= nil
+local image_h_explicit = opts["image-h"] ~= nil or opts["image_h"] ~= nil
+local image_w_explicit = opts["image-w"] ~= nil or opts["image_w"] ~= nil
+cfg.latent_h = latent_h_explicit
+    and opt_int("latent-h", opt_int("latent_h", cfg.latent_h or 64))
+    or (image_h_explicit and math.floor(cfg.image_h / 8) or (cfg.latent_h or 64))
+cfg.latent_w = latent_w_explicit
+    and opt_int("latent-w", opt_int("latent_w", cfg.latent_w or 64))
+    or (image_w_explicit and math.floor(cfg.image_w / 8) or (cfg.latent_w or 64))
+cfg.latent_c = opt_int("latent-c", cfg.latent_c or 32)
+
+cfg.base_channels = opt_int("base-channels", cfg.base_channels or 64)
+cfg.decoder_upsample = "nearest_conv"
+
+do
+  local function downsample_steps(image_size, latent_size, axis)
+    if image_size <= 0 or latent_size <= 0 or image_size % latent_size ~= 0 then
+      error(string.format(
+        "Géométrie VAEConv invalide sur %s: image=%d, latent=%d; le latent doit diviser l'image.",
+        axis, image_size, latent_size
+      ))
+    end
+    local ratio = image_size / latent_size
+    local steps = 0
+    while ratio > 1 and ratio % 2 == 0 do
+      ratio = ratio / 2
+      steps = steps + 1
+    end
+    if ratio ~= 1 then
+      error(string.format(
+        "Géométrie VAEConv invalide sur %s: image/latent doit être une puissance de 2.", axis
+      ))
+    end
+    return steps
+  end
+
+  local width_steps = downsample_steps(cfg.image_w, cfg.latent_w, "la largeur")
+  local height_steps = downsample_steps(cfg.image_h, cfg.latent_h, "la hauteur")
+  if width_steps ~= height_steps then
+    error(string.format(
+      "Géométrie VAEConv asymétrique: image=%dx%d, latent=%dx%d donne %d downsamplings en largeur et %d en hauteur; les deux axes doivent avoir le même ratio. " ..
+      "Vérifiez notamment que les espaces après --image-w/--image-h sont des espaces ASCII.",
+      cfg.image_w, cfg.image_h, cfg.latent_w, cfg.latent_h, width_steps, height_steps
+    ))
+  end
+end
 
 -- Normalisation encodeur (nouveaux layers côté C++)
 -- Valeurs: none | layernorm (ln) | groupnorm (gn)
@@ -226,17 +324,67 @@ do
   end
 end
 
+-- Normalisation décodeur indépendante de l'encodeur.
+-- `--dec-norm none` et `--no-dec-norm` doivent réellement supprimer toutes
+-- les couches GroupNorm/LayerNorm du décodeur. Une option absente conserve la
+-- valeur du fichier de configuration/checkpoint.
+do
+  local raw_dec_norm = opts["dec-norm"]
+  if raw_dec_norm == nil then raw_dec_norm = opts["decoder-norm"] end
+  if raw_dec_norm == nil then raw_dec_norm = opts["dec_norm"] end
+
+  if raw_dec_norm ~= nil then
+    if raw_dec_norm == false then
+      if resume_decoder_norm ~= nil and resume_decoder_norm ~= "none" then
+        error(string.format(
+          "Topologie decoder incompatible avec le checkpoint repris: --dec-norm=none, graphe checkpoint=%s. " ..
+          "Une reprise stricte doit conserver les couches réellement sérialisées.",
+          resume_decoder_norm
+        ))
+      end
+      cfg.dec_norm = "none"
+    else
+      local value = tostring(raw_dec_norm):lower()
+      if value == "off" or value == "false" or value == "disabled" then value = "none" end
+      if value == "gn" then value = "groupnorm" end
+      if value == "ln" then value = "layernorm" end
+      assert(
+        value == "none" or value == "groupnorm" or value == "layernorm",
+        "--dec-norm invalide: " .. tostring(raw_dec_norm) ..
+          " (attendu: none | groupnorm | layernorm)"
+      )
+      if resume_decoder_norm ~= nil and value ~= resume_decoder_norm then
+        error(string.format(
+          "Topologie decoder incompatible avec le checkpoint repris: --dec-norm=%s, graphe checkpoint=%s. " ..
+          "Une reprise stricte doit conserver les couches réellement sérialisées.",
+          value, resume_decoder_norm
+        ))
+      end
+      cfg.dec_norm = value
+    end
+  end
+
+  cfg.dec_gn_groups = opt_int(
+    "dec-gn-groups",
+    opt_int("decoder-gn-groups", opt_int("dec_gn_groups", cfg.dec_gn_groups or cfg.enc_gn_groups or 32))
+  )
+end
+
 -- Blocs ResNet (ex-attention) (optionnel)
--- NOTE: historiquement ce flag activait des blocs d'attention; il active maintenant des blocs ResNet.
+-- NOTE: use_attention reste un alias historique de use_resnet.
 -- Recommandé: --resnet/--use-resnet/--resnet-max-tokens.
 -- Pour désactiver: --no-resnet
+local configured_resnet = cfg.use_resnet
+if configured_resnet == nil then configured_resnet = cfg.use_attention end
+if configured_resnet == nil then configured_resnet = true end
 cfg.use_attention = opt_bool(
   "resnet",
   opt_bool(
     "resnet-blocks",
-    opt_bool("use-resnet", cfg.use_attention or true)
+    opt_bool("use-resnet", configured_resnet)
   )
 )
+cfg.use_resnet = cfg.use_attention
 
 -- Attention (SelfAttention) en plus des blocs ResNet.
 -- Pour activer l'attention: --attn (ou --vae-attn/--self-attn).
@@ -244,7 +392,7 @@ cfg.use_attn = opt_bool(
   "attn",
   opt_bool(
     "vae-attn",
-    opt_bool("self-attn", opt_bool("use-attn", opt_bool("use-vae-attn", (cfg.use_attn ~= nil) and cfg.use_attn or true)))
+    opt_bool("self-attn", opt_bool("use-attn", opt_bool("use-vae-attn", cfg.use_attn)))
   )
 )
 
@@ -423,7 +571,7 @@ cfg.epsilon = opt_num("epsilon", cfg.epsilon or 1e-8)
 -- VAEConv: le weight decay trop fort dégrade souvent la reconstruction.
 cfg.weight_decay = opt_num("weight-decay", cfg.weight_decay or 1e-8)
 
-cfg.decay_strategy = opt_str("decay-strategy", cfg.decay_strategy or "linear")
+cfg.decay_strategy = opt_str("decay-strategy", cfg.decay_strategy or "cosine")
 
 cfg.kl_beta = opt_num("kl-beta", cfg.kl_beta or 0.5)
 -- Stabilisation VAE (consommée côté C++ par Model::trainStepVAE)
@@ -456,7 +604,7 @@ cfg.spectral_scales = opt_int("spectral-scales", cfg.spectral_scales or 1)
 
 -- Perceptual loss: utilise par défaut le vgg16_feat pré-entraîné par
 -- scripts/training/pretrain_vgg16_feat.lua.
-cfg.perceptual_weight = opt_num("perceptual-weight", 0.2)
+cfg.perceptual_weight = opt_num("perceptual-weight", 0.0)
 cfg.perceptual_arch = opt_str("perceptual-arch", cfg.perceptual_arch or "vgg16_feat")
 do
   local default_pckpt = cfg.perceptual_checkpoint
@@ -473,7 +621,7 @@ do
   local parch = tostring(cfg.perceptual_arch or ""):lower()
   if parch == "vgg16_feat" then
     if (tonumber(cfg.perceptual_base_channels or 0) or 0) < 4 then
-      cfg.perceptual_base_channels = 4
+      cfg.perceptual_base_channels = 8
     end
   end
 end
@@ -536,12 +684,17 @@ cfg.warmup_steps = opt_int("lr-warmup-steps", opt_int("warmup-steps", cfg.warmup
 
 -- Autosave (consommé côté C++ dans LuaScripting::lua_trainModel)
 -- 0 = désactiver. 1 = sauvegarde à chaque epoch.
-cfg.autosave_every_epochs = opt_int("autosave-every-epochs", opt_int("autosave_every_epochs", 0))
+local autosave_default = tonumber(
+  conf_training.autosave_every_epochs or conf_training.autosave_every_epoch or
+  conf_model.autosave_every_epochs or conf_model.autosave_every_epoch)
+if autosave_default == nil then autosave_default = 1 end
+cfg.autosave_every_epochs = opt_int(
+  "autosave-every-epochs", opt_int("autosave_every_epochs", autosave_default))
 
 -- Marqueurs (Wasserstein/Temporal) qui modulent la loss de reconstruction côté C++.
 -- Par défaut: désactivé (0.0) pour conserver un training identique.
-cfg.marker_wass_scale = opt_num("marker-wass-scale", cfg.marker_wass_scale or 0.01)
-cfg.marker_temp_scale = opt_num("marker-temp-scale", cfg.marker_temp_scale or 0.01)
+cfg.marker_wass_scale = opt_num("marker-wass-scale", cfg.marker_wass_scale or 0.0)
+cfg.marker_temp_scale = opt_num("marker-temp-scale", cfg.marker_temp_scale or 0.0)
 cfg.marker_warmup_steps = opt_int("marker-warmup-steps", cfg.marker_warmup_steps or 1)
 cfg.marker_scale_max = opt_num("marker-scale-max", cfg.marker_scale_max or 1.0)
 -- Clamp logvar plus serré => std dans ~[exp(-3), exp(1)] = [0.05, 2.7]
@@ -586,6 +739,14 @@ Args.apply_validation_config(cfg, opts, {
   validate_items = 6,
   validate_holdout_frac = 0.1,
 })
+cfg.fpga_validation_enabled = opt_bool(
+  "fpga-validation",
+  cfg.fpga_validation_enabled ~= nil and cfg.fpga_validation_enabled or true
+)
+cfg.fpga_validation_every_steps = opt_int(
+  "fpga-validation-every-steps",
+  cfg.fpga_validation_every_steps or cfg.validate_every_steps
+)
 
 -- Détection automatique: "VAE backbone prêt" (pour diffusion text→image)
 -- NOTE: dépend de la validation (validate_every_steps/items). Si la validation est désactivée,
@@ -607,71 +768,46 @@ cfg.triple_fault_every_steps = opt_int("fault-every", opt_int("triple-fault-ever
 cfg.dtype = opt_str("dtype", os.getenv("MIMIR_DTYPE") or "float32")
 
 
+local function format_cfg_value(value, seen)
+  local value_type = type(value)
+  if value_type == "string" then return string.format("%q", value) end
+  if value_type ~= "table" then return tostring(value) end
+
+  seen = seen or {}
+  if seen[value] then return "<cycle>" end
+  seen[value] = true
+
+  local keys = {}
+  for key in pairs(value) do keys[#keys + 1] = key end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+
+  local entries = {}
+  for _, key in ipairs(keys) do
+    entries[#entries + 1] = string.format(
+      "[%s]=%s",
+      format_cfg_value(key, seen),
+      format_cfg_value(value[key], seen)
+    )
+  end
+  seen[value] = nil
+  return "{" .. table.concat(entries, ", ") .. "}"
+end
+
 log("VAEConv train config :")
 log(string.format("  - dataset_root=%s", dataset_root))
 log(string.format("  - out_dir(resume_from)=%s", out_dir))
 log(string.format("  - output_model(save_to)=%s", save_out_dir))
-log(string.format("  - image=%dx%dx%d", cfg.image_w, cfg.image_h, cfg.image_c))
-log(string.format("  - latent=%dx%dx%d", cfg.latent_h, cfg.latent_w, cfg.latent_c))
-log(string.format("  - base_channels=%d", cfg.base_channels))
-log(string.format("  - enc_norm=%s enc_gn_groups=%d",
-  tostring(cfg.enc_norm or "none"),
-  tonumber(cfg.enc_gn_groups or 0) or 0))
-log(string.format("  - resnet_blocks=%s max_tokens=%d",
-  tostring(cfg.use_attention),
-  tonumber(cfg.resnet_max_tokens or 0) or 0))
-log(string.format("  - skip_connections=%s", tostring(cfg.use_skip_connections)))
-log(string.format("  - encoder_prior=%s (couche Constant apprise)", tostring(cfg.use_encoder_prior)))
-log(string.format("  - d_model=%d (ConditioningEncoder externe%s)",
-  tonumber(cfg.d_model or 0) or 0,
-  (tonumber(cfg.d_model or 0) or 0) > 0 and " actif" or " désactivé"))
-log(string.format("  - attn=%s heads=%d max_tokens=%d",
-  tostring(cfg.use_attn),
-  tonumber(cfg.attn_heads or 0) or 0,
-  tonumber(cfg.attn_max_tokens or 0) or 0))
-log(string.format("  - stochastic_latent=%s", tostring(cfg.stochastic_latent)))
-if cfg.text_cond then
-  log(string.format("  - text_cond=true seq_len=%d vocab_size=%d text_d_model=%d proj_dim=%d align_weight=%g",
-    cfg.seq_len or 0, cfg.vocab_size or 0, cfg.text_d_model or 0, cfg.proj_dim or 0, cfg.align_weight or 0.0))
-  log(string.format("  - base_tokenizer=%s", base_tok_path))
-end
-log(string.format("  - epochs=%d lr=%g kl_beta=%g", epochs, lr, cfg.kl_beta))
-log(string.format("  - perceptual: weight=%g arch=%s base=%d ckpt=%s",
-  tonumber(cfg.perceptual_weight or 0.0) or 0.0,
-  tostring(cfg.perceptual_arch or ""),
-  tonumber(cfg.perceptual_base_channels or 0) or 0,
-  tostring(cfg.perceptual_checkpoint or "")))
-if (tonumber(cfg.perceptual_weight or 0) or 0) > 0 then
-  log(string.format("  - perceptual_prior: enabled=true momentum=%g scale=%g",
-    tonumber(cfg.perceptual_prior_momentum or 0.95) or 0.95,
-    tonumber(cfg.perceptual_prior_scale or 0.05) or 0.05))
-end
-log(string.format("  - seed=%d", seed))
-log(string.format("  - warmup: lr_warmup_steps=%d kl_warmup_steps=%d", cfg.warmup_steps or 0, cfg.kl_warmup_steps or 0))
-log(string.format("  - logvar_clip=[%g,%g] grad_clip_norm=%g",
-  cfg.logvar_clip_min, cfg.logvar_clip_max, cfg.grad_clip_norm))
-log(string.format("  - autosave_every_epochs=%d", cfg.autosave_every_epochs or 0))
-log(string.format("  - viz_taps_force_inference=%s", tostring(cfg.viz_taps_force_inference)))
-log(string.format("  - markers: wass_scale=%g temp_scale=%g warmup_steps=%d scale_max=%g",
-  cfg.marker_wass_scale or 0.0, cfg.marker_temp_scale or 0.0, cfg.marker_warmup_steps or 0, cfg.marker_scale_max or 0.0))
-log(string.format("  - grad_accum_steps=%d", cfg.grad_accum_steps))
-log(string.format("  - backbone_ready=%s stop=%s window=%d recon_target=%g kl=[%g,%g] plateau(rel<=%g abs<=%g) min_steps=%d file=%s",
-  tostring(cfg.backbone_ready_enabled),
-  tostring(cfg.backbone_ready_stop),
-  tonumber(cfg.backbone_ready_window or 0) or 0,
-  tonumber(cfg.backbone_ready_recon_target or 0.0) or 0.0,
-  tonumber(cfg.backbone_ready_kl_min or 0.0) or 0.0,
-  tonumber(cfg.backbone_ready_kl_max or 0.0) or 0.0,
-  tonumber(cfg.backbone_ready_plateau_rel or 0.0) or 0.0,
-  tonumber(cfg.backbone_ready_plateau_abs or 0.0) or 0.0,
-  tonumber(cfg.backbone_ready_min_steps or 0) or 0,
-  tostring(cfg.backbone_ready_file or "")))
-if (cfg.validate_every_steps or 0) > 0 then
-  log(string.format("  - validate_every_steps=%d validate_items=%d holdout_frac=%.4g",
-    cfg.validate_every_steps, cfg.validate_items, cfg.validate_holdout_frac))
-end
-if cfg.triple_fault then
-  log(string.format("  - triple_fault=true fault_every=%d", cfg.triple_fault_every_steps))
+log(string.format("  - epochs=%d", epochs))
+log(string.format("  - learning_rate=%g", lr))
+log(string.format("  - base_tokenizer=%s", base_tok_path))
+log("  - cfg:")
+do
+  local cfg_keys = {}
+  for key in pairs(cfg) do cfg_keys[#cfg_keys + 1] = key end
+  table.sort(cfg_keys, function(a, b) return tostring(a) < tostring(b) end)
+  for _, key in ipairs(cfg_keys) do
+    log(string.format("      %s = %s", tostring(key), format_cfg_value(cfg[key])))
+  end
 end
 
 -- Heuristiques de qualité: si le latent est trop petit ou si KL+latent déterministe => détails lissés.
@@ -726,7 +862,7 @@ if RESUME and Ckpt and Ckpt.resolve_dir then
       load_encoder = true,
       load_tokenizer = true,
       load_optimizer = true,
-      strict_mode = false,
+      strict_mode = true,
       validate_checksums = true
     }
     local ok_load, err_load = Mimir.Serialization.load(resume_dir, "raw_folder", load_opts)

@@ -9,6 +9,42 @@
 #include <vector>
 
 int main() {
+    // Rectangular inputs are valid when both axes use the same power-of-two
+    // downsampling ratio (8x4 -> 4x2 here).
+    VAEConvModel::Config rectangular_cfg;
+    rectangular_cfg.image_w = 8;
+    rectangular_cfg.image_h = 4;
+    rectangular_cfg.image_c = 1;
+    rectangular_cfg.latent_w = 4;
+    rectangular_cfg.latent_h = 2;
+    rectangular_cfg.latent_c = 1;
+    rectangular_cfg.base_channels = 8;
+    rectangular_cfg.use_attention = false;
+    rectangular_cfg.use_attn = false;
+    VAEConvModel rectangular_vae;
+    rectangular_vae.buildFromConfig(rectangular_cfg);
+    TASSERT_TRUE(!rectangular_vae.getLayers().empty());
+
+    // Decoder normalization can be disabled independently from the encoder.
+    // This protects the CLI/config contract `enc_norm=groupnorm, dec_norm=none`.
+    VAEConvModel::Config decoder_no_norm_cfg = rectangular_cfg;
+    decoder_no_norm_cfg.use_attention = true;
+    decoder_no_norm_cfg.resnet_max_tokens = 0;
+    decoder_no_norm_cfg.enc_norm = "groupnorm";
+    decoder_no_norm_cfg.dec_norm = "none";
+    VAEConvModel decoder_no_norm_vae;
+    decoder_no_norm_vae.buildFromConfig(decoder_no_norm_cfg);
+    bool saw_encoder_norm = false;
+    bool saw_decoder_norm = false;
+    for (const auto& layer : decoder_no_norm_vae.getLayers()) {
+        const bool is_norm = layer.type == "GroupNorm" || layer.type == "LayerNorm";
+        if (!is_norm) continue;
+        saw_encoder_norm = saw_encoder_norm || layer.name.rfind("vae_conv/enc/", 0) == 0;
+        saw_decoder_norm = saw_decoder_norm || layer.name.rfind("vae_conv/dec/", 0) == 0;
+    }
+    TASSERT_TRUE(saw_encoder_norm);
+    TASSERT_TRUE(!saw_decoder_norm);
+
     // A fixed Constant must remain fixed, while an explicitly trainable one
     // receives the exact upstream gradient and is updated by the optimizer.
     Model parameter_model;

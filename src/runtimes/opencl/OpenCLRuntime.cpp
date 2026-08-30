@@ -136,6 +136,21 @@ bool OpenCLRuntime::supportsBackwardLayerType(const LayerType type) const {
     }
 }
 
+RuntimeCapabilityLevel OpenCLRuntime::queryForwardCapability(const LayerType type) const {
+#ifndef ENABLE_OPENCL
+    return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
+                                          : RuntimeCapabilityLevel::Unsupported;
+#else
+    return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::Native
+                                          : RuntimeCapabilityLevel::Unsupported;
+#endif
+}
+
+RuntimeCapabilityLevel OpenCLRuntime::queryBackwardCapability(const LayerType type) const {
+    return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
+                                           : RuntimeCapabilityLevel::Unsupported;
+}
+
 bool OpenCLRuntime::linearForward(
     const float* input,
     const float* weights,
@@ -254,11 +269,8 @@ bool OpenCLRuntime::forwardLayer(
 
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
-            if (impl_->engine.binaryForward(A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()), op)) {
-                return true;
-            }
-            RuntimeLayerOps::binaryForwardHost(A, B, outputs[0], op);
-            return true;
+            return impl_->engine.binaryForward(
+                A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()), op);
         }
         case LayerType::ReLU:
         case LayerType::LeakyReLU:
@@ -282,11 +294,8 @@ bool OpenCLRuntime::forwardLayer(
 
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
-            if (impl_->engine.unaryForward(A.data(), outputs[0].data(), static_cast<int>(A.size()), op, alpha)) {
-                return true;
-            }
-            RuntimeLayerOps::unaryForwardHost(A, outputs[0], op, alpha);
-            return true;
+            return impl_->engine.unaryForward(
+                A.data(), outputs[0].data(), static_cast<int>(A.size()), op, alpha);
         }
         default:
             return false;

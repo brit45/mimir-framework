@@ -18,6 +18,8 @@ framework, puis choisissez un guide selon ce que vous souhaitez construire.
 - [Ajouter un modèle](02-Tuto-Ajouter-Modele.md)
 - [Écrire un script Lua](03-Tuto-Coder-Script.md)
 - [Du registre au checkpoint](08-Tuto-Registre-Pipeline-Checkpoint.md)
+- [Créer et inspecter un package MPK](09-Tuto-Creer-MPK.md)
+- [Rendre un run reproductible avec JSON et `env`](../02-User-Guide/08-Config-Driven-Scripting.md)
 - [Valider VAEConv et son prior appris sans dataset](07-Tuto-VAEConv-Sans-Dataset.md)
 
 ## Moteur et runtimes

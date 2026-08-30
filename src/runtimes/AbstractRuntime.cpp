@@ -132,6 +132,24 @@ bool AbstractRuntime::supportsBackwardLayerType(LayerType type) const {
     return false;
 }
 
+RuntimeCapabilityLevel AbstractRuntime::queryForwardCapability(LayerType type) const {
+    return supportsForwardLayerType(type)
+        ? RuntimeCapabilityLevel::Native
+        : RuntimeCapabilityLevel::Unsupported;
+}
+
+RuntimeCapabilityLevel AbstractRuntime::queryBackwardCapability(LayerType type) const {
+    return supportsBackwardLayerType(type)
+        ? RuntimeCapabilityLevel::Native
+        : RuntimeCapabilityLevel::Unsupported;
+}
+
+bool AbstractRuntime::supportsKernelFusion(LayerType producer, LayerType consumer) const {
+    (void)producer;
+    (void)consumer;
+    return false;
+}
+
 bool AbstractRuntime::dispatchForwardLayer(
     const std::vector<AbstractRuntime*>& runtime_priority,
     const std::vector<const std::vector<float>*>& inputs,

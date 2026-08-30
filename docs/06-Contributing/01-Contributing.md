@@ -19,6 +19,8 @@ Compléments développeurs :
 - Ajouter une architecture + registry + script Lua + outils : [docs/06-Contributing/02-New-Architecture-And-Tools.md](02-New-Architecture-And-Tools.md)
 - Chapitre complet (models, runtimes, features, scripting multi-langage) : [docs/06-Contributing/03-Extending-Models-Runtimes-And-Features.md](03-Extending-Models-Runtimes-And-Features.md)
 - Tutoriel pas-à-pas (ajouter une entrée Python, transposable Ruby/JS/Perl/Java/Rust) : [docs/06-Contributing/04-Tutorial-Add-Python-Scripting-Entry.md](04-Tutorial-Add-Python-Scripting-Entry.md)
+- Audit, nettoyage et pull request publique : [Préparer une publication GitHub](05-Publishing-GitHub.md)
+- Maturité vérifiée des composants : [État réel du projet](../00-PROJECT-STATUS.md)
 
 ## Philosophie
 

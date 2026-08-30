@@ -174,7 +174,11 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         ++downsamples;
     }
     if (down_h != LH || down_w != LW) {
-        throw std::runtime_error("VAEConvModel: cannot reach latent_h/latent_w with /2 downsamples");
+        throw std::runtime_error(
+            "VAEConvModel: cannot reach latent " + std::to_string(LW) + "x" + std::to_string(LH) +
+            " from image " + std::to_string(W) + "x" + std::to_string(H) +
+            " with identical /2 downsamples (ratios width=" + std::to_string(W / LW) +
+            ", height=" + std::to_string(H / LH) + ")");
     }
 
     const int image_dim = W * H * C;
@@ -745,7 +749,11 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         ++downsamples;
     }
     if (down_h != LH || down_w != LW) {
-        throw std::runtime_error("VAEConvModel(decode): cannot reach latent_h/latent_w with /2 downsamples");
+        throw std::runtime_error(
+            "VAEConvModel(decode): cannot reach latent " + std::to_string(LW) + "x" + std::to_string(LH) +
+            " from image " + std::to_string(W) + "x" + std::to_string(H) +
+            " with identical /2 downsamples (ratios width=" + std::to_string(W / LW) +
+            ", height=" + std::to_string(H / LH) + ")");
     }
 
     const int image_dim = W * H * C;

@@ -261,16 +261,16 @@ Lecture pratique de ces commandes :
 
 ```bash
 # Exécution de la section lua racine (tâche par défaut)
-./bin/mimir --conf vae_conv-config.json
+./bin/mimir --conf configs/vae_conv-config.json
 
 # Sélection d'une tâche nommée
-./bin/mimir --conf vae_conv-config.json --run train
-./bin/mimir --conf vae_conv-config.json --run infer
-./bin/mimir --conf vae_conv-config.json --run resume
+./bin/mimir --conf configs/vae_conv-config.json --run train
+./bin/mimir --conf configs/vae_conv-config.json --run infer
+./bin/mimir --conf configs/vae_conv-config.json --run resume
 
 # Override à la volée sur une tâche
-./bin/mimir --conf vae_conv-config.json --run train --override training.learning_rate=5e-6
-./bin/mimir --conf vae_conv-config.json --run train --override model.base_channels=16
+./bin/mimir --conf configs/vae_conv-config.json --run train --override training.learning_rate=5e-6
+./bin/mimir --conf configs/vae_conv-config.json --run train --override model.base_channels=16
 
 # Si la tâche est introuvable, mimir liste les tâches disponibles :
 # ❌ --run: tâche 'xxx' introuvable
@@ -282,11 +282,22 @@ Sans `--run`, la section `lua` racine est utilisée.
 
 Le schéma complet des fichiers de conf est documenté dans `configs/conf.schema.json`.
 
+La section racine `env` applique ses variables avant l'exécution. Une valeur du
+fichier de conf remplace la valeur héritée du shell ou initialisée par
+`run_mimir.sh` :
+
+```json
+"env": {
+  "OMP_NUM_THREADS": 10,
+  "MIMIR_ACCEL_VERBOSE": 0
+}
+```
+
 ### Avec `run_mimir.sh`
 
 ```bash
 ./run_mimir.sh --lua scripts/templates/template_new_model.lua
-./run_mimir.sh --conf vae_conv-config.json --run train
+./run_mimir.sh --conf configs/vae_conv-config.json --run train
 ```
 
 ### Bootstrap environnement (config.sh)

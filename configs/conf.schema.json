@@ -178,7 +178,7 @@
 
     "env": {
       "type": "object",
-      "description": "Documentation des variables d'environnement. Non appliquées par mimir — doivent être définies par le shell avant le lancement (via export ou prefix de commande).",
+      "description": "Variables d'environnement appliquées par Mímir avant l'exécution de la configuration. Les valeurs de la conf remplacent celles héritées du shell.",
       "properties": {
         "MIMIR_ACCEL_VERBOSE": { "type": "integer", "enum": [0, 1], "description": "Verbosité du backend d'accélération (0 = silencieux, 1 = verbose)." },
         "MIMIR_PLANNER_TRACE": { "type": "integer", "enum": [0, 1], "description": "Trace du planificateur de graphe de calcul (0 = off, 1 = on)." },

@@ -483,6 +483,57 @@ bool RocmRuntime::supportsBackwardLayerType(const LayerType type) const {
     }
 }
 
+RuntimeCapabilityLevel RocmRuntime::queryForwardCapability(const LayerType type) const {
+    if (!supportsForwardLayerType(type)) return RuntimeCapabilityLevel::Unsupported;
+#ifndef ENABLE_ROCM
+    return RuntimeCapabilityLevel::HostFallback;
+#else
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Conv2d:
+        case LayerType::LayerNorm:
+        case LayerType::RMSNorm:
+        case LayerType::SelfAttention:
+        case LayerType::MultiHeadAttention:
+            return RuntimeCapabilityLevel::NativeOptimized;
+        default:
+            return RuntimeCapabilityLevel::HostFallback;
+    }
+#endif
+}
+
+RuntimeCapabilityLevel RocmRuntime::queryBackwardCapability(const LayerType type) const {
+    if (!supportsBackwardLayerType(type)) return RuntimeCapabilityLevel::Unsupported;
+#ifndef ENABLE_ROCM
+    return RuntimeCapabilityLevel::HostFallback;
+#else
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            return RuntimeCapabilityLevel::Native;
+        default:
+            return RuntimeCapabilityLevel::HostFallback;
+    }
+#endif
+}
+
 bool RocmRuntime::linearForward(
     const float* input,
     const float* weights,

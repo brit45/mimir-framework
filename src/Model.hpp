@@ -749,6 +749,9 @@ protected:
     struct StaticPlanCache {
         bool built = false;
         bool built_for_training = false;
+        bool built_with_fusion = false;
+        bool built_with_buffer_reuse = false;
+        Mimir::Planning::PlannerMode mode = Mimir::Planning::PlannerMode::Legacy;
         bool dumped = false;
         bool runtime_scan_dumped = false;
         std::string runtime_scan_signature;

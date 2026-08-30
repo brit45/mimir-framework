@@ -5001,8 +5001,19 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // STATIC SCHEDULING + PLANNERS (framework)
     // ========================================================================
     const bool planner_enabled = env_flag_true("MIMIR_ENABLE_PLANNER", true);
-    const bool fusion_enabled = env_flag_true("MIMIR_ENABLE_FUSION", true);
+    const bool fusion_enabled = env_flag_true(
+        "MIMIR_PLANNER_FUSION", env_flag_true("MIMIR_ENABLE_FUSION", true));
     const bool fusion_in_training = env_flag_true("MIMIR_ENABLE_FUSION_TRAIN", false);
+    const bool planner_buffer_reuse = env_flag_true("MIMIR_PLANNER_BUFFER_REUSE", false);
+    const bool planner_cost_model = env_flag_true("MIMIR_PLANNER_COST_MODEL", true);
+    const std::string planner_mode_value = [] {
+        const char* value = std::getenv("MIMIR_PLANNER_MODE");
+        return std::string(value ? value : "legacy");
+    }();
+    const Mimir::Planning::PlannerMode planner_mode =
+        planner_mode_value == "cost" && planner_cost_model ? Mimir::Planning::PlannerMode::Cost :
+        planner_mode_value == "static" ? Mimir::Planning::PlannerMode::Static :
+        Mimir::Planning::PlannerMode::Legacy;
     // Par défaut, la planification reste silencieuse dans le terminal.
     // Opt-in explicite via MIMIR_PLANNER_STDOUT=1 (compatibilité conservée avec l'ancien nom).
     const bool planner_to_terminal = env_flag_true(
@@ -5019,10 +5030,42 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     if (planner_enabled) {
         if (!static_plan_.built ||
             static_plan_.built_for_training != training ||
+            static_plan_.built_with_fusion != fusion_enabled ||
+            static_plan_.built_with_buffer_reuse != planner_buffer_reuse ||
+            static_plan_.mode != planner_mode ||
             static_plan_.execution.ops.size() != layers.size()) {
-            static_plan_.execution = Mimir::Planning::build_execution_plan_static(layers, training, fusion_in_training);
+            static_plan_.execution = Mimir::Planning::build_execution_plan_global(
+                layers, training, planner_mode, fusion_enabled, planner_buffer_reuse);
+            Mimir::Planning::plan_host_buffer_reuse(static_plan_.execution, planner_buffer_reuse);
+            Mimir::Planning::apply_global_scratch_plan(static_plan_.execution, layers);
             static_plan_.built = true;
             static_plan_.built_for_training = training;
+            static_plan_.built_with_fusion = fusion_enabled;
+            static_plan_.built_with_buffer_reuse = planner_buffer_reuse;
+            static_plan_.mode = planner_mode;
+            static_plan_.dumped = false;
+            static_plan_.runtime_scan_dumped = false;
+        }
+
+        // Runtime activation and placement must precede every dump so the
+        // selected runtime, transfers and regions describe the executable plan.
+        RuntimeRouter::instance().planForwardLayerRoutes(layers);
+        if (planner_mode != Mimir::Planning::PlannerMode::Legacy) {
+            std::vector<AbstractRuntime*> planner_runtimes;
+#ifdef ENABLE_ROCM
+            if (g_rocm_engine) planner_runtimes.push_back(g_rocm_engine.get());
+#endif
+#ifdef ENABLE_CUDA
+            if (g_cuda_engine) planner_runtimes.push_back(g_cuda_engine.get());
+#endif
+#ifdef ENABLE_VULKAN
+            if (g_compute_engine) planner_runtimes.push_back(g_compute_engine.get());
+#endif
+#ifdef ENABLE_OPENCL
+            if (g_opencl_engine) planner_runtimes.push_back(g_opencl_engine.get());
+#endif
+            if (g_cpu_engine) planner_runtimes.push_back(g_cpu_engine.get());
+            Mimir::Planning::apply_runtime_placement(static_plan_.execution, planner_runtimes);
         }
 
         if (!static_plan_.dumped && env_flag_true("MIMIR_PLANNER_DUMP", false)) {
@@ -5052,7 +5095,20 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             << ", c=" << scratch.c_bytes
                             << "}";
             emit_planner_line(planner_summary.str());
+
+            const std::string global_dump = Mimir::Planning::dump_execution_plan_text(static_plan_.execution);
+            std::istringstream global_lines(global_dump);
+            std::string global_line;
+            while (std::getline(global_lines, global_line)) {
+                if (!global_line.empty()) emit_planner_line(global_line);
+            }
+            if (const char* json_path = std::getenv("MIMIR_PLANNER_JSON"); json_path && json_path[0] != '\0') {
+                std::ofstream json(json_path, std::ios::binary | std::ios::trunc);
+                if (json) json << Mimir::Planning::dump_execution_plan_json(static_plan_.execution) << '\n';
+            }
         }
+    } else {
+        static_plan_.built = false;
     }
 
     const bool runtime_verbose = !Model::frameworkLogsSuppressed();
@@ -5261,7 +5317,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
     }
     
-    RuntimeRouter::instance().planForwardLayerRoutes(layers);
+    if (!planner_enabled) RuntimeRouter::instance().planForwardLayerRoutes(layers);
 
     // État du forward
     if (training) {
@@ -5464,7 +5520,21 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                                       static_cast<size_t>(std::numeric_limits<int>::max()))));
     }
 
+    const bool planned_host_reuse_enabled =
+        planner_enabled && static_plan_.built && planner_buffer_reuse && !training &&
+        !exhaustive_model_viz &&
+        std::none_of(static_plan_.execution.skip_layer.begin(),
+                     static_plan_.execution.skip_layer.end(),
+                     [](const uint8_t value) { return value != 0; });
+    const bool poison_reused_buffers = env_flag_true("MIMIR_PLANNER_BUFFER_POISON", false);
+    std::unordered_map<size_t, std::vector<float>> planned_host_buffer_pool;
+    size_t actual_buffer_reuse_count = 0;
+    size_t actual_buffer_reuse_bytes = 0;
+    const bool planner_device_residency = env_flag_true("MIMIR_PLANNER_DEVICE_RESIDENCY", false);
+    std::vector<uint8_t> resident_chain_skip(layers.size(), 0);
+
     for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        if (resident_chain_skip[layer_idx] != 0) continue;
         // Une fusion retire les consumers du parcours. En mode VIZ exhaustif,
         // executer chaque noeud garantit une vignette (L) par layer.
         if (!exhaustive_model_viz && planner_enabled && static_plan_.built &&
@@ -5575,6 +5645,61 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         std::string executed_call = "cpu_switch_kernel";
         
         std::vector<float> layer_output;
+        bool resident_chain_executed = false;
+        std::string resident_final_output_name;
+
+#ifdef ENABLE_VULKAN
+        if (planner_device_residency && planner_enabled && static_plan_.built && !training &&
+            !exhaustive_model_viz && g_compute_engine && g_compute_engine->isInitialized() &&
+            g_compute_engine->config().linear_enabled &&
+            layer_idx < static_plan_.execution.layers.size() &&
+            static_plan_.execution.layers[layer_idx].runtime == RuntimeKind::Vulkan &&
+            static_cast<long long>(x.size()) >= std::max(0, g_compute_engine->config().linear_min_ops)) {
+            auto resident_unary = [](const LayerType type) {
+                return type == LayerType::ReLU || type == LayerType::SiLU ||
+                       type == LayerType::GELU || type == LayerType::Sigmoid ||
+                       type == LayerType::Tanh;
+            };
+            if (resident_unary(layer.type_enum)) {
+                std::vector<LayerType> operations;
+                size_t chain_end = layer_idx;
+                std::string expected_input = input_names.empty() ? std::string() : input_names.front();
+                for (size_t candidate = layer_idx; candidate < layers.size(); ++candidate) {
+                    const Layer& chain_layer = layers[candidate];
+                    if (!resident_unary(chain_layer.type_enum) ||
+                        candidate >= static_plan_.execution.layers.size() ||
+                        static_plan_.execution.layers[candidate].runtime != RuntimeKind::Vulkan) break;
+                    const auto& chain_inputs = Mimir::Planning::planner_inputs_for(chain_layer);
+                    if (chain_inputs.size() != 1 || chain_inputs.front() != expected_input) break;
+                    if (candidate > layer_idx) {
+                        const auto& previous_planned = static_plan_.execution.layers[candidate - 1];
+                        const auto tensor_it = static_plan_.execution.tensors.find(previous_planned.output);
+                        if (tensor_it == static_plan_.execution.tensors.end() ||
+                            tensor_it->second.persistent || tensor_it->second.graph_output ||
+                            tensor_it->second.last_use != candidate) break;
+                    }
+                    operations.push_back(chain_layer.type_enum);
+                    chain_end = candidate;
+                    expected_input = Mimir::Planning::planner_output_name_for(chain_layer);
+                }
+                if (operations.size() >= 2) {
+                    layer_output.assign(x.size(), 0.0f);
+                    if (g_compute_engine->unaryChainForwardResident(
+                            x.data(), layer_output.data(), static_cast<int>(x.size()), operations)) {
+                        resident_chain_executed = true;
+                        resident_final_output_name = Mimir::Planning::planner_output_name_for(layers[chain_end]);
+                        for (size_t skipped = layer_idx + 1; skipped <= chain_end; ++skipped) {
+                            resident_chain_skip[skipped] = 1;
+                        }
+                        executed_backend = "VULKAN";
+                        executed_call = "vulkan.unaryChainForwardResident";
+                    } else {
+                        layer_output.clear();
+                    }
+                }
+            }
+        }
+#endif
 
         // Dispatch runtime générique (CUDA/ROCm) pour les layers supportés via forwardLayer().
         // Retourne true si un runtime a produit une sortie valide (outputs[0]).
@@ -5593,7 +5718,33 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             std::vector<std::vector<float>> runtime_outputs;
             AbstractRuntime* selected_runtime = nullptr;
-            if (!RuntimeRouter::instance().dispatchForwardLayer(inputs, runtime_outputs, layer, training, &selected_runtime)) {
+            AbstractRuntime* planned_runtime = nullptr;
+            if (planner_enabled && static_plan_.built &&
+                planner_mode != Mimir::Planning::PlannerMode::Legacy &&
+                layer_idx < static_plan_.execution.layers.size()) {
+                switch (static_plan_.execution.layers[layer_idx].runtime) {
+#ifdef ENABLE_ROCM
+                    case RuntimeKind::ROCm: planned_runtime = g_rocm_engine.get(); break;
+#endif
+#ifdef ENABLE_CUDA
+                    case RuntimeKind::CUDA: planned_runtime = g_cuda_engine.get(); break;
+#endif
+#ifdef ENABLE_VULKAN
+                    case RuntimeKind::Vulkan: planned_runtime = g_compute_engine.get(); break;
+#endif
+#ifdef ENABLE_OPENCL
+                    case RuntimeKind::OpenCL: planned_runtime = g_opencl_engine.get(); break;
+#endif
+                    case RuntimeKind::CPU: planned_runtime = g_cpu_engine.get(); break;
+                    default: break;
+                }
+            }
+            const bool runtime_ok = planned_runtime
+                ? RuntimeRouter::instance().dispatchForwardLayerPlanned(
+                    planned_runtime, inputs, runtime_outputs, layer, training, &selected_runtime)
+                : RuntimeRouter::instance().dispatchForwardLayer(
+                    inputs, runtime_outputs, layer, training, &selected_runtime);
+            if (!runtime_ok) {
                 if (runtime_trace) {
                     std::vector<std::string> active_runtimes;
                     active_runtimes.reserve(5);
@@ -5635,7 +5786,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 return false;
             }
             out = std::move(runtime_outputs[0]);
-            executed_call = "runtime_router.dispatchForwardLayer";
+            executed_call = planned_runtime
+                ? "runtime_router.dispatchForwardLayerPlanned"
+                : "runtime_router.dispatchForwardLayer";
             executed_backend = selected_runtime ? std::string(selected_runtime->name()) : std::string("runtime_router(unknown)");
             return true;
         };
@@ -5645,7 +5798,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // ====================================================================
         
         try {
-            switch (layer.type_enum) {
+            if (!resident_chain_executed) switch (layer.type_enum) {
 
     // ====================================================================
     // CONVOLUTION
@@ -8109,9 +8262,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // STORE OUTPUT (multi-output support)
         // ====================================================================
         
-        std::string output_name = layer.output.empty() ? "x" : layer.output;
+        std::string output_name = resident_chain_executed
+            ? resident_final_output_name
+            : (layer.output.empty() ? "x" : layer.output);
 
-        if (!exhaustive_model_viz && fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
+        if (!resident_chain_executed && !exhaustive_model_viz && fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
             const auto& plan = static_plan_.execution;
             if (layer_idx < plan.fuse_chain_next.size()) {
                 int chain_idx = plan.fuse_chain_next[layer_idx];
@@ -8180,6 +8335,44 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             }
         }
 
+        if (planned_host_reuse_enabled && layer_idx < static_plan_.execution.layers.size()) {
+            const auto& planned_layer = static_plan_.execution.layers[layer_idx];
+            // Inputs whose last logical use is this layer can be returned to
+            // their planned physical slot before the output is materialized.
+            for (const auto& input_id : planned_layer.inputs) {
+                const auto tensor_it = static_plan_.execution.tensors.find(input_id);
+                if (tensor_it == static_plan_.execution.tensors.end()) continue;
+                const auto& planned_tensor = tensor_it->second;
+                if (planned_tensor.last_use != layer_idx || planned_tensor.persistent ||
+                    planned_tensor.required_for_backward ||
+                    planned_tensor.physical_buffer_id == std::numeric_limits<size_t>::max()) continue;
+                auto live = tensor_store.find(planned_tensor.name);
+                if (live == tensor_store.end()) continue;
+                std::vector<float> released = std::move(live->second);
+                tensor_store.erase(live);
+                typed_tensor_store.erase(planned_tensor.name);
+                if (poison_reused_buffers) {
+                    std::fill(released.begin(), released.end(), std::numeric_limits<float>::quiet_NaN());
+                }
+                planned_host_buffer_pool[planned_tensor.physical_buffer_id] = std::move(released);
+            }
+
+            const auto output_it = static_plan_.execution.tensors.find(planned_layer.output);
+            if (output_it != static_plan_.execution.tensors.end()) {
+                const size_t slot = output_it->second.physical_buffer_id;
+                auto reusable = planned_host_buffer_pool.find(slot);
+                if (slot != std::numeric_limits<size_t>::max() && reusable != planned_host_buffer_pool.end() &&
+                    reusable->second.capacity() >= layer_output.size()) {
+                    std::vector<float> recycled = std::move(reusable->second);
+                    planned_host_buffer_pool.erase(reusable);
+                    recycled.assign(layer_output.begin(), layer_output.end());
+                    layer_output.swap(recycled);
+                    ++actual_buffer_reuse_count;
+                    actual_buffer_reuse_bytes += layer_output.size() * sizeof(float);
+                }
+            }
+        }
+
         storeTensor(output_name, std::move(layer_output));
 
         const auto& layer_out_view = getTensor(output_name);
@@ -8218,6 +8411,15 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             executeBranchComputation(layer_idx, all_layer_outputs, training);
             // Update tensor store avec le résultat mergé
             storeTensor(output_name, all_layer_outputs[layer_idx]);
+        }
+    }
+
+    if (planned_host_reuse_enabled) {
+        static_plan_.execution.stats.buffer_reuse_count = actual_buffer_reuse_count;
+        static_plan_.execution.stats.buffer_reuse_bytes = actual_buffer_reuse_bytes;
+        if (planner_to_terminal) {
+            std::cerr << "[planner] host_buffer_reuse_count=" << actual_buffer_reuse_count
+                      << " host_buffer_reuse_bytes=" << actual_buffer_reuse_bytes << std::endl;
         }
     }
     
