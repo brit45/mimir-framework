@@ -3,6 +3,7 @@
 --   local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
 --   local dir = Ckpt.resolve_dir("checkpoint/MyModel")
 
+---@class MimirCheckpointResumeModule
 local M = {}
 local FS = dofile("scripts/modules/fs.lua")
 

@@ -8,6 +8,7 @@
 --   --no-flag (bool=false)
 --   -- (fin des options)
 
+---@class MimirArgsModule
 local M = {}
 local Help = dofile("scripts/modules/help_cli.lua")
 local caller_script_path = Help.find_script_from_stack(3, 24)
@@ -212,6 +213,9 @@ local function apply_override(cfg, expr)
   return cfg
 end
 
+---@param argv? string[]
+---@return MimirScriptArgs opts
+---@return string[] positional
 function M.parse(argv)
   local opts = {}
   local pos = {}
@@ -314,6 +318,9 @@ function M.apply_overrides(cfg, opts)
   return cfg
 end
 
+---@param opts MimirScriptArgs
+---@param key string
+---@return boolean
 function M.has(opts, key)
   return opts and opts[key] == true
 end
@@ -423,4 +430,3 @@ function M.opt_bool(k, d)
 end
 
 return M
-

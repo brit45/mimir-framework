@@ -2,6 +2,7 @@
 
 -- Shared helpers for MPK node-graph layer type normalization/validation.
 
+---@class MimirMPKLayersModule
 local M = {}
 
 local KNOWN_CANONICAL = {

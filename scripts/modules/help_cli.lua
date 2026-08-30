@@ -1,3 +1,4 @@
+---@class MimirHelpModule
 local M = {}
 
 local function read_file(path)

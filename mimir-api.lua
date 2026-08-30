@@ -1,7 +1,7 @@
 ---@meta
 ---@version 3.1.0
 ---@author <bri45> for "Mímir Framework"
----@date 31 juillet 2026 (dernière sync)
+---@date 30 août 2026 (dernière sync)
 ---@diagnostic disable: missing-return, unused-local, unused-vararg, duplicate-doc-field, redundant-parameter
 
 --=============================================================================
@@ -13,7 +13,7 @@
 -- ⚠️  IMPORTANT: Ce fichier est synchronisé avec
 --    src/scriptings/Lua/luaScripting/LuaScripting.cpp
 --    Toute modification de l'API C++ doit être reflétée ici.
---    Dernière synchronisation: 31 juillet 2026
+--    Dernière synchronisation: 30 août 2026
 --  • Alias `Mimir.model` (lowercase) + stub explicite `Mimir.model.dtype`
 --  • Operations multi-input complètes (Add, Multiply, Concat, MatMul, Split)
 -- Historique v2.0.0 :
@@ -1869,6 +1869,103 @@ function write_json(path, obj) end
 ---Print (redirigé) — peut être surchargé par le runtime.
 ---@param ... any
 function print(...) end
+
+--=============================================================================
+-- Modules Lua (`dofile("scripts/modules/...")`)
+--=============================================================================
+-- Ces types décrivent des helpers écrits en Lua. Ils ne sont pas membres de
+-- `Mimir` et leur chargement reste explicite.
+
+---@class MimirScriptArgs
+---@field override? string[]
+---@field [string] string|boolean|string[]
+
+---@class MimirArgsModule
+---@field parse fun(argv?:string[]):MimirScriptArgs, string[]
+---@field apply_overrides fun(cfg?:table, opts?:MimirScriptArgs):table
+---@field apply_validation_config fun(cfg?:table, opts?:MimirScriptArgs, defaults?:table):table
+---@field has fun(opts:MimirScriptArgs, key:string):boolean
+---@field get_str fun(opts:MimirScriptArgs, key:string, default?:string):string?
+---@field get_num fun(opts:MimirScriptArgs, key:string, default?:number):number?
+---@field get_int fun(opts:MimirScriptArgs, key:string, default?:integer):integer?
+---@field get_bool fun(opts:MimirScriptArgs, key:string, default?:boolean):boolean?
+---@field opt_str fun(key:string, default?:string):string?
+---@field opt_num fun(key:string, default?:number):number?
+---@field opt_int fun(key:string, default?:integer):integer?
+---@field opt_bool fun(key:string, default?:boolean):boolean?
+
+---@class MimirFSModule
+---@field is_windows fun():boolean
+---@field sep fun():string
+---@field quote fun(path:string):string
+---@field normalize fun(path:string):string
+---@field join fun(...:string):string
+---@field dirname fun(path:string):string?
+---@field file_exists fun(path:string):boolean
+---@field is_dir fun(path:string):boolean
+---@field exists fun(path:string):boolean
+---@field mkdir_p fun(path:string):boolean
+---@field list_dir fun(path:string):string[]
+
+---@class MimirCheckpointResumeModule
+---@field file_exists fun(path:string):boolean
+---@field find_latest_epoch_dir fun(base:string):string?
+---@field resolve_dir fun(base:string):string?
+
+---@class MimirBaseTokenizerOptions
+---@field path? string
+---@field require? boolean
+---@field max_vocab? integer
+
+---@class MimirBaseTokenizerModule
+---@field default_path fun():string
+---@field load_base fun(opts?:MimirBaseTokenizerOptions):boolean, string?
+---@field vocab_size fun():integer
+---@field save_current_as_base fun(path?:string):boolean, string?
+
+---@class MimirCausalTokenizerOptions
+---@field corpus string
+---@field vocab_size integer
+---@field padding_idx? integer
+---@field seq_len? integer
+---@field path? string
+---@field bpe_merges? integer
+
+---@class MimirCausalTokenizerInfo
+---@field generated boolean
+---@field replaced_loaded_tokenizer? boolean
+---@field reason? string
+---@field path? string
+---@field vocab_size integer
+---@field max_vocab integer
+
+---@class MimirCausalTokenizerModule
+---@field ensure fun(options:MimirCausalTokenizerOptions):TokenIds, MimirCausalTokenizerInfo
+
+---@class MimirHelpModule
+---@field should_show_help fun(argv?:string[]):boolean
+---@field find_script_from_stack fun(start_level?:integer, max_level?:integer):string?
+---@field print_help fun(params?:table)
+---@field auto_exit_help fun(params?:table)
+
+---@class MimirMPKModule
+---@field build fun(spec:table):table
+---@field compile fun(source_path:string, output_path:string):boolean?, string?
+---@field read fun(path:string):table?, string?
+---@field write fun(path:string, pkg:table, opts?:table):boolean?, string?
+---@field verify_checksum fun(pkg:table):boolean, string?
+---@field decode_payload fun(pkg:table):table?, string?
+---@field to_registry_full_config fun(pkg:table):table?, string?
+---@field model_structure_template fun(kind?:string):table
+---@field encode_pseudocode fun(value:table):string
+---@field decode_pseudocode fun(source:string):table
+
+---@class MimirMPKLayersModule
+---@field available_layer_types fun():string[]
+---@field infer_layer_type fun(layer_name:string):string
+---@field canonical_layer_type fun(raw_type:string, params?:table):string?, string?
+---@field predict_params_count fun(layer_type:string, params?:table, context?:table):integer, string
+---@field normalize_graph_in_place fun(model_structure:table, opts?:table):boolean, string?
 
 --=============================================================================
 -- Pipeline API (optionnel)
