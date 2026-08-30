@@ -13,7 +13,7 @@ DOCS_OUTPUT_DIR := docs/output
 DOCS_PDF := $(DOCS_OUTPUT_DIR)/Documentation_Mimir-FRAMEWORK.pdf
 DOCS_HTML := $(DOCS_OUTPUT_DIR)/Documentation_Mimir-FRAMEWORK.html
 DOCS_RESOURCE_PATH := .:docs:docs/01-Getting-Started:docs/02-User-Guide:docs/03-API-Reference:docs/04-Architecture-Internals:docs/05-Advanced:docs/06-Contributing:docs/07-Devs:docs/08-Tuto
-PANDOC_DOCS_FLAGS := --from=markdown+tex_math_single_backslash --resource-path=$(DOCS_RESOURCE_PATH)
+PANDOC_DOCS_FLAGS := --from=markdown+tex_math_single_backslash --resource-path=$(DOCS_RESOURCE_PATH) --lua-filter=scripts/tools/pandoc_project_logo.lua
 
 # Sources de la documentation publique, dans l'ordre de lecture du site.
 # Les rapports générés de docs/graphs restent exclus du livre; seul leur index
@@ -106,6 +106,7 @@ build-docs: check-docs
 		--toc \
 		--toc-depth=3 \
 		--standalone \
+		--embed-resources \
 		--css=https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.1.0/github-markdown.min.css; \
 	echo "✓ Documentation HTML générée: $(DOCS_HTML)"; \
 	ls -lh $(DOCS_HTML) | awk '{print "  Taille:", $$5}'
