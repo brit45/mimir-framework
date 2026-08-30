@@ -146,6 +146,33 @@ Notes scripts Lua (cross-plateforme):
 - Éviter `os.execute("mkdir ...")`, `io.popen("ls ...")`, `test -d`, etc. dans les scripts métier.
 - Les appels shell restent réservés aux besoins process externes (ex: ouvrir navigateur, lancer un outil), pas au filesystem applicatif.
 
+### Docker (CPU/headless)
+
+L'image Docker générique compile Mímir sans dépendre des instructions CPU de la
+machine de build. Elle active Lua, OpenMP, LZ4 et FFmpeg, mais désactive SFML,
+CUDA, ROCm, Vulkan, OpenCL et les bridges externes.
+
+```bash
+docker build --build-arg BUILD_JOBS=4 -t mimir:3.1.0 .
+docker run --rm mimir:3.1.0 --version
+docker run --rm mimir:3.1.0 \
+  --lua scripts/templates/template_new_model.lua
+```
+
+Pour utiliser des données et conserver les checkpoints :
+
+```bash
+docker run --rm \
+  -v "$PWD/datasets:/workspace/datasets:ro" \
+  -v "$PWD/checkpoint:/workspace/checkpoint" \
+  mimir:3.1.0 \
+  --conf configs/vae_conv-training.json
+```
+
+La configuration JSON peut remplacer `OMP_NUM_THREADS` grâce à sa section
+`env`. Les backends GPU nécessitent des images spécialisées avec leurs SDK et
+un accès explicite au matériel; ce Dockerfile ne revendique pas ce support.
+
 ---
 
 ### Modes d'utilisation
