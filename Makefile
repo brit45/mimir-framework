@@ -1,5 +1,5 @@
 
-.PHONY: all build build-static clean mk-video build-docs
+.PHONY: all build build-static clean mk-video check-docs build-docs
 
 FLAGS= -ffp-contract=fast \
 	-funroll-loops \
@@ -12,17 +12,25 @@ FLAGS= -ffp-contract=fast \
 DOCS_OUTPUT_DIR := docs/output
 DOCS_PDF := $(DOCS_OUTPUT_DIR)/Documentation_Mimir-FRAMEWORK.pdf
 DOCS_HTML := $(DOCS_OUTPUT_DIR)/Documentation_Mimir-FRAMEWORK.html
+DOCS_RESOURCE_PATH := .:docs:docs/01-Getting-Started:docs/02-User-Guide:docs/03-API-Reference:docs/04-Architecture-Internals:docs/05-Advanced:docs/06-Contributing:docs/07-Devs:docs/08-Tuto
+PANDOC_DOCS_FLAGS := --from=markdown+tex_math_single_backslash --resource-path=$(DOCS_RESOURCE_PATH)
 
-# Sources doc (nouvelle structure).
-# Ordre: index -> getting started -> user guide -> API -> internals -> advanced -> contributing.
+# Sources de la documentation publique, dans l'ordre de lecture du site.
+# Les rapports générés de docs/graphs restent exclus du livre; seul leur index
+# est inclus. Ajouter une nouvelle section numérotée implique de l'ajouter ici.
 DOCS_SOURCES := \
 	docs/00-INDEX.md \
+	docs/00-PROJECT-STATUS.md \
+	docs/00-Framework-Philosophy.md \
+	docs/00-STYLE.md \
 	$(sort $(wildcard docs/01-Getting-Started/*.md)) \
 	$(sort $(wildcard docs/02-User-Guide/*.md)) \
 	$(sort $(wildcard docs/03-API-Reference/*.md)) \
 	$(sort $(wildcard docs/04-Architecture-Internals/*.md)) \
 	$(sort $(wildcard docs/05-Advanced/*.md)) \
 	$(sort $(wildcard docs/06-Contributing/*.md)) \
+	$(sort $(wildcard docs/07-Devs/*.md)) \
+	$(sort $(wildcard docs/08-Tuto/*.md)) \
 	docs/graphs/README.md
 
 all: build
@@ -51,7 +59,12 @@ clean:
 	@rm -f *.o
 	@echo "✓ Nettoyage terminé"
 
-build-docs:
+check-docs:
+	@echo "🔎 Vérification de la documentation et de l'API Lua..."
+	@./scripts/tools/verify_api_sync.sh
+	@./scripts/tools/verify_docs.py
+
+build-docs: check-docs
 	@echo "📚 Génération de la documentation PDF..."
 	@if ! command -v pandoc >/dev/null 2>&1; then \
 		echo "❌ Erreur: pandoc n'est pas installé"; \
@@ -60,7 +73,7 @@ build-docs:
 	fi
 	@mkdir -p $(DOCS_OUTPUT_DIR)
 	@set -e; \
-	if pandoc $(DOCS_SOURCES) \
+	if pandoc $(PANDOC_DOCS_FLAGS) $(DOCS_SOURCES) \
 		-o $(DOCS_PDF) \
 		--pdf-engine=xelatex \
 		--toc \
@@ -77,7 +90,7 @@ build-docs:
 	fi; \
 	echo "⚠️  Échec xelatex, tentative wkhtmltopdf..."; \
 	if command -v wkhtmltopdf >/dev/null 2>&1; then \
-		pandoc $(DOCS_SOURCES) \
+		pandoc $(PANDOC_DOCS_FLAGS) $(DOCS_SOURCES) \
 			-o $(DOCS_PDF) \
 			--pdf-engine=wkhtmltopdf \
 			--toc \
@@ -88,7 +101,7 @@ build-docs:
 	fi; \
 	echo "❌ Aucun moteur PDF disponible (xelatex/wkhtmltopdf)"; \
 	echo "   Génération HTML à la place..."; \
-	pandoc $(DOCS_SOURCES) \
+	pandoc $(PANDOC_DOCS_FLAGS) $(DOCS_SOURCES) \
 		-o $(DOCS_HTML) \
 		--toc \
 		--toc-depth=3 \
