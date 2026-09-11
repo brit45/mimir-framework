@@ -30,6 +30,7 @@ option(ENABLE_SCRIPTING_JS "Enable JavaScript scripting bridge" ON)
 option(ENABLE_SCRIPTING_CSHARP "Enable C# scripting bridge" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
 option(MIMIR_ENABLE_FACE_RECOGNITION_TOOL "Build OpenCV face detection/recognition tool" OFF)
+option(MIMIR_PORTABLE_BUILD "Disable host-specific CPU optimizations for portable binaries" OFF)
 
 if(ENABLE_SCRIPTING_REST)
     message(WARNING "ENABLE_SCRIPTING_REST=ON demandé, mais aucun bridge REST natif n'est implémenté dans ce dépôt. Option forcée à OFF.")
@@ -122,7 +123,10 @@ endif()
 if(MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
 else()
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG")
+    if(NOT MIMIR_PORTABLE_BUILD)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+    endif()
 endif()
 
 # Flags de debug
@@ -365,6 +369,7 @@ endif()
 
 set(MIMIR_SOURCES
     src/Model.cpp
+    src/Models/VAETraining.cpp
     src/Encoder.cpp
     src/Tokenizer.cpp
     src/Visualizer.cpp
@@ -405,6 +410,7 @@ set(MIMIR_SOURCES
     src/Models/Diffusion/DiffusionModel.cpp
     src/Models/Diffusion/CondDiffusionModel.cpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.cpp
+    src/Models/Diffusion/LumenLatentDiffusionModel.cpp
     src/Models/Diffusion/SD35Model.cpp
     src/Serialization/Serialization.cpp
     src/Serialization/SafeTensorsWriter.cpp
@@ -416,6 +422,7 @@ set(MIMIR_SOURCES
 
 set(MIMIR_HEADERS
     src/Model.hpp
+    src/Models/VAETraining.hpp
     src/Encoder.hpp
     src/Tokenizer.hpp
     src/Visualizer.hpp
@@ -474,6 +481,7 @@ set(MIMIR_HEADERS
     src/Models/Diffusion/DiffusionModel.hpp
     src/Models/Diffusion/CondDiffusionModel.hpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.hpp
+    src/Models/Diffusion/LumenLatentDiffusionModel.hpp
     src/Models/Diffusion/SD35Model.hpp
     src/Serialization/Serialization.hpp
     src/Serialization/SafeTensorsWriter.hpp
@@ -786,6 +794,7 @@ file(COPY ${LUA_SCRIPTS} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/scripts)
 # Installer l'exécutable principal
 install(TARGETS mimir
     RUNTIME DESTINATION bin
+    COMPONENT Runtime
 )
 
 if(BUILD_MIMIR_STATIC)
@@ -808,6 +817,7 @@ install(FILES ${MIMIR_HEADERS}
 # Installer les scripts Lua
 install(DIRECTORY scripts/
     DESTINATION share/mimir/scripts
+    COMPONENT Runtime
     FILES_MATCHING PATTERN "*.lua"
 )
 
@@ -816,6 +826,102 @@ install(DIRECTORY docs/
     DESTINATION share/mimir/docs
     FILES_MATCHING PATTERN "*.md"
 )
+
+# ============================================================================
+# AppImage Linux portable (build non natif)
+# ============================================================================
+
+if(UNIX AND NOT APPLE AND NOT MIMIR_APPIMAGE_INNER_BUILD)
+    set(MIMIR_LINUXDEPLOY "" CACHE FILEPATH
+        "Path to linuxdeploy or linuxdeploy-x86_64.AppImage")
+    if(MIMIR_LINUXDEPLOY)
+        set(_MIMIR_LINUXDEPLOY "${MIMIR_LINUXDEPLOY}")
+    else()
+        find_program(_MIMIR_LINUXDEPLOY
+            NAMES linuxdeploy linuxdeploy-x86_64.AppImage
+            HINTS "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    endif()
+
+    set(MIMIR_APPIMAGE_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_appimage")
+    set(MIMIR_APPDIR "${MIMIR_APPIMAGE_BUILD_DIR}/AppDir")
+    set(MIMIR_APPIMAGE_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist")
+    set(MIMIR_APPIMAGE_DESKTOP "${CMAKE_CURRENT_BINARY_DIR}/appimage/mimir.desktop")
+    set(MIMIR_APPIMAGE_ICON "${CMAKE_CURRENT_BINARY_DIR}/appimage/mimir.svg")
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" MIMIR_APPIMAGE_ARCH)
+    if(MIMIR_APPIMAGE_ARCH MATCHES "^(amd64|x86_64)$")
+        set(MIMIR_APPIMAGE_ARCH "x86_64")
+        set(MIMIR_APPIMAGE_ENABLE_SIMD ON)
+    elseif(MIMIR_APPIMAGE_ARCH MATCHES "^(aarch64|arm64)$")
+        set(MIMIR_APPIMAGE_ARCH "aarch64")
+        set(MIMIR_APPIMAGE_ENABLE_SIMD OFF)
+    else()
+        set(MIMIR_APPIMAGE_ENABLE_SIMD OFF)
+    endif()
+
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/appimage")
+    file(WRITE "${MIMIR_APPIMAGE_DESKTOP}"
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Mimir\n"
+        "Comment=Machine learning framework and scripting runtime\n"
+        "Exec=mimir\n"
+        "Icon=mimir\n"
+        "Terminal=true\n"
+        "Categories=Development;Science;\n")
+    file(WRITE "${MIMIR_APPIMAGE_ICON}"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"256\" height=\"256\" viewBox=\"0 0 256 256\">"
+        "<rect width=\"256\" height=\"256\" rx=\"32\" fill=\"#15191f\"/>"
+        "<path d=\"M48 192V64h32l48 72 48-72h32v128h-32v-76l-48 68-48-68v76z\" fill=\"#62d6a8\"/>"
+        "</svg>\n")
+
+    if(_MIMIR_LINUXDEPLOY)
+        add_custom_target(appimage
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "${MIMIR_APPIMAGE_BUILD_DIR}"
+            COMMAND ${CMAKE_COMMAND} -S "${CMAKE_CURRENT_SOURCE_DIR}"
+                    -B "${MIMIR_APPIMAGE_BUILD_DIR}"
+                    -G "${CMAKE_GENERATOR}"
+                    -DCMAKE_BUILD_TYPE=Release
+                    -DCMAKE_INSTALL_PREFIX=/usr
+                    -DMIMIR_APPIMAGE_INNER_BUILD=ON
+                    -DMIMIR_PORTABLE_BUILD=ON
+                    -DMIMIR_ENABLE_TESTS=OFF
+                    -DENABLE_SIMD=${MIMIR_APPIMAGE_ENABLE_SIMD}
+                    -DENABLE_VULKAN=ON
+                    -DENABLE_OPENCL=ON
+                    -DENABLE_CUDA=OFF
+                    -DENABLE_ROCM=OFF
+                    -DENABLE_SFML=ON
+            COMMAND ${CMAKE_COMMAND} --build "${MIMIR_APPIMAGE_BUILD_DIR}"
+                    --config Release --target mimir --parallel
+            COMMAND ${CMAKE_COMMAND} -E env
+                    DESTDIR=${MIMIR_APPDIR}
+                    ${CMAKE_COMMAND} --install "${MIMIR_APPIMAGE_BUILD_DIR}"
+                    --config Release --prefix /usr --component Runtime
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${MIMIR_APPIMAGE_DIST_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E env
+                    VERSION=${PROJECT_VERSION}
+                    ARCH=${MIMIR_APPIMAGE_ARCH}
+                    OUTPUT=${MIMIR_APPIMAGE_DIST_DIR}/Mimir-${PROJECT_VERSION}-${MIMIR_APPIMAGE_ARCH}.AppImage
+                    "${_MIMIR_LINUXDEPLOY}"
+                    --appdir "${MIMIR_APPDIR}"
+                    --executable "${MIMIR_APPDIR}/usr/bin/mimir"
+                    --desktop-file "${MIMIR_APPIMAGE_DESKTOP}"
+                    --icon-file "${MIMIR_APPIMAGE_ICON}"
+                    --output appimage
+            COMMENT "Building portable Mimir AppImage (no -march=native)"
+            USES_TERMINAL
+            VERBATIM
+        )
+    else()
+        add_custom_target(appimage
+            COMMAND ${CMAKE_COMMAND} -E echo
+                    "linuxdeploy not found. Set -DMIMIR_LINUXDEPLOY=/path/to/linuxdeploy-x86_64.AppImage"
+            COMMAND ${CMAKE_COMMAND} -E false
+            COMMENT "Cannot build AppImage without linuxdeploy"
+            VERBATIM
+        )
+    endif()
+endif()
 
 # ============================================================================
 # Résumé de la configuration

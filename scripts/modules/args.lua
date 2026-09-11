@@ -10,7 +10,7 @@
 
 ---@class MimirArgsModule
 local M = {}
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 local caller_script_path = Help.find_script_from_stack(3, 24)
 
 Help.auto_exit_help({

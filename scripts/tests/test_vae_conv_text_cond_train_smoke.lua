@@ -1,4 +1,4 @@
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- Smoke test: VAEConv text-cond natif (multi-modal optionnel)
@@ -12,8 +12,8 @@ Help.auto_exit_help()
 -- Usage:
 --   ./bin/mimir --lua scripts/tests/test_vae_conv_text_cond_train_smoke.lua
 
-local FS = dofile("scripts/modules/fs.lua")
-local BaseTok = dofile("scripts/modules/base_tokenizer.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
+local BaseTok = dofile(ROOTWORK.."/scripts/modules/base_tokenizer.lua")
 
 local function logx(msg)
   local l = rawget(_G, "log")
@@ -55,8 +55,8 @@ cfg.latent_h = 8
 cfg.latent_w = 8
 cfg.latent_c = 16
 cfg.base_channels = 16
-cfg.use_attention = false
-cfg.use_attn = false
+cfg.resnet = false
+cfg.attention = false
 cfg.stochastic_latent = false
 
 cfg.text_cond = true

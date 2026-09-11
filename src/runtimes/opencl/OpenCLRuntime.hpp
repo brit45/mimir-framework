@@ -34,6 +34,10 @@ public:
     bool supportsBackwardLayerType(LayerType type) const override;
     RuntimeCapabilityLevel queryForwardCapability(LayerType type) const override;
     RuntimeCapabilityLevel queryBackwardCapability(LayerType type) const override;
+    RuntimeCapabilityLevel queryForwardOperationCapability(
+        const Layer& layer,
+        const std::vector<const std::vector<float>*>& inputs,
+        bool training) const override;
 
     bool backwardLayer(
         const std::vector<const std::vector<float>*>& inputs,

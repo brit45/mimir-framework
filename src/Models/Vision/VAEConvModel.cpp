@@ -134,8 +134,8 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     // Le cœur reste convolutionnel (Conv2d / ConvTranspose2d / SiLU / Add /
     // UpsampleNearest / Reparameterize). On peut en plus activer des blocs
     // ResNet et SelfAttention spatiale (H*W tokens, embed_dim=channels).
-    const bool use_resnet       = cfg.use_attention;
-    const bool use_attn         = cfg.use_attn;
+    const bool use_resnet       = cfg.resnet;
+    const bool attention         = cfg.attention;
     const bool use_skip_conn    = cfg.use_skip_connections;
     const bool use_enc_prior    = cfg.use_encoder_prior;
     // Normalisation configurable. Le décodeur reprend la normalisation encodeur
@@ -156,7 +156,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     };
 
     auto attn_gate = [&](int h, int w) -> bool {
-        if (!use_attn) return false;
+        if (!attention) return false;
         if (attn_max_tok <= 0) return true;
         return (h * w) <= attn_max_tok;
     };
@@ -213,8 +213,8 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["decoder_upsample"] = dec_upsample;
     model.modelConfig["use_skip_connections"] = use_skip_conn;
     model.modelConfig["use_encoder_prior"] = use_enc_prior;
-    model.modelConfig["use_attention"] = use_resnet;
-    model.modelConfig["use_attn"] = use_attn;
+    model.modelConfig["resnet"] = use_resnet;
+    model.modelConfig["attention"] = attention;
     model.modelConfig["attn_heads"] = attn_heads;
     model.modelConfig["attn_max_tokens"] = attn_max_tok;
     model.modelConfig["resnet_max_tokens"] = resnet_max_tok;
@@ -665,7 +665,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         P->permute_dims = {1, 2, 0};
     }
 
-    // Projections multi-modales optionnelles pour trainStepVAEText.
+    // Projections multi-modales optionnelles pour trainStep.
     if (text_cond) {
         model.push("vae_conv/txt/tok_emb", "Embedding",
                    static_cast<size_t>(vocab_size) * static_cast<size_t>(text_d_model));
@@ -720,6 +720,29 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         L->output = "x";
         L->concat_axis = 0;
     }
+}
+
+std::optional<Model::TrainStepResult> VAEConvModel::trainStep(const TrainStepRequest& request) {
+    if (!request.optimizer) {
+        return std::nullopt;
+    }
+
+    const std::vector<float>* input = nullptr;
+    if (const auto it = request.float_inputs.find("__input__"); it != request.float_inputs.end() && it->second) {
+        input = it->second;
+    } else if (const auto it = request.float_inputs.find("image"); it != request.float_inputs.end() && it->second) {
+        input = it->second;
+    }
+    if (!input) return std::nullopt;
+
+    if (const auto it = request.int_inputs.find("text_ids"); it != request.int_inputs.end() && it->second) {
+        return vae_training_.trainText(*this, *input, *it->second, request.target,
+                           *request.optimizer, request.learning_rate,
+                           request.mode, request.grad_scale);
+    }
+        return vae_training_.trainImage(*this, *input, request.target,
+                        *request.optimizer, request.learning_rate,
+                        request.mode, request.grad_scale);
 }
 
 void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
@@ -894,9 +917,9 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     };
 
     // Options blocs optionnels
-    const bool use_resnet_dec  = cfg.use_attention;
+    const bool use_resnet_dec  = cfg.resnet;
     const int resnet_max_dec   = cfg.resnet_max_tokens;
-    const bool use_attn_dec    = cfg.use_attn;
+    const bool use_attn_dec    = cfg.attention;
     const int attn_max_dec     = cfg.attn_max_tokens;
     int attn_heads_dec         = std::max(1, cfg.attn_heads);
     // Skip connections : si le checkpoint a été entraîné avec use_skip_connections=true,
@@ -906,9 +929,9 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     // C'est bien meilleur que bypasser skip_proj entièrement.
     const bool use_skip_dec = cfg.use_skip_connections;
     // Stocker dans modelConfig pour permettre de reconstruire une architecture identique.
-    model.modelConfig["use_attention"] = use_resnet_dec;
+    model.modelConfig["resnet"] = use_resnet_dec;
     model.modelConfig["resnet_max_tokens"] = resnet_max_dec;
-    model.modelConfig["use_attn"] = use_attn_dec;
+    model.modelConfig["attention"] = use_attn_dec;
     model.modelConfig["attn_heads"] = attn_heads_dec;
     model.modelConfig["attn_max_tokens"] = attn_max_dec;
     model.modelConfig["use_skip_connections"] = use_skip_dec;

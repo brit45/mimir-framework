@@ -48,6 +48,10 @@ bool RawCheckpointReader::load(
         if (!load_architecture(root.string(), model, options, error)) {
             return false;
         }
+
+        if (options.metadata_only) {
+            return true;
+        }
         
         // Load tokenizer if requested
         if (options.load_tokenizer) {
@@ -122,12 +126,25 @@ bool RawCheckpointReader::load_training(
         }
 
         Optimizer opt;
-        opt.type = static_cast<OptimizerType>(j.value("type", static_cast<int>(OptimizerType::ADAMW)));
+        const int type = j.value("type", static_cast<int>(OptimizerType::ADAMW));
+        if (type < static_cast<int>(OptimizerType::SGD)
+            || type > static_cast<int>(OptimizerType::LAMB)) {
+            if (error) *error = "Invalid optimizer type in training.json";
+            return false;
+        }
+        opt.type = static_cast<OptimizerType>(type);
         opt.step = static_cast<size_t>(j.value("step", 0));
         opt.beta1 = j.value("beta1", opt.beta1);
         opt.beta2 = j.value("beta2", opt.beta2);
         opt.eps = j.value("eps", opt.eps);
         opt.weight_decay = j.value("weight_decay", opt.weight_decay);
+        opt.rmsprop_alpha = j.value("rmsprop_alpha", opt.rmsprop_alpha);
+        opt.adafactor_clip_threshold = j.value("adafactor_clip_threshold", opt.adafactor_clip_threshold);
+        opt.adafactor_decay_rate = j.value("adafactor_decay_rate", opt.adafactor_decay_rate);
+        opt.adafactor_eps2 = j.value("adafactor_eps2", opt.adafactor_eps2);
+        opt.adafactor_beta1 = j.value("adafactor_beta1", opt.adafactor_beta1);
+        opt.adafactor_scale_parameter = j.value("adafactor_scale_parameter", opt.adafactor_scale_parameter);
+        opt.adafactor_relative_step = j.value("adafactor_relative_step", opt.adafactor_relative_step);
         opt.decay_strategy = static_cast<LRDecayStrategy>(j.value("decay_strategy", static_cast<int>(opt.decay_strategy)));
         opt.initial_lr = j.value("initial_lr", opt.initial_lr);
         opt.min_lr = j.value("min_lr", opt.min_lr);
@@ -251,7 +268,7 @@ bool RawCheckpointReader::load_architecture(
         // IMPORTANT: l'architecture sauvegardée ne contient pas toutes les métadonnées
         // (in_features/out_features, kernels, etc.). Si le caller a déjà construit
         // l'architecture via un builder (recommandé), on ne l'écrase pas.
-        if (arch.contains("layers") && model.getLayers().empty()) {
+        if (!options.metadata_only && arch.contains("layers") && model.getLayers().empty()) {
             model.getMutableLayers().clear();
             for (const auto& layer_obj : arch["layers"]) {
                 const std::string name = layer_obj.value("name", "");

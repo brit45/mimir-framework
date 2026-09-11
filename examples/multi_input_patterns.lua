@@ -1,5 +1,5 @@
 #!/usr/bin/env lua5.3
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- ============================================================================

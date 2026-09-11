@@ -1,7 +1,7 @@
 #!/usr/bin/env mimir --lua
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 -- ================================================================
 -- Mímir Benchmark Script - CPU Performance Tests

@@ -243,6 +243,13 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
                 j["beta2"] = opt->beta2;
                 j["eps"] = opt->eps;
                 j["weight_decay"] = opt->weight_decay;
+                j["rmsprop_alpha"] = opt->rmsprop_alpha;
+                j["adafactor_clip_threshold"] = opt->adafactor_clip_threshold;
+                j["adafactor_decay_rate"] = opt->adafactor_decay_rate;
+                j["adafactor_eps2"] = opt->adafactor_eps2;
+                j["adafactor_beta1"] = opt->adafactor_beta1;
+                j["adafactor_scale_parameter"] = opt->adafactor_scale_parameter;
+                j["adafactor_relative_step"] = opt->adafactor_relative_step;
                 j["decay_strategy"] = static_cast<int>(opt->decay_strategy);
                 j["initial_lr"] = opt->initial_lr;
                 j["min_lr"] = opt->min_lr;

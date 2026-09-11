@@ -4,8 +4,8 @@
 --   - prompt -> image  : génération itérative (__input__ + text_ids) avec steps
 --   - image  -> texte  : tokens dérivés directement de la sortie forward (pas de liste candidates)
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function logf(fmt, ...)
   local msg = string.format(fmt, ...)
@@ -37,6 +37,13 @@ local function clamp(x, a, b)
   if x < a then return a end
   if x > b then return b end
   return x
+end
+
+local function first_defined(values, keys)
+  for _, key in ipairs(keys) do
+    if values[key] ~= nil then return values[key] end
+  end
+  return nil
 end
 
 local function apply_dtype(cfg)
@@ -541,8 +548,8 @@ local function infer_cfg_from_checkpoint(ckpt_dir)
     proj_dim = mci("proj_dim"),
     seq_len = mci("seq_len"),
     text_d_model = mci("text_d_model"),
-    use_attention = mc.use_attention,
-    use_attn = mc.use_attn,
+    resnet = first_defined(mc, {"resnet", "use_resnet", "use_attention"}),
+    attention = first_defined(mc, {"attention", "use_attn"}),
     use_skip_connections = mc.use_skip_connections,
     use_encoder_prior = mc.use_encoder_prior,
     decoder_upsample = mc.decoder_upsample,
@@ -627,8 +634,8 @@ local function main()
   else
     cfg.vocab_size = math.floor(tonumber(cfg.vocab_size or 65536) or 65536)
   end
-  cfg.use_attention = inferred.use_attention
-  cfg.use_attn = inferred.use_attn
+  cfg.resnet = inferred.resnet
+  cfg.attention = inferred.attention
   cfg.use_skip_connections = inferred.use_skip_connections
   cfg.use_encoder_prior = inferred.use_encoder_prior
   cfg.decoder_upsample = inferred.decoder_upsample

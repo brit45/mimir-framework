@@ -275,6 +275,17 @@ private:
 
     VkCommandPool cmd_pool_ = VK_NULL_HANDLE;
 
+    struct ReusableBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        size_t capacity = 0;
+    };
+
+    ReusableBuffer conv_input_buffer_;
+    ReusableBuffer conv_weights_buffer_;
+    ReusableBuffer conv_bias_buffer_;
+    ReusableBuffer conv_output_buffer_;
+
     std::recursive_mutex linear_mutex_;
     
 public:
@@ -377,6 +388,10 @@ public:
     }
     
     void cleanup() {
+        releaseReusableBuffer(conv_input_buffer_);
+        releaseReusableBuffer(conv_weights_buffer_);
+        releaseReusableBuffer(conv_bias_buffer_);
+        releaseReusableBuffer(conv_output_buffer_);
         cleanupLinearKernel();
         cleanupAddKernel();
         cleanupMulKernel();
@@ -1385,36 +1400,21 @@ private:
         size_t out_bytes,
         const ConvDims& dims
     ) {
-        VkBuffer buf_in = VK_NULL_HANDLE, buf_w = VK_NULL_HANDLE, buf_b = VK_NULL_HANDLE, buf_o = VK_NULL_HANDLE;
-        VkDeviceMemory mem_in = VK_NULL_HANDLE, mem_w = VK_NULL_HANDLE, mem_b = VK_NULL_HANDLE, mem_o = VK_NULL_HANDLE;
+        if (!ensureReusableBuffer(conv_input_buffer_, in_bytes) ||
+            !ensureReusableBuffer(conv_weights_buffer_, w_bytes) ||
+            !ensureReusableBuffer(conv_bias_buffer_, b_bytes) ||
+            !ensureReusableBuffer(conv_output_buffer_, out_bytes)) {
+            return false;
+        }
 
-        auto make_buffer = [&](size_t size, VkBuffer& buf, VkDeviceMemory& mem) -> bool {
-            VkBufferCreateInfo bi = {};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = size;
-            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            if (vkCreateBuffer(device, &bi, nullptr, &buf) != VK_SUCCESS) return false;
-
-            VkMemoryRequirements req;
-            vkGetBufferMemoryRequirements(device, buf, &req);
-            const uint32_t mt = findMemoryType(physicalDevice, req.memoryTypeBits,
-                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            if (mt == UINT32_MAX) return false;
-
-            VkMemoryAllocateInfo ai = {};
-            ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            ai.allocationSize = req.size;
-            ai.memoryTypeIndex = mt;
-            if (vkAllocateMemory(device, &ai, nullptr, &mem) != VK_SUCCESS) return false;
-            if (vkBindBufferMemory(device, buf, mem, 0) != VK_SUCCESS) return false;
-            return true;
-        };
-
-        auto destroy_buf = [&](VkBuffer& b0, VkDeviceMemory& m0) {
-            if (b0 != VK_NULL_HANDLE) { vkDestroyBuffer(device, b0, nullptr); b0 = VK_NULL_HANDLE; }
-            if (m0 != VK_NULL_HANDLE) { vkFreeMemory(device, m0, nullptr); m0 = VK_NULL_HANDLE; }
-        };
+        const VkBuffer buf_in = conv_input_buffer_.buffer;
+        const VkBuffer buf_w = conv_weights_buffer_.buffer;
+        const VkBuffer buf_b = conv_bias_buffer_.buffer;
+        const VkBuffer buf_o = conv_output_buffer_.buffer;
+        const VkDeviceMemory mem_in = conv_input_buffer_.memory;
+        const VkDeviceMemory mem_w = conv_weights_buffer_.memory;
+        const VkDeviceMemory mem_b = conv_bias_buffer_.memory;
+        const VkDeviceMemory mem_o = conv_output_buffer_.memory;
 
         auto upload = [&](VkDeviceMemory mem, const void* src, size_t sz) -> bool {
             void* mapped = nullptr;
@@ -1424,23 +1424,18 @@ private:
             return true;
         };
 
-        if (!make_buffer(in_bytes, buf_in, mem_in)) { destroy_buf(buf_in, mem_in); return false; }
-        if (!make_buffer(w_bytes, buf_w, mem_w)) { destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); return false; }
-        if (!make_buffer(b_bytes, buf_b, mem_b)) { destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); return false; }
-        if (!make_buffer(out_bytes, buf_o, mem_o)) { destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false; }
-
         if (!upload(mem_in, in, in_bytes) || !upload(mem_w, w, w_bytes)) {
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
 
         if (b) {
             if (!upload(mem_b, b, b_bytes)) {
-                destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+                return false;
             }
         } else {
             std::vector<float> zb(b_bytes / sizeof(float), 0.0f);
             if (!upload(mem_b, zb.data(), b_bytes)) {
-                destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+                return false;
             }
         }
 
@@ -1451,7 +1446,7 @@ private:
         infos[2] = { buf_b,  0, static_cast<VkDeviceSize>(b_bytes) };
         infos[3] = { buf_o,  0, static_cast<VkDeviceSize>(out_bytes) };
         if (!allocAndWriteDescriptorSet(dp, dsl, infos, ds)) {
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
 
         VkCommandBufferAllocateInfo cbai = {};
@@ -1461,7 +1456,7 @@ private:
         cbai.commandBufferCount = 1;
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         if (vkAllocateCommandBuffers(device, &cbai, &cmd) != VK_SUCCESS) {
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
 
         VkCommandBufferBeginInfo bi = {};
@@ -1469,7 +1464,7 @@ private:
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) {
             vkFreeCommandBuffers(device, cmd_pool_, 1, &cmd);
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
@@ -1482,7 +1477,7 @@ private:
 
         if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
             vkFreeCommandBuffers(device, cmd_pool_, 1, &cmd);
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
 
         VkFence fence = VK_NULL_HANDLE;
@@ -1490,7 +1485,7 @@ private:
         fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         if (vkCreateFence(device, &fci, nullptr, &fence) != VK_SUCCESS) {
             vkFreeCommandBuffers(device, cmd_pool_, 1, &cmd);
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
 
         VkSubmitInfo si = {};
@@ -1500,7 +1495,7 @@ private:
         if (vkQueueSubmit(computeQueue, 1, &si, fence) != VK_SUCCESS) {
             vkDestroyFence(device, fence, nullptr);
             vkFreeCommandBuffers(device, cmd_pool_, 1, &cmd);
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
         vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
 
@@ -1509,12 +1504,58 @@ private:
 
         void* mapped = nullptr;
         if (vkMapMemory(device, mem_o, 0, out_bytes, 0, &mapped) != VK_SUCCESS) {
-            destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o); return false;
+            return false;
         }
         std::memcpy(out, mapped, out_bytes);
         vkUnmapMemory(device, mem_o);
 
-        destroy_buf(buf_in, mem_in); destroy_buf(buf_w, mem_w); destroy_buf(buf_b, mem_b); destroy_buf(buf_o, mem_o);
+        return true;
+    }
+
+    void releaseReusableBuffer(ReusableBuffer& reusable) {
+        if (reusable.buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, reusable.buffer, nullptr);
+            reusable.buffer = VK_NULL_HANDLE;
+        }
+        if (reusable.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, reusable.memory, nullptr);
+            reusable.memory = VK_NULL_HANDLE;
+        }
+        reusable.capacity = 0;
+    }
+
+    bool ensureReusableBuffer(ReusableBuffer& reusable, size_t required) {
+        if (reusable.buffer != VK_NULL_HANDLE && reusable.capacity >= required) return true;
+
+        releaseReusableBuffer(reusable);
+        VkBufferCreateInfo bi = {};
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size = required;
+        bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device, &bi, nullptr, &reusable.buffer) != VK_SUCCESS) return false;
+
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(device, reusable.buffer, &req);
+        const uint32_t memory_type = findMemoryType(
+            physicalDevice,
+            req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (memory_type == UINT32_MAX) {
+            releaseReusableBuffer(reusable);
+            return false;
+        }
+
+        VkMemoryAllocateInfo ai = {};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = memory_type;
+        if (vkAllocateMemory(device, &ai, nullptr, &reusable.memory) != VK_SUCCESS ||
+            vkBindBufferMemory(device, reusable.buffer, reusable.memory, 0) != VK_SUCCESS) {
+            releaseReusableBuffer(reusable);
+            return false;
+        }
+        reusable.capacity = required;
         return true;
     }
 

@@ -100,13 +100,55 @@
         },
         "optimizer": {
           "type": "string",
-          "enum": ["adamw", "adam", "sgd"],
+          "enum": ["adamw", "adam", "sgd", "lion", "adafactor", "radam", "nadam", "rmsprop", "lamb"],
           "description": "Optimiseur à utiliser."
         },
         "weight_decay": {
           "type": "number",
           "minimum": 0,
           "description": "Décroissance des poids (L2 regularization)."
+        },
+        "rmsprop_alpha": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.99,
+          "description": "Facteur de décroissance de la moyenne quadratique RMSprop."
+        },
+        "adafactor_clip_threshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.0,
+          "description": "Seuil de clipping RMS de l'update Adafactor."
+        },
+        "adafactor_decay_rate": {
+          "type": "number",
+          "maximum": 0,
+          "default": -0.8,
+          "description": "Exposant de décroissance dynamique du second moment Adafactor."
+        },
+        "adafactor_eps2": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.001,
+          "description": "Seuil minimal d'échelle des paramètres Adafactor."
+        },
+        "adafactor_beta1": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0,
+          "description": "Momentum optionnel Adafactor ; 0 le désactive."
+        },
+        "adafactor_scale_parameter": {
+          "type": "boolean",
+          "default": true,
+          "description": "Adapte le pas Adafactor à l'échelle RMS des paramètres."
+        },
+        "adafactor_relative_step": {
+          "type": "boolean",
+          "default": false,
+          "description": "Utilise le planning de pas relatif interne à Adafactor."
         },
         "warmup_steps": {
           "type": "integer",

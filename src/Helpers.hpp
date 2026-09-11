@@ -1233,6 +1233,18 @@ struct DatasetItem {
     }
 };
 
+class DatasetItemUnloadGuard {
+public:
+    explicit DatasetItemUnloadGuard(DatasetItem& item) : item_(item) {}
+    ~DatasetItemUnloadGuard() { item_.unload(); }
+
+    DatasetItemUnloadGuard(const DatasetItemUnloadGuard&) = delete;
+    DatasetItemUnloadGuard& operator=(const DatasetItemUnloadGuard&) = delete;
+
+private:
+    DatasetItem& item_;
+};
+
 // Gestionnaire de Dataset avec éviction LRU intelligente
 class DatasetManager {
 public:

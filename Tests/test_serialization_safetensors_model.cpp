@@ -115,6 +115,16 @@ int main() {
         modelA->setEncoder(enc);
         modelA->setHasEncoder(true);
 
+        if (std::string(c.expected_tag) == "F32") {
+            Optimizer optimizer;
+            optimizer.type = OptimizerType::LAMB;
+            optimizer.step = 23;
+            optimizer.weight_decay = 0.02f;
+            optimizer.m = {0.1f, 0.2f};
+            optimizer.v = {0.3f, 0.4f};
+            modelA->setSerializedOptimizer(std::move(optimizer));
+        }
+
         const std::filesystem::path p = tmp / (std::string("mimir_test_model_") + c.expected_tag + ".safetensors");
         std::filesystem::remove(p);
 
@@ -122,11 +132,20 @@ int main() {
         sopts.format = CheckpointFormat::SafeTensors;
         sopts.save_tokenizer = true;
         sopts.save_encoder = true;
-        sopts.save_optimizer = false;
+        sopts.save_optimizer = std::string(c.expected_tag) == "F32";
         sopts.custom_metadata = R"({"run":"dtype-test","seed":123})";
 
         std::string err;
         TASSERT_TRUE(save_checkpoint(*modelA, p.string(), sopts, &err));
+
+        {
+            std::ifstream serialized(p, std::ios::binary);
+            TASSERT_TRUE((bool)serialized);
+            const std::string bytes((std::istreambuf_iterator<char>(serialized)),
+                                    std::istreambuf_iterator<char>());
+            TASSERT_TRUE(bytes.find("\"image_width\"") == std::string::npos);
+            TASSERT_TRUE(bytes.find("\"image_height\"") == std::string::npos);
+        }
 
         // Header should advertise expected dtype on at least one weights tensor.
         {
@@ -167,7 +186,7 @@ int main() {
         lopts.strict_mode = true;
         lopts.load_tokenizer = true;
         lopts.load_encoder = true;
-        lopts.load_optimizer = false;
+        lopts.load_optimizer = std::string(c.expected_tag) == "F32";
 
         TASSERT_TRUE(load_checkpoint(*modelB, p.string(), lopts, &err));
 
@@ -182,6 +201,15 @@ int main() {
         TASSERT_TRUE(modelB->getEncoder().dim == modelA->getEncoder().dim);
         TASSERT_TRUE(modelB->getEncoder().vocab_size == modelA->getEncoder().vocab_size);
         TASSERT_TRUE(!modelB->getEncoder().token_embeddings.empty());
+
+        if (std::string(c.expected_tag) == "F32") {
+            const Optimizer* optimizer = modelB->getSerializedOptimizer();
+            TASSERT_TRUE(optimizer != nullptr);
+            TASSERT_TRUE(optimizer->type == OptimizerType::LAMB);
+            TASSERT_TRUE(optimizer->step == 23);
+            TASSERT_NEAR(optimizer->weight_decay, 0.02f, 1e-6f);
+            TASSERT_TRUE(optimizer->m.size() == 2 && optimizer->v.size() == 2);
+        }
 
         std::filesystem::remove(p);
     }

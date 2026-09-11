@@ -13,6 +13,7 @@
 #include "runtimes/opencl/OpenCLRuntime.hpp"
 #endif
 #include "runtimes/AbstractRuntime.hpp"
+#include "runtimes/LayerOps.hpp"
 #include "runtimes/RuntimeRouter.hpp"
 #ifdef ENABLE_CUDA
 #include "runtimes/cuda/CudaRuntime.hpp"
@@ -38,6 +39,9 @@
 #include <limits>
 #include <sstream>
 #include <cstdlib>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #include <unordered_map>
 #include <mutex>
@@ -56,100 +60,6 @@ static thread_local Model* g_viz_capture_root = nullptr;
 
 
 namespace {
-struct DistMoments {
-    double mean = 0.0;
-    double var = 0.0;
-    double skew = 0.0;
-};
-
-static inline DistMoments compute_moments(const std::vector<float>& v) {
-    DistMoments m;
-    if (v.empty()) return m;
-    double sum = 0.0;
-    for (float x : v) sum += static_cast<double>(x);
-    m.mean = sum / static_cast<double>(v.size());
-
-    double m2 = 0.0;
-    double m3 = 0.0;
-    for (float x : v) {
-        const double d = static_cast<double>(x) - m.mean;
-        m2 += d * d;
-        m3 += d * d * d;
-    }
-    m.var = m2 / static_cast<double>(v.size());
-    const double std = std::sqrt(std::max(0.0, m.var));
-    if (std > 1e-12) {
-        m.skew = (m3 / static_cast<double>(v.size())) / (std * std * std);
-    } else {
-        m.skew = 0.0;
-    }
-    return m;
-}
-
-static inline DistMoments compute_moments_prefix(const std::vector<float>& v, size_t off, int n) {
-    DistMoments m;
-    if (n <= 0) return m;
-    const size_t vn = v.size();
-    const size_t end = std::min(vn, off + static_cast<size_t>(n));
-    if (end <= off) return m;
-    const size_t count = end - off;
-
-    double sum = 0.0;
-    for (size_t i = off; i < end; ++i) sum += static_cast<double>(v[i]);
-    m.mean = sum / static_cast<double>(count);
-
-    double m2 = 0.0;
-    double m3 = 0.0;
-    for (size_t i = off; i < end; ++i) {
-        const double d = static_cast<double>(v[i]) - m.mean;
-        m2 += d * d;
-        m3 += d * d * d;
-    }
-    m.var = m2 / static_cast<double>(count);
-    const double std = std::sqrt(std::max(0.0, m.var));
-    if (std > 1e-12) {
-        m.skew = (m3 / static_cast<double>(count)) / (std * std * std);
-    } else {
-        m.skew = 0.0;
-    }
-    return m;
-}
-
-static inline double pearson_corr_prefix(const std::vector<float>& a, size_t a_off,
-                                         const std::vector<float>& b, size_t b_off,
-                                         int n) {
-    if (n < 2) return 0.0;
-    const size_t an = a.size();
-    const size_t bn = b.size();
-    const size_t a_end = std::min(an, a_off + static_cast<size_t>(n));
-    const size_t b_end = std::min(bn, b_off + static_cast<size_t>(n));
-    const size_t count = std::min(a_end - std::min(a_end, a_off), b_end - std::min(b_end, b_off));
-    if (count < 2) return 0.0;
-
-    double sa = 0.0, sb = 0.0;
-    for (size_t i = 0; i < count; ++i) {
-        sa += static_cast<double>(a[a_off + i]);
-        sb += static_cast<double>(b[b_off + i]);
-    }
-    const double ma = sa / static_cast<double>(count);
-    const double mb = sb / static_cast<double>(count);
-
-    double num = 0.0;
-    double da = 0.0;
-    double db = 0.0;
-    for (size_t i = 0; i < count; ++i) {
-        const double xa = static_cast<double>(a[a_off + i]) - ma;
-        const double xb = static_cast<double>(b[b_off + i]) - mb;
-        num += xa * xb;
-        da += xa * xa;
-        db += xb * xb;
-    }
-    const double den = std::sqrt(da) * std::sqrt(db);
-    if (den <= 1e-18) return 0.0;
-    const double r = num / den;
-    return std::clamp(r, -1.0, 1.0);
-}
-
 static inline long long omp_work_threshold() {
 #ifdef _OPENMP
     // Seuil adaptatif modéré: on amortit le runtime OpenMP sans basculer trop vite en séquentiel.
@@ -163,52 +73,6 @@ static inline long long omp_work_threshold() {
 #else
     return 262144LL;
 #endif
-}
-
-static inline double mean_abs_adjacent_diff(const std::vector<float>& v) {
-    if (v.size() < 2) return 0.0;
-    double acc = 0.0;
-    for (size_t i = 1; i < v.size(); ++i) {
-        acc += std::abs(static_cast<double>(v[i]) - static_cast<double>(v[i - 1]));
-    }
-    return acc / static_cast<double>(v.size() - 1);
-}
-
-static inline double mean_abs_adjacent_diff_prefix(const std::vector<float>& v, size_t off, size_t count) {
-    if (off >= v.size() || count < 2) return 0.0;
-    const size_t n = std::min(count, v.size() - off);
-    if (n < 2) return 0.0;
-    double acc = 0.0;
-    for (size_t i = 1; i < n; ++i) {
-        acc += std::abs(static_cast<double>(v[off + i]) - static_cast<double>(v[off + i - 1]));
-    }
-    return acc / static_cast<double>(n - 1);
-}
-
-static inline double pearson_corr(const std::vector<float>& a, const std::vector<float>& b) {
-    const size_t n = std::min(a.size(), b.size());
-    if (n < 2) return 0.0;
-    double sa = 0.0, sb = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        sa += static_cast<double>(a[i]);
-        sb += static_cast<double>(b[i]);
-    }
-    const double ma = sa / static_cast<double>(n);
-    const double mb = sb / static_cast<double>(n);
-    double num = 0.0;
-    double da = 0.0;
-    double db = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const double xa = static_cast<double>(a[i]) - ma;
-        const double xb = static_cast<double>(b[i]) - mb;
-        num += xa * xb;
-        da += xa * xa;
-        db += xb * xb;
-    }
-    const double den = std::sqrt(da) * std::sqrt(db);
-    if (den <= 1e-18) return 0.0;
-    const double r = num / den;
-    return std::clamp(r, -1.0, 1.0);
 }
 } // namespace
 #include <cstdint>
@@ -478,13 +342,7 @@ Model::Model()
     RuntimeRouter::instance().activateAvailableRuntimes();
 }
 
-Model::~Model() {
-    shutdownComputeEngine();
-    shutdownOpenCLComputeEngine();
-    shutdownCudaComputeEngine();
-    shutdownRocmComputeEngine();
-    shutdownCpuComputeEngine();
-}
+Model::~Model() = default;
 
 void Model::setDefaultDType(const std::string& dtype) {
     const auto dt = Mimir::parse_dtype(dtype);
@@ -940,6 +798,27 @@ void Model::zeroGradients() {
     forward_state.clear();
 }
 
+void Model::releaseTrainingWorkingSet(size_t completed_step) {
+    forward_state.clear();
+    clearTensorStore();
+    clearTensorStoreInt();
+
+#if defined(__GLIBC__)
+    static const size_t trim_every = []() {
+        const char* value = std::getenv("MIMIR_MALLOC_TRIM_EVERY");
+        if (!value || *value == '\0') return size_t{1};
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        return (end != value) ? static_cast<size_t>(parsed) : size_t{1};
+    }();
+    if (trim_every > 0 && completed_step % trim_every == 0) {
+        malloc_trim(0);
+    }
+#else
+    (void)completed_step;
+#endif
+}
+
 Gradients Model::getGradients() const {
     Gradients grads;
     
@@ -1259,2001 +1138,8 @@ const std::vector<float>& Model::forwardPassNamedView(
     return forwardPassView(empty, training);
 }
 
-Model::StepStats Model::trainStepNamed(
-    const std::unordered_map<std::string, std::vector<float>>& float_inputs,
-    const std::unordered_map<std::string, std::vector<int>>& int_inputs,
-    const std::vector<float>& target,
-    Optimizer& opt,
-    float learning_rate
-) {
-    if (layers.empty()) {
-        throw std::runtime_error("Model::trainStepNamed: model not built");
-    }
-    if (layer_weight_blocks.empty()) {
-        throw std::runtime_error("Model::trainStepNamed: weights not allocated (call allocateParams/initWeights)");
-    }
-
-    zeroGradients();
-
-    const std::vector<float>& prediction = forwardPassNamedView(float_inputs, int_inputs, true);
-
-    StepStats stats;
-    stats.loss = computeLoss(prediction, target, "mse");
-
-    // Métriques supplémentaires: best-effort sur les distributions globales.
-    // Ces métriques servent au monitoring (Htop/Viz) et ne modifient pas l'entraînement.
-    {
-        const auto mp = compute_moments(prediction);
-        const auto mt = compute_moments(target);
-        const double vp = std::max(mp.var, 1e-12);
-        const double vt = std::max(mt.var, 1e-12);
-
-        // KL(Nt || Np)
-        const double kl = 0.5 * (std::log(vp / vt) + (vt + (mt.mean - mp.mean) * (mt.mean - mp.mean)) / vp - 1.0);
-        stats.kl_divergence = static_cast<float>(std::max(0.0, kl));
-
-        // Wasserstein-2 entre gaussiennes (1D)
-        const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
-        stats.wasserstein = static_cast<float>(std::sqrt(std::max(0.0, w2)));
-
-        // Entropie gaussienne: 0.5 * log(2πeσ²)
-        constexpr double pi = 3.14159265358979323846264338327950288;
-        constexpr double e = 2.71828182845904523536028747135266250;
-        const double two_pi_e = 2.0 * pi * e;
-        const double Hp = 0.5 * std::log(two_pi_e * vp);
-        const double Ht = 0.5 * std::log(two_pi_e * vt);
-        stats.entropy_diff = static_cast<float>(Hp - Ht);
-
-        // Mismatch de moments: skewness difference (|skew_p - skew_t|)
-        stats.moment_mismatch = static_cast<float>(std::abs(mp.skew - mt.skew));
-
-        // Cohérence spatiale: différence de "total variation" 1D (adjacent diffs)
-        const double tvp = mean_abs_adjacent_diff(prediction);
-        const double tvt = mean_abs_adjacent_diff(target);
-        stats.spatial_coherence = static_cast<float>(std::abs(tvp - tvt));
-
-        // Consistency: corrélation prediction/target (Pearson)
-        stats.temporal_consistency = static_cast<float>(pearson_corr(prediction, target));
-    }
-
-    scratch_loss_grad_.clear();
-    computeLossGradientInto(prediction, target, scratch_loss_grad_, "mse");
-    backwardPass(scratch_loss_grad_);
-
-    double sum_sq = 0.0;
-    float max_abs = 0.0f;
-    for (const auto& layer : layers) {
-        for (float g : layer.grad_weights) {
-            sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs) max_abs = a;
-        }
-    }
-    stats.grad_norm = static_cast<float>(std::sqrt(sum_sq));
-    stats.grad_max_abs = max_abs;
-
-    optimizerStep(opt, learning_rate);
-    return stats;
-}
-
-Model::VAEStepStats Model::trainStepVAE(const std::vector<float>& x, Optimizer& opt, float learning_rate) {
-    if (params_frozen_) {
-        throw std::runtime_error("Model::trainStepVAE: parameters are frozen");
-    }
-    if (layers.empty()) {
-        throw std::runtime_error("Model::trainStepVAE: model not built");
-    }
-    if (layer_weight_blocks.empty()) {
-        throw std::runtime_error("Model::trainStepVAE: weights not allocated (call allocateParams/initWeights)");
-    }
-
-    // Read config
-    int image_dim = 0;
-    if (modelConfig.contains("image_dim")) {
-        image_dim = std::max(0, modelConfig["image_dim"].get<int>());
-    }
-    if (image_dim <= 0) image_dim = static_cast<int>(x.size());
-
-    int latent_dim = 0;
-    if (modelConfig.contains("latent_dim")) {
-        latent_dim = std::max(0, modelConfig["latent_dim"].get<int>());
-    }
-
-    float kl_beta = 1.0f;
-    if (modelConfig.contains("kl_beta")) {
-        kl_beta = modelConfig["kl_beta"].get<float>();
-    } else if (modelConfig.contains("vae_kl_beta")) {
-        kl_beta = modelConfig["vae_kl_beta"].get<float>();
-    }
-    kl_beta = std::max(0.0f, kl_beta);
-
-    int kl_warmup_steps = 0;
-    if (modelConfig.contains("kl_warmup_steps")) {
-        kl_warmup_steps = std::max(0, modelConfig["kl_warmup_steps"].get<int>());
-    }
-
-    // Optional marker-driven scaling of reconstruction loss.
-    // These are intended as training "marqueurs" (KL/Wass/Temp) to modulate the recon signal.
-    float marker_wass_scale = 0.0f;
-    float marker_temp_scale = 0.0f;
-    float marker_scale_max = 10.0f;
-    int marker_warmup_steps = 0;
-    if (modelConfig.contains("marker_wass_scale")) marker_wass_scale = modelConfig["marker_wass_scale"].get<float>();
-    if (modelConfig.contains("marker_temp_scale")) marker_temp_scale = modelConfig["marker_temp_scale"].get<float>();
-    if (modelConfig.contains("marker_scale_max")) marker_scale_max = modelConfig["marker_scale_max"].get<float>();
-    if (modelConfig.contains("marker_warmup_steps")) marker_warmup_steps = std::max(0, modelConfig["marker_warmup_steps"].get<int>());
-    marker_wass_scale = std::max(0.0f, marker_wass_scale);
-    marker_temp_scale = std::max(0.0f, marker_temp_scale);
-    marker_scale_max = std::max(1.0f, marker_scale_max);
-
-    float logvar_min = -10.0f;
-    float logvar_max = 10.0f;
-    if (modelConfig.contains("logvar_clip_min")) {
-        logvar_min = modelConfig["logvar_clip_min"].get<float>();
-    }
-    if (modelConfig.contains("logvar_clip_max")) {
-        logvar_max = modelConfig["logvar_clip_max"].get<float>();
-    }
-    if (logvar_min > logvar_max) std::swap(logvar_min, logvar_max);
-
-    // grad clipping is handled in optimizerStep (supports gradient accumulation)
-
-    const float progress = (kl_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(kl_warmup_steps))
-        : 1.0f;
-    const float beta_eff = kl_beta * progress;
-
-    const float marker_progress = (marker_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(marker_warmup_steps))
-        : 1.0f;
-    const float marker_wass_eff = marker_wass_scale * marker_progress;
-    const float marker_temp_eff = marker_temp_scale * marker_progress;
-
-    // Appliquer l'hydratation perceptuelle calculee au batch precedent avant
-    // d'executer le graphe. Le prior reste trainable et serialisable.
-    if (!pending_perceptual_prior_.empty()) {
-        Layer* prior = getLayerByName("vae_conv/z_prior_bias");
-        if (prior && prior->getWeights() &&
-            prior->getWeightsSize() == pending_perceptual_prior_.size()) {
-            std::copy(pending_perceptual_prior_.begin(), pending_perceptual_prior_.end(),
-                      prior->getWeights());
-            modelConfig["perceptual_prior_hydrated"] = true;
-        }
-        pending_perceptual_prior_.clear();
-    }
-
-    // Forward
-    zeroGradients();
-    const std::vector<float>& pred = forwardPassView(x, true);
-    const int out_dim = static_cast<int>(pred.size());
-
-    // Infer latent_dim if missing
-    if (latent_dim <= 0) {
-        if (out_dim > image_dim + 2 && ((out_dim - image_dim) % 2) == 0) {
-            latent_dim = std::max(1, (out_dim - image_dim) / 2);
-        }
-    }
-
-    if (image_dim <= 0 || out_dim < image_dim + 2) {
-        throw std::runtime_error("Model::trainStepVAE: invalid output/image_dim (out_dim=" + std::to_string(out_dim) + ", image_dim=" + std::to_string(image_dim) + ")");
-    }
-    if (latent_dim <= 0 || out_dim < image_dim + 2 * latent_dim) {
-        // Fallback robust: use whatever tail we have.
-        const int tail = out_dim - image_dim;
-        if (tail < 2 || (tail % 2) != 0) {
-            throw std::runtime_error("Model::trainStepVAE: cannot infer latent_dim from output tail (tail=" + std::to_string(tail) + ")");
-        }
-        latent_dim = std::max(1, tail / 2);
-    }
-
-    const int recon_n = std::min(image_dim, static_cast<int>(x.size()));
-    std::string recon_loss = "mse";
-    if (modelConfig.contains("recon_loss")) {
-        try {
-            recon_loss = modelConfig["recon_loss"].get<std::string>();
-        } catch (...) {
-        }
-    }
-
-    // Optional additive recon components
-    float ssim_weight = 0.0f;
-    float spectral_weight = 0.0f;
-    float perceptual_weight = 0.0f;
-    float adv_weight = 0.0f;
-    if (modelConfig.contains("ssim_weight")) ssim_weight = std::max(0.0f, modelConfig["ssim_weight"].get<float>());
-    if (modelConfig.contains("spectral_weight")) spectral_weight = std::max(0.0f, modelConfig["spectral_weight"].get<float>());
-    if (modelConfig.contains("perceptual_weight")) perceptual_weight = std::max(0.0f, modelConfig["perceptual_weight"].get<float>());
-    // Adversarial (discriminateur) retiré pour VAEConv. On ignore adv_weight si présent.
-    (void)adv_weight;
-
-    // Image shape for image-specific losses
-    int img_w = 0, img_h = 0, img_c = 0;
-    if (modelConfig.contains("image_w")) img_w = std::max(0, modelConfig["image_w"].get<int>());
-    if (modelConfig.contains("image_h")) img_h = std::max(0, modelConfig["image_h"].get<int>());
-    if (modelConfig.contains("image_c")) img_c = std::max(0, modelConfig["image_c"].get<int>());
-    if (img_w <= 0 || img_h <= 0 || img_c <= 0) {
-        img_c = 1;
-        img_w = recon_n;
-        img_h = 1;
-    }
-    const bool recon_is_hwc = (recon_n == img_w * img_h * img_c);
-
-    // Loss: recon (avg) + beta * KL (avg)
-    // Recon = base pixel loss + optional additive losses.
-    double recon = 0.0;
-
-    // Parameters for some losses
-    float huber_delta = 1.0f;
-    if (modelConfig.contains("huber_delta")) huber_delta = std::max(1e-6f, modelConfig["huber_delta"].get<float>());
-    if (modelConfig.contains("smoothl1_delta")) huber_delta = std::max(1e-6f, modelConfig["smoothl1_delta"].get<float>());
-    if (modelConfig.contains("smoothl1_beta")) huber_delta = std::max(1e-6f, modelConfig["smoothl1_beta"].get<float>());
-
-    float charbonnier_eps = 1e-3f;
-    if (modelConfig.contains("charbonnier_eps")) charbonnier_eps = std::max(1e-12f, modelConfig["charbonnier_eps"].get<float>());
-
-    float nll_sigma = 1.0f;
-    if (modelConfig.contains("nll_sigma")) nll_sigma = std::max(1e-6f, modelConfig["nll_sigma"].get<float>());
-    if (modelConfig.contains("gaussian_nll_sigma")) nll_sigma = std::max(1e-6f, modelConfig["gaussian_nll_sigma"].get<float>());
-
-    std::vector<float> grad_recon(static_cast<size_t>(recon_n), 0.0f);
-
-    auto add_pixel_loss_and_grad = [&](const std::string& type, double weight) {
-        if (weight <= 0.0) return;
-        const double inv_n = 1.0 / static_cast<double>(std::max(1, recon_n));
-        double lsum = 0.0;
-        if (type == "l1" || type == "mae") {
-            for (int i = 0; i < recon_n; ++i) {
-                const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>(x[static_cast<size_t>(i)]);
-                lsum += std::abs(d);
-                const float df = static_cast<float>(d);
-                const float s = (df > 0.0f) ? 1.0f : (df < 0.0f ? -1.0f : 0.0f);
-                grad_recon[static_cast<size_t>(i)] += static_cast<float>(weight * inv_n) * s;
-            }
-        } else if (type == "huber" || type == "smoothl1") {
-            const float dlt = huber_delta;
-            for (int i = 0; i < recon_n; ++i) {
-                const float diff = pred[static_cast<size_t>(i)] - x[static_cast<size_t>(i)];
-                const float ad = std::abs(diff);
-                if (ad <= dlt) {
-                    lsum += 0.5 * static_cast<double>(diff) * static_cast<double>(diff);
-                    grad_recon[static_cast<size_t>(i)] += static_cast<float>(weight * inv_n) * diff;
-                } else {
-                    lsum += static_cast<double>(dlt) * (static_cast<double>(ad) - 0.5 * static_cast<double>(dlt));
-                    const float s = (diff > 0.0f) ? 1.0f : (diff < 0.0f ? -1.0f : 0.0f);
-                    grad_recon[static_cast<size_t>(i)] += static_cast<float>(weight * inv_n) * dlt * s;
-                }
-            }
-        } else if (type == "charbonnier") {
-            const float eps = charbonnier_eps;
-            for (int i = 0; i < recon_n; ++i) {
-                const float diff = pred[static_cast<size_t>(i)] - x[static_cast<size_t>(i)];
-                const float denom = std::sqrt(diff * diff + eps * eps);
-                lsum += static_cast<double>(denom);
-                grad_recon[static_cast<size_t>(i)] += (denom > 0.0f)
-                    ? (static_cast<float>(weight * inv_n) * (diff / denom))
-                    : 0.0f;
-            }
-        } else if (type == "gaussian_nll" || type == "nll_gaussian") {
-            const double inv_var = 1.0 / (static_cast<double>(nll_sigma) * static_cast<double>(nll_sigma));
-            const double log_var = std::log(static_cast<double>(nll_sigma) * static_cast<double>(nll_sigma));
-            for (int i = 0; i < recon_n; ++i) {
-                const double diff = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>(x[static_cast<size_t>(i)]);
-                lsum += 0.5 * (diff * diff * inv_var + log_var);
-                grad_recon[static_cast<size_t>(i)] += static_cast<float>(weight * inv_n) * static_cast<float>(diff * inv_var);
-            }
-        } else {
-            // default: mse
-            for (int i = 0; i < recon_n; ++i) {
-                const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>(x[static_cast<size_t>(i)]);
-                lsum += d * d;
-                grad_recon[static_cast<size_t>(i)] += static_cast<float>(weight * (2.0 * inv_n)) * static_cast<float>(d);
-            }
-        }
-        recon += weight * (lsum * inv_n);
-    };
-
-    // Base recon loss
-    add_pixel_loss_and_grad(recon_loss, 1.0);
-
-    // SSIM / MS-SSIM (global, differentiable)
-    if (ssim_weight > 0.0f && recon_is_hwc) {
-        float k1 = 0.01f, k2 = 0.03f, L = 2.0f;
-        if (modelConfig.contains("ssim_k1")) k1 = modelConfig["ssim_k1"].get<float>();
-        if (modelConfig.contains("ssim_k2")) k2 = modelConfig["ssim_k2"].get<float>();
-        if (modelConfig.contains("ssim_L")) L = modelConfig["ssim_L"].get<float>();
-
-        std::string ssim_mode = "ssim";
-        if (modelConfig.contains("ssim_mode")) {
-            try { ssim_mode = modelConfig["ssim_mode"].get<std::string>(); } catch (...) {}
-        }
-
-        if (ssim_mode == "ms_ssim" || ssim_mode == "ms-ssim" || recon_loss == "ms_ssim" || recon_loss == "ms-ssim") {
-            // Build scales
-            std::vector<std::vector<float>> x_scales;
-            std::vector<std::vector<float>> t_scales;
-            std::vector<int> ws;
-            std::vector<int> hs;
-            x_scales.emplace_back(pred.begin(), pred.begin() + recon_n);
-            t_scales.emplace_back(x.begin(), x.begin() + recon_n);
-            ws.push_back(img_w);
-            hs.push_back(img_h);
-            int cur_w = img_w, cur_h = img_h;
-            for (int s = 1; s < 5; ++s) {
-                if (cur_w < 8 || cur_h < 8) break;
-                std::vector<float> xd, td;
-                int nw = 0, nh = 0;
-                RuntimeLossGrad::avgpool2x2_hwc(x_scales.back(), cur_w, cur_h, img_c, xd, nw, nh);
-                RuntimeLossGrad::avgpool2x2_hwc(t_scales.back(), cur_w, cur_h, img_c, td, nw, nh);
-                cur_w = nw;
-                cur_h = nh;
-                x_scales.push_back(std::move(xd));
-                t_scales.push_back(std::move(td));
-                ws.push_back(cur_w);
-                hs.push_back(cur_h);
-            }
-
-            // Weights (MS-SSIM paper defaults, truncated/renorm)
-            static const double w_default[5] = {0.0448, 0.2856, 0.3001, 0.2363, 0.1333};
-            const int S = static_cast<int>(x_scales.size());
-            double wsum = 0.0;
-            for (int s = 0; s < S; ++s) wsum += w_default[s];
-            if (wsum <= 0.0) wsum = 1.0;
-
-            // Accumulate loss and gradients
-            double ms_loss = 0.0;
-            std::vector<float> grad_full(static_cast<size_t>(recon_n), 0.0f);
-            for (int s = 0; s < S; ++s) {
-                const double ws_norm = w_default[s] / wsum;
-                const auto r = RuntimeLossGrad::ssim_global_hwc(x_scales[s], t_scales[s], ws[s], hs[s], img_c, k1, k2, L);
-                ms_loss += ws_norm * r.loss;
-
-                // Backprop grad to full resolution via avgpool adjoint
-                std::vector<float> g = r.grad;
-                for (int back = s - 1; back >= 0; --back) {
-                    std::vector<float> up;
-                    RuntimeLossGrad::avgpool2x2_back_hwc(g, ws[back], hs[back], img_c, up);
-                    g.swap(up);
-                }
-                if (g.size() == grad_full.size()) {
-                    for (size_t i = 0; i < grad_full.size(); ++i) {
-                        grad_full[i] += static_cast<float>(ws_norm) * g[i];
-                    }
-                }
-            }
-            recon += static_cast<double>(ssim_weight) * ms_loss;
-            for (int i = 0; i < recon_n; ++i) {
-                grad_recon[static_cast<size_t>(i)] += ssim_weight * grad_full[static_cast<size_t>(i)];
-            }
-        } else {
-            const std::vector<float> pred_recon(pred.begin(), pred.begin() + recon_n);
-            const std::vector<float> tgt_recon(x.begin(), x.begin() + recon_n);
-            const auto r = RuntimeLossGrad::ssim_global_hwc(pred_recon, tgt_recon, img_w, img_h, img_c, k1, k2, L);
-            recon += static_cast<double>(ssim_weight) * r.loss;
-            for (int i = 0; i < recon_n; ++i) {
-                grad_recon[static_cast<size_t>(i)] += ssim_weight * r.grad[static_cast<size_t>(i)];
-            }
-        }
-    }
-
-    // Spectral / frequency-domain loss (DCT L1, multi-scale via avgpool)
-    if (spectral_weight > 0.0f && recon_is_hwc) {
-        int spectral_scales = 1;
-        if (modelConfig.contains("spectral_scales")) {
-            spectral_scales = std::max(1, modelConfig["spectral_scales"].get<int>());
-        }
-
-        std::vector<std::vector<float>> x_scales;
-        std::vector<std::vector<float>> t_scales;
-        std::vector<int> ws;
-        std::vector<int> hs;
-        x_scales.emplace_back(pred.begin(), pred.begin() + recon_n);
-        t_scales.emplace_back(x.begin(), x.begin() + recon_n);
-        ws.push_back(img_w);
-        hs.push_back(img_h);
-
-        int cur_w = img_w, cur_h = img_h;
-        for (int s = 1; s < spectral_scales; ++s) {
-            if (cur_w < 8 || cur_h < 8) break;
-            std::vector<float> xd, td;
-            int nw = 0, nh = 0;
-            RuntimeLossGrad::avgpool2x2_hwc(x_scales.back(), cur_w, cur_h, img_c, xd, nw, nh);
-            RuntimeLossGrad::avgpool2x2_hwc(t_scales.back(), cur_w, cur_h, img_c, td, nw, nh);
-            cur_w = nw;
-            cur_h = nh;
-            x_scales.push_back(std::move(xd));
-            t_scales.push_back(std::move(td));
-            ws.push_back(cur_w);
-            hs.push_back(cur_h);
-        }
-
-        const int S = static_cast<int>(x_scales.size());
-        double wsum = 0.0;
-        for (int s = 0; s < S; ++s) wsum += std::pow(0.5, static_cast<double>(s));
-        if (wsum <= 0.0) wsum = 1.0;
-
-        double spec_loss = 0.0;
-        std::vector<float> grad_full(static_cast<size_t>(recon_n), 0.0f);
-        for (int s = 0; s < S; ++s) {
-            const double ws_norm = std::pow(0.5, static_cast<double>(s)) / wsum;
-            const auto r = RuntimeLossGrad::spectral_dct_l1_hwc(x_scales[s], t_scales[s], ws[s], hs[s], img_c);
-            spec_loss += ws_norm * r.loss;
-
-            // Backprop grad to full resolution via avgpool adjoint
-            std::vector<float> g = r.grad;
-            for (int back = s - 1; back >= 0; --back) {
-                std::vector<float> up;
-                RuntimeLossGrad::avgpool2x2_back_hwc(g, ws[back], hs[back], img_c, up);
-                g.swap(up);
-            }
-            if (g.size() == grad_full.size()) {
-                for (size_t i = 0; i < grad_full.size(); ++i) {
-                    grad_full[i] += static_cast<float>(ws_norm) * g[i];
-                }
-            }
-        }
-
-        recon += static_cast<double>(spectral_weight) * spec_loss;
-        for (int i = 0; i < recon_n; ++i) {
-            grad_recon[static_cast<size_t>(i)] += spectral_weight * grad_full[static_cast<size_t>(i)];
-        }
-    }
-
-    // Perceptual loss (requires a dedicated architecture with feature output)
-    if (perceptual_weight > 0.0f && recon_is_hwc) {
-        std::string p_arch = "vgg16_feat";
-        if (modelConfig.contains("perceptual_arch")) {
-            try { p_arch = modelConfig["perceptual_arch"].get<std::string>(); } catch (...) {}
-        }
-
-        // Lazy init aux model
-        if (!aux_perceptual_) {
-            json pcfg = ModelArchitectures::defaultConfig(p_arch);
-            pcfg["image_w"] = img_w;
-            pcfg["image_h"] = img_h;
-            pcfg["image_c"] = img_c;
-            if (modelConfig.contains("perceptual_base_channels")) {
-                int bc = std::max(1, modelConfig["perceptual_base_channels"].get<int>());
-                // Compat: vgg16_feat force base_channels>=4.
-                if (p_arch == "vgg16_feat") bc = std::max(4, bc);
-                pcfg["base_channels"] = bc;
-            }
-            aux_perceptual_ = ModelArchitectures::create(p_arch, pcfg);
-            aux_perceptual_->allocateParams();
-
-            // IMPORTANT: si aucun checkpoint n'est fourni, il faut au minimum
-            // initialiser les poids; sinon le réseau peut produire des features
-            // dégénérées (ex: zéros) et la loss perceptuelle n'apporte aucun
-            // signal => pas de "punition"/"récompense".
-            // On utilise un seed fixe pour garder un comportement déterministe.
-            try {
-                aux_perceptual_->initializeWeights("xavier", 1337u);
-            } catch (...) {
-                // Best-effort: si l'init échoue, on continue (checkpoint peut encore charger).
-            }
-
-            std::string ckpt;
-            if (modelConfig.contains("perceptual_checkpoint")) {
-                try { ckpt = modelConfig["perceptual_checkpoint"].get<std::string>(); } catch (...) {}
-            }
-            if (!ckpt.empty()) {
-                Mimir::Serialization::LoadOptions opts;
-                opts.format = Mimir::Serialization::detect_format(ckpt);
-                opts.load_tokenizer = false;
-                opts.load_encoder = false;
-                opts.load_optimizer = false;
-                opts.strict_mode = false;
-                opts.validate_checksums = false;
-                std::string err;
-                if (!Mimir::Serialization::load_checkpoint(*aux_perceptual_, ckpt, opts, &err)) {
-                    // Helpful fallback: for raw_folder checkpoints, infer the base_channels from
-                    // the checkpoint architecture (e.g. base=4 vs base=8 mismatch) and retry.
-                    bool retried = false;
-                    if (opts.format == Mimir::Serialization::CheckpointFormat::RawFolder) {
-                        try {
-                            namespace fs = std::filesystem;
-                            const fs::path arch_path = fs::path(ckpt) / "model" / "architecture.json";
-                            if (fs::exists(arch_path)) {
-                                std::ifstream f(arch_path);
-                                json arch;
-                                f >> arch;
-
-                                int inferred_base = 0;
-                                if (arch.is_object() && arch.contains("layers") && arch["layers"].is_array()) {
-                                    for (const auto& L : arch["layers"]) {
-                                        if (!L.is_object()) continue;
-                                        const std::string name = L.value("name", std::string());
-                                        if (name == "vgg16_feat/b1/c1") {
-                                            inferred_base = L.value("out_channels", 0);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                const int cfg_base = pcfg.contains("base_channels") ? (int)pcfg["base_channels"].get<int>() : 0;
-                                if (inferred_base > 0 && inferred_base != cfg_base) {
-                                    std::cerr << "⚠️  Perceptual checkpoint base_channels mismatch (cfg=" << cfg_base
-                                              << ", ckpt=" << inferred_base << "). Rebuilding aux model and retrying load..." << std::endl;
-
-                                    json pcfg2 = pcfg;
-                                    pcfg2["base_channels"] = std::max(1, inferred_base);
-
-                                    aux_perceptual_.reset();
-                                    aux_perceptual_ = ModelArchitectures::create(p_arch, pcfg2);
-                                    aux_perceptual_->allocateParams();
-                                    try { aux_perceptual_->initializeWeights("xavier", 1337u); } catch (...) {}
-
-                                    std::string err2;
-                                    if (Mimir::Serialization::load_checkpoint(*aux_perceptual_, ckpt, opts, &err2)) {
-                                        retried = true;
-                                    } else {
-                                        err = err2;
-                                    }
-                                }
-                            }
-                        } catch (...) {
-                            // best-effort: keep original err
-                        }
-                    }
-
-                    if (!retried) {
-                        std::cerr << "⚠️  Perceptual checkpoint load failed: " << ckpt << " | " << err << std::endl;
-                    }
-                }
-            } else {
-                std::cerr << "⚠️  Perceptual loss active but perceptual_checkpoint is empty: using fixed random Xavier init (seed=1337)." << std::endl;
-            }
-        }
-
-        const std::vector<float> pred_recon(pred.begin(), pred.begin() + recon_n);
-        const std::vector<float> tgt_recon(x.begin(), x.begin() + recon_n);
-
-        // Forward real first (copy features), then forward fake (keeps activations for backward)
-        aux_perceptual_->zeroGradients();
-        const std::vector<float>& f_real_view = aux_perceptual_->forwardPassView(tgt_recon, true);
-        std::vector<float> f_real(f_real_view.begin(), f_real_view.end());
-
-        // Hydrater le prior latent avec la perception de l'image reelle.
-        // Les features GAP et le latent n'ont pas la meme dimension: on centre
-        // et normalise les features, puis on les projette cycliquement. Une EMA
-        // preserve les apprentissages deja presents dans le prior.
-        if (!f_real.empty()) {
-            Layer* prior = getLayerByName("vae_conv/z_prior_bias");
-            if (prior && prior->getWeights() && prior->getWeightsSize() > 0) {
-                float momentum = 0.95f;
-                float scale = 0.05f;
-                if (modelConfig.contains("perceptual_prior_momentum")) {
-                    momentum = modelConfig["perceptual_prior_momentum"].get<float>();
-                }
-                if (modelConfig.contains("perceptual_prior_scale")) {
-                    scale = modelConfig["perceptual_prior_scale"].get<float>();
-                }
-                momentum = std::clamp(momentum, 0.0f, 0.9999f);
-                scale = std::max(0.0f, scale);
-
-                double mean = 0.0;
-                for (float v : f_real) mean += static_cast<double>(v);
-                mean /= static_cast<double>(f_real.size());
-                double variance = 0.0;
-                for (float v : f_real) {
-                    const double d = static_cast<double>(v) - mean;
-                    variance += d * d;
-                }
-                variance /= static_cast<double>(f_real.size());
-                const float inv_std = 1.0f / std::sqrt(static_cast<float>(variance) + 1e-6f);
-
-                const size_t prior_n = prior->getWeightsSize();
-                pending_perceptual_prior_.resize(prior_n);
-                const float* current = prior->getWeights();
-                for (size_t i = 0; i < prior_n; ++i) {
-                    const float feature = (f_real[i % f_real.size()] - static_cast<float>(mean)) * inv_std;
-                    const float target = scale * std::clamp(feature, -3.0f, 3.0f);
-                    pending_perceptual_prior_[i] = momentum * current[i] + (1.0f - momentum) * target;
-                }
-            }
-        }
-
-        aux_perceptual_->zeroGradients();
-        const std::vector<float>& f_fake_view = aux_perceptual_->forwardPassView(pred_recon, true);
-        const size_t fn = std::min(f_fake_view.size(), f_real.size());
-        if (fn > 0) {
-            double pl = 0.0;
-            std::vector<float> gfeat(fn, 0.0f);
-            const float scale = 2.0f / static_cast<float>(fn);
-            for (size_t i = 0; i < fn; ++i) {
-                const double d = static_cast<double>(f_fake_view[i]) - static_cast<double>(f_real[i]);
-                pl += d * d;
-                gfeat[i] = scale * static_cast<float>(d);
-            }
-            pl /= static_cast<double>(fn);
-            recon += static_cast<double>(perceptual_weight) * pl;
-
-            aux_perceptual_->backwardPass(gfeat);
-            if (aux_perceptual_->hasLastInputGradient()) {
-                const auto& gin = aux_perceptual_->getLastInputGradient();
-                if (gin.size() >= static_cast<size_t>(recon_n)) {
-                    for (int i = 0; i < recon_n; ++i) {
-                        grad_recon[static_cast<size_t>(i)] += perceptual_weight * gin[static_cast<size_t>(i)];
-                    }
-                }
-            }
-        }
-    }
-
-    // Adversarial (discriminateur) retiré.
-    const int mu_off = image_dim;
-    const int lv_off = image_dim + latent_dim;
-    double kl = 0.0;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu_f = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const double mu = static_cast<double>(mu_f);
-        const double ev = std::exp(static_cast<double>(lv));
-        kl += 0.5 * (mu * mu + ev - 1.0 - static_cast<double>(lv));
-    }
-    kl /= static_cast<double>(std::max(1, latent_dim));
-
-    const double total_loss = recon + static_cast<double>(beta_eff) * kl;
-
-    // Marker metrics computed on recon vs target image (prefix).
-    const auto mp = compute_moments_prefix(pred, 0, recon_n);
-    const auto mt = compute_moments_prefix(x, 0, recon_n);
-    const double vp = std::max(mp.var, 1e-12);
-    const double vt = std::max(mt.var, 1e-12);
-    const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
-    const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
-    const float spat = static_cast<float>(std::abs(
-        mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
-        mean_abs_adjacent_diff_prefix(x, 0, static_cast<size_t>(recon_n))
-    ));
-    const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
-    const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
-    // Distribution diagnostics: entropy difference (Gaussian approx) and skewness mismatch.
-    const float entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
-    const float moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
-
-    // Stop-grad marker scaling (treat marker as constant for the step).
-    float marker_scale = 1.0f;
-    if (marker_wass_eff > 0.0f || marker_temp_eff > 0.0f) {
-        marker_scale = 1.0f + marker_wass_eff * wass + marker_temp_eff * temp_pen;
-        marker_scale = std::clamp(marker_scale, 0.1f, marker_scale_max);
-    }
-
-    const double total_loss_marked = static_cast<double>(marker_scale) * recon + static_cast<double>(beta_eff) * kl;
-
-    // Gradient on packed output [recon|mu|logvar]
-    scratch_packed_grad_.resize(static_cast<size_t>(out_dim));
-    std::fill(scratch_packed_grad_.begin(), scratch_packed_grad_.end(), 0.0f);
-    auto& grad = scratch_packed_grad_;
-    // recon grad: already normalized by n in each component, just apply marker_scale.
-    for (int i = 0; i < recon_n; ++i) {
-        grad[static_cast<size_t>(i)] = marker_scale * grad_recon[static_cast<size_t>(i)];
-    }
-
-    const float kl_scale = (latent_dim > 0) ? (beta_eff / static_cast<float>(latent_dim)) : 0.0f;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const float in_range = (lv_raw >= logvar_min && lv_raw <= logvar_max) ? 1.0f : 0.0f;
-
-        grad[static_cast<size_t>(mu_off + i)] = kl_scale * mu;
-        grad[static_cast<size_t>(lv_off + i)] = kl_scale * (0.5f * (std::exp(lv) - 1.0f)) * in_range;
-    }
-
-    backwardPass(grad);
-
-    // Gradient norm (monitoring)
-    double sum_sq = 0.0;
-    float max_abs = 0.0f;
-    for (const auto& layer : layers) {
-        for (float g : layer.grad_weights) {
-            sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs) max_abs = a;
-        }
-        for (float g : layer.grad_bias) {
-            sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs) max_abs = a;
-        }
-    }
-    const float grad_norm = static_cast<float>(std::sqrt(sum_sq));
-
-    optimizerStep(opt, learning_rate);
-
-    VAEStepStats stats;
-    stats.loss = static_cast<float>(total_loss_marked);
-    stats.mse = static_cast<float>(recon);
-    stats.kl = static_cast<float>(kl);
-    stats.wass = wass;
-    stats.spatial_coherence = spat;
-    stats.temp = temp;
-    const int total_steps = std::max(1, opt.total_steps);
-    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
-    stats.kl_beta_effective = beta_eff;
-    stats.latent_dim = latent_dim;
-    stats.grad_norm = grad_norm;
-    stats.grad_max_abs = max_abs;
-    stats.entropy_diff = entropy_diff_v;
-    stats.moment_mismatch = moment_mismatch_v;
-    return stats;
-}
-
-Model::VAEStepStats Model::backwardStepVAE(const std::vector<float>& x, Optimizer& opt, float grad_scale) {
-    if (params_frozen_) {
-        throw std::runtime_error("Model::backwardStepVAE: parameters are frozen");
-    }
-    if (layers.empty()) {
-        throw std::runtime_error("Model::backwardStepVAE: model not built");
-    }
-    if (layer_weight_blocks.empty()) {
-        throw std::runtime_error("Model::backwardStepVAE: weights not allocated (call allocateParams/initWeights)");
-    }
-    if (!std::isfinite(grad_scale) || grad_scale <= 0.0f) grad_scale = 1.0f;
-
-    int image_dim = 0;
-    if (modelConfig.contains("image_dim")) {
-        image_dim = std::max(0, modelConfig["image_dim"].get<int>());
-    }
-    if (image_dim <= 0) image_dim = static_cast<int>(x.size());
-
-    int latent_dim = 0;
-    if (modelConfig.contains("latent_dim")) {
-        latent_dim = std::max(0, modelConfig["latent_dim"].get<int>());
-    }
-
-    float kl_beta = 1.0f;
-    if (modelConfig.contains("kl_beta")) {
-        kl_beta = modelConfig["kl_beta"].get<float>();
-    } else if (modelConfig.contains("vae_kl_beta")) {
-        kl_beta = modelConfig["vae_kl_beta"].get<float>();
-    }
-    kl_beta = std::max(0.0f, kl_beta);
-
-    int kl_warmup_steps = 0;
-    if (modelConfig.contains("kl_warmup_steps")) {
-        kl_warmup_steps = std::max(0, modelConfig["kl_warmup_steps"].get<int>());
-    }
-
-    float marker_wass_scale = 0.0f;
-    float marker_temp_scale = 0.0f;
-    float marker_scale_max = 10.0f;
-    int marker_warmup_steps = 0;
-    if (modelConfig.contains("marker_wass_scale")) marker_wass_scale = modelConfig["marker_wass_scale"].get<float>();
-    if (modelConfig.contains("marker_temp_scale")) marker_temp_scale = modelConfig["marker_temp_scale"].get<float>();
-    if (modelConfig.contains("marker_scale_max")) marker_scale_max = modelConfig["marker_scale_max"].get<float>();
-    if (modelConfig.contains("marker_warmup_steps")) marker_warmup_steps = std::max(0, modelConfig["marker_warmup_steps"].get<int>());
-    marker_wass_scale = std::max(0.0f, marker_wass_scale);
-    marker_temp_scale = std::max(0.0f, marker_temp_scale);
-    marker_scale_max = std::max(1.0f, marker_scale_max);
-
-    float logvar_min = -10.0f;
-    float logvar_max = 10.0f;
-    if (modelConfig.contains("logvar_clip_min")) {
-        logvar_min = modelConfig["logvar_clip_min"].get<float>();
-    }
-    if (modelConfig.contains("logvar_clip_max")) {
-        logvar_max = modelConfig["logvar_clip_max"].get<float>();
-    }
-    if (logvar_min > logvar_max) std::swap(logvar_min, logvar_max);
-
-    const float progress = (kl_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(kl_warmup_steps))
-        : 1.0f;
-    const float beta_eff = kl_beta * progress;
-
-    const float marker_progress = (marker_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(marker_warmup_steps))
-        : 1.0f;
-    const float marker_wass_eff = marker_wass_scale * marker_progress;
-    const float marker_temp_eff = marker_temp_scale * marker_progress;
-
-    const std::vector<float>& pred = forwardPassView(x, true);
-    const int out_dim = static_cast<int>(pred.size());
-
-    if (latent_dim <= 0) {
-        if (out_dim > image_dim + 2 && ((out_dim - image_dim) % 2) == 0) {
-            latent_dim = std::max(1, (out_dim - image_dim) / 2);
-        }
-    }
-    if (image_dim <= 0 || out_dim < image_dim + 2) {
-        throw std::runtime_error("Model::backwardStepVAE: invalid output/image_dim (out_dim=" + std::to_string(out_dim) + ", image_dim=" + std::to_string(image_dim) + ")");
-    }
-    if (latent_dim <= 0 || out_dim < image_dim + 2 * latent_dim) {
-        const int tail = out_dim - image_dim;
-        if (tail < 2 || (tail % 2) != 0) {
-            throw std::runtime_error("Model::backwardStepVAE: cannot infer latent_dim from output tail (tail=" + std::to_string(tail) + ")");
-        }
-        latent_dim = std::max(1, tail / 2);
-    }
-
-    const int recon_n = std::min(image_dim, static_cast<int>(x.size()));
-    std::string recon_loss = "mse";
-    if (modelConfig.contains("recon_loss")) {
-        try {
-            recon_loss = modelConfig["recon_loss"].get<std::string>();
-        } catch (...) {
-        }
-    }
-    // Loss: recon (avg) + beta * KL (avg)
-    double recon = 0.0;
-    if (recon_loss == "l1" || recon_loss == "mae") {
-        for (int i = 0; i < recon_n; ++i) {
-            const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>(x[static_cast<size_t>(i)]);
-            recon += std::abs(d);
-        }
-        recon /= static_cast<double>(std::max(1, recon_n));
-    } else {
-        for (int i = 0; i < recon_n; ++i) {
-            const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>(x[static_cast<size_t>(i)]);
-            recon += d * d;
-        }
-        recon /= static_cast<double>(std::max(1, recon_n));
-    }
-    const int mu_off = image_dim;
-    const int lv_off = image_dim + latent_dim;
-    double kl = 0.0;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu_f = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const double mu = static_cast<double>(mu_f);
-        const double ev = std::exp(static_cast<double>(lv));
-        kl += 0.5 * (mu * mu + ev - 1.0 - static_cast<double>(lv));
-    }
-    kl /= static_cast<double>(std::max(1, latent_dim));
-
-    const double total_loss = recon + static_cast<double>(beta_eff) * kl;
-
-    const auto mp = compute_moments_prefix(pred, 0, recon_n);
-    const auto mt = compute_moments_prefix(x, 0, recon_n);
-    const double vp = std::max(mp.var, 1e-12);
-    const double vt = std::max(mt.var, 1e-12);
-    const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
-    const float wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
-    const float spat = static_cast<float>(std::abs(
-        mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
-        mean_abs_adjacent_diff_prefix(x, 0, static_cast<size_t>(recon_n))
-    ));
-    const float temp = static_cast<float>(pearson_corr_prefix(pred, 0, x, 0, recon_n));
-    const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
-    const float entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
-    const float moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
-
-    float marker_scale = 1.0f;
-    if (marker_wass_eff > 0.0f || marker_temp_eff > 0.0f) {
-        marker_scale = 1.0f + marker_wass_eff * wass + marker_temp_eff * temp_pen;
-        marker_scale = std::clamp(marker_scale, 0.1f, marker_scale_max);
-    }
-
-    const double total_loss_marked = static_cast<double>(marker_scale) * recon + static_cast<double>(beta_eff) * kl;
-
-    scratch_packed_grad_.resize(static_cast<size_t>(out_dim));
-    std::fill(scratch_packed_grad_.begin(), scratch_packed_grad_.end(), 0.0f);
-    auto& grad = scratch_packed_grad_;
-    if (recon_loss == "l1" || recon_loss == "mae") {
-        const float recon_scale = (1.0f / static_cast<float>(std::max(1, recon_n))) * grad_scale * marker_scale;
-        for (int i = 0; i < recon_n; ++i) {
-            const float d = pred[static_cast<size_t>(i)] - x[static_cast<size_t>(i)];
-            const float s = (d > 0.0f) ? 1.0f : (d < 0.0f ? -1.0f : 0.0f);
-            grad[static_cast<size_t>(i)] = recon_scale * s;
-        }
-    } else {
-        const float recon_scale = (2.0f / static_cast<float>(std::max(1, recon_n))) * grad_scale * marker_scale;
-        for (int i = 0; i < recon_n; ++i) {
-            grad[static_cast<size_t>(i)] = recon_scale * (pred[static_cast<size_t>(i)] - x[static_cast<size_t>(i)]);
-        }
-    }
-
-    const float kl_scale = (latent_dim > 0) ? ((beta_eff / static_cast<float>(latent_dim)) * grad_scale) : 0.0f;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const float in_range = (lv_raw >= logvar_min && lv_raw <= logvar_max) ? 1.0f : 0.0f;
-        grad[static_cast<size_t>(mu_off + i)] = kl_scale * mu;
-        grad[static_cast<size_t>(lv_off + i)] = kl_scale * (0.5f * (std::exp(lv) - 1.0f)) * in_range;
-    }
-
-    backwardPass(grad);
-
-    double sum_sq2 = 0.0;
-    float max_abs2 = 0.0f;
-    for (const auto& layer : layers) {
-        for (float g : layer.grad_weights) {
-            sum_sq2 += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs2) max_abs2 = a;
-        }
-        for (float g : layer.grad_bias) {
-            sum_sq2 += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs2) max_abs2 = a;
-        }
-    }
-
-    VAEStepStats stats;
-    stats.loss = static_cast<float>(total_loss_marked);
-    stats.mse = static_cast<float>(recon);
-    stats.kl = static_cast<float>(kl);
-    stats.wass = wass;
-    stats.spatial_coherence = spat;
-    stats.temp = temp;
-    const int total_steps = std::max(1, opt.total_steps);
-    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
-    stats.kl_beta_effective = beta_eff;
-    stats.latent_dim = latent_dim;
-    stats.grad_norm = static_cast<float>(std::sqrt(sum_sq2));
-    stats.grad_max_abs = max_abs2;
-    stats.entropy_diff = entropy_diff_v;
-    stats.moment_mismatch = moment_mismatch_v;
-    return stats;
-}
-
-static inline float dot_f(const std::vector<float>& a, size_t a_off, const std::vector<float>& b, size_t b_off, int n) {
-    double s = 0.0;
-    for (int i = 0; i < n; ++i) {
-        s += static_cast<double>(a[a_off + static_cast<size_t>(i)]) * static_cast<double>(b[b_off + static_cast<size_t>(i)]);
-    }
-    return static_cast<float>(s);
-}
-
-static inline float norm2_f(const std::vector<float>& a, size_t a_off, int n) {
-    double s = 0.0;
-    for (int i = 0; i < n; ++i) {
-        const double v = static_cast<double>(a[a_off + static_cast<size_t>(i)]);
-        s += v * v;
-    }
-    return static_cast<float>(std::sqrt(s));
-}
-
-static inline uint64_t mix_u64(uint64_t x) {
-    x ^= x >> 30;
-    x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27;
-    x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31;
-    return x;
-}
-
-static inline std::vector<float> make_text_hash_target_unigram(const std::vector<int>& ids,
-                                                                int pad_id,
-                                                                int dim,
-                                                                uint64_t seed) {
-    std::vector<float> out(static_cast<size_t>(std::max(0, dim)), 0.0f);
-    if (dim <= 0) return out;
-
-    int valid = 0;
-    for (int tok : ids) {
-        if (pad_id >= 0 && tok == pad_id) continue;
-        const uint64_t h = mix_u64(static_cast<uint64_t>(static_cast<uint32_t>(tok)) ^ seed);
-        const int idx = static_cast<int>(h % static_cast<uint64_t>(dim));
-        const float sgn = ((h >> 63) != 0ULL) ? 1.0f : -1.0f;
-        out[static_cast<size_t>(idx)] += sgn;
-        valid += 1;
-    }
-
-    if (valid > 0) {
-        const float inv = 1.0f / static_cast<float>(valid);
-        for (float& v : out) v *= inv;
-    }
-
-    const float n = std::max(1e-8f, norm2_f(out, 0, dim));
-    for (float& v : out) v /= n;
-    return out;
-}
-
-static inline std::vector<float> make_text_hash_target_bigram(const std::vector<int>& ids,
-                                                               int pad_id,
-                                                               int dim,
-                                                               uint64_t seed) {
-    std::vector<float> out(static_cast<size_t>(std::max(0, dim)), 0.0f);
-    if (dim <= 0) return out;
-
-    int prev = -1;
-    int valid = 0;
-    for (int tok : ids) {
-        if (pad_id >= 0 && tok == pad_id) continue;
-        if (prev >= 0) {
-            const uint64_t pair = (static_cast<uint64_t>(static_cast<uint32_t>(prev)) << 32)
-                                ^ static_cast<uint64_t>(static_cast<uint32_t>(tok));
-            const uint64_t h = mix_u64(pair ^ seed);
-            const int idx = static_cast<int>(h % static_cast<uint64_t>(dim));
-            const float sgn = ((h >> 62) & 1ULL) ? 1.0f : -1.0f;
-            out[static_cast<size_t>(idx)] += sgn;
-            valid += 1;
-        }
-        prev = tok;
-    }
-
-    if (valid > 0) {
-        const float inv = 1.0f / static_cast<float>(valid);
-        for (float& v : out) v *= inv;
-    }
-
-    const float n = std::max(1e-8f, norm2_f(out, 0, dim));
-    for (float& v : out) v /= n;
-    return out;
-}
-
-Model::VAEStepStats Model::trainStepVAEText(const std::vector<float>& x,
-                                           const std::vector<int>& text_ids,
-                                           Optimizer& opt,
-                                           float learning_rate) {
-    if (params_frozen_) {
-        throw std::runtime_error("Model::trainStepVAEText: parameters are frozen");
-    }
-    if (layers.empty()) {
-        throw std::runtime_error("Model::trainStepVAEText: model not built");
-    }
-    if (layer_weight_blocks.empty()) {
-        throw std::runtime_error("Model::trainStepVAEText: weights not allocated (call allocateParams/initWeights)");
-    }
-
-    // Reconstruction loss type
-    std::string recon_loss = "mse";
-    if (modelConfig.contains("recon_loss")) {
-        try { recon_loss = modelConfig["recon_loss"].get<std::string>(); } catch (...) {}
-    }
-
-    const bool recon_is_ce = (recon_loss == "ce" || recon_loss == "cross_entropy" || recon_loss == "xent");
-
-    // Target: for MSE/L1 we use x or an internal tap tensor. For CE we use text_ids.
-    const std::vector<float>* target = &x;
-    bool using_internal_target = false;
-
-    int image_dim = 0;
-    if (modelConfig.contains("image_dim")) {
-        image_dim = std::max(0, modelConfig["image_dim"].get<int>());
-    }
-
-    int seq_len_cfg = 0;
-    int vocab_cfg = 0;
-    int pad_id = -1;
-    if (modelConfig.contains("seq_len")) seq_len_cfg = std::max(0, modelConfig["seq_len"].get<int>());
-    if (modelConfig.contains("vocab_size")) vocab_cfg = std::max(0, modelConfig["vocab_size"].get<int>());
-    if (modelConfig.contains("padding_idx")) pad_id = modelConfig["padding_idx"].get<int>();
-
-    if (recon_is_ce) {
-        const int sl = std::max(1, seq_len_cfg);
-        const int vv = std::max(2, vocab_cfg);
-        image_dim = std::max(1, sl * vv);
-    } else {
-        if (x.empty()) {
-            std::string tname;
-            if (modelConfig.contains("target_tensor")) {
-                try { tname = modelConfig["target_tensor"].get<std::string>(); } catch (...) {}
-            }
-            if (!tname.empty() && hasTensor(tname)) {
-                target = &getTensor(tname);
-            } else if (hasTensor("vae_text/target")) {
-                target = &getTensor("vae_text/target");
-            }
-        }
-
-        using_internal_target = x.empty() && (target != &x) && (!target->empty());
-        if (using_internal_target) {
-            image_dim = static_cast<int>(target->size());
-        } else if (image_dim <= 0) {
-            image_dim = static_cast<int>(target->size());
-        }
-    }
-
-    int latent_dim = 0;
-    if (modelConfig.contains("latent_dim")) {
-        latent_dim = std::max(0, modelConfig["latent_dim"].get<int>());
-    }
-    if (modelConfig.contains("latent_tokens") && modelConfig.contains("d_model")) {
-        const int lt = std::max(1, modelConfig["latent_tokens"].get<int>());
-        const int dm = std::max(1, modelConfig["d_model"].get<int>());
-        const int ld = std::max(1, lt * dm);
-        if (latent_dim <= 0 || latent_dim != ld) latent_dim = ld;
-    }
-
-    int proj_dim = 0;
-    if (modelConfig.contains("proj_dim")) {
-        proj_dim = std::max(0, modelConfig["proj_dim"].get<int>());
-    }
-
-    int sem_dim = 0;
-    int them_dim = 0;
-    int dialog_dim = 0;
-    if (modelConfig.contains("context_semantic_dim")) sem_dim = std::max(0, modelConfig["context_semantic_dim"].get<int>());
-    if (modelConfig.contains("context_thematic_dim")) them_dim = std::max(0, modelConfig["context_thematic_dim"].get<int>());
-    if (modelConfig.contains("context_dialog_dim")) dialog_dim = std::max(0, modelConfig["context_dialog_dim"].get<int>());
-
-    float context_sem_weight = 0.0f;
-    float context_them_weight = 0.0f;
-    float context_dialog_weight = 0.0f;
-    if (modelConfig.contains("context_semantic_weight")) context_sem_weight = std::max(0.0f, modelConfig["context_semantic_weight"].get<float>());
-    if (modelConfig.contains("context_thematic_weight")) context_them_weight = std::max(0.0f, modelConfig["context_thematic_weight"].get<float>());
-    if (modelConfig.contains("context_dialog_weight")) context_dialog_weight = std::max(0.0f, modelConfig["context_dialog_weight"].get<float>());
-
-    float align_weight = 0.1f;
-    if (modelConfig.contains("align_weight")) {
-        align_weight = modelConfig["align_weight"].get<float>();
-    }
-    align_weight = std::max(0.0f, align_weight);
-
-    float kl_beta = 1.0f;
-    if (modelConfig.contains("kl_beta")) {
-        kl_beta = modelConfig["kl_beta"].get<float>();
-    } else if (modelConfig.contains("vae_kl_beta")) {
-        kl_beta = modelConfig["vae_kl_beta"].get<float>();
-    }
-    kl_beta = std::max(0.0f, kl_beta);
-
-    int kl_warmup_steps = 0;
-    if (modelConfig.contains("kl_warmup_steps")) {
-        kl_warmup_steps = std::max(0, modelConfig["kl_warmup_steps"].get<int>());
-    }
-
-    float marker_wass_scale = 0.0f;
-    float marker_temp_scale = 0.0f;
-    float marker_scale_max = 10.0f;
-    int marker_warmup_steps = 0;
-    if (modelConfig.contains("marker_wass_scale")) marker_wass_scale = modelConfig["marker_wass_scale"].get<float>();
-    if (modelConfig.contains("marker_temp_scale")) marker_temp_scale = modelConfig["marker_temp_scale"].get<float>();
-    if (modelConfig.contains("marker_scale_max")) marker_scale_max = modelConfig["marker_scale_max"].get<float>();
-    if (modelConfig.contains("marker_warmup_steps")) marker_warmup_steps = std::max(0, modelConfig["marker_warmup_steps"].get<int>());
-    marker_wass_scale = std::max(0.0f, marker_wass_scale);
-    marker_temp_scale = std::max(0.0f, marker_temp_scale);
-    marker_scale_max = std::max(1.0f, marker_scale_max);
-
-    float logvar_min = -10.0f;
-    float logvar_max = 10.0f;
-    if (modelConfig.contains("logvar_clip_min")) {
-        logvar_min = modelConfig["logvar_clip_min"].get<float>();
-    }
-    if (modelConfig.contains("logvar_clip_max")) {
-        logvar_max = modelConfig["logvar_clip_max"].get<float>();
-    }
-    if (logvar_min > logvar_max) std::swap(logvar_min, logvar_max);
-
-    const float progress = (kl_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(kl_warmup_steps))
-        : 1.0f;
-    const float beta_eff = kl_beta * progress;
-
-    const float marker_progress = (marker_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(marker_warmup_steps))
-        : 1.0f;
-    const float marker_wass_eff = marker_wass_scale * marker_progress;
-    const float marker_temp_eff = marker_temp_scale * marker_progress;
-
-    // Forward (named inputs)
-    zeroGradients();
-    std::unordered_map<std::string, std::vector<float>> fin;
-    std::unordered_map<std::string, std::vector<int>> iin;
-    fin["__input__"] = x;
-    iin["text_ids"] = text_ids;
-    const std::vector<float>& pred = forwardPassNamedView(fin, iin, true);
-    const int out_dim = static_cast<int>(pred.size());
-
-    // Resolve internal target AFTER forward (it is produced by the graph) for MSE/L1 modes.
-    if (!recon_is_ce && x.empty()) {
-        std::string tname;
-        if (modelConfig.contains("target_tensor")) {
-            try { tname = modelConfig["target_tensor"].get<std::string>(); } catch (...) {}
-        }
-        if (!tname.empty() && hasTensor(tname)) {
-            target = &getTensor(tname);
-        } else if (hasTensor("vae_text/target")) {
-            target = &getTensor("vae_text/target");
-        }
-        using_internal_target = x.empty() && (target != &x) && (!target->empty());
-        if (using_internal_target) {
-            image_dim = static_cast<int>(target->size());
-        } else if (x.empty() && modelConfig.contains("seq_len") && modelConfig.contains("d_model")) {
-            const int sl = std::max(1, modelConfig["seq_len"].get<int>());
-            const int dm = std::max(1, modelConfig["d_model"].get<int>());
-            image_dim = std::max(1, sl * dm);
-        }
-    }
-
-    // Infer latent_dim / proj_dim if missing
-    if (latent_dim <= 0) {
-        // We need at least recon + mu + logvar
-        const int tail = out_dim - image_dim;
-        if (tail >= 4 && (tail % 2) == 0) {
-            // ambiguous when proj heads exist; prefer config. fallback: split in 2 equal halves for mu/logvar and ignore proj.
-            latent_dim = std::max(1, tail / 2);
-        }
-    }
-
-    if (image_dim <= 0 || latent_dim <= 0 || out_dim < image_dim + 2 * latent_dim + 2) {
-        throw std::runtime_error("Model::trainStepVAEText: invalid dims (out_dim=" + std::to_string(out_dim) + ", image_dim=" + std::to_string(image_dim) + ", latent_dim=" + std::to_string(latent_dim) + ")");
-    }
-
-    const int proj_tail = out_dim - (image_dim + 2 * latent_dim);
-    if (proj_dim <= 0) {
-        if (proj_tail > 0 && (proj_tail % 2) == 0) proj_dim = std::max(1, proj_tail / 2);
-    }
-    if (proj_dim <= 0 || out_dim < image_dim + 2 * latent_dim + 2 * proj_dim) {
-        throw std::runtime_error("Model::trainStepVAEText: missing/invalid proj_dim (proj_tail=" + std::to_string(proj_tail) + ")");
-    }
-
-    const int base_dim = image_dim + 2 * latent_dim + 2 * proj_dim;
-    int extra_tail = std::max(0, out_dim - base_dim);
-    if ((sem_dim + them_dim + dialog_dim) <= 0 && extra_tail > 0) {
-        sem_dim = extra_tail;
-        them_dim = 0;
-        dialog_dim = 0;
-    }
-    const int requested_extra = sem_dim + them_dim + dialog_dim;
-    if (requested_extra > extra_tail) {
-        const int overflow = requested_extra - extra_tail;
-        if (dialog_dim >= overflow) dialog_dim -= overflow;
-        else if (them_dim >= overflow) them_dim -= overflow;
-        else sem_dim = std::max(0, sem_dim - overflow);
-    }
-
-    const int recon_n = std::min(image_dim, static_cast<int>(target->size()));
-
-    // Recon
-    double recon = 0.0;
-    float wass = 0.0f;
-    float spat = 0.0f;
-    float temp = 0.0f;
-    float entropy_diff_v = 0.0f;
-    float moment_mismatch_v = 0.0f;
-    float marker_scale = 1.0f;
-
-    if (recon_is_ce) {
-        const int sl = std::max(1, seq_len_cfg);
-        const int vv = std::max(2, vocab_cfg);
-        const int valid_n = std::min(static_cast<int>(text_ids.size()), sl);
-
-        int count = 0;
-        for (int t = 0; t < valid_n; ++t) {
-            const int y = text_ids[static_cast<size_t>(t)];
-            if (pad_id >= 0 && y == pad_id) continue;
-            if (y < 0 || y >= vv) continue;
-            const size_t base = static_cast<size_t>(t) * static_cast<size_t>(vv);
-
-            float m = -1e30f;
-            for (int j = 0; j < vv; ++j) {
-                const float v = pred[base + static_cast<size_t>(j)];
-                if (v > m) m = v;
-            }
-            double sum = 0.0;
-            for (int j = 0; j < vv; ++j) {
-                sum += std::exp(static_cast<double>(pred[base + static_cast<size_t>(j)] - m));
-            }
-            const double lse = static_cast<double>(m) + std::log(std::max(1e-30, sum));
-            recon += lse - static_cast<double>(pred[base + static_cast<size_t>(y)]);
-            count += 1;
-        }
-        if (count > 0) recon /= static_cast<double>(count);
-    } else {
-        if (!using_internal_target && x.empty()) {
-            // x empty without internal target: fallback to seq_len*d_model if available
-            if (modelConfig.contains("seq_len") && modelConfig.contains("d_model")) {
-                const int sl = std::max(1, modelConfig["seq_len"].get<int>());
-                const int dm = std::max(1, modelConfig["d_model"].get<int>());
-                image_dim = std::max(1, sl * dm);
-            }
-        }
-
-        const int recon_n = std::min(image_dim, static_cast<int>(target->size()));
-
-        if (recon_loss == "l1" || recon_loss == "mae") {
-            for (int i = 0; i < recon_n; ++i) {
-                const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>((*target)[static_cast<size_t>(i)]);
-                recon += std::abs(d);
-            }
-            recon /= static_cast<double>(std::max(1, recon_n));
-        } else {
-            for (int i = 0; i < recon_n; ++i) {
-                const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>((*target)[static_cast<size_t>(i)]);
-                recon += d * d;
-            }
-            recon /= static_cast<double>(std::max(1, recon_n));
-        }
-
-        const auto mp = compute_moments_prefix(pred, 0, recon_n);
-        const auto mt = compute_moments_prefix(*target, 0, recon_n);
-        const double vp = std::max(mp.var, 1e-12);
-        const double vt = std::max(mt.var, 1e-12);
-        const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
-        wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
-        spat = static_cast<float>(std::abs(
-            mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
-            mean_abs_adjacent_diff_prefix(*target, 0, static_cast<size_t>(recon_n))
-        ));
-        temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
-        const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
-        entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
-        moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
-
-        if (marker_wass_eff > 0.0f || marker_temp_eff > 0.0f) {
-            marker_scale = 1.0f + marker_wass_eff * wass + marker_temp_eff * temp_pen;
-            marker_scale = std::clamp(marker_scale, 0.1f, marker_scale_max);
-        }
-    }
-
-    // KL
-    const int mu_off = image_dim;
-    const int lv_off = image_dim + latent_dim;
-    double kl = 0.0;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu_f = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const double mu = static_cast<double>(mu_f);
-        const double ev = std::exp(static_cast<double>(lv));
-        kl += 0.5 * (mu * mu + ev - 1.0 - static_cast<double>(lv));
-    }
-    kl /= static_cast<double>(std::max(1, latent_dim));
-
-    // Alignment (1 - cosine)
-    const size_t imgp_off = static_cast<size_t>(image_dim + 2 * latent_dim);
-    const size_t txtp_off = imgp_off + static_cast<size_t>(proj_dim);
-    const size_t sem_off = txtp_off + static_cast<size_t>(proj_dim);
-    const size_t them_off = sem_off + static_cast<size_t>(sem_dim);
-    const size_t dialog_off = them_off + static_cast<size_t>(them_dim);
-    const float eps = 1e-8f;
-    const float na = std::max(eps, norm2_f(pred, imgp_off, proj_dim));
-    const float nb = std::max(eps, norm2_f(pred, txtp_off, proj_dim));
-    const float dp = dot_f(pred, imgp_off, pred, txtp_off, proj_dim);
-    const float cos_sim = dp / (na * nb);
-    const float align = (align_weight > 0.0f) ? (align_weight * (1.0f - cos_sim)) : 0.0f;
-
-    auto sem_target = make_text_hash_target_unigram(text_ids, pad_id, sem_dim, 0x9e3779b97f4a7c15ULL);
-    auto them_target = make_text_hash_target_bigram(text_ids, pad_id, them_dim, 0xbf58476d1ce4e5b9ULL);
-    auto dialog_target = make_text_hash_target_unigram(text_ids, pad_id, dialog_dim, 0x94d049bb133111ebULL);
-
-    double sem_loss = 0.0;
-    double them_loss = 0.0;
-    double dialog_loss = 0.0;
-    if (sem_dim > 0 && context_sem_weight > 0.0f) {
-        for (int i = 0; i < sem_dim; ++i) {
-            const double d = static_cast<double>(pred[sem_off + static_cast<size_t>(i)]) - static_cast<double>(sem_target[static_cast<size_t>(i)]);
-            sem_loss += d * d;
-        }
-        sem_loss /= static_cast<double>(sem_dim);
-    }
-    if (them_dim > 0 && context_them_weight > 0.0f) {
-        for (int i = 0; i < them_dim; ++i) {
-            const double d = static_cast<double>(pred[them_off + static_cast<size_t>(i)]) - static_cast<double>(them_target[static_cast<size_t>(i)]);
-            them_loss += d * d;
-        }
-        them_loss /= static_cast<double>(them_dim);
-    }
-    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
-        for (int i = 0; i < dialog_dim; ++i) {
-            const double d = static_cast<double>(pred[dialog_off + static_cast<size_t>(i)]) - static_cast<double>(dialog_target[static_cast<size_t>(i)]);
-            dialog_loss += d * d;
-        }
-        dialog_loss /= static_cast<double>(dialog_dim);
-    }
-
-    const double total_loss = static_cast<double>(marker_scale) * recon
-                            + static_cast<double>(beta_eff) * kl
-                            + static_cast<double>(align)
-                            + static_cast<double>(context_sem_weight) * sem_loss
-                            + static_cast<double>(context_them_weight) * them_loss
-                            + static_cast<double>(context_dialog_weight) * dialog_loss;
-
-    // Gradient on packed output
-    scratch_packed_grad_.resize(static_cast<size_t>(out_dim));
-    std::fill(scratch_packed_grad_.begin(), scratch_packed_grad_.end(), 0.0f);
-    auto& grad = scratch_packed_grad_;
-
-    // Recon grad
-    if (recon_is_ce) {
-        const int sl = std::max(1, seq_len_cfg);
-        const int vv = std::max(2, vocab_cfg);
-        const int valid_n = std::min(static_cast<int>(text_ids.size()), sl);
-
-        int count = 0;
-        for (int t = 0; t < valid_n; ++t) {
-            const int y = text_ids[static_cast<size_t>(t)];
-            if (pad_id >= 0 && y == pad_id) continue;
-            if (y < 0 || y >= vv) continue;
-            count += 1;
-        }
-        const float scale = (count > 0) ? (marker_scale / static_cast<float>(count)) : 0.0f;
-
-        for (int t = 0; t < valid_n; ++t) {
-            const int y = text_ids[static_cast<size_t>(t)];
-            if (pad_id >= 0 && y == pad_id) continue;
-            if (y < 0 || y >= vv) continue;
-            const size_t base = static_cast<size_t>(t) * static_cast<size_t>(vv);
-
-            float m = -1e30f;
-            for (int j = 0; j < vv; ++j) {
-                const float v = pred[base + static_cast<size_t>(j)];
-                if (v > m) m = v;
-            }
-            double sum = 0.0;
-            for (int j = 0; j < vv; ++j) {
-                sum += std::exp(static_cast<double>(pred[base + static_cast<size_t>(j)] - m));
-            }
-            const double inv_denom = 1.0 / std::max(1e-30, sum);
-            for (int j = 0; j < vv; ++j) {
-                const double p = std::exp(static_cast<double>(pred[base + static_cast<size_t>(j)] - m)) * inv_denom;
-                grad[base + static_cast<size_t>(j)] = scale * static_cast<float>(p);
-            }
-            grad[base + static_cast<size_t>(y)] -= scale;
-        }
-    } else {
-        const int recon_n = std::min(image_dim, static_cast<int>(target->size()));
-        if (recon_loss == "l1" || recon_loss == "mae") {
-            const float recon_scale = (1.0f / static_cast<float>(std::max(1, recon_n))) * marker_scale;
-            for (int i = 0; i < recon_n; ++i) {
-                const float d = pred[static_cast<size_t>(i)] - (*target)[static_cast<size_t>(i)];
-                const float s = (d > 0.0f) ? 1.0f : (d < 0.0f ? -1.0f : 0.0f);
-                grad[static_cast<size_t>(i)] = recon_scale * s;
-            }
-        } else {
-            const float recon_scale = (2.0f / static_cast<float>(std::max(1, recon_n))) * marker_scale;
-            for (int i = 0; i < recon_n; ++i) {
-                grad[static_cast<size_t>(i)] = recon_scale * (pred[static_cast<size_t>(i)] - (*target)[static_cast<size_t>(i)]);
-            }
-        }
-    }
-
-    // KL grad
-    const float kl_scale = (latent_dim > 0) ? (beta_eff / static_cast<float>(latent_dim)) : 0.0f;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const float in_range = (lv_raw >= logvar_min && lv_raw <= logvar_max) ? 1.0f : 0.0f;
-        grad[static_cast<size_t>(mu_off + i)] = kl_scale * mu;
-        grad[static_cast<size_t>(lv_off + i)] = kl_scale * (0.5f * (std::exp(lv) - 1.0f)) * in_range;
-    }
-
-    // Align grad (cosine)
-    if (align_weight > 0.0f) {
-        // u=a/||a||, v=b/||b||, cos=u·v
-        // dcos/da = (v - cos*u)/||a||, dL/da = -w*dcos/da
-        const float inv_na = 1.0f / na;
-        const float inv_nb = 1.0f / nb;
-        for (int i = 0; i < proj_dim; ++i) {
-            const float a = pred[imgp_off + static_cast<size_t>(i)];
-            const float b = pred[txtp_off + static_cast<size_t>(i)];
-            const float u = a * inv_na;
-            const float v = b * inv_nb;
-            const float dcos_da = (v - cos_sim * u) * inv_na;
-            const float dcos_db = (u - cos_sim * v) * inv_nb;
-            grad[imgp_off + static_cast<size_t>(i)] = -align_weight * dcos_da;
-            grad[txtp_off + static_cast<size_t>(i)] = -align_weight * dcos_db;
-        }
-    }
-
-    if (sem_dim > 0 && context_sem_weight > 0.0f) {
-        const float s = (2.0f * context_sem_weight) / static_cast<float>(std::max(1, sem_dim));
-        for (int i = 0; i < sem_dim; ++i) {
-            const size_t idx = sem_off + static_cast<size_t>(i);
-            grad[idx] = s * (pred[idx] - sem_target[static_cast<size_t>(i)]);
-        }
-    }
-    if (them_dim > 0 && context_them_weight > 0.0f) {
-        const float s = (2.0f * context_them_weight) / static_cast<float>(std::max(1, them_dim));
-        for (int i = 0; i < them_dim; ++i) {
-            const size_t idx = them_off + static_cast<size_t>(i);
-            grad[idx] = s * (pred[idx] - them_target[static_cast<size_t>(i)]);
-        }
-    }
-    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
-        const float s = (2.0f * context_dialog_weight) / static_cast<float>(std::max(1, dialog_dim));
-        for (int i = 0; i < dialog_dim; ++i) {
-            const size_t idx = dialog_off + static_cast<size_t>(i);
-            grad[idx] = s * (pred[idx] - dialog_target[static_cast<size_t>(i)]);
-        }
-    }
-
-    backwardPass(grad);
-
-    // Gradient norm (monitoring)
-    double sum_sq = 0.0;
-    float max_abs = 0.0f;
-    for (const auto& layer : layers) {
-        for (float g : layer.grad_weights) {
-            sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs) max_abs = a;
-        }
-        for (float g : layer.grad_bias) {
-            sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs) max_abs = a;
-        }
-    }
-    const float grad_norm = static_cast<float>(std::sqrt(sum_sq));
-
-    optimizerStep(opt, learning_rate);
-
-    VAEStepStats stats;
-    stats.loss = static_cast<float>(total_loss);
-    stats.mse = static_cast<float>(recon);
-    stats.kl = static_cast<float>(kl);
-    stats.wass = wass;
-    stats.spatial_coherence = spat;
-    stats.temp = temp;
-    const int total_steps = std::max(1, opt.total_steps);
-    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
-    stats.align = align;
-    stats.kl_beta_effective = beta_eff;
-    stats.latent_dim = latent_dim;
-    stats.grad_norm = grad_norm;
-    stats.grad_max_abs = max_abs;
-    stats.entropy_diff = entropy_diff_v;
-    stats.moment_mismatch = moment_mismatch_v;
-    return stats;
-}
-
-Model::VAEStepStats Model::backwardStepVAEText(const std::vector<float>& x,
-                                               const std::vector<int>& text_ids,
-                                               Optimizer& opt,
-                                               float grad_scale) {
-    if (params_frozen_) {
-        throw std::runtime_error("Model::backwardStepVAEText: parameters are frozen");
-    }
-    if (layers.empty()) {
-        throw std::runtime_error("Model::backwardStepVAEText: model not built");
-    }
-    if (layer_weight_blocks.empty()) {
-        throw std::runtime_error("Model::backwardStepVAEText: weights not allocated (call allocateParams/initWeights)");
-    }
-    if (!std::isfinite(grad_scale) || grad_scale <= 0.0f) grad_scale = 1.0f;
-
-    std::string recon_loss = "mse";
-    if (modelConfig.contains("recon_loss")) {
-        try { recon_loss = modelConfig["recon_loss"].get<std::string>(); } catch (...) {}
-    }
-    const bool recon_is_ce = (recon_loss == "ce" || recon_loss == "cross_entropy" || recon_loss == "xent");
-
-    const std::vector<float>* target = &x;
-    bool using_internal_target = false;
-
-    int image_dim = 0;
-    if (modelConfig.contains("image_dim")) {
-        image_dim = std::max(0, modelConfig["image_dim"].get<int>());
-    }
-    int seq_len_cfg = 0;
-    int vocab_cfg = 0;
-    int pad_id = -1;
-    if (modelConfig.contains("seq_len")) seq_len_cfg = std::max(0, modelConfig["seq_len"].get<int>());
-    if (modelConfig.contains("vocab_size")) vocab_cfg = std::max(0, modelConfig["vocab_size"].get<int>());
-    if (modelConfig.contains("padding_idx")) pad_id = modelConfig["padding_idx"].get<int>();
-
-    if (recon_is_ce) {
-        const int sl = std::max(1, seq_len_cfg);
-        const int vv = std::max(2, vocab_cfg);
-        image_dim = std::max(1, sl * vv);
-    } else {
-        if (x.empty()) {
-            std::string tname;
-            if (modelConfig.contains("target_tensor")) {
-                try { tname = modelConfig["target_tensor"].get<std::string>(); } catch (...) {}
-            }
-            if (!tname.empty() && hasTensor(tname)) {
-                target = &getTensor(tname);
-            } else if (hasTensor("vae_text/target")) {
-                target = &getTensor("vae_text/target");
-            }
-        }
-        using_internal_target = x.empty() && (target != &x) && (!target->empty());
-        if (using_internal_target) {
-            image_dim = static_cast<int>(target->size());
-        } else if (image_dim <= 0) {
-            image_dim = static_cast<int>(target->size());
-        }
-    }
-
-    int latent_dim = 0;
-    if (modelConfig.contains("latent_dim")) {
-        latent_dim = std::max(0, modelConfig["latent_dim"].get<int>());
-    }
-    if (modelConfig.contains("latent_tokens") && modelConfig.contains("d_model")) {
-        const int lt = std::max(1, modelConfig["latent_tokens"].get<int>());
-        const int dm = std::max(1, modelConfig["d_model"].get<int>());
-        const int ld = std::max(1, lt * dm);
-        if (latent_dim <= 0 || latent_dim != ld) latent_dim = ld;
-    }
-
-    int proj_dim = 0;
-    if (modelConfig.contains("proj_dim")) {
-        proj_dim = std::max(0, modelConfig["proj_dim"].get<int>());
-    }
-
-    int sem_dim = 0;
-    int them_dim = 0;
-    int dialog_dim = 0;
-    if (modelConfig.contains("context_semantic_dim")) sem_dim = std::max(0, modelConfig["context_semantic_dim"].get<int>());
-    if (modelConfig.contains("context_thematic_dim")) them_dim = std::max(0, modelConfig["context_thematic_dim"].get<int>());
-    if (modelConfig.contains("context_dialog_dim")) dialog_dim = std::max(0, modelConfig["context_dialog_dim"].get<int>());
-
-    float context_sem_weight = 0.0f;
-    float context_them_weight = 0.0f;
-    float context_dialog_weight = 0.0f;
-    if (modelConfig.contains("context_semantic_weight")) context_sem_weight = std::max(0.0f, modelConfig["context_semantic_weight"].get<float>());
-    if (modelConfig.contains("context_thematic_weight")) context_them_weight = std::max(0.0f, modelConfig["context_thematic_weight"].get<float>());
-    if (modelConfig.contains("context_dialog_weight")) context_dialog_weight = std::max(0.0f, modelConfig["context_dialog_weight"].get<float>());
-
-    float align_weight = 0.1f;
-    if (modelConfig.contains("align_weight")) {
-        align_weight = modelConfig["align_weight"].get<float>();
-    }
-    align_weight = std::max(0.0f, align_weight);
-
-    float kl_beta = 1.0f;
-    if (modelConfig.contains("kl_beta")) {
-        kl_beta = modelConfig["kl_beta"].get<float>();
-    } else if (modelConfig.contains("vae_kl_beta")) {
-        kl_beta = modelConfig["vae_kl_beta"].get<float>();
-    }
-    kl_beta = std::max(0.0f, kl_beta);
-
-    int kl_warmup_steps = 0;
-    if (modelConfig.contains("kl_warmup_steps")) {
-        kl_warmup_steps = std::max(0, modelConfig["kl_warmup_steps"].get<int>());
-    }
-
-    float marker_wass_scale = 0.0f;
-    float marker_temp_scale = 0.0f;
-    float marker_scale_max = 10.0f;
-    int marker_warmup_steps = 0;
-    if (modelConfig.contains("marker_wass_scale")) marker_wass_scale = modelConfig["marker_wass_scale"].get<float>();
-    if (modelConfig.contains("marker_temp_scale")) marker_temp_scale = modelConfig["marker_temp_scale"].get<float>();
-    if (modelConfig.contains("marker_scale_max")) marker_scale_max = modelConfig["marker_scale_max"].get<float>();
-    if (modelConfig.contains("marker_warmup_steps")) marker_warmup_steps = std::max(0, modelConfig["marker_warmup_steps"].get<int>());
-    marker_wass_scale = std::max(0.0f, marker_wass_scale);
-    marker_temp_scale = std::max(0.0f, marker_temp_scale);
-    marker_scale_max = std::max(1.0f, marker_scale_max);
-
-    float logvar_min = -10.0f;
-    float logvar_max = 10.0f;
-    if (modelConfig.contains("logvar_clip_min")) {
-        logvar_min = modelConfig["logvar_clip_min"].get<float>();
-    }
-    if (modelConfig.contains("logvar_clip_max")) {
-        logvar_max = modelConfig["logvar_clip_max"].get<float>();
-    }
-    if (logvar_min > logvar_max) std::swap(logvar_min, logvar_max);
-
-    const float progress = (kl_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(kl_warmup_steps))
-        : 1.0f;
-    const float beta_eff = kl_beta * progress;
-
-    const float marker_progress = (marker_warmup_steps > 0)
-        ? std::min(1.0f, static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(marker_warmup_steps))
-        : 1.0f;
-    const float marker_wass_eff = marker_wass_scale * marker_progress;
-    const float marker_temp_eff = marker_temp_scale * marker_progress;
-
-    std::unordered_map<std::string, std::vector<float>> fin;
-    std::unordered_map<std::string, std::vector<int>> iin;
-    fin["__input__"] = x;
-    iin["text_ids"] = text_ids;
-    const std::vector<float>& pred = forwardPassNamedView(fin, iin, true);
-    const int out_dim = static_cast<int>(pred.size());
-
-    // Resolve internal target AFTER forward (it is produced by the graph) for MSE/L1 modes.
-    if (!recon_is_ce && x.empty()) {
-        std::string tname;
-        if (modelConfig.contains("target_tensor")) {
-            try { tname = modelConfig["target_tensor"].get<std::string>(); } catch (...) {}
-        }
-        if (!tname.empty() && hasTensor(tname)) {
-            target = &getTensor(tname);
-        } else if (hasTensor("vae_text/target")) {
-            target = &getTensor("vae_text/target");
-        }
-        using_internal_target = x.empty() && (target != &x) && (!target->empty());
-        if (using_internal_target) {
-            image_dim = static_cast<int>(target->size());
-        } else if (x.empty() && modelConfig.contains("seq_len") && modelConfig.contains("d_model")) {
-            const int sl = std::max(1, modelConfig["seq_len"].get<int>());
-            const int dm = std::max(1, modelConfig["d_model"].get<int>());
-            image_dim = std::max(1, sl * dm);
-        }
-    }
-
-    if (latent_dim <= 0) {
-        const int tail = out_dim - image_dim;
-        if (tail > 2 && (tail % 2) == 0) latent_dim = std::max(1, tail / 2);
-    }
-    const int proj_tail = out_dim - (image_dim + 2 * latent_dim);
-    if (proj_dim <= 0) {
-        if (proj_tail > 0 && (proj_tail % 2) == 0) proj_dim = std::max(1, proj_tail / 2);
-    }
-    if (image_dim <= 0 || latent_dim <= 0 || proj_dim <= 0 || out_dim < image_dim + 2 * latent_dim + 2 * proj_dim) {
-        throw std::runtime_error("Model::backwardStepVAEText: invalid dims");
-    }
-
-    const int base_dim = image_dim + 2 * latent_dim + 2 * proj_dim;
-    int extra_tail = std::max(0, out_dim - base_dim);
-    if ((sem_dim + them_dim + dialog_dim) <= 0 && extra_tail > 0) {
-        sem_dim = extra_tail;
-        them_dim = 0;
-        dialog_dim = 0;
-    }
-    const int requested_extra = sem_dim + them_dim + dialog_dim;
-    if (requested_extra > extra_tail) {
-        const int overflow = requested_extra - extra_tail;
-        if (dialog_dim >= overflow) dialog_dim -= overflow;
-        else if (them_dim >= overflow) them_dim -= overflow;
-        else sem_dim = std::max(0, sem_dim - overflow);
-    }
-
-    const int recon_n = (!recon_is_ce) ? std::min(image_dim, static_cast<int>(target->size())) : 0;
-
-    const int mu_off = image_dim;
-    const int lv_off = image_dim + latent_dim;
-    const size_t imgp_off = static_cast<size_t>(image_dim + 2 * latent_dim);
-    const size_t txtp_off = imgp_off + static_cast<size_t>(proj_dim);
-    const size_t sem_off = txtp_off + static_cast<size_t>(proj_dim);
-    const size_t them_off = sem_off + static_cast<size_t>(sem_dim);
-    const size_t dialog_off = them_off + static_cast<size_t>(them_dim);
-    const float eps = 1e-8f;
-    const float na = std::max(eps, norm2_f(pred, imgp_off, proj_dim));
-    const float nb = std::max(eps, norm2_f(pred, txtp_off, proj_dim));
-    const float dp = dot_f(pred, imgp_off, pred, txtp_off, proj_dim);
-    const float cos_sim = dp / (na * nb);
-    const float align = (align_weight > 0.0f) ? (align_weight * (1.0f - cos_sim)) : 0.0f;
-
-    auto sem_target = make_text_hash_target_unigram(text_ids, pad_id, sem_dim, 0x9e3779b97f4a7c15ULL);
-    auto them_target = make_text_hash_target_bigram(text_ids, pad_id, them_dim, 0xbf58476d1ce4e5b9ULL);
-    auto dialog_target = make_text_hash_target_unigram(text_ids, pad_id, dialog_dim, 0x94d049bb133111ebULL);
-
-    double sem_loss = 0.0;
-    double them_loss = 0.0;
-    double dialog_loss = 0.0;
-    if (sem_dim > 0 && context_sem_weight > 0.0f) {
-        for (int i = 0; i < sem_dim; ++i) {
-            const double d = static_cast<double>(pred[sem_off + static_cast<size_t>(i)]) - static_cast<double>(sem_target[static_cast<size_t>(i)]);
-            sem_loss += d * d;
-        }
-        sem_loss /= static_cast<double>(sem_dim);
-    }
-    if (them_dim > 0 && context_them_weight > 0.0f) {
-        for (int i = 0; i < them_dim; ++i) {
-            const double d = static_cast<double>(pred[them_off + static_cast<size_t>(i)]) - static_cast<double>(them_target[static_cast<size_t>(i)]);
-            them_loss += d * d;
-        }
-        them_loss /= static_cast<double>(them_dim);
-    }
-    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
-        for (int i = 0; i < dialog_dim; ++i) {
-            const double d = static_cast<double>(pred[dialog_off + static_cast<size_t>(i)]) - static_cast<double>(dialog_target[static_cast<size_t>(i)]);
-            dialog_loss += d * d;
-        }
-        dialog_loss /= static_cast<double>(dialog_dim);
-    }
-
-    // Metrics (unscaled)
-    double recon = 0.0;
-    float wass = 0.0f;
-    float spat = 0.0f;
-    float temp = 0.0f;
-    float entropy_diff_v = 0.0f;
-    float moment_mismatch_v = 0.0f;
-
-    if (recon_is_ce) {
-        const int sl = std::max(1, seq_len_cfg);
-        const int vv = std::max(2, vocab_cfg);
-        const int valid_n = std::min(static_cast<int>(text_ids.size()), sl);
-        int count = 0;
-        for (int t = 0; t < valid_n; ++t) {
-            const int y = text_ids[static_cast<size_t>(t)];
-            if (pad_id >= 0 && y == pad_id) continue;
-            if (y < 0 || y >= vv) continue;
-            const size_t base = static_cast<size_t>(t) * static_cast<size_t>(vv);
-
-            float m = -1e30f;
-            for (int j = 0; j < vv; ++j) {
-                const float v = pred[base + static_cast<size_t>(j)];
-                if (v > m) m = v;
-            }
-            double sum = 0.0;
-            for (int j = 0; j < vv; ++j) {
-                sum += std::exp(static_cast<double>(pred[base + static_cast<size_t>(j)] - m));
-            }
-            const double lse = static_cast<double>(m) + std::log(std::max(1e-30, sum));
-            recon += lse - static_cast<double>(pred[base + static_cast<size_t>(y)]);
-            count += 1;
-        }
-        if (count > 0) recon /= static_cast<double>(count);
-    } else {
-        if (recon_loss == "l1" || recon_loss == "mae") {
-            for (int i = 0; i < recon_n; ++i) {
-                const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>((*target)[static_cast<size_t>(i)]);
-                recon += std::abs(d);
-            }
-            recon /= static_cast<double>(std::max(1, recon_n));
-        } else {
-            for (int i = 0; i < recon_n; ++i) {
-                const double d = static_cast<double>(pred[static_cast<size_t>(i)]) - static_cast<double>((*target)[static_cast<size_t>(i)]);
-                recon += d * d;
-            }
-            recon /= static_cast<double>(std::max(1, recon_n));
-        }
-
-        const auto mp = compute_moments_prefix(pred, 0, recon_n);
-        const auto mt = compute_moments_prefix(*target, 0, recon_n);
-        const double vp = std::max(mp.var, 1e-12);
-        const double vt = std::max(mt.var, 1e-12);
-        const double w2 = (mt.mean - mp.mean) * (mt.mean - mp.mean) + (std::sqrt(vt) - std::sqrt(vp)) * (std::sqrt(vt) - std::sqrt(vp));
-        wass = static_cast<float>(std::sqrt(std::max(0.0, w2)));
-        spat = static_cast<float>(std::abs(
-            mean_abs_adjacent_diff_prefix(pred, 0, static_cast<size_t>(recon_n)) -
-            mean_abs_adjacent_diff_prefix(*target, 0, static_cast<size_t>(recon_n))
-        ));
-        temp = static_cast<float>(pearson_corr_prefix(pred, 0, *target, 0, recon_n));
-        entropy_diff_v = static_cast<float>(0.5 * (std::log(vp) - std::log(vt)));
-        moment_mismatch_v = static_cast<float>(std::abs(mp.skew - mt.skew));
-    }
-
-    double kl = 0.0;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu_f = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const double mu = static_cast<double>(mu_f);
-        const double ev = std::exp(static_cast<double>(lv));
-        kl += 0.5 * (mu * mu + ev - 1.0 - static_cast<double>(lv));
-    }
-    kl /= static_cast<double>(std::max(1, latent_dim));
-
-    float marker_scale = 1.0f;
-    if (!recon_is_ce && (marker_wass_eff > 0.0f || marker_temp_eff > 0.0f)) {
-        const float temp_pen = 1.0f - std::clamp(temp, -1.0f, 1.0f);
-        marker_scale = 1.0f + marker_wass_eff * wass + marker_temp_eff * temp_pen;
-        marker_scale = std::clamp(marker_scale, 0.1f, marker_scale_max);
-    }
-
-    const double total_loss = static_cast<double>(marker_scale) * recon
-                            + static_cast<double>(beta_eff) * kl
-                            + static_cast<double>(align)
-                            + static_cast<double>(context_sem_weight) * sem_loss
-                            + static_cast<double>(context_them_weight) * them_loss
-                            + static_cast<double>(context_dialog_weight) * dialog_loss;
-
-    // Build grad
-    scratch_packed_grad_.resize(static_cast<size_t>(out_dim));
-    std::fill(scratch_packed_grad_.begin(), scratch_packed_grad_.end(), 0.0f);
-    auto& grad = scratch_packed_grad_;
-    if (recon_is_ce) {
-        const int sl = std::max(1, seq_len_cfg);
-        const int vv = std::max(2, vocab_cfg);
-        const int valid_n = std::min(static_cast<int>(text_ids.size()), sl);
-
-        int count = 0;
-        for (int t = 0; t < valid_n; ++t) {
-            const int y = text_ids[static_cast<size_t>(t)];
-            if (pad_id >= 0 && y == pad_id) continue;
-            if (y < 0 || y >= vv) continue;
-            count += 1;
-        }
-        const float scale = (count > 0) ? ((grad_scale * marker_scale) / static_cast<float>(count)) : 0.0f;
-
-        for (int t = 0; t < valid_n; ++t) {
-            const int y = text_ids[static_cast<size_t>(t)];
-            if (pad_id >= 0 && y == pad_id) continue;
-            if (y < 0 || y >= vv) continue;
-            const size_t base = static_cast<size_t>(t) * static_cast<size_t>(vv);
-
-            float m = -1e30f;
-            for (int j = 0; j < vv; ++j) {
-                const float v = pred[base + static_cast<size_t>(j)];
-                if (v > m) m = v;
-            }
-            double sum = 0.0;
-            for (int j = 0; j < vv; ++j) {
-                sum += std::exp(static_cast<double>(pred[base + static_cast<size_t>(j)] - m));
-            }
-            const double inv_denom = 1.0 / std::max(1e-30, sum);
-            for (int j = 0; j < vv; ++j) {
-                const double p = std::exp(static_cast<double>(pred[base + static_cast<size_t>(j)] - m)) * inv_denom;
-                grad[base + static_cast<size_t>(j)] = scale * static_cast<float>(p);
-            }
-            grad[base + static_cast<size_t>(y)] -= scale;
-        }
-    } else {
-        if (recon_loss == "l1" || recon_loss == "mae") {
-            const float recon_scale = (1.0f / static_cast<float>(std::max(1, recon_n))) * grad_scale * marker_scale;
-            for (int i = 0; i < recon_n; ++i) {
-                const float d = pred[static_cast<size_t>(i)] - (*target)[static_cast<size_t>(i)];
-                const float s = (d > 0.0f) ? 1.0f : (d < 0.0f ? -1.0f : 0.0f);
-                grad[static_cast<size_t>(i)] = recon_scale * s;
-            }
-        } else {
-            const float recon_scale = (2.0f / static_cast<float>(std::max(1, recon_n))) * grad_scale * marker_scale;
-            for (int i = 0; i < recon_n; ++i) {
-                grad[static_cast<size_t>(i)] = recon_scale * (pred[static_cast<size_t>(i)] - (*target)[static_cast<size_t>(i)]);
-            }
-        }
-    }
-
-    const float kl_scale = ((latent_dim > 0) ? (beta_eff / static_cast<float>(latent_dim)) : 0.0f) * grad_scale;
-    for (int i = 0; i < latent_dim; ++i) {
-        const float mu = pred[static_cast<size_t>(mu_off + i)];
-        const float lv_raw = pred[static_cast<size_t>(lv_off + i)];
-        const float lv = std::clamp(lv_raw, logvar_min, logvar_max);
-        const float in_range = (lv_raw >= logvar_min && lv_raw <= logvar_max) ? 1.0f : 0.0f;
-        grad[static_cast<size_t>(mu_off + i)] = kl_scale * mu;
-        grad[static_cast<size_t>(lv_off + i)] = kl_scale * (0.5f * (std::exp(lv) - 1.0f)) * in_range;
-    }
-
-    if (align_weight > 0.0f) {
-        const float inv_na = 1.0f / na;
-        const float inv_nb = 1.0f / nb;
-        const float w = align_weight * grad_scale;
-        for (int i = 0; i < proj_dim; ++i) {
-            const float a = pred[imgp_off + static_cast<size_t>(i)];
-            const float b = pred[txtp_off + static_cast<size_t>(i)];
-            const float u = a * inv_na;
-            const float v = b * inv_nb;
-            const float dcos_da = (v - cos_sim * u) * inv_na;
-            const float dcos_db = (u - cos_sim * v) * inv_nb;
-            grad[imgp_off + static_cast<size_t>(i)] = -w * dcos_da;
-            grad[txtp_off + static_cast<size_t>(i)] = -w * dcos_db;
-        }
-    }
-
-    if (sem_dim > 0 && context_sem_weight > 0.0f) {
-        const float s = ((2.0f * context_sem_weight) / static_cast<float>(std::max(1, sem_dim))) * grad_scale;
-        for (int i = 0; i < sem_dim; ++i) {
-            const size_t idx = sem_off + static_cast<size_t>(i);
-            grad[idx] = s * (pred[idx] - sem_target[static_cast<size_t>(i)]);
-        }
-    }
-    if (them_dim > 0 && context_them_weight > 0.0f) {
-        const float s = ((2.0f * context_them_weight) / static_cast<float>(std::max(1, them_dim))) * grad_scale;
-        for (int i = 0; i < them_dim; ++i) {
-            const size_t idx = them_off + static_cast<size_t>(i);
-            grad[idx] = s * (pred[idx] - them_target[static_cast<size_t>(i)]);
-        }
-    }
-    if (dialog_dim > 0 && context_dialog_weight > 0.0f) {
-        const float s = ((2.0f * context_dialog_weight) / static_cast<float>(std::max(1, dialog_dim))) * grad_scale;
-        for (int i = 0; i < dialog_dim; ++i) {
-            const size_t idx = dialog_off + static_cast<size_t>(i);
-            grad[idx] = s * (pred[idx] - dialog_target[static_cast<size_t>(i)]);
-        }
-    }
-
-    backwardPass(grad);
-
-    // Gradient norm (monitoring)
-    double sum_sq = 0.0;
-    float max_abs = 0.0f;
-    for (const auto& layer : layers) {
-        for (float g : layer.grad_weights) {
-            sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs) max_abs = a;
-        }
-        for (float g : layer.grad_bias) {
-            sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            const float a = std::abs(g);
-            if (a > max_abs) max_abs = a;
-        }
-    }
-
-    VAEStepStats stats;
-    stats.loss = static_cast<float>(total_loss);
-    stats.mse = static_cast<float>(recon);
-    stats.kl = static_cast<float>(kl);
-    stats.wass = wass;
-    stats.spatial_coherence = spat;
-    stats.temp = temp;
-    const int total_steps = std::max(1, opt.total_steps);
-    stats.timestep = std::clamp(static_cast<float>(static_cast<int>(opt.step) + 1) / static_cast<float>(total_steps), 0.0f, 1.0f);
-    stats.align = align;
-    stats.kl_beta_effective = beta_eff;
-    stats.latent_dim = latent_dim;
-    stats.grad_norm = static_cast<float>(std::sqrt(sum_sq));
-    stats.grad_max_abs = max_abs;
-    stats.entropy_diff = entropy_diff_v;
-    stats.moment_mismatch = moment_mismatch_v;
-    return stats;
+std::optional<Model::TrainStepResult> Model::trainStep(const TrainStepRequest&) {
+    return std::nullopt;
 }
 
 Layer* Model::getLayerByName(const std::string& name) {
@@ -3576,6 +1462,60 @@ void Model::setOutputTarget(const std::vector<uint8_t> &target) {
     // NOTE: Fonction obsolète utilisant l'ancienne structure params
 }
 
+bool optimizerTypeFromString(const std::string& name, OptimizerType& type) {
+    std::string normalized = name;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "sgd") type = OptimizerType::SGD;
+    else if (normalized == "adam") type = OptimizerType::ADAM;
+    else if (normalized == "adamw") type = OptimizerType::ADAMW;
+    else if (normalized == "lion") type = OptimizerType::LION;
+    else if (normalized == "adafactor") type = OptimizerType::ADAFACTOR;
+    else if (normalized == "radam") type = OptimizerType::RADAM;
+    else if (normalized == "nadam") type = OptimizerType::NADAM;
+    else if (normalized == "rmsprop") type = OptimizerType::RMSPROP;
+    else if (normalized == "lamb") type = OptimizerType::LAMB;
+    else return false;
+    return true;
+}
+
+const char* optimizerTypeName(OptimizerType type) {
+    switch (type) {
+        case OptimizerType::SGD: return "sgd";
+        case OptimizerType::ADAM: return "adam";
+        case OptimizerType::ADAMW: return "adamw";
+        case OptimizerType::LION: return "lion";
+        case OptimizerType::ADAFACTOR: return "adafactor";
+        case OptimizerType::RADAM: return "radam";
+        case OptimizerType::NADAM: return "nadam";
+        case OptimizerType::RMSPROP: return "rmsprop";
+        case OptimizerType::LAMB: return "lamb";
+    }
+    return "unknown";
+}
+
+void configureOptimizerFromJson(Optimizer& optimizer, const json& config) {
+    if (config.contains("optimizer") && config["optimizer"].is_string()) {
+        OptimizerType parsed;
+        if (!optimizerTypeFromString(config["optimizer"].get<std::string>(), parsed)) {
+            throw std::invalid_argument("optimiseur inconnu: " + config["optimizer"].get<std::string>());
+        }
+        optimizer.type = parsed;
+    }
+    if (config.contains("beta1")) optimizer.beta1 = config["beta1"].get<float>();
+    if (config.contains("beta2")) optimizer.beta2 = config["beta2"].get<float>();
+    if (config.contains("epsilon")) optimizer.eps = config["epsilon"].get<float>();
+    if (config.contains("eps")) optimizer.eps = config["eps"].get<float>();
+    if (config.contains("weight_decay")) optimizer.weight_decay = config["weight_decay"].get<float>();
+    if (config.contains("rmsprop_alpha")) optimizer.rmsprop_alpha = config["rmsprop_alpha"].get<float>();
+    if (config.contains("adafactor_clip_threshold")) optimizer.adafactor_clip_threshold = config["adafactor_clip_threshold"].get<float>();
+    if (config.contains("adafactor_decay_rate")) optimizer.adafactor_decay_rate = config["adafactor_decay_rate"].get<float>();
+    if (config.contains("adafactor_eps2")) optimizer.adafactor_eps2 = config["adafactor_eps2"].get<float>();
+    if (config.contains("adafactor_beta1")) optimizer.adafactor_beta1 = config["adafactor_beta1"].get<float>();
+    if (config.contains("adafactor_scale_parameter")) optimizer.adafactor_scale_parameter = config["adafactor_scale_parameter"].get<bool>();
+    if (config.contains("adafactor_relative_step")) optimizer.adafactor_relative_step = config["adafactor_relative_step"].get<bool>();
+}
+
 void Model::setSerializedOptimizer(Optimizer opt) {
     // If runtime moments exist (mv_by_param_ptr), pack them into flat m/v vectors
     // in the deterministic order of layers. This keeps checkpoint save/load working.
@@ -3624,7 +1564,7 @@ void Model::applyParamUpdate(float learning_rate) {
     return;
 }
 
-// Multi-optimizer step (SGD, Adam, AdamW)
+// Multi-optimizer step
 void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* gradients) {
     if (params_frozen_) {
         throw std::runtime_error("Model::optimizerStep: parameters are frozen");
@@ -3683,13 +1623,13 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
         }
     }
     
-    // Warmup doit fonctionner même si decay_strategy=NONE.
+    // Appliquer le scheduler exactement une fois. `learning_rate` reste la LR de
+    // base demandée par l'appelant (éventuellement modulée par le feedback), et
+    // getCurrentLR() fournit uniquement le facteur warmup/decay correspondant.
     float effective_lr = learning_rate;
-    const size_t wu = opt.warmup_steps > 0 ? static_cast<size_t>(opt.warmup_steps) : 0ULL;
-    if (wu > 0 && opt.step < wu) {
-        effective_lr = opt.getCurrentLR();
-    } else if (opt.decay_strategy != LRDecayStrategy::NONE) {
-        effective_lr = opt.getCurrentLR();
+    if (opt.warmup_steps > 0 || opt.decay_strategy != LRDecayStrategy::NONE) {
+        const float base = std::max(1e-12f, opt.initial_lr);
+        effective_lr = opt.getCurrentLR() * (learning_rate / base);
     }
     
     // If optimizer was loaded from checkpoint, it may only have flat m/v.
@@ -3731,7 +1671,7 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
         const size_t n = std::min(weight_count, layer.grad_weights.size());
         
         Optimizer::MomentBlock* moments = nullptr;
-        if (opt.type == OptimizerType::ADAM || opt.type == OptimizerType::ADAMW) {
+        if (opt.type != OptimizerType::SGD) {
             moments = &opt.ensureMomentsFor(weights, weight_count);
         }
         
@@ -3794,12 +1734,162 @@ void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* 
 
                     float m_hat = mi / bias_correction1;
                     float v_hat = vi / bias_correction2;
-                    
+
                     float denom = std::sqrt(v_hat) + opt.eps;
                     float weight_decay_term = opt.weight_decay * current;
                     float adam_update = effective_lr * (m_hat / denom);
-                    
+
                     weights[i] = current - adam_update - effective_lr * weight_decay_term;
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
+
+            case OptimizerType::LION: {
+                const float b1 = std::clamp(opt.beta1, 0.0f, 1.0f);
+                const float b2 = std::clamp(opt.beta2, 0.0f, 1.0f);
+                #pragma omp simd
+                for (size_t i = 0; i < n; ++i) {
+                    const float grad = layer.grad_weights[i];
+                    float& mi = moments->m[i];
+                    const float update = b1 * mi + (1.0f - b1) * grad;
+                    const float direction = (update > 0.0f) - (update < 0.0f);
+                    weights[i] -= effective_lr * (direction + opt.weight_decay * weights[i]);
+                    mi = b2 * mi + (1.0f - b2) * grad;
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
+
+            case OptimizerType::ADAFACTOR: {
+                const float decay = std::clamp(
+                    1.0f - std::pow(static_cast<float>(opt.step), opt.adafactor_decay_rate),
+                    0.0f, 1.0f);
+                double update_sq_sum = 0.0;
+                double param_sq_sum = 0.0;
+                for (size_t i = 0; i < n; ++i) {
+                    const float grad = layer.grad_weights[i];
+                    float& vi = moments->v[i];
+                    vi = decay * vi + (1.0f - decay) * grad * grad;
+                    const float update = grad / std::sqrt(vi + std::max(1e-30f, opt.eps));
+                    update_sq_sum += static_cast<double>(update) * update;
+                    param_sq_sum += static_cast<double>(weights[i]) * weights[i];
+                }
+                const float update_rms = n > 0 ? static_cast<float>(std::sqrt(update_sq_sum / n)) : 0.0f;
+                const float clip = std::max(1e-6f, opt.adafactor_clip_threshold);
+                const float clip_scale = 1.0f / std::max(1.0f, update_rms / clip);
+                const float param_scale = opt.adafactor_scale_parameter && n > 0
+                    ? std::max(opt.adafactor_eps2, static_cast<float>(std::sqrt(param_sq_sum / n)))
+                    : 1.0f;
+                const float relative_lr = opt.adafactor_relative_step
+                    ? std::min(1e-2f, 1.0f / std::sqrt(static_cast<float>(opt.step)))
+                    : effective_lr;
+                #pragma omp simd
+                for (size_t i = 0; i < n; ++i) {
+                    float update = clip_scale * layer.grad_weights[i]
+                        / std::sqrt(moments->v[i] + std::max(1e-30f, opt.eps));
+                    if (opt.adafactor_beta1 > 0.0f) {
+                        float& momentum = moments->m[i];
+                        momentum = opt.adafactor_beta1 * momentum
+                            + (1.0f - opt.adafactor_beta1) * update;
+                        update = momentum;
+                    }
+                    weights[i] -= relative_lr * param_scale * update;
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
+
+            case OptimizerType::RADAM: {
+                const float b1 = std::clamp(opt.beta1, 0.0f, 1.0f);
+                const float b2 = std::clamp(opt.beta2, 0.0f, 1.0f - 1e-7f);
+                const float b1_power = std::pow(b1, static_cast<float>(opt.step));
+                const float b2_power = std::pow(b2, static_cast<float>(opt.step));
+                const float bias_correction1 = std::max(1e-8f, 1.0f - b1_power);
+                const float rho_inf = 2.0f / (1.0f - b2) - 1.0f;
+                const float rho = rho_inf - 2.0f * static_cast<float>(opt.step) * b2_power
+                    / std::max(1e-8f, 1.0f - b2_power);
+                const float rectification = rho > 5.0f
+                    ? std::sqrt(((rho - 4.0f) * (rho - 2.0f) * rho_inf)
+                                / ((rho_inf - 4.0f) * (rho_inf - 2.0f) * rho))
+                    : 1.0f;
+                #pragma omp simd
+                for (size_t i = 0; i < n; ++i) {
+                    const float grad = layer.grad_weights[i];
+                    float& mi = moments->m[i];
+                    float& vi = moments->v[i];
+                    mi = b1 * mi + (1.0f - b1) * grad;
+                    vi = b2 * vi + (1.0f - b2) * grad * grad;
+                    const float m_hat = mi / bias_correction1;
+                    const float update = rho > 5.0f
+                        ? rectification * m_hat / (std::sqrt(vi / std::max(1e-8f, 1.0f - b2_power)) + opt.eps)
+                        : m_hat;
+                    weights[i] -= effective_lr * update;
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
+
+            case OptimizerType::NADAM: {
+                const float b1 = std::clamp(opt.beta1, 0.0f, 1.0f);
+                const float b2 = std::clamp(opt.beta2, 0.0f, 1.0f);
+                const float bc1 = std::max(1e-8f, 1.0f - std::pow(b1, static_cast<float>(opt.step)));
+                const float bc2 = std::max(1e-8f, 1.0f - std::pow(b2, static_cast<float>(opt.step)));
+                #pragma omp simd
+                for (size_t i = 0; i < n; ++i) {
+                    const float grad = layer.grad_weights[i];
+                    float& mi = moments->m[i];
+                    float& vi = moments->v[i];
+                    mi = b1 * mi + (1.0f - b1) * grad;
+                    vi = b2 * vi + (1.0f - b2) * grad * grad;
+                    const float nesterov = b1 * (mi / bc1) + (1.0f - b1) * grad / bc1;
+                    weights[i] -= effective_lr * nesterov / (std::sqrt(vi / bc2) + opt.eps);
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
+
+            case OptimizerType::RMSPROP: {
+                const float alpha = std::clamp(opt.rmsprop_alpha, 0.0f, 1.0f);
+                #pragma omp simd
+                for (size_t i = 0; i < n; ++i) {
+                    const float grad = layer.grad_weights[i];
+                    float& vi = moments->v[i];
+                    vi = alpha * vi + (1.0f - alpha) * grad * grad;
+                    weights[i] -= effective_lr * grad / (std::sqrt(vi) + opt.eps);
+                    weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
+                }
+                break;
+            }
+
+            case OptimizerType::LAMB: {
+                const float b1 = std::clamp(opt.beta1, 0.0f, 1.0f);
+                const float b2 = std::clamp(opt.beta2, 0.0f, 1.0f);
+                const float bc1 = std::max(1e-8f, 1.0f - std::pow(b1, static_cast<float>(opt.step)));
+                const float bc2 = std::max(1e-8f, 1.0f - std::pow(b2, static_cast<float>(opt.step)));
+                double weight_norm_sq = 0.0;
+                double update_norm_sq = 0.0;
+                for (size_t i = 0; i < n; ++i) {
+                    const float grad = layer.grad_weights[i];
+                    float& mi = moments->m[i];
+                    float& vi = moments->v[i];
+                    mi = b1 * mi + (1.0f - b1) * grad;
+                    vi = b2 * vi + (1.0f - b2) * grad * grad;
+                    const float update = (mi / bc1) / (std::sqrt(vi / bc2) + opt.eps)
+                        + opt.weight_decay * weights[i];
+                    weight_norm_sq += static_cast<double>(weights[i]) * weights[i];
+                    update_norm_sq += static_cast<double>(update) * update;
+                }
+                const float weight_norm = static_cast<float>(std::sqrt(weight_norm_sq));
+                const float update_norm = static_cast<float>(std::sqrt(update_norm_sq));
+                const float trust_ratio = weight_norm > 0.0f && update_norm > 0.0f
+                    ? weight_norm / update_norm : 1.0f;
+                #pragma omp simd
+                for (size_t i = 0; i < n; ++i) {
+                    const float update = (moments->m[i] / bc1)
+                        / (std::sqrt(moments->v[i] / bc2) + opt.eps)
+                        + opt.weight_decay * weights[i];
+                    weights[i] -= effective_lr * trust_ratio * update;
                     weights[i] = std::clamp(weights[i], -3.0f, 3.0f);
                 }
                 break;
@@ -4122,460 +2212,6 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
     return loaded_any;
 }
 
-// ===== Implémentation des opérations de layer =====
-
-void Model::computeConv2D(const std::vector<float>& input, std::vector<float>& output,
-                         const LayerParams& params, int in_h, int in_w, int in_c, int out_c,
-                         bool use_hardware) {
-    // Utilise directement l'implémentation optimisée de Conv::conv2d
-    // qui gère automatiquement SIMD et CPU selon la compilation
-    Conv::conv2d(input, output, params.weights, params.bias,
-                in_h, in_w, in_c, out_c, params.kernel_size,
-                params.stride, params.padding, params.dilation);
-}
-
-void Model::computeLinear(const std::vector<float>& input, std::vector<float>& output,
-                         const LayerParams& params, bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    output.resize(params.out_features, 0.0f);
-    
-    if (use_hardware && hasFMA()) {
-        // Version hardware avec FMA saturé
-        SIMD::matmul_avx2(output.data(), input.data(), params.weights.data(),
-                         1, params.out_features, params.in_features);
-        
-        // Ajouter bias
-        if (!params.bias.empty()) {
-            SIMD::add_vectors_avx2(output.data(), output.data(), params.bias.data(), params.out_features);
-        }
-    } else {
-        // Version software
-        for (int o = 0; o < params.out_features; ++o) {
-            float sum = 0.0f;
-            for (int i = 0; i < params.in_features; ++i) {
-                sum += input[i] * params.weights[o * params.in_features + i];
-            }
-            if (!params.bias.empty()) sum += params.bias[o];
-            output[o] = sum;
-        }
-    }
-}
-
-void Model::computeMaxPool2D(const std::vector<float>& input, std::vector<float>& output,
-                            int in_h, int in_w, int channels, int kernel_size, int stride,
-                            bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    if (stride < 0) stride = kernel_size;
-    int out_h = (in_h - kernel_size) / stride + 1;
-    int out_w = (in_w - kernel_size) / stride + 1;
-    
-    output.resize(out_h * out_w * channels);
-    
-    if (use_hardware) {
-        // Version hardware avec AVX2
-        for (int c = 0; c < channels; ++c) {
-            for (int oh = 0; oh < out_h; ++oh) {
-                for (int ow = 0; ow < out_w; ++ow) {
-                    __m256 max_vec = _mm256_set1_ps(-std::numeric_limits<float>::infinity());
-                    
-                    for (int kh = 0; kh < kernel_size; ++kh) {
-                        for (int kw = 0; kw < kernel_size; kw += 8) {
-                            int ih = oh * stride + kh;
-                            int iw = ow * stride + kw;
-                            
-                            if (kw + 8 <= kernel_size) {
-                                __m256 vals = _mm256_loadu_ps(&input[(c * in_h + ih) * in_w + iw]);
-                                max_vec = _mm256_max_ps(max_vec, vals);
-                            } else {
-                                // Scalar fallback pour derniers éléments
-                                for (int k = kw; k < kernel_size; ++k) {
-                                    float val = input[(c * in_h + ih) * in_w + (ow * stride + k)];
-                                    float temp[8];
-                                    _mm256_storeu_ps(temp, max_vec);
-                                    temp[0] = std::max(temp[0], val);
-                                    max_vec = _mm256_loadu_ps(temp);
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Horizontal max
-                    float temp[8];
-                    _mm256_storeu_ps(temp, max_vec);
-                    float max_val = temp[0];
-                    for (int i = 1; i < 8; ++i) max_val = std::max(max_val, temp[i]);
-                    
-                    output[(c * out_h + oh) * out_w + ow] = max_val;
-                }
-            }
-        }
-    } else {
-        // Version software
-        Pooling::maxpool2d(input, output, in_h, in_w, channels, kernel_size, stride);
-    }
-}
-
-void Model::computeAvgPool2D(const std::vector<float>& input, std::vector<float>& output,
-                            int in_h, int in_w, int channels, int kernel_size, int stride,
-                            bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    if (stride < 0) stride = kernel_size;
-    int out_h = (in_h - kernel_size) / stride + 1;
-    int out_w = (in_w - kernel_size) / stride + 1;
-    
-    output.resize(out_h * out_w * channels);
-    
-    if (use_hardware) {
-        // Version hardware avec AVX2
-        float inv_area = 1.0f / (kernel_size * kernel_size);
-        __m256 inv_vec = _mm256_set1_ps(inv_area);
-
-        for (int c = 0; c < channels; ++c) {
-            for (int oh = 0; oh < out_h; ++oh) {
-                for (int ow = 0; ow < out_w; ++ow) {
-                    __m256 sum_vec = _mm256_setzero_ps();
-                    
-                    for (int kh = 0; kh < kernel_size; ++kh) {
-                        for (int kw = 0; kw < kernel_size; kw += 8) {
-                            int ih = oh * stride + kh;
-                            int iw = ow * stride + kw;
-                            
-                            if (kw + 8 <= kernel_size) {
-                                __m256 vals = _mm256_loadu_ps(&input[(c * in_h + ih) * in_w + iw]);
-                                sum_vec = _mm256_add_ps(sum_vec, vals);
-                            }
-                        }
-                    }
-                    
-                    // Horizontal sum
-                    __m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
-                    __m128 sum_low = _mm256_castps256_ps128(sum_vec);
-                    __m128 sum128 = _mm_add_ps(sum_low, sum_high);
-                    __m128 shuf = _mm_movehdup_ps(sum128);
-                    __m128 sums = _mm_add_ps(sum128, shuf);
-                    shuf = _mm_movehl_ps(shuf, sums);
-                    sums = _mm_add_ss(sums, shuf);
-                    
-                    float sum = _mm_cvtss_f32(sums) * inv_area;
-                    output[(c * out_h + oh) * out_w + ow] = sum;
-                }
-            }
-        }
-    } else {
-        // Version software
-        Pooling::avgpool2d(input, output, in_h, in_w, channels, kernel_size, stride);
-    }
-}
-
-void Model::computeActivation(std::vector<float>& data, const std::string& activation_type,
-                             float param, bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    if (activation_type == "gelu" && use_hardware) {
-        SIMD::gelu_forward_avx2(data.data(), data.data(), data.size());
-    } else if (activation_type == "relu") {
-        if (use_hardware) {
-            size_t n = data.size();
-            __m256 zero = _mm256_setzero_ps();
-
-            const size_t vecN = n & ~static_cast<size_t>(7);
-            for (size_t i = 0; i < vecN; i += 8) {
-                __m256 vals = _mm256_loadu_ps(&data[i]);
-                vals = _mm256_max_ps(vals, zero);
-                _mm256_storeu_ps(&data[i], vals);
-            }
-            for (size_t i = vecN; i < n; ++i) {
-                data[i] = std::max(0.0f, data[i]);
-            }
-        } else {
-            relu_inplace(data);
-        }
-    } else if (activation_type == "leaky_relu") {
-        leaky_relu_inplace(data, param);
-    } else if (activation_type == "tanh") {
-        tanh_inplace(data);
-    } else if (activation_type == "sigmoid") {
-        for (auto& v : data) v = sigmoidf(v);
-    } else if (activation_type == "softmax") {
-        if (use_hardware) {
-            SIMD::softmax_avx2(data.data(), data.data(), data.size());
-        } else {
-            softmax_inplace(data);
-        }
-    } else if (activation_type == "elu") {
-        elu_inplace(data, param);
-    }
-}
-
-void Model::computeBatchNorm(std::vector<float>& data, const std::vector<float>& gamma,
-                            const std::vector<float>& beta, const std::vector<float>& running_mean,
-                            const std::vector<float>& running_var, int batch_size, int channels,
-                            int spatial_size, float eps, bool training, bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    if (use_hardware) {
-        // Version hardware avec AVX2
-        __m256 eps_vec = _mm256_set1_ps(eps);
-
-        for (int c = 0; c < channels; ++c) {
-            float mean = running_mean[c];
-            float var = running_var[c];
-            
-            if (training) {
-                // Calculer mean (AVX2)
-                __m256 mean_vec = _mm256_setzero_ps();
-                int total_size = batch_size * spatial_size;
-                int count = 0;
-                
-                for (int b = 0; b < batch_size; ++b) {
-                    for (int s = 0; s < spatial_size; s += 8) {
-                        if (s + 8 <= spatial_size) {
-                            __m256 vals = _mm256_loadu_ps(&data[b * channels * spatial_size + c * spatial_size + s]);
-                            mean_vec = _mm256_add_ps(mean_vec, vals);
-                            count += 8;
-                        }
-                    }
-                }
-                
-                // Horizontal sum pour mean
-                float temp[8];
-                _mm256_storeu_ps(temp, mean_vec);
-                mean = 0.0f;
-                for (int i = 0; i < 8; ++i) mean += temp[i];
-                for (int b = 0; b < batch_size; ++b) {
-                    for (int s = count; s < spatial_size; ++s) {
-                        mean += data[b * channels * spatial_size + c * spatial_size + s];
-                    }
-                }
-                mean /= total_size;
-                
-                // Calculer variance
-                var = 0.0f;
-                for (int b = 0; b < batch_size; ++b) {
-                    for (int s = 0; s < spatial_size; ++s) {
-                        float diff = data[b * channels * spatial_size + c * spatial_size + s] - mean;
-                        var += diff * diff;
-                    }
-                }
-                var /= total_size;
-            }
-            
-            __m256 mean_vec = _mm256_set1_ps(mean);
-            __m256 inv_std_vec = _mm256_set1_ps(1.0f / std::sqrt(var + eps));
-            __m256 gamma_vec = _mm256_set1_ps(gamma[c]);
-            __m256 beta_vec = _mm256_set1_ps(beta[c]);
-            
-            for (int b = 0; b < batch_size; ++b) {
-                for (int s = 0; s < spatial_size; s += 8) {
-                    int idx = b * channels * spatial_size + c * spatial_size + s;
-                    if (s + 8 <= spatial_size) {
-                        __m256 vals = _mm256_loadu_ps(&data[idx]);
-                        vals = _mm256_sub_ps(vals, mean_vec);
-                        vals = _mm256_mul_ps(vals, inv_std_vec);
-                        vals = _mm256_mul_ps(vals, gamma_vec);
-                        vals = _mm256_add_ps(vals, beta_vec);
-                        _mm256_storeu_ps(&data[idx], vals);
-                    } else {
-                        for (int i = s; i < spatial_size; ++i) {
-                            int idx2 = b * channels * spatial_size + c * spatial_size + i;
-                            data[idx2] = (data[idx2] - mean) * (1.0f / std::sqrt(var + eps)) * gamma[c] + beta[c];
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // Version software
-        Normalization::batch_norm(data, gamma, beta, running_mean, running_var,
-                                 batch_size, channels, spatial_size, eps, training);
-    }
-}
-
-void Model::computeLayerNorm(std::vector<float>& data, const std::vector<float>& gamma,
-                            const std::vector<float>& beta, int normalized_size,
-                            float eps, bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    if (use_hardware) {
-        // Version hardware avec AVX2
-        int num_groups = data.size() / normalized_size;
-        __m256 eps_vec = _mm256_set1_ps(eps);
-
-        for (int g = 0; g < num_groups; ++g) {
-            // Calculer mean
-            __m256 mean_vec = _mm256_setzero_ps();
-            int base = g * normalized_size;
-            
-            int i = 0;
-            for (; i + 8 <= normalized_size; i += 8) {
-                __m256 vals = _mm256_loadu_ps(&data[base + i]);
-                mean_vec = _mm256_add_ps(mean_vec, vals);
-            }
-            
-            float temp[8];
-            _mm256_storeu_ps(temp, mean_vec);
-            float mean = 0.0f;
-            for (int j = 0; j < 8; ++j) mean += temp[j];
-            for (; i < normalized_size; ++i) mean += data[base + i];
-            mean /= normalized_size;
-            
-            // Calculer variance
-            float var = 0.0f;
-            for (int i = 0; i < normalized_size; ++i) {
-                float diff = data[base + i] - mean;
-                var += diff * diff;
-            }
-            var /= normalized_size;
-            
-            __m256 mean_vec_bc = _mm256_set1_ps(mean);
-            __m256 inv_std = _mm256_set1_ps(1.0f / std::sqrt(var + eps));
-            
-            // Normaliser
-            for (int i = 0; i + 8 <= normalized_size; i += 8) {
-                __m256 vals = _mm256_loadu_ps(&data[base + i]);
-                __m256 gamma_vec = _mm256_loadu_ps(&gamma[i]);
-                __m256 beta_vec = _mm256_loadu_ps(&beta[i]);
-                
-                vals = _mm256_sub_ps(vals, mean_vec_bc);
-                vals = _mm256_mul_ps(vals, inv_std);
-                vals = _mm256_mul_ps(vals, gamma_vec);
-                vals = _mm256_add_ps(vals, beta_vec);
-                
-                _mm256_storeu_ps(&data[base + i], vals);
-            }
-            
-            // Remaining elements
-            for (int i = (normalized_size / 8) * 8; i < normalized_size; ++i) {
-                data[base + i] = (data[base + i] - mean) * (1.0f / std::sqrt(var + eps)) * gamma[i] + beta[i];
-            }
-        }
-    } else {
-        // Version software
-        Normalization::layer_norm(data, gamma, beta, normalized_size, eps);
-    }
-}
-
-void Model::computeConvTranspose2D(const std::vector<float>& input, std::vector<float>& output,
-                                  const LayerParams& params, int in_h, int in_w, int in_c, int out_c,
-                                  bool use_hardware) {
-    // ConvTranspose est complexe, utiliser version software
-    Conv::conv_transpose2d(input, output, params.weights, params.bias,
-                          in_h, in_w, in_c, out_c, params.kernel_size,
-                          params.stride, params.padding);
-}
-
-void Model::computeAttention(const std::vector<float>& query, const std::vector<float>& key,
-                            const std::vector<float>& value, std::vector<float>& output,
-                            int seq_len, int d_model, int num_heads, bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    int head_dim = d_model / num_heads;
-    output.resize(seq_len * d_model, 0.0f);
-    
-    std::vector<float> attention_scores(seq_len * seq_len);
-    float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    
-    for (int h = 0; h < num_heads; ++h) {
-        // Q * K^T avec scaling
-        if (use_hardware) {
-            SIMD::matmul_transpose_avx2(attention_scores.data(),
-                                       &query[h * head_dim], &key[h * head_dim],
-                                       seq_len, seq_len, head_dim);
-        } else {
-            // Scalar version
-            for (int i = 0; i < seq_len; ++i) {
-                for (int j = 0; j < seq_len; ++j) {
-                    float sum = 0.0f;
-                    for (int k = 0; k < head_dim; ++k) {
-                        sum += query[(i * d_model) + h * head_dim + k] * key[(j * d_model) + h * head_dim + k];
-                    }
-                    attention_scores[i * seq_len + j] = sum * scale;
-                }
-            }
-        }
-        
-        // Softmax sur chaque ligne
-        for (int i = 0; i < seq_len; ++i) {
-            std::vector<float> row(attention_scores.begin() + i * seq_len,
-                                 attention_scores.begin() + (i + 1) * seq_len);
-            if (use_hardware) {
-                SIMD::softmax_avx2(row.data(), row.data(), seq_len);
-            } else {
-                softmax_inplace(row);
-            }
-            std::copy(row.begin(), row.end(), attention_scores.begin() + i * seq_len);
-        }
-        
-        // Attention * V
-        if (use_hardware) {
-            std::vector<float> head_output(seq_len * head_dim);
-            SIMD::matmul_avx2(head_output.data(), attention_scores.data(),
-                            &value[h * head_dim], seq_len, head_dim, seq_len);
-            
-            // Copier dans output
-            for (int i = 0; i < seq_len; ++i) {
-                for (int j = 0; j < head_dim; ++j) {
-                    output[i * d_model + h * head_dim + j] = head_output[i * head_dim + j];
-                }
-            }
-        } else {
-            for (int i = 0; i < seq_len; ++i) {
-                for (int j = 0; j < head_dim; ++j) {
-                    float sum = 0.0f;
-                    for (int k = 0; k < seq_len; ++k) {
-                        sum += attention_scores[i * seq_len + k] * value[(k * d_model) + h * head_dim + j];
-                    }
-                    output[i * d_model + h * head_dim + j] = sum;
-                }
-            }
-        }
-    }
-}
-
-void Model::conv2d_same(const std::vector<float> &in, std::vector<float> &out, int W, int H, const std::vector<float> &kernel, int ksize)
-{
-
-    out.assign(W * H, 0.0f);
-    // Utiliser la version optimis\u00e9e si disponible
-    if (global_use_hardware && hasAVX2() && hasFMA()) {
-        LayerParams params;
-        params.weights = kernel;
-        params.kernel_size = ksize;
-        params.stride = 1;
-        params.padding = ksize / 2;
-        
-        computeConv2D(in, out, params, H, W, 1, 1, true);
-        return;
-    }
-    
-    // Fallback software
-    const int khalf = ksize / 2;
-    for (int y = 0; y < H; ++y)
-    {
-        for (int x = 0; x < W; ++x)
-        {
-            float sum = 0.0f;
-            for (int ky = 0; ky < ksize; ++ky)
-            {
-                const int iy = y + ky - khalf;
-                if (iy < 0 || iy >= H)
-                    continue;
-                for (int kx = 0; kx < ksize; ++kx)
-                {
-                    const int ix = x + kx - khalf;
-                    if (ix < 0 || ix >= W)
-                        continue;
-                    sum += in[iy * W + ix] * kernel[ky * ksize + kx];
-                }
-            }
-            out[y * W + x] = sum;
-        }
-    }
-}
-
 // --- Définitions vides pour méthodes virtuelles afin de fournir la vtable ---
 void Model::buildBackboneUNet(int /*stages*/, int /*blocks_per_stage*/, int /*bottleneck_depth*/) { /* noop */ }
 void Model::injectMagicToken(const MagicToken & /*tok*/) { /* noop */ }
@@ -4583,162 +2219,6 @@ void Model::buildTextBranch(const MagicToken & /*tok*/) { /* noop */ }
 void Model::buildAudioBranch(const MagicToken & /*tok*/) { /* noop */ }
 void Model::buildImageBranch(const MagicToken & /*tok*/) { /* noop */ }
 void Model::buildVideoBranch(const MagicToken & /*tok*/) { /* noop */ }
-
-// ============================= 
-// Branch Operations Implementation
-// =============================
-
-void Model::computeBranchMerge(const std::vector<float>& branch1, 
-                               const std::vector<float>& branch2,
-                               std::vector<float>& output,
-                               MergeOperation merge_op,
-                               bool use_hardware) {
-    use_hardware = use_hardware && global_use_hardware && hasAVX2();
-    
-    size_t size = branch1.size();
-    output.resize(size);
-    
-    switch (merge_op) {
-        case MergeOperation::ADD: {
-            if (use_hardware) {
-                #ifdef __AVX2__
-                size_t i = 0;
-                for (; i + 8 <= size; i += 8) {
-                    __m256 a = _mm256_loadu_ps(&branch1[i]);
-                    __m256 b = _mm256_loadu_ps(&branch2[i]);
-                    __m256 result = _mm256_add_ps(a, b);
-                    _mm256_storeu_ps(&output[i], result);
-                }
-                // Éléments restants
-                for (; i < size; ++i) {
-                    output[i] = branch1[i] + branch2[i];
-                }
-                #else
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = branch1[i] + branch2[i];
-                }
-                #endif
-            } else {
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = branch1[i] + branch2[i];
-                }
-            }
-            break;
-        }
-        
-        case MergeOperation::MULTIPLY: {
-            if (use_hardware) {
-                #ifdef __AVX2__
-                size_t i = 0;
-                for (; i + 8 <= size; i += 8) {
-                    __m256 a = _mm256_loadu_ps(&branch1[i]);
-                    __m256 b = _mm256_loadu_ps(&branch2[i]);
-                    __m256 result = _mm256_mul_ps(a, b);
-                    _mm256_storeu_ps(&output[i], result);
-                }
-                for (; i < size; ++i) {
-                    output[i] = branch1[i] * branch2[i];
-                }
-                #else
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = branch1[i] * branch2[i];
-                }
-                #endif
-            } else {
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = branch1[i] * branch2[i];
-                }
-            }
-            break;
-        }
-        
-        case MergeOperation::MAX: {
-            if (use_hardware) {
-                #ifdef __AVX2__
-                size_t i = 0;
-                for (; i + 8 <= size; i += 8) {
-                    __m256 a = _mm256_loadu_ps(&branch1[i]);
-                    __m256 b = _mm256_loadu_ps(&branch2[i]);
-                    __m256 result = _mm256_max_ps(a, b);
-                    _mm256_storeu_ps(&output[i], result);
-                }
-                for (; i < size; ++i) {
-                    output[i] = std::max(branch1[i], branch2[i]);
-                }
-                #else
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = std::max(branch1[i], branch2[i]);
-                }
-                #endif
-            } else {
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = std::max(branch1[i], branch2[i]);
-                }
-            }
-            break;
-        }
-        
-        case MergeOperation::AVERAGE: {
-            if (use_hardware) {
-                #ifdef __AVX2__
-                __m256 half = _mm256_set1_ps(0.5f);
-                size_t i = 0;
-                for (; i + 8 <= size; i += 8) {
-                    __m256 a = _mm256_loadu_ps(&branch1[i]);
-                    __m256 b = _mm256_loadu_ps(&branch2[i]);
-                    __m256 sum = _mm256_add_ps(a, b);
-                    __m256 result = _mm256_mul_ps(sum, half);
-                    _mm256_storeu_ps(&output[i], result);
-                }
-                for (; i < size; ++i) {
-                    output[i] = (branch1[i] + branch2[i]) * 0.5f;
-                }
-                #else
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = (branch1[i] + branch2[i]) * 0.5f;
-                }
-                #endif
-            } else {
-                for (size_t i = 0; i < size; ++i) {
-                    output[i] = (branch1[i] + branch2[i]) * 0.5f;
-                }
-            }
-            break;
-        }
-        
-        case MergeOperation::CONCATENATE: {
-            // Concaténation simple
-            output.resize(branch1.size() + branch2.size());
-            std::copy(branch1.begin(), branch1.end(), output.begin());
-            std::copy(branch2.begin(), branch2.end(), output.begin() + branch1.size());
-            break;
-        }
-        
-        default: {
-            // Par défaut, addition
-            std::copy(branch1.begin(), branch1.end(), output.begin());
-            for (size_t i = 0; i < size; ++i) {
-                output[i] += branch2[i];
-            }
-            break;
-        }
-    }
-}
-
-void Model::computeBranchSplit(const std::vector<float>& input,
-                               std::vector<std::vector<float>>& outputs,
-                               const std::vector<int>& split_sizes) {
-    outputs.resize(split_sizes.size());
-    size_t offset = 0;
-    
-    for (size_t i = 0; i < split_sizes.size(); ++i) {
-        outputs[i].resize(split_sizes[i]);
-        std::copy(input.begin() + offset, 
-                  input.begin() + offset + split_sizes[i], 
-                  outputs[i].begin());
-        offset += split_sizes[i];
-    }
-}
 
 void Model::detectAndSetupBranches() {
     // Parcourir tous les layers et détecter automatiquement les types de branches
@@ -4814,11 +2294,11 @@ void Model::executeBranchComputation(int layer_idx,
         if (source_idx >= 0 && source_idx < static_cast<int>(layer_outputs.size())) {
             // Fusionner avec l'opération spécifiée
             std::vector<float> merged_output;
-            computeBranchMerge(layer_outputs[layer_idx], 
-                             layer_outputs[source_idx],
-                             merged_output,
-                             layer.merge_op,
-                             true);
+            RuntimeLayerOps::branchMerge(layer_outputs[layer_idx],
+                                         layer_outputs[source_idx],
+                                         merged_output,
+                                         layer.merge_op,
+                                         true);
             layer_outputs[layer_idx] = std::move(merged_output);
         }
     }
@@ -5893,7 +3373,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
         // Fast path: im2col + GEMM (tuilé) via HardwareOpt::matmul_fma_saturated
         // NOTE: Pour ConvTranspose2d, on garde le chemin naïf (à optimiser ensuite).
-        const bool can_fast = (layer.type_enum == LayerType::Conv2d) && global_use_hardware && hasAVX2() && hasFMA();
+        const bool can_fast = (layer.type_enum == LayerType::Conv2d) &&
+                      RuntimeLayerOps::hardwareAccelerationEnabled() && hasAVX2() && hasFMA();
         const int out_spatial = out_height * out_width;
         const int K = in_channels * kernel_size * kernel_size;
 
@@ -5913,7 +3394,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
                       << " runtime_fma=" << (hasFMA() ? 1 : 0)
-                      << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
+                      << " global_use_hardware=" << (RuntimeLayerOps::hardwareAccelerationEnabled() ? 1 : 0)
                       << " will_use_fast_path=" << (can_fast ? 1 : 0)
                       << std::endl;
         }
@@ -6970,7 +4451,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
                       << " runtime_fma=" << (hasFMA() ? 1 : 0)
-                      << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
+                      << " global_use_hardware=" << (RuntimeLayerOps::hardwareAccelerationEnabled() ? 1 : 0)
                       << std::endl;
         }
 
@@ -7215,7 +4696,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             std::cerr << " runtime_avx2=" << (hasAVX2() ? 1 : 0)
                       << " runtime_fma=" << (hasFMA() ? 1 : 0)
-                      << " global_use_hardware=" << (global_use_hardware ? 1 : 0)
+                      << " global_use_hardware=" << (RuntimeLayerOps::hardwareAccelerationEnabled() ? 1 : 0)
                       << std::endl;
         }
 
@@ -10625,7 +8106,8 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             const int out_spatial = std::max(0, out_h) * std::max(0, out_w);
 
             // NOTE: pour ConvTranspose2d, on conserve l'ancien chemin (complexe à rewriter ici).
-            const bool can_fast_bwd = (layer.type == "Conv2d") && global_use_hardware && hasAVX2() && hasFMA();
+            const bool can_fast_bwd = (layer.type == "Conv2d") &&
+                                      RuntimeLayerOps::hardwareAccelerationEnabled() && hasAVX2() && hasFMA();
 
             if (can_fast_bwd) {
                 const int K = in_channels * kernel_size * kernel_size;
@@ -11845,66 +9327,8 @@ float Model::computeLoss(const std::vector<float> &prediction,
         std::cerr << "⚠️  Prediction and target size mismatch" << std::endl;
         return 0.0f;
     }
-    
-    float loss = 0.0f;
-    
-    if (loss_type == "mse") {
-        // Mean Squared Error
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            float diff = prediction[i] - target[i];
-            loss += diff * diff;
-        }
-        loss /= prediction.size();
-        
-    } else if (loss_type == "mae") {
-        // Mean Absolute Error
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            loss += std::abs(prediction[i] - target[i]);
-        }
-        loss /= prediction.size();
-        
-    } else if (loss_type == "bce") {
-        // Binary Cross Entropy
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            float p = std::clamp(prediction[i], 1e-7f, 1.0f - 1e-7f);
-            float t = target[i];
-            loss += -(t * std::log(p) + (1.0f - t) * std::log(1.0f - p));
-        }
-        loss /= prediction.size();
-    } else if (loss_type == "huber" || loss_type == "smoothl1") {
-        // Huber / SmoothL1 (delta=1)
-        const float delta = 1.0f;
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            const float diff = prediction[i] - target[i];
-            const float ad = std::abs(diff);
-            if (ad <= delta) {
-                loss += 0.5f * diff * diff;
-            } else {
-                loss += delta * (ad - 0.5f * delta);
-            }
-        }
-        loss /= prediction.size();
-    } else if (loss_type == "charbonnier") {
-        // Charbonnier (eps=1e-3)
-        const float eps = 1e-3f;
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            const float diff = prediction[i] - target[i];
-            loss += std::sqrt(diff * diff + eps * eps);
-        }
-        loss /= prediction.size();
-    } else if (loss_type == "gaussian_nll" || loss_type == "nll_gaussian") {
-        // Gaussian NLL with fixed sigma=1 (equivalent to scaled MSE + const)
-        const float sigma = 1.0f;
-        const float inv_var = 1.0f / (sigma * sigma);
-        const float log_var = std::log(sigma * sigma);
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            const float diff = prediction[i] - target[i];
-            loss += 0.5f * (diff * diff * inv_var + log_var);
-        }
-        loss /= prediction.size();
-    }
-    
-    return loss;
+    return static_cast<float>(
+        RuntimeLossGrad::pixel_loss_and_grad(prediction, target, loss_type).loss);
 }
 
 std::vector<float> Model::computeLossGradient(const std::vector<float> &prediction,
@@ -11919,112 +9343,13 @@ void Model::computeLossGradientInto(const std::vector<float> &prediction,
                                     const std::vector<float> &target,
                                     std::vector<float> &gradient,
                                     const std::string &loss_type) {
-    gradient.resize(prediction.size());
     if (prediction.size() != target.size()) {
+        gradient.resize(prediction.size());
         std::fill(gradient.begin(), gradient.end(), 0.0f);
         return;
     }
-
-    if (loss_type == "mse") {
-        // Gradient MSE: 2(pred - target) / n avec AVX2
-        const size_t size = prediction.size();
-        const float scale = (size > 0) ? (2.0f / static_cast<float>(size)) : 0.0f;
-        size_t i = 0;
-
-#ifdef __AVX2__
-        __m256 scale_vec = _mm256_set1_ps(scale);
-        for (; i + 8 <= size; i += 8) {
-            __m256 pred = _mm256_loadu_ps(&prediction[i]);
-            __m256 tgt = _mm256_loadu_ps(&target[i]);
-            __m256 diff = _mm256_sub_ps(pred, tgt);
-            __m256 grad = _mm256_mul_ps(diff, scale_vec);
-            _mm256_storeu_ps(&gradient[i], grad);
-        }
-#endif
-
-        for (; i < size; ++i) {
-            gradient[i] = scale * (prediction[i] - target[i]);
-        }
-    } else if (loss_type == "mae") {
-        // Gradient MAE: sign(pred - target) / n
-        const float inv_n = prediction.empty() ? 0.0f : (1.0f / static_cast<float>(prediction.size()));
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            const float diff = prediction[i] - target[i];
-            if (diff > 0.0f) {
-                gradient[i] = inv_n;
-            } else if (diff < 0.0f) {
-                gradient[i] = -inv_n;
-            } else {
-                gradient[i] = 0.0f;
-            }
-        }
-    } else if (loss_type == "bce") {
-        // Gradient BCE avec AVX2
-        const size_t size = prediction.size();
-        const float inv_size = (size > 0) ? (1.0f / static_cast<float>(size)) : 0.0f;
-        size_t i = 0;
-
-#ifdef __AVX2__
-        __m256 eps = _mm256_set1_ps(1e-7f);
-        __m256 one = _mm256_set1_ps(1.0f);
-        __m256 one_minus_eps = _mm256_set1_ps(1.0f - 1e-7f);
-        __m256 inv_size_vec = _mm256_set1_ps(inv_size);
-
-        for (; i + 8 <= size; i += 8) {
-            __m256 p = _mm256_loadu_ps(&prediction[i]);
-            __m256 t = _mm256_loadu_ps(&target[i]);
-
-            // Clamp p to [1e-7, 1-1e-7]
-            p = _mm256_max_ps(p, eps);
-            p = _mm256_min_ps(p, one_minus_eps);
-
-            // grad = (p - t) / (p * (1 - p)) / size
-            __m256 diff = _mm256_sub_ps(p, t);
-            __m256 one_minus_p = _mm256_sub_ps(one, p);
-            __m256 denom = _mm256_mul_ps(p, one_minus_p);
-            __m256 grad = _mm256_div_ps(diff, denom);
-            grad = _mm256_mul_ps(grad, inv_size_vec);
-
-            _mm256_storeu_ps(&gradient[i], grad);
-        }
-#endif
-
-        for (; i < size; ++i) {
-            const float p = std::clamp(prediction[i], 1e-7f, 1.0f - 1e-7f);
-            const float t = target[i];
-            gradient[i] = (p - t) / (p * (1.0f - p)) * inv_size;
-        }
-    } else if (loss_type == "huber" || loss_type == "smoothl1") {
-        const float delta = 1.0f;
-        const float inv_n = prediction.empty() ? 0.0f : (1.0f / static_cast<float>(prediction.size()));
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            const float diff = prediction[i] - target[i];
-            const float ad = std::abs(diff);
-            if (ad <= delta) {
-                gradient[i] = inv_n * diff;
-            } else {
-                const float s = (diff > 0.0f) ? 1.0f : (diff < 0.0f ? -1.0f : 0.0f);
-                gradient[i] = inv_n * delta * s;
-            }
-        }
-    } else if (loss_type == "charbonnier") {
-        const float eps = 1e-3f;
-        const float inv_n = prediction.empty() ? 0.0f : (1.0f / static_cast<float>(prediction.size()));
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            const float diff = prediction[i] - target[i];
-            const float denom = std::sqrt(diff * diff + eps * eps);
-            gradient[i] = (denom > 0.0f) ? (inv_n * diff / denom) : 0.0f;
-        }
-    } else if (loss_type == "gaussian_nll" || loss_type == "nll_gaussian") {
-        const float sigma = 1.0f;
-        const float inv_var = 1.0f / (sigma * sigma);
-        const float inv_n = prediction.empty() ? 0.0f : (1.0f / static_cast<float>(prediction.size()));
-        for (size_t i = 0; i < prediction.size(); ++i) {
-            gradient[i] = inv_n * (prediction[i] - target[i]) * inv_var;
-        }
-    } else {
-        std::fill(gradient.begin(), gradient.end(), 0.0f);
-    }
+    gradient = RuntimeLossGrad::pixel_loss_and_grad(
+        prediction, target, loss_type).grad;
 }
 
 // === build & autoBuildFromDataset ===

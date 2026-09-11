@@ -20,8 +20,8 @@ public:
         int latent_c = 4;
         int vae_base_channels = 8;
         bool vae_stochastic_latent = true;
-        bool vae_use_resnet = true;
-        bool vae_use_attn = false;
+        bool vae_resnet = true;
+        bool vae_attention = false;
         bool vae_use_skip_connections = false;
         bool vae_use_encoder_prior = false;
         std::string vae_enc_norm = "none";
@@ -88,6 +88,7 @@ public:
 
     void buildFromConfig(const Config& cfg);
     const Config& getConfig() const { return cfg_; }
+    std::optional<TrainStepResult> trainStep(const TrainStepRequest& request) override;
 
     GeneratedImage generate(const std::string& prompt,
                             int seed,

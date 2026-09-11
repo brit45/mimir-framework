@@ -51,7 +51,7 @@ Source de vérité :
 |Paramètres|`Layer::weight_block` + buffers legacy|Réserve/organise les poids + gradients + états (BatchNorm, etc.).|
 |Execution forward|`Model::forwardPass*`|Exécute les layers dans l’ordre avec un `switch (LayerType)` dans `src/Model.cpp`.|
 |Execution backward|`Model::backwardPass` (et variantes)|Best-effort selon layers.|
-|Optimisation|`Optimizer`|Applique SGD/Adam/AdamW + stratégies de LR decay.|
+|Optimisation|`Optimizer`|Applique SGD, Adam, AdamW, Lion, Adafactor, RAdam, NAdam, RMSprop ou LAMB + stratégies de LR decay.|
 |Sécurité mémoire|`MemoryGuard`|Bloque/limite certaines allocations si strict mode.|
 
 ## API C++ principale (méthodes clés)

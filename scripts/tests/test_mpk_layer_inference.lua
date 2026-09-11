@@ -1,4 +1,4 @@
-local MPKLayers = dofile("scripts/modules/mpk_layers.lua")
+local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")
 
 local cases = {
   ["encoder/conv_1"] = "Conv2d",

@@ -1,5 +1,5 @@
 #!/usr/bin/env mimir --lua
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- scripts/benchmarks/benchmark_stress.lua

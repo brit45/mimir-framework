@@ -1,6 +1,7 @@
 #include "test_utils.hpp"
 
 #include "Model.hpp"
+#include "Models/Registry/ModelArchitectures.hpp"
 #include "Models/Vision/VAEConvModel.hpp"
 
 #include <algorithm>
@@ -9,6 +10,39 @@
 #include <vector>
 
 int main() {
+    // Canonical keys independently control residual blocks and attention.
+    auto registry_vae = ModelArchitectures::create("vae_conv", {
+        {"image_w", 4}, {"image_h", 4}, {"image_c", 1},
+        {"latent_w", 2}, {"latent_h", 2}, {"latent_c", 2},
+        {"base_channels", 8}, {"resnet", true}, {"attention", false},
+        {"enc_norm", "none"}, {"dec_norm", "none"}
+    });
+    bool saw_residual_add = false;
+    bool saw_self_attention = false;
+    for (const auto& layer : registry_vae->getLayers()) {
+        saw_residual_add = saw_residual_add || layer.name.find("/res/add") != std::string::npos;
+        saw_self_attention = saw_self_attention || layer.type == "SelfAttention";
+    }
+    TASSERT_TRUE(saw_residual_add);
+    TASSERT_TRUE(!saw_self_attention);
+
+    auto legacy_registry_vae = ModelArchitectures::create("vae_conv", {
+        {"image_w", 4}, {"image_h", 4}, {"image_c", 1},
+        {"latent_w", 2}, {"latent_h", 2}, {"latent_c", 2},
+        {"base_channels", 8}, {"use_attention", false},
+        {"use_attn", true}, {"enc_norm", "none"}, {"dec_norm", "none"}
+    });
+    bool legacy_saw_residual_add = false;
+    bool legacy_saw_self_attention = false;
+    for (const auto& layer : legacy_registry_vae->getLayers()) {
+        legacy_saw_residual_add = legacy_saw_residual_add ||
+                                  layer.name.find("/res/add") != std::string::npos;
+        legacy_saw_self_attention = legacy_saw_self_attention ||
+                                    layer.type == "SelfAttention";
+    }
+    TASSERT_TRUE(!legacy_saw_residual_add);
+    TASSERT_TRUE(legacy_saw_self_attention);
+
     // Rectangular inputs are valid when both axes use the same power-of-two
     // downsampling ratio (8x4 -> 4x2 here).
     VAEConvModel::Config rectangular_cfg;
@@ -19,8 +53,8 @@ int main() {
     rectangular_cfg.latent_h = 2;
     rectangular_cfg.latent_c = 1;
     rectangular_cfg.base_channels = 8;
-    rectangular_cfg.use_attention = false;
-    rectangular_cfg.use_attn = false;
+    rectangular_cfg.resnet = false;
+    rectangular_cfg.attention = false;
     VAEConvModel rectangular_vae;
     rectangular_vae.buildFromConfig(rectangular_cfg);
     TASSERT_TRUE(!rectangular_vae.getLayers().empty());
@@ -28,7 +62,7 @@ int main() {
     // Decoder normalization can be disabled independently from the encoder.
     // This protects the CLI/config contract `enc_norm=groupnorm, dec_norm=none`.
     VAEConvModel::Config decoder_no_norm_cfg = rectangular_cfg;
-    decoder_no_norm_cfg.use_attention = true;
+    decoder_no_norm_cfg.resnet = true;
     decoder_no_norm_cfg.resnet_max_tokens = 0;
     decoder_no_norm_cfg.enc_norm = "groupnorm";
     decoder_no_norm_cfg.dec_norm = "none";
@@ -87,8 +121,8 @@ int main() {
     cfg.latent_c = 2;
     cfg.base_channels = 8;
     cfg.stochastic_latent = true;
-    cfg.use_attention = false;
-    cfg.use_attn = false;
+    cfg.resnet = false;
+    cfg.attention = false;
     cfg.enc_norm = "none";
     cfg.dec_norm = "none";
     cfg.use_encoder_prior = true;
@@ -122,6 +156,37 @@ int main() {
     for (size_t i = 0; i < z_biased.size(); ++i) {
         TASSERT_NEAR(z_biased[i], z[i] + prior_values[i], 1e-6f);
     }
+
+    // The generic hook must dispatch through Model, honor an explicit target,
+    // and accumulate gradients without advancing the optimizer.
+    std::vector<float> target(input.size(), 0.25f);
+    vae.modelConfig["recon_loss"] = "mse";
+    Optimizer train_optimizer;
+    train_optimizer.type = OptimizerType::SGD;
+    train_optimizer.decay_strategy = LRDecayStrategy::NONE;
+    Model::TrainStepRequest train_request;
+    train_request.float_inputs["__input__"] = &input;
+    train_request.target = &target;
+    train_request.optimizer = &train_optimizer;
+    train_request.mode = Model::TrainStepMode::Accumulate;
+    train_request.grad_scale = 0.5f;
+
+    Model& generic_vae = vae;
+    const auto train_result = generic_vae.trainStep(train_request);
+    TASSERT_TRUE(train_result.has_value());
+    TASSERT_TRUE(train_result->metrics.count("mse") == 1);
+    TASSERT_TRUE(train_result->metrics.count("kl") == 1);
+    TASSERT_TRUE(train_optimizer.step == 0);
+    TASSERT_TRUE(vae.hasTensor("vae_conv/recon"));
+
+    const auto& trained_recon = vae.getTensor("vae_conv/recon");
+    double expected_mse = 0.0;
+    for (size_t i = 0; i < target.size(); ++i) {
+        const double delta = static_cast<double>(trained_recon[i]) - target[i];
+        expected_mse += delta * delta;
+    }
+    expected_mse /= static_cast<double>(target.size());
+    TASSERT_NEAR(train_result->metrics.at("mse"), static_cast<float>(expected_mse), 1e-5f);
 
     // VIZ contract: a deliberately tiny historical limit must not hide graph
     // layers. Every node gets one canonical <model>/blocks/... label.

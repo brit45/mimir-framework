@@ -38,7 +38,7 @@ Le premier `--` termine les options de `mimir`. `args.lua` analyse ensuite la
 table globale `arg`.
 
 ```lua
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
 
 local arch = Args.get_str(opts, "arch", "basic_mlp")
@@ -56,8 +56,8 @@ Ce script utilise uniquement des méthodes présentes dans
 `pipeline_api.lua` :
 
 ```lua
-local Args = dofile("scripts/modules/args.lua")
-local P = dofile("scripts/modules/pipeline.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local P = dofile(ROOTWORK.."/scripts/modules/pipeline.lua")
 
 local opts = Args.parse(arg) or {}
 local arch = Args.get_str(opts, "arch", "basic_mlp")

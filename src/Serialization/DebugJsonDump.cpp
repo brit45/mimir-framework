@@ -299,11 +299,6 @@ json DebugJsonDump::build_json(
     model_info["total_params"] = model.totalParamCount();
     model_info["num_layers"] = model.getLayers().size();
     
-    if (model.width() > 0 && model.height() > 0) {
-        model_info["image_width"] = model.width();
-        model_info["image_height"] = model.height();
-    }
-    
     root["model"] = model_info;
     
     // Layers
@@ -908,8 +903,6 @@ void DebugJsonDump::add_tensor_info(
         model_state["num_layers"] = model.getLayers().size();
         model_state["has_encoder"] = model.getHasEncoder();
         model_state["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
-        model_state["image_width"] = model.width();
-        model_state["image_height"] = model.height();
         model_state["parameters_frozen"] = model.parametersFrozen();
         model_state["model_config"] = model.modelConfig.is_object() ? model.modelConfig : json::object();
         framework["model"] = model_state;
@@ -990,8 +983,6 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     model_info["logical_parameter_elements"] = logical_params;
     model_info["total_params"] = logical_params;
     model_info["parameters_frozen"] = model.parametersFrozen();
-    model_info["image_width"] = model.width();
-    model_info["image_height"] = model.height();
     model_info["has_encoder"] = model.getHasEncoder();
     model_info["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
     if (root["model_config"].contains("type") && root["model_config"]["type"].is_string()) {
@@ -1006,22 +997,20 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     if (options.include_optimizer_state) {
         json opt_state;
         if (const Optimizer* opt = model.getSerializedOptimizer()) {
-            auto type_to_string = [&](OptimizerType t) {
-                switch (t) {
-                    case OptimizerType::SGD: return "sgd";
-                    case OptimizerType::ADAM: return "adam";
-                    case OptimizerType::ADAMW: return "adamw";
-                    default: return "unknown";
-                }
-            };
-
-            opt_state["type"] = type_to_string(opt->type);
+            opt_state["type"] = optimizerTypeName(opt->type);
             opt_state["step"] = opt->step;
             opt_state["lr_current"] = opt->getCurrentLR();
             opt_state["beta1"] = opt->beta1;
             opt_state["beta2"] = opt->beta2;
             opt_state["eps"] = opt->eps;
             opt_state["weight_decay"] = opt->weight_decay;
+            opt_state["rmsprop_alpha"] = opt->rmsprop_alpha;
+            opt_state["adafactor_clip_threshold"] = opt->adafactor_clip_threshold;
+            opt_state["adafactor_decay_rate"] = opt->adafactor_decay_rate;
+            opt_state["adafactor_eps2"] = opt->adafactor_eps2;
+            opt_state["adafactor_beta1"] = opt->adafactor_beta1;
+            opt_state["adafactor_scale_parameter"] = opt->adafactor_scale_parameter;
+            opt_state["adafactor_relative_step"] = opt->adafactor_relative_step;
             opt_state["decay_strategy"] = static_cast<int>(opt->decay_strategy);
             opt_state["initial_lr"] = opt->initial_lr;
             opt_state["min_lr"] = opt->min_lr;

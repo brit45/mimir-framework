@@ -19,7 +19,7 @@
 
 ---@diagnostic disable: undefined-field, need-check-nil, param-type-mismatch
 
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 
 local function die(msg)
     io.stderr:write("[inspect_z_prior] " .. tostring(msg) .. "\n")

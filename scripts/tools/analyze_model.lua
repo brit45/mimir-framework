@@ -10,7 +10,7 @@
 
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 
 -- ---------------------------------------------------------------------------
 -- Couleurs ANSI (désactivées si NO_COLOR)
@@ -1366,7 +1366,7 @@ local function render_summary(info, opts)
         local interesting = {
             "task", "image_w", "image_h", "image_c",
             "latent_h", "latent_w", "latent_c", "base_channels", "downsamples",
-            "use_attention", "use_attn", "enc_norm", "enc_gn_groups",
+            "resnet", "attention", "enc_norm", "enc_gn_groups",
             "attn_heads", "resnet_max_tokens", "attn_max_tokens",
             "stochastic_latent", "text_cond",
             "d_model", "num_heads", "num_layers", "mlp_hidden",

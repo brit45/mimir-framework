@@ -324,7 +324,7 @@ Module Lua pour piloter les modèles via le registre d'architectures du framewor
 ### Utilisation rapide
 
 ```lua
-local P = dofile("scripts/modules/pipeline.lua")
+local P = dofile(ROOTWORK.."/scripts/modules/pipeline.lua")
 local pipe = P.FromRegistry("transformer")  -- ou P.Transformer(cfg) pour la forme spécialisée
 pipe:loadDefaultConfig("transformer")
 pipe:patchConfig({ d_model = 256, num_layers = 4 })

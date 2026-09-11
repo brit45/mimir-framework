@@ -214,7 +214,7 @@ Exemple :
 Notes :
 
 - Le séparateur `--` termine les options du CLI Mímir ; les valeurs suivantes sont transmises au script.
-- Dans un script, parsage recommandé : `local Args = dofile("scripts/modules/args.lua")` puis `Args.parse(arg)`.
+- Dans un script, parsage recommandé : `local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")` puis `Args.parse(arg)`.
 
 ## Sortie au démarrage
 

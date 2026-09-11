@@ -1,7 +1,7 @@
 #!/usr/bin/env lua
 ---@diagnostic disable: undefined-field
 
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
 
 local checkpoint = Args.get_str(opts, "vae-checkpoint", "")

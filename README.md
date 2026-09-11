@@ -168,8 +168,8 @@ publics de ces helpers afin que LuaLS/EmmyLua puisse les compléter.
 Exemple minimal, lancé depuis la racine du dépôt :
 
 ```lua
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local opts = Args.parse(arg)
 local out_dir = Args.get_str(opts, "out-dir", "checkpoint/demo")

@@ -141,14 +141,43 @@ RuntimeCapabilityLevel OpenCLRuntime::queryForwardCapability(const LayerType typ
     return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
                                           : RuntimeCapabilityLevel::Unsupported;
 #else
-    return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::Native
-                                          : RuntimeCapabilityLevel::Unsupported;
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            return RuntimeCapabilityLevel::Native;
+        default:
+            return RuntimeCapabilityLevel::Unsupported;
+    }
 #endif
 }
 
 RuntimeCapabilityLevel OpenCLRuntime::queryBackwardCapability(const LayerType type) const {
     return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
                                            : RuntimeCapabilityLevel::Unsupported;
+}
+
+RuntimeCapabilityLevel OpenCLRuntime::queryForwardOperationCapability(
+    const Layer& layer,
+    const std::vector<const std::vector<float>*>& inputs,
+    bool training
+) const {
+    (void)training;
+    return queryConfiguredForwardOperationCapability(layer, inputs, true);
 }
 
 bool OpenCLRuntime::linearForward(

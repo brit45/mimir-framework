@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Model.hpp"
+#include "../VAETraining.hpp"
 
 #include <string>
 
@@ -35,12 +36,12 @@ public:
         // ---- Blocs optionnels ----
 
         // Blocs ResNet (conv3x3->SiLU->conv3x3 + skip) dans l'encodeur et le décodeur.
-        // Entièrement convolutionnels. Activé via --resnet / cfg.use_attention.
-        bool use_attention = true;
+        // Entièrement convolutionnels. Activé via --resnet / cfg.resnet.
+        bool resnet = true;
 
         // Active la SelfAttention spatiale optionnelle (H*W tokens, embed_dim=channels)
         // sur certains blocs encodeur/décodeur.
-        bool use_attn = false;
+        bool attention = false;
 
         // Normalisation dans l'encodeur : "none" | "groupnorm" | "layernorm"
         std::string enc_norm = "groupnorm";
@@ -67,7 +68,7 @@ public:
         int resnet_max_tokens = 0;
 
         // Garde-fou SelfAttention : injectée seulement si h*w <= attn_max_tokens.
-        // 0 = pas de garde-fou (toujours injectée quand use_attn=true).
+        // 0 = pas de garde-fou (toujours injectée quand attention=true).
         int attn_max_tokens = 0;
 
         // Skip connections encodeur→décodeur (style U-Net).
@@ -97,7 +98,7 @@ public:
         // Conditionnement texte optionnel.
         // Quand activé, le graphe ajoute une branche texte légère
         // (Embedding -> TokenMeanPool -> Linear) et deux têtes de projection
-        // (image/text) pour l'alignement multi-modal via trainStepVAEText.
+        // (image/text) pour l'alignement multi-modal pendant trainStep.
         // Quand désactivé, le graphe reste strictement image-only.
         bool text_cond = false;
         int vocab_size = 32000;
@@ -118,7 +119,9 @@ public:
 
     bool InitVizTips() override;
     bool UpdateVizTips(const Layer& layer, VizFrame& frame) override;
+    std::optional<TrainStepResult> trainStep(const TrainStepRequest& request) override;
 
 private:
     Config cfg_;
+    VAETraining vae_training_;
 };

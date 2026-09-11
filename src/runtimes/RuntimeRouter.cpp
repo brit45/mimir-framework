@@ -38,31 +38,18 @@ void RuntimeRouter::composeRoutes() const {
     backward_routes_.assign(type_count, {});
 
     for (AbstractRuntime* rt : runtime_priority_) {
-        switch (rt == nullptr) {
-            case true:
-                continue;
-            case false:
-                break;
-        }
+        if (!rt || !rt->isInitialized()) continue;
 
         for (size_t i = 0; i < type_count; ++i) {
             const LayerType type = static_cast<LayerType>(i);
 
-            switch (rt->supportsForwardLayerType(type)) {
-                case true:
-                    forward_vote_[i] = 1;
-                    forward_routes_[i].push_back(rt);
-                    break;
-                case false:
-                    break;
+            if (runtimeCapabilityIsNative(rt->queryForwardCapability(type))) {
+                forward_vote_[i] = 1;
+                forward_routes_[i].push_back(rt);
             }
-            switch (rt->supportsBackwardLayerType(type)) {
-                case true:
-                    backward_vote_[i] = 1;
-                    backward_routes_[i].push_back(rt);
-                    break;
-                case false:
-                    break;
+            if (runtimeCapabilityIsNative(rt->queryBackwardCapability(type))) {
+                backward_vote_[i] = 1;
+                backward_routes_[i].push_back(rt);
             }
         }
     }
@@ -163,6 +150,9 @@ void RuntimeRouter::setActivators(
     activate_vulkan_ = std::move(vulkan);
     activate_opencl_ = std::move(opencl);
     activate_cpu_ = std::move(cpu);
+    runtimes_activated_ = false;
+    forward_layer_routes_.clear();
+    backward_layer_routes_.clear();
 }
 
 void RuntimeRouter::activateAvailableRuntimes() const {
@@ -192,6 +182,7 @@ void RuntimeRouter::ensureActivatedAndComposed() const {
     if (!runtimes_activated_) {
         activateAvailableRuntimes();
         runtimes_activated_ = true;
+        composeRoutes();
     }
     switch (forward_vote_.empty() || backward_vote_.empty()) {
         case true:
@@ -291,8 +282,13 @@ bool RuntimeRouter::dispatchForwardLayer(
     size_t i = 0;
     while (i < route.size()) {
         AbstractRuntime* rt = route[i];
-        if (!rt || !rt->isInitialized() || !rt->supportsForwardLayerType(layer.type_enum)) {
+        if (!rt || !rt->isInitialized()) {
             route.erase(route.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (!runtimeCapabilityIsNative(
+                rt->queryForwardOperationCapability(layer, inputs, training))) {
+            ++i;
             continue;
         }
 
@@ -324,9 +320,19 @@ bool RuntimeRouter::dispatchForwardLayerPlanned(
     if (selected_runtime) *selected_runtime = nullptr;
     outputs.clear();
 
+    auto route_it = forward_layer_routes_.find(&layer);
+    if (route_it == forward_layer_routes_.end()) {
+        route_it = forward_layer_routes_.emplace(
+            &layer, buildForwardRouteForLayer(layer)).first;
+    }
+    std::vector<AbstractRuntime*>& route = route_it->second;
+
+    auto is_eligible = [&](AbstractRuntime* runtime) {
+        return runtime && runtime->isInitialized() &&
+            runtimeCapabilityIsNative(runtime->queryForwardOperationCapability(
+                layer, inputs, training));
+    };
     auto execute = [&](AbstractRuntime* runtime) -> bool {
-        if (!runtime || !runtime->isInitialized() ||
-            !runtimeCapabilityIsNative(runtime->queryForwardCapability(layer.type_enum))) return false;
         std::vector<std::vector<float>> local;
         if (!runtime->forwardLayer(inputs, local, layer, training) ||
             local.empty() || !tensorsAreFinite(local)) return false;
@@ -335,15 +341,27 @@ bool RuntimeRouter::dispatchForwardLayerPlanned(
         return true;
     };
 
-    if (execute(preferred)) return true;
-
-    auto it = forward_layer_routes_.find(&layer);
-    if (it == forward_layer_routes_.end()) {
-        it = forward_layer_routes_.emplace(&layer, buildForwardRouteForLayer(layer)).first;
+    auto preferred_it = std::find(route.begin(), route.end(), preferred);
+    if (preferred_it != route.end()) {
+        if (is_eligible(preferred)) {
+            if (execute(preferred)) return true;
+            route.erase(preferred_it);
+        }
     }
-    for (AbstractRuntime* runtime : it->second) {
-        if (runtime == preferred) continue;
+
+    size_t index = 0;
+    while (index < route.size()) {
+        AbstractRuntime* runtime = route[index];
+        if (!runtime || !runtime->isInitialized()) {
+            route.erase(route.begin() + static_cast<std::ptrdiff_t>(index));
+            continue;
+        }
+        if (!is_eligible(runtime)) {
+            ++index;
+            continue;
+        }
         if (execute(runtime)) return true;
+        route.erase(route.begin() + static_cast<std::ptrdiff_t>(index));
     }
     return false;
 }
@@ -373,8 +391,13 @@ bool RuntimeRouter::dispatchBackwardLayer(
     size_t i = 0;
     while (i < route.size()) {
         AbstractRuntime* rt = route[i];
-        if (!rt || !rt->isInitialized() || !rt->supportsBackwardLayerType(layer.type_enum)) {
+        if (!rt || !rt->isInitialized()) {
             route.erase(route.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (!runtimeCapabilityIsNative(rt->queryBackwardOperationCapability(
+                layer, inputs, grad_outputs, training))) {
+            ++i;
             continue;
         }
 

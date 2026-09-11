@@ -1,10 +1,10 @@
 #!/usr/bin/env lua
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
-local BaseTok = dofile("scripts/modules/base_tokenizer.lua")
-local Checkpoint = dofile("scripts/modules/checkpoint_resume.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
+local BaseTok = dofile(ROOTWORK.."/scripts/modules/base_tokenizer.lua")
+local Checkpoint = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
 local opts = Args.parse(arg) or {}
 
 local function logf(format, ...)
@@ -38,7 +38,7 @@ if viz_enabled then
   check(ok_viz, viz_err, "Viz.create")
   check(Mimir.Viz.set_validation({ enabled = true }), nil,
     "Viz.set_validation(enabled)")
-  log("[train_lumen] interface VIZ activée")
+  logf("interface VIZ activée")
 end
 
 local dataset_root = Args.get_str(opts, "dataset", "")
@@ -73,10 +73,10 @@ local requested_kl_warmup_steps = math.max(0, Args.get_int(opts, "kl-warmup-step
 local kl_beta = 0.0
 local kl_warmup_steps = 0
 if requested_kl_beta > 0.0 then
-  logf("[train_lumen] --kl-beta=%.8g ignoré: Lumen entraîne epsilon avec MSE pure",
+  logf("--kl-beta=%.8g ignoré: Lumen entraîne epsilon avec MSE pure",
     requested_kl_beta)
 end
-local log_every = math.max(1, Args.get_int(opts, "log-every", training.log_every or 10))
+local log_every = math.max(1, Args.get_int(opts, "logf-every", training.log_every or 10))
 local save_every = math.max(0, Args.get_int(opts, "save-every", training.save_every or 500))
 local max_items = math.max(0, Args.get_int(opts, "max-items", training.max_items or 0))
 local vae_calibration_items = math.max(1, Args.get_int(opts,
@@ -117,6 +117,13 @@ local validation_max_penalties = math.max(0, Args.get_int(opts,
 local validation_save_best = Args.get_bool(opts, "validation-save-best",
   training.validation_save_best ~= false)
 
+if type(Mimir.Viz.set_validation) == "function" then
+  Mimir.Viz.set_validation({
+    enabled = validation_items > 0 and
+      (validation_every_steps > 0 or validation_every_epochs > 0)
+  })
+end
+
 if learning_rate <= 0 then die("--lr doit être strictement positif") end
 if cfg_dropout < 0 or cfg_dropout > 1 then die("--cfg-dropout doit être dans [0,1]") end
 if validation_reward_factor < 1 then die("--validation-reward-factor doit être >= 1") end
@@ -146,8 +153,8 @@ cfg.vae_checkpoint = Args.get_str(opts, "vae-checkpoint", cfg.vae_checkpoint or 
 cfg.vae_base_channels = Args.get_int(opts, "vae-base-channels", cfg.vae_base_channels or 16)
 cfg.vae_stochastic_latent = Args.get_bool(opts, "vae-stochastic-latent",
   cfg.vae_stochastic_latent ~= false)
-cfg.vae_use_resnet = Args.get_bool(opts, "vae-resnet", cfg.vae_use_resnet ~= false)
-cfg.vae_use_attn = Args.get_bool(opts, "vae-attn", cfg.vae_use_attn ~= false)
+cfg.vae_resnet = Args.get_bool(opts, "vae-resnet", cfg.vae_resnet ~= false)
+cfg.vae_attention = Args.get_bool(opts, "vae-attn", cfg.vae_attention ~= false)
 cfg.vae_use_skip_connections = Args.get_bool(opts, "vae-use-skip-connections",
   cfg.vae_use_skip_connections ~= false)
 cfg.vae_use_encoder_prior = Args.get_bool(opts, "vae-encoder-prior",
@@ -170,10 +177,13 @@ cfg.patch_size = Args.get_int(opts, "patch-size", cfg.patch_size or 4)
 cfg.hidden_size = Args.get_int(opts, "hidden-size", cfg.hidden_size or 384)
 cfg.depth = Args.get_int(opts, "depth", cfg.depth or 8)
 cfg.mlp_ratio = Args.get_num(opts, "mlp-ratio", cfg.mlp_ratio or 4.0)
-if cfg.image_w <= 0 or cfg.image_h <= 0 then die("--image-w et --image-h doivent être positifs") end
-if cfg.latent_w <= 0 or cfg.latent_h <= 0 or cfg.latent_c <= 0 then
-  die("--latent-w, --latent-h et --latent-c doivent être positifs")
-end
+cfg.text_seq_len = Args.get_int(opts, "text-seq-len",
+  cfg.text_seq_len or tokenizer_cfg.max_sequence_length or 77)
+cfg.text_layers = Args.get_int(opts, "text-layers", cfg.text_layers or 2)
+cfg.num_heads = Args.get_int(opts, "num-heads", cfg.num_heads or 8)
+cfg.diffusion_steps = Args.get_int(opts, "diffusion-steps", cfg.diffusion_steps or 1000)
+cfg.beta_start = Args.get_num(opts, "beta-start", cfg.beta_start or 0.00085)
+cfg.beta_end = Args.get_num(opts, "beta-end", cfg.beta_end or 0.012)
 if cfg.vae_checkpoint == "" and not prepare_tokenizer_only then
   die("--vae-checkpoint est requis (dossier epoch_* du VAEConv entraîné)")
 end
@@ -184,29 +194,25 @@ if not prepare_tokenizer_only then
       cfg.vae_checkpoint)
   end
   if resolved_vae_checkpoint ~= cfg.vae_checkpoint then
-    log("[train_lumen] checkpoint VAE résolu: " .. resolved_vae_checkpoint)
+    logf("checkpoint VAE résolu: " .. resolved_vae_checkpoint)
     cfg.vae_checkpoint = resolved_vae_checkpoint
   end
-end
-if cfg.patch_size < 1 or cfg.latent_w % cfg.patch_size ~= 0 or
-    cfg.latent_h % cfg.patch_size ~= 0 then
-  die("--patch-size doit diviser exactement --latent-w et --latent-h")
 end
 if cfg.hidden_size < 1 or cfg.depth < 1 or cfg.mlp_ratio < 1 then
   die("--hidden-size, --depth et --mlp-ratio doivent être positifs")
 end
-local patch_tokens = (cfg.latent_w / cfg.patch_size) * (cfg.latent_h / cfg.patch_size)
+if cfg.text_seq_len < 1 or cfg.text_layers < 1 or cfg.num_heads < 1 then
+  die("--text-seq-len, --text-layers et --num-heads doivent être positifs")
+end
+if cfg.hidden_size % cfg.num_heads ~= 0 then
+  die("--num-heads doit diviser exactement --hidden-size")
+end
+if cfg.diffusion_steps < 2 then die("--diffusion-steps doit être >= 2") end
+if cfg.beta_start <= 0 or cfg.beta_start >= 1 or
+    cfg.beta_end < cfg.beta_start or cfg.beta_end >= 1 then
+  die("--beta-start et --beta-end doivent vérifier 0 < start <= end < 1")
+end
 local max_patch_tokens = math.max(1, Args.get_int(opts, "max-patch-tokens", 1024))
-if patch_tokens > max_patch_tokens then
-  die(string.format(
-    "grille DiT latente trop grande: %d tokens (%dx%d, patch=%d); " ..
-    "le backward d'attention est quadratique. Utilisez --patch-size 64 " ..
-    "pour 1024x1024, ou augmentez explicitement --max-patch-tokens.",
-    patch_tokens, cfg.latent_w, cfg.latent_h, cfg.patch_size))
-end
-if cfg.image_c ~= 1 and cfg.image_c ~= 3 and cfg.image_c ~= 4 then
-  die("--image-c doit valoir 1, 3 ou 4")
-end
 
 cfg.weight_decay = weight_decay
 cfg.beta1 = training.beta1 or 0.9
@@ -237,6 +243,30 @@ local function convert_image_channels(rgb)
   return converted
 end
 
+local skipped_images = 0
+
+local function release_dataset_item(index)
+  local ok, err = Mimir.Dataset.release(index)
+  if not ok then
+    die("Dataset.release(" .. index .. "): " .. tostring(err or "échec"))
+  end
+end
+
+local function get_image_item(index, phase)
+  local item, item_err = Mimir.Dataset.get(index)
+  if type(item) == "table" and type(item.image) == "table" then
+    return item
+  end
+  skipped_images = skipped_images + 1
+  local path = type(item) == "table" and item.image_file or nil
+  release_dataset_item(index)
+  logf(
+    "image ignorée (%s): index=%d path=%s erreur=%s",
+    phase, index, tostring(path or "?"),
+    tostring(item_err or "décodage ou allocation impossible"))
+  return nil
+end
+
 local tokenizer_source_path = tokenizer_path
 local resume_tokenizer_path = FS.join(resume_path, "tokenizer", "tokenizer.json")
 if resume_path ~= "" and FS.file_exists(resume_tokenizer_path) then
@@ -250,6 +280,50 @@ local ok_tokenizer, tokenizer_err = BaseTok.load_base({
 check(ok_tokenizer, tokenizer_err, "Tokenizer.load_or_create")
 local ok_max_vocab, max_vocab_err = Mimir.Tokenizer.set_max_vocab(tokenizer_max_vocab)
 check(ok_max_vocab, max_vocab_err, "Tokenizer.set_max_vocab")
+
+if not prepare_tokenizer_only then
+  local ok_create, create_err = Mimir.Model.create("lumen_diffusion", cfg)
+  check(ok_create, create_err, "Model.create")
+  local effective_cfg, effective_cfg_err = Mimir.Model.get_config()
+  if type(effective_cfg) ~= "table" then
+    die("Model.get_config: " .. tostring(effective_cfg_err or "échec"))
+  end
+  for _, key in ipairs({
+    "image_w", "image_h", "image_c", "latent_w", "latent_h", "latent_c",
+    "patch_size", "vae_base_channels", "vae_stochastic_latent",
+    "vae_resnet", "vae_attention", "vae_use_skip_connections",
+    "vae_use_encoder_prior", "vae_enc_norm", "vae_dec_norm",
+    "vae_decoder_upsample", "vae_enc_gn_groups", "vae_dec_gn_groups",
+    "vae_attn_heads", "vae_attn_max_tokens", "vae_resnet_max_tokens",
+  }) do
+    if effective_cfg[key] ~= nil then cfg[key] = effective_cfg[key] end
+  end
+  logf(
+    "Lumen adapté au VAE: image=%dx%dx%d latent=%dx%dx%d patch=%d",
+    cfg.image_w, cfg.image_h, cfg.image_c,
+    cfg.latent_w, cfg.latent_h, cfg.latent_c, cfg.patch_size)
+end
+
+if cfg.image_w <= 0 or cfg.image_h <= 0 then
+  die("dimensions image effectives invalides")
+end
+if cfg.latent_w <= 0 or cfg.latent_h <= 0 or cfg.latent_c <= 0 then
+  die("dimensions latentes effectives invalides")
+end
+if cfg.patch_size < 1 or cfg.latent_w % cfg.patch_size ~= 0 or
+    cfg.latent_h % cfg.patch_size ~= 0 then
+  die("le patch-size effectif doit diviser exactement le latent du VAE")
+end
+local patch_tokens = (cfg.latent_w / cfg.patch_size) * (cfg.latent_h / cfg.patch_size)
+if patch_tokens > max_patch_tokens then
+  die(string.format(
+    "grille DiT latente effective trop grande: %d tokens (%dx%d, patch=%d); " ..
+    "augmentez --patch-size ou explicitement --max-patch-tokens.",
+    patch_tokens, cfg.latent_w, cfg.latent_h, cfg.patch_size))
+end
+if cfg.image_c ~= 1 and cfg.image_c ~= 3 and cfg.image_c ~= 4 then
+  die("le nombre de canaux image effectif doit valoir 1, 3 ou 4")
+end
 
 local cache_path = Args.get_str(opts, "cache", dataset_root .. "/dataset_cache.json")
 local ok_dataset, dataset_count_or_error = Mimir.Dataset.load(
@@ -268,23 +342,51 @@ local training_count = validation_holdout and
   (dataset_count - validation_count) or dataset_count
 if validation_items > 0 and validation_count < validation_items then
   logf(
-    "[train_lumen] validation réduite à %d item(s) pour conserver un item d'entraînement",
+    "validation réduite à %d item(s) pour conserver un item d'entraînement",
     validation_count)
 end
 logf(
-  "[train_lumen] partition: train=%d validation=%d holdout=%s",
+  "partition: train=%d validation=%d holdout=%s",
   training_count, validation_count, tostring(validation_holdout))
 
 local function hydrate_tokenizer(reason)
-  local stats, hydrate_err = Mimir.Dataset.hydrate_tokenizer()
-  if type(stats) ~= "table" then
-    die("Dataset.hydrate_tokenizer: " .. tostring(hydrate_err or "échec"))
+  if type(Mimir.Dataset.hydrate_tokenizer) == "function" then
+    local stats, hydrate_err = Mimir.Dataset.hydrate_tokenizer()
+    if type(stats) ~= "table" then
+      die("Dataset.hydrate_tokenizer: " .. tostring(hydrate_err or "échec"))
+    end
+    logf(
+      "tokenizer hydraté (%s): captions=%d/%d vocab=%d->%d max=%d erreurs=%d",
+      reason, stats.captions or 0, stats.items or 0, stats.vocab_before or 0,
+      stats.vocab_after or 0, tokenizer_max_vocab, stats.errors or 0)
+    return
   end
+
+  local ensure_vocab = Mimir.Tokenizer.ensure_vocab_from_text
+  local tokenize_ensure = Mimir.Tokenizer.tokenize_ensure
+  if type(ensure_vocab) ~= "function" and type(tokenize_ensure) ~= "function" then
+    die("tokenizer: aucune API d'enrichissement du vocabulaire disponible")
+  end
+  local vocab_before = math.floor(tonumber(Mimir.Tokenizer.vocab_size()) or 0)
+  local captions = 0
+  local errors = 0
+  for index = 1, dataset_total do
+    local item = Mimir.Dataset.get(index, false)
+    local text = type(item) == "table" and tostring(item.text or "") or ""
+    if text ~= "" then
+      captions = captions + 1
+      local ok_call, result = pcall(ensure_vocab or tokenize_ensure, text)
+      if not ok_call or result == false then errors = errors + 1 end
+    end
+    release_dataset_item(index)
+  end
+  local vocab_after = math.floor(tonumber(Mimir.Tokenizer.vocab_size()) or 0)
   logf(
-    "[train_lumen] tokenizer hydraté (%s): captions=%d/%d vocab=%d->%d max=%d erreurs=%d",
-    reason, stats.captions or 0, stats.items or 0, stats.vocab_before or 0,
-    stats.vocab_after or 0, tokenizer_max_vocab, stats.errors or 0)
+    "tokenizer hydraté (%s): captions=%d/%d vocab=%d->%d max=%d erreurs=%d",
+    reason, captions, dataset_total, vocab_before, vocab_after,
+    tokenizer_max_vocab, errors)
 end
+
 
 hydrate_tokenizer("dataset")
 local tokenizer_vocab_size = math.floor(tonumber(Mimir.Tokenizer.vocab_size()) or 0)
@@ -313,28 +415,26 @@ if FS.normalize(output_tokenizer_path) ~= FS.normalize(tokenizer_path) then
   check(ok_output_save, output_save_err, "Tokenizer.save(output)")
 end
 logf(
-  "[train_lumen] tokenizer construit et sérialisé avant modèle: vocab=%d path=%s",
+  "tokenizer construit et sérialisé avant modèle: vocab=%d path=%s",
   tokenizer_vocab_size, output_tokenizer_path)
 if prepare_tokenizer_only then
-  log("[train_lumen] préparation tokenizer terminée; modèle non créé")
+  logf("préparation tokenizer terminée; modèle non créé")
   return
 end
 
-local ok_create, create_err = Mimir.Model.create("lumen_diffusion", cfg)
-check(ok_create, create_err, "Model.create")
 local ok_allocate, allocate_err = Mimir.Model.allocate_params()
 check(ok_allocate, allocate_err, "Model.allocate_params")
 
 if resume_path ~= "" then
   local ok_resume, resume_err = Mimir.Serialization.load(resume_path, "raw_folder", {
-    load_tokenizer = false,
+    load_tokenizer = true,
     load_encoder = false,
     load_optimizer = true,
     strict_mode = false,
     validate_checksums = true,
   })
   check(ok_resume, resume_err, "Serialization.load")
-  log("[train_lumen] reprise: " .. resume_path)
+  logf("reprise: " .. resume_path)
 else
   local ok_init, init_err =
     Mimir.Model.init_weights(Args.get_str(opts, "init", "xavier"), seed)
@@ -344,33 +444,40 @@ end
 local ok_build, build_err = Mimir.Model.build()
 check(ok_build, build_err, "Model.build(tokenizer hydraté)")
 logf(
-  "[train_lumen] loss: epsilon_mse pure (KL/Wasserstein diagnostiques), " ..
+  "loss: epsilon_mse pure (KL/Wasserstein diagnostiques), " ..
   "kl_beta=%.8g kl_warmup_steps=%d",
   cfg.kl_beta, cfg.kl_warmup_steps)
 
 local calibration_count = math.min(vae_calibration_items, training_count)
 local ok_calibration, calibration_err = Mimir.Model.lumen_begin_vae_calibration()
 check(ok_calibration, calibration_err, "Model.lumen_begin_vae_calibration")
-for index = 1, calibration_count do
-  local item, item_err = Mimir.Dataset.get(index)
-  if type(item) ~= "table" or type(item.image) ~= "table" then
-    die("calibration VAE item " .. index .. ": " ..
-      tostring(item_err or "image absente"))
+local calibrated_items = 0
+local calibration_index = 1
+while calibrated_items < calibration_count and calibration_index <= training_count do
+  local item = get_image_item(calibration_index, "calibration")
+  if item then
+    local stats, add_err = Mimir.Model.lumen_add_vae_calibration_image(
+      convert_image_channels(item.image))
+    item = nil
+    release_dataset_item(calibration_index)
+    if type(stats) ~= "table" then
+      die(add_err or "ajout calibration VAE impossible")
+    end
+    calibrated_items = calibrated_items + 1
   end
-  local stats, add_err = Mimir.Model.lumen_add_vae_calibration_image(
-    convert_image_channels(item.image))
-  if type(stats) ~= "table" then
-    die(add_err or "ajout calibration VAE impossible")
-  end
+  calibration_index = calibration_index + 1
+end
+if calibrated_items < 1 then
+  die("calibration VAE impossible: aucune image décodable dans la partition d'entraînement")
 end
 local calibration, finish_err = Mimir.Model.lumen_finish_vae_calibration()
 if type(calibration) ~= "table" then
   die(finish_err or "finalisation calibration VAE impossible")
 end
 logf(
-  "[train_lumen] VAE auto-calibré avant entraînement: items=%d/%d values=%d " ..
+  "VAE auto-calibré avant entraînement: items=%d/%d values=%d " ..
   "shift=%.9g scale=%.9g",
-  calibration.items or 0, vae_calibration_items, calibration.values or 0,
+  calibration.items or 0, calibration_count, calibration.values or 0,
   calibration.shift or 0.0, calibration.scale or 0.0)
 
 check(Mimir.Serialization.save(output_dir .. "/starttrain.json", "debug_json", {
@@ -403,7 +510,7 @@ local function save_checkpoint(label)
     include_git_info = true,
     include_optimizer_state = true,
   }), nil, "Serialization.save(" .. label .. ")")
-  log("[train_lumen] checkpoint: " .. path)
+  logf("checkpoint: " .. path)
 end
 
 local function run_validation(reason)
@@ -412,7 +519,8 @@ local function run_validation(reason)
       not Mimir.Viz.validation_enabled() then
     return nil
   end
-  local total = validation_count
+  local target = validation_count
+  local total = target
   local loss_sum = 0.0
   local reconstruction_mae_sum = 0.0
   local reconstruction_mse_sum = 0.0
@@ -426,45 +534,58 @@ local function run_validation(reason)
     in_progress = true, step = global_step, done = 0, total = total,
     has = false, ok = true, recon = 0.0, kl = 0.0, align = 0.0,
   })
-  for offset = 0, total - 1 do
+  local done = 0
+  local dataset_index = dataset_count
+  local validation_first_index = validation_holdout and (training_count + 1) or 1
+  while done < target and dataset_index >= validation_first_index do
     if type(Mimir.Viz.validation_enabled) == "function" and
         not Mimir.Viz.validation_enabled() then
       Mimir.Viz.set_validation({
-        in_progress = false, step = global_step, done = offset, total = total,
+        in_progress = false, step = global_step, done = done, total = target,
         has = false, ok = false,
       })
       logf(
-        "[train_lumen] validation interrompue step=%d items=%d/%d",
-        global_step, offset, total)
+        "validation interrompue step=%d items=%d/%d",
+        global_step, done, target)
       return nil
     end
-    local dataset_index = math.floor(dataset_count - offset)
-    local item, item_err = Mimir.Dataset.get(dataset_index)
-    if type(item) ~= "table" or type(item.image) ~= "table" then
-      die("validation item " .. dataset_index .. ": " ..
-        tostring(item_err or "image absente"))
+    local item = get_image_item(dataset_index, "validation")
+    if item then
+      local stats, validation_err = Mimir.Model.lumen_validate_step(
+        convert_image_channels(item.image), tostring(item.text or ""),
+        math.tointeger(seed + dataset_index * 1000003))
+      item = nil
+      release_dataset_item(dataset_index)
+      if type(stats) ~= "table" then
+        die(validation_err or "validation diffusion impossible")
+      end
+      done = done + 1
+      loss_sum = loss_sum + stats.loss
+      reconstruction_mae_sum = reconstruction_mae_sum + stats.reconstruction_mae
+      reconstruction_mse_sum = reconstruction_mse_sum + stats.reconstruction_mse
+      kl_sum = kl_sum + stats.kl
+      wasserstein_sum = wasserstein_sum + stats.wasserstein
+      entropy_sum = entropy_sum + stats.entropy_diff
+      moment_sum = moment_sum + stats.moment_mismatch
+      spatial_sum = spatial_sum + stats.spatial_coherence
+      temporal_sum = temporal_sum + stats.temporal_consistency
+      Mimir.Viz.set_validation({
+        in_progress = true, step = global_step, done = done, total = target,
+        has = true, ok = true, recon = reconstruction_mae_sum / done,
+        kl = reconstruction_mse_sum / done, align = loss_sum / done,
+      })
     end
-    local stats, validation_err = Mimir.Model.lumen_validate_step(
-      convert_image_channels(item.image), tostring(item.text or ""),
-      seed + dataset_index * 1000003)
-    if type(stats) ~= "table" then
-      die(validation_err or "validation diffusion impossible")
-    end
-    loss_sum = loss_sum + stats.loss
-    reconstruction_mae_sum = reconstruction_mae_sum + stats.reconstruction_mae
-    reconstruction_mse_sum = reconstruction_mse_sum + stats.reconstruction_mse
-    kl_sum = kl_sum + stats.kl
-    wasserstein_sum = wasserstein_sum + stats.wasserstein
-    entropy_sum = entropy_sum + stats.entropy_diff
-    moment_sum = moment_sum + stats.moment_mismatch
-    spatial_sum = spatial_sum + stats.spatial_coherence
-    temporal_sum = temporal_sum + stats.temporal_consistency
-    Mimir.Viz.set_validation({
-      in_progress = true, step = global_step, done = offset + 1, total = total,
-      has = true, ok = true, recon = reconstruction_mae_sum / (offset + 1),
-      kl = reconstruction_mse_sum / (offset + 1), align = loss_sum / (offset + 1),
-    })
+    dataset_index = dataset_index - 1
   end
+  if done < 1 then
+    Mimir.Viz.set_validation({
+      in_progress = false, step = global_step, done = 0, total = target,
+      has = false, ok = false,
+    })
+    logf("validation=%s ignorée: aucune image décodable", reason)
+    return nil
+  end
+  total = done
   local epsilon_mse = loss_sum / total
   local reconstruction_mae = reconstruction_mae_sum / total
   local reconstruction_mse = reconstruction_mse_sum / total
@@ -539,7 +660,7 @@ local function run_validation(reason)
       feedback == "EARLY_STOP" and "penalty" or "none",
   })
   logf(
-    "[train_lumen] validation=%s step=%d items=%d epsilon_mse=%.7g recon_mae=%.7g " ..
+    "validation=%s step=%d items=%d epsilon_mse=%.7g recon_mae=%.7g " ..
     "recon_mse=%.7g kl=%.7g wa=%.7g entropy=%.7g moment_miss=%.7g spatial_co=%.7g " ..
     "temporal=%.7g score=%.7g ema=%.7g feedback=%s signal=%+.6g lr_scale=%.6g " ..
     "bad=%d penalties=%d",
@@ -558,9 +679,9 @@ for epoch = 1, epochs do
   end
 
   for position = 1, training_count do
-    local item, item_err = Mimir.Dataset.get(order[position])
-    if type(item) ~= "table" then die(item_err or "Dataset.get impossible") end
-    if type(item.image) ~= "table" then die("image absente à l'item " .. order[position]) end
+    local dataset_index = order[position]
+    local item = get_image_item(dataset_index, "entraînement")
+    if item then
 
     global_step = global_step + 1
     local prompt = tostring(item.text or "")
@@ -578,13 +699,17 @@ for epoch = 1, epochs do
         step = global_step,
         completed_steps = global_step - 1,
         loss_sum_before = total_loss,
+        lr_warmup_steps = warmup_steps,
       })
+    item = nil
+    release_dataset_item(dataset_index)
     if type(stats) ~= "table" then die(step_err or "lumen_train_step impossible") end
+    local applied_lr = tonumber(stats.learning_rate) or step_lr
     running_loss = running_loss + stats.loss
     total_loss = total_loss + stats.loss
 
     if stats.stop_requested then
-      logf("[train_lumen] arrêt demandé depuis Viz au step=%d", global_step)
+      logf("arrêt sécurisé demandé au step=%d", global_step)
       stop_requested = true
       break
     end
@@ -592,14 +717,14 @@ for epoch = 1, epochs do
     if global_step == 1 or global_step % log_every == 0 then
       local divisor = global_step == 1 and 1 or log_every
       logf(
-        "[train_lumen] epoch=%d/%d step=%d item=%d/%d loss=%.7g avg=%.7g grad=%.6g " ..
+        "epoch=%d/%d step=%d item=%d/%d loss=%.7g avg=%.7g grad=%.6g " ..
         "mse=%.6g kl=%.6g kl_beta_eff=%.6g wa=%.6g ent=%.6g mom=%.6g " ..
         "spat=%.6g temp=%.6g t=%d lr=%.6g",
         epoch, epochs, global_step, position, training_count, stats.loss,
         running_loss / divisor, stats.grad_norm, stats.mse, stats.kl,
         stats.kl_beta_effective, stats.wasserstein,
         stats.entropy_diff, stats.moment_mismatch, stats.spatial_coherence,
-        stats.temporal_consistency, stats.timestep, step_lr)
+        stats.temporal_consistency, stats.timestep, applied_lr)
       running_loss = 0.0
     end
 
@@ -609,6 +734,7 @@ for epoch = 1, epochs do
     if validation_every_steps > 0 and global_step % validation_every_steps == 0 then
       run_validation("step")
       if stop_requested then break end
+    end
     end
   end
   if stop_requested then break end
@@ -626,5 +752,8 @@ check(Mimir.Serialization.save(output_dir .. "/endtrain.json", "debug_json", {
   include_optimizer_state = true,
 }), nil, "Serialization.save(endtrain)")
 
-logf("[train_lumen] terminé: epochs=%d steps=%d sortie=%s",
+logf("terminé: epochs=%d steps=%d sortie=%s",
   epochs, global_step, output_dir)
+if skipped_images > 0 then
+  logf("images ignorées au total: %d", skipped_images)
+end

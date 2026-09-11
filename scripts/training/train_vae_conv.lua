@@ -1,9 +1,9 @@
 ---@diagnostic disable: undefined-global, undefined-field, inject-field
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
-local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
+local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
 
 local function opt_num(k, d)
   local v = opts[k]
@@ -35,7 +35,7 @@ local function opt_bool(k, d)
   return d
 end
 
-local BaseTok = dofile("scripts/modules/base_tokenizer.lua")
+local BaseTok = dofile(ROOTWORK.."/scripts/modules/base_tokenizer.lua")
 
 local function assert_ok(ok, err, msg)
   if ok == false then
@@ -370,29 +370,30 @@ do
   )
 end
 
--- Blocs ResNet (ex-attention) (optionnel)
--- NOTE: use_attention reste un alias historique de use_resnet.
+-- Blocs ResNet (optionnel). Les anciennes clés restent acceptées à la lecture.
 -- Recommandé: --resnet/--use-resnet/--resnet-max-tokens.
 -- Pour désactiver: --no-resnet
-local configured_resnet = cfg.use_resnet
+local configured_resnet = cfg.resnet
+if configured_resnet == nil then configured_resnet = cfg.use_resnet end
 if configured_resnet == nil then configured_resnet = cfg.use_attention end
 if configured_resnet == nil then configured_resnet = true end
-cfg.use_attention = opt_bool(
+cfg.resnet = opt_bool(
   "resnet",
   opt_bool(
     "resnet-blocks",
     opt_bool("use-resnet", configured_resnet)
   )
 )
-cfg.use_resnet = cfg.use_attention
 
 -- Attention (SelfAttention) en plus des blocs ResNet.
 -- Pour activer l'attention: --attn (ou --vae-attn/--self-attn).
-cfg.use_attn = opt_bool(
+local configured_attention = cfg.attention
+if configured_attention == nil then configured_attention = cfg.use_attn end
+cfg.attention = opt_bool(
   "attn",
   opt_bool(
     "vae-attn",
-    opt_bool("self-attn", opt_bool("use-attn", opt_bool("use-vae-attn", cfg.use_attn)))
+    opt_bool("self-attn", opt_bool("use-attn", opt_bool("use-vae-attn", configured_attention)))
   )
 )
 
@@ -406,16 +407,16 @@ do
       opts["use-attn"] == nil and
       opts["use-vae-attn"] == nil
   if CPU_ONLY and attn_opt_absent then
-    cfg.use_attn = false
+    cfg.attention = false
   end
 end
 
--- `attn_heads` est utilisé par l'attention si `use_attn=true`.
+-- `attn_heads` est utilisé par l'attention si `attention=true`.
 cfg.attn_heads = opt_int("attn-heads", cfg.attn_heads or 4)
 
 -- CPU-only: si non fourni, baisser le nombre de heads pour réduire le coût.
 do
-  if CPU_ONLY and opts["attn-heads"] == nil and (cfg.use_attn == true) then
+  if CPU_ONLY and opts["attn-heads"] == nil and (cfg.attention == true) then
     cfg.attn_heads = math.max(1, math.min(2, tonumber(cfg.attn_heads or 2) or 2))
   end
 end
@@ -513,7 +514,7 @@ if (cfg.latent_w or 0) <= 0 then cfg.latent_w = math.max(1, math.floor(cfg.image
 -- Valeurs sûres par défaut pour l'attention.
 -- IMPORTANT: côté C++, `attn_max_tokens<=0` désactive le garde-fou (attention partout) => potentiellement très coûteux.
 -- Ici, si l'option n'est pas fournie, on choisit un défaut = latent_w*latent_h.
-if cfg.use_attn == true then
+if cfg.attention == true then
   local latent_tokens = math.max(1, (cfg.latent_h or 1) * (cfg.latent_w or 1))
 
   local attn_opt_absent =
@@ -535,7 +536,7 @@ end
 -- Si l'utilisateur n'a pas fourni --resnet-max-tokens,
 -- on force une limite = latent_w*latent_h
 -- afin que le bloc soit effectivement injecté au latent (et skip aux upscales trop coûteux).
-if cfg.use_attention == true then
+if cfg.resnet == true then
   local latent_tokens = math.max(1, (cfg.latent_h or 1) * (cfg.latent_w or 1))
 
   -- Cas 1: option absente -> auto
@@ -550,11 +551,11 @@ if cfg.use_attention == true then
   end
 end
 
--- Alerte UX: use_attention activé mais gate trop basse => aucun bloc ResNet injecté dans le graph.
+-- Alerte UX: ResNet activé mais gate trop basse => aucun bloc résiduel injecté dans le graphe.
 do
   local tokens = math.max(1, (cfg.latent_h or 1) * (cfg.latent_w or 1))
   local max_t = tonumber(cfg.resnet_max_tokens or 0) or 0
-  if cfg.use_attention == true and max_t > 0 and max_t < tokens then
+  if cfg.resnet == true and max_t > 0 and max_t < tokens then
     log(string.format("⚠️  Blocs ResNet activés mais skippés (latent tokens=%d > resnet_max_tokens=%d). Augmente --resnet-max-tokens (ex: %d) ou baisse latent_h/latent_w.",
       tokens, max_t, tokens))
   end
@@ -574,7 +575,7 @@ cfg.weight_decay = opt_num("weight-decay", cfg.weight_decay or 1e-8)
 cfg.decay_strategy = opt_str("decay-strategy", cfg.decay_strategy or "cosine")
 
 cfg.kl_beta = opt_num("kl-beta", cfg.kl_beta or 0.5)
--- Stabilisation VAE (consommée côté C++ par Model::trainStepVAE)
+-- Stabilisation VAE (consommée côté C++ par le hook Model::trainStep)
 -- Par défaut: ramp-up du KL sur ~1/2 époque (dataset ~1967 linkables)
 cfg.kl_warmup_steps = opt_int(
   "kl-warmup-steps",
@@ -589,7 +590,7 @@ if stochastic_opt_absent and (not resume_dir_hint) and ((cfg.kl_beta or 0) > 0) 
   cfg.stochastic_latent = true
 end
 
--- Recon loss (consommé côté C++ par Model::trainStepVAE)
+-- Recon loss (consommé côté C++ par le hook Model::trainStep)
 cfg.recon_loss = opt_str("recon-loss", cfg.recon_loss or "charbonnier")
 
 -- Losses additionnelles (optionnelles)
@@ -674,7 +675,7 @@ cfg.perceptual_prior_momentum = opt_num("perceptual-prior-momentum", cfg.percept
 cfg.perceptual_prior_scale = opt_num("perceptual-prior-scale", cfg.perceptual_prior_scale or 0.05)
 
 -- Paramètres recon loss
-cfg.huber_delta = opt_num("huber-delta", cfg.huber_delta or 1.0)
+cfg.huber_delta = opt_num("huber-delta", cfg.huber_delta or 0.0)
 cfg.charbonnier_eps = opt_num("charbonnier-eps", cfg.charbonnier_eps or 3e-5)
 cfg.nll_sigma = opt_num("nll-sigma", cfg.nll_sigma or 1.0)
 
@@ -693,19 +694,19 @@ cfg.autosave_every_epochs = opt_int(
 
 -- Marqueurs (Wasserstein/Temporal) qui modulent la loss de reconstruction côté C++.
 -- Par défaut: désactivé (0.0) pour conserver un training identique.
-cfg.marker_wass_scale = opt_num("marker-wass-scale", cfg.marker_wass_scale or 0.0)
-cfg.marker_temp_scale = opt_num("marker-temp-scale", cfg.marker_temp_scale or 0.0)
-cfg.marker_warmup_steps = opt_int("marker-warmup-steps", cfg.marker_warmup_steps or 1)
+cfg.marker_wass_scale = opt_num("marker-wass-scale", cfg.marker_wass_scale or 1.0)
+cfg.marker_temp_scale = opt_num("marker-temp-scale", cfg.marker_temp_scale or 1.0)
+cfg.marker_warmup_steps = opt_int("marker-warmup-steps", cfg.marker_warmup_steps or 0)
 cfg.marker_scale_max = opt_num("marker-scale-max", cfg.marker_scale_max or 1.0)
 -- Clamp logvar plus serré => std dans ~[exp(-3), exp(1)] = [0.05, 2.7]
 -- Clamp logvar (log(variance)). Pour un VAE destiné à servir de backbone à un modèle
 -- de diffusion, on évite des std trop grands (latents trop bruités).
 -- std = exp(0.5*logvar) => logvar_max=0 => std_max=1.
 cfg.logvar_clip_min = opt_num("logvar-clip-min", cfg.logvar_clip_min or -6.0)
-cfg.logvar_clip_max = opt_num("logvar-clip-max", cfg.logvar_clip_max or 0.0)
+cfg.logvar_clip_max = opt_num("logvar-clip-max", cfg.logvar_clip_max or 1.0)
 -- Clip grad global (L2) pour éviter un emballement; 1.0 est souvent trop agressif
 -- sur des modèles/étapes avec pertes additionnelles (SSIM/perceptual).
-cfg.grad_clip_norm = opt_num("grad-clip-norm", cfg.grad_clip_norm or 2.0)
+cfg.grad_clip_norm = opt_num("grad-clip-norm", cfg.grad_clip_norm or 1.5)
 cfg.grad_accum_steps = opt_int("grad-accum-steps", cfg.grad_accum_steps or 1)
 
 cfg.max_items = opt_int("max-items", cfg.max_items or 0)

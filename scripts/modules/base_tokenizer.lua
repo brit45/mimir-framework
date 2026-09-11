@@ -6,13 +6,13 @@
 --   - Pour forcer la présence: $MIMIR_REQUIRE_BASE_TOKENIZER=1
 --
 -- Usage (dans un script):
---   local BaseTok = dofile("scripts/modules/base_tokenizer.lua")
+--   local BaseTok = dofile(ROOTWORK.."/scripts/modules/base_tokenizer.lua")
 --   BaseTok.load_base({ max_vocab = 50000, require = true })
 --   cfg.vocab_size = BaseTok.vocab_size()  -- important pour Embedding
 
 ---@class MimirBaseTokenizerModule
 local BaseTok = {}
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function env_str(k, d)
   local v = os.getenv(k)

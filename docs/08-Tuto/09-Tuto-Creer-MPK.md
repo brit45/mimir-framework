@@ -108,7 +108,7 @@ Créez `scripts/local/create_my_stack_mpk.lua` avec le contenu suivant :
 ```lua
 ---@diagnostic disable: undefined-global
 
-local MPK = dofile("scripts/modules/mpk.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
 
 local config = {
   hidden_dim = 32,

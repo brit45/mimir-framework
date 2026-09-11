@@ -6,6 +6,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <stdexcept>
 #include <unordered_map>
@@ -17,11 +18,143 @@ size_t parameterCount(int out_channels, int in_channels, int kernel_size) {
            static_cast<size_t>(kernel_size) * static_cast<size_t>(kernel_size);
 }
 
+struct DistributionMoments {
+    double mean = 0.0;
+    double variance = 0.0;
+    double skew = 0.0;
+};
+
+DistributionMoments distributionMoments(const std::vector<float>& values) {
+    DistributionMoments moments;
+    if (values.empty()) return moments;
+    for (float value : values) moments.mean += value;
+    moments.mean /= static_cast<double>(values.size());
+    double third_moment = 0.0;
+    for (float value : values) {
+        const double delta = static_cast<double>(value) - moments.mean;
+        moments.variance += delta * delta;
+        third_moment += delta * delta * delta;
+    }
+    moments.variance /= static_cast<double>(values.size());
+    const double deviation = std::sqrt(std::max(0.0, moments.variance));
+    if (deviation > 1e-12) {
+        moments.skew = (third_moment / static_cast<double>(values.size())) /
+                       (deviation * deviation * deviation);
+    }
+    return moments;
+}
+
+double adjacentDifference(const std::vector<float>& values) {
+    if (values.size() < 2) return 0.0;
+    double total = 0.0;
+    for (size_t index = 1; index < values.size(); ++index) {
+        total += std::abs(static_cast<double>(values[index]) - values[index - 1]);
+    }
+    return total / static_cast<double>(values.size() - 1);
+}
+
+double correlation(const std::vector<float>& left, const std::vector<float>& right) {
+    const size_t count = std::min(left.size(), right.size());
+    if (count == 0) return 0.0;
+    double left_mean = 0.0;
+    double right_mean = 0.0;
+    for (size_t index = 0; index < count; ++index) {
+        left_mean += left[index];
+        right_mean += right[index];
+    }
+    left_mean /= static_cast<double>(count);
+    right_mean /= static_cast<double>(count);
+    double covariance = 0.0;
+    double left_variance = 0.0;
+    double right_variance = 0.0;
+    for (size_t index = 0; index < count; ++index) {
+        const double left_delta = left[index] - left_mean;
+        const double right_delta = right[index] - right_mean;
+        covariance += left_delta * right_delta;
+        left_variance += left_delta * left_delta;
+        right_variance += right_delta * right_delta;
+    }
+    const double denominator = std::sqrt(left_variance * right_variance);
+    return denominator > 1e-12 ? covariance / denominator : 0.0;
+}
+
+std::unordered_map<std::string, float> diffusionDiagnostics(
+    const std::vector<float>& prediction,
+    const std::vector<float>& target) {
+    std::unordered_map<std::string, float> metrics;
+    const DistributionMoments prediction_moments = distributionMoments(prediction);
+    const DistributionMoments target_moments = distributionMoments(target);
+    const double prediction_variance = std::max(prediction_moments.variance, 1e-12);
+    const double target_variance = std::max(target_moments.variance, 1e-12);
+    const double mean_delta = target_moments.mean - prediction_moments.mean;
+    metrics["kl"] = static_cast<float>(std::max(0.0, 0.5 * (
+        std::log(prediction_variance / target_variance) +
+        (target_variance + mean_delta * mean_delta) / prediction_variance - 1.0)));
+    const double deviation_delta =
+        std::sqrt(target_variance) - std::sqrt(prediction_variance);
+    metrics["wasserstein"] = static_cast<float>(std::sqrt(std::max(
+        0.0, mean_delta * mean_delta + deviation_delta * deviation_delta)));
+    metrics["entropy_diff"] = static_cast<float>(
+        0.5 * std::log(prediction_variance / target_variance));
+    metrics["moment_mismatch"] = static_cast<float>(
+        std::abs(prediction_moments.skew - target_moments.skew));
+    metrics["spatial_coherence"] = static_cast<float>(std::abs(
+        adjacentDifference(prediction) - adjacentDifference(target)));
+    metrics["temporal_consistency"] = static_cast<float>(correlation(prediction, target));
+    return metrics;
+}
+
 } // namespace
 
 LumenLatentDiffusionModel::LumenLatentDiffusionModel() {
     setModelName("LumenLatentDiffusionModel");
     setHasEncoder(false);
+}
+
+std::optional<Model::TrainStepResult> LumenLatentDiffusionModel::trainStep(
+    const TrainStepRequest& request) {
+    if (request.optimizer == nullptr || request.target == nullptr) return std::nullopt;
+
+    std::unordered_map<std::string, std::vector<float>> float_inputs;
+    for (const auto& [name, values] : request.float_inputs) {
+        if (values == nullptr) return std::nullopt;
+        float_inputs.emplace(name, *values);
+    }
+    std::unordered_map<std::string, std::vector<int>> int_inputs;
+    for (const auto& [name, values] : request.int_inputs) {
+        if (values == nullptr) return std::nullopt;
+        int_inputs.emplace(name, *values);
+    }
+    if (float_inputs.empty()) return std::nullopt;
+
+    if (request.mode == TrainStepMode::Optimize) zeroGradients();
+    const std::vector<float>& prediction =
+        forwardPassNamedView(float_inputs, int_inputs, true);
+
+    TrainStepResult result;
+    result.loss = computeLoss(prediction, *request.target, "mse");
+    result.metrics = diffusionDiagnostics(prediction, *request.target);
+    result.metrics["mse"] = result.loss;
+
+    std::vector<float> loss_gradient;
+    computeLossGradientInto(prediction, *request.target, loss_gradient, "mse");
+    if (request.mode == TrainStepMode::Accumulate && request.grad_scale != 1.0f) {
+        for (float& gradient : loss_gradient) gradient *= request.grad_scale;
+    }
+    backwardPass(loss_gradient);
+
+    double gradient_sum = 0.0;
+    for (const Layer& layer : getLayers()) {
+        for (float gradient : layer.grad_weights) {
+            gradient_sum += static_cast<double>(gradient) * gradient;
+            result.grad_max_abs = std::max(result.grad_max_abs, std::abs(gradient));
+        }
+    }
+    result.grad_norm = static_cast<float>(std::sqrt(gradient_sum));
+    if (request.mode == TrainStepMode::Optimize) {
+        optimizerStep(*request.optimizer, request.learning_rate);
+    }
+    return result;
 }
 
 static bool graphProduces(const Model& model, const std::string& tensor_name) {
@@ -56,6 +189,59 @@ static nlohmann::json external_execution_graph(
         {"bindings", bindings},
         {"nodes", std::move(nodes)},
     };
+}
+
+static void adaptLumenConfigToVaeCheckpoint(
+    LumenLatentDiffusionModel::Config& cfg,
+    const nlohmann::json& vae_config
+) {
+    const std::string type = vae_config.value("type", "");
+    if (!type.empty() && type != "vae_conv") {
+        throw std::runtime_error(
+            "LumenLatentDiffusionModel: checkpoint type must be 'vae_conv', got '" +
+            type + "'");
+    }
+
+    auto adapt_int = [&](const char* key, int& value) {
+        if (vae_config.contains(key) && vae_config[key].is_number_integer()) {
+            value = vae_config[key].get<int>();
+        }
+    };
+    auto adapt_bool = [&](const char* key, bool& value) {
+        if (vae_config.contains(key) && vae_config[key].is_boolean()) {
+            value = vae_config[key].get<bool>();
+        }
+    };
+    auto adapt_string = [&](const char* key, std::string& value) {
+        if (vae_config.contains(key) && vae_config[key].is_string()) {
+            value = vae_config[key].get<std::string>();
+        }
+    };
+
+    adapt_int("image_w", cfg.image_w);
+    adapt_int("image_h", cfg.image_h);
+    adapt_int("image_c", cfg.image_c);
+    adapt_int("latent_w", cfg.latent_w);
+    adapt_int("latent_h", cfg.latent_h);
+    adapt_int("latent_c", cfg.latent_c);
+    adapt_int("base_channels", cfg.vae_base_channels);
+    adapt_bool("stochastic_latent", cfg.vae_stochastic_latent);
+    adapt_bool("resnet", cfg.vae_resnet);
+    adapt_bool("attention", cfg.vae_attention);
+    adapt_bool("use_skip_connections", cfg.vae_use_skip_connections);
+    adapt_bool("use_encoder_prior", cfg.vae_use_encoder_prior);
+    adapt_string("enc_norm", cfg.vae_enc_norm);
+    adapt_string("dec_norm", cfg.vae_dec_norm);
+    adapt_string("decoder_upsample", cfg.vae_decoder_upsample);
+    adapt_int("enc_gn_groups", cfg.vae_enc_gn_groups);
+    adapt_int("dec_gn_groups", cfg.vae_dec_gn_groups);
+    adapt_int("attn_heads", cfg.vae_attn_heads);
+    adapt_int("attn_max_tokens", cfg.vae_attn_max_tokens);
+    adapt_int("resnet_max_tokens", cfg.vae_resnet_max_tokens);
+
+    if (cfg.patch_size > 0) {
+        cfg.patch_size = std::gcd(cfg.patch_size, std::gcd(cfg.latent_w, cfg.latent_h));
+    }
 }
 
 bool LumenLatentDiffusionModel::InitVizTips() {
@@ -164,6 +350,31 @@ void LumenLatentDiffusionModel::addDiffusionComparisonVizTips(
 
 void LumenLatentDiffusionModel::buildFromConfig(const Config& cfg) {
     cfg_ = cfg;
+    if (!cfg_.vae_checkpoint.empty()) {
+        Model checkpoint_metadata;
+        Mimir::Serialization::LoadOptions metadata_options;
+        metadata_options.format = std::filesystem::is_directory(cfg_.vae_checkpoint)
+            ? Mimir::Serialization::CheckpointFormat::RawFolder
+            : Mimir::Serialization::CheckpointFormat::SafeTensors;
+        metadata_options.load_optimizer = false;
+        metadata_options.load_tokenizer = false;
+        metadata_options.load_encoder = false;
+        metadata_options.strict_mode = true;
+        metadata_options.validate_checksums = false;
+        metadata_options.apply_model_name = false;
+        metadata_options.apply_model_config = true;
+        metadata_options.metadata_only = true;
+
+        std::string metadata_error;
+        if (!Mimir::Serialization::load_checkpoint(
+                checkpoint_metadata, cfg_.vae_checkpoint, metadata_options,
+                &metadata_error)) {
+            throw std::runtime_error(
+                "LumenLatentDiffusionModel: cannot read VAE configuration: " +
+                metadata_error);
+        }
+        adaptLumenConfigToVaeCheckpoint(cfg_, checkpoint_metadata.modelConfig);
+    }
     if (cfg_.image_w <= 0 || cfg_.image_h <= 0 || cfg_.image_c <= 0) {
         throw std::runtime_error("LumenLatentDiffusionModel: invalid image dimensions");
     }
@@ -194,8 +405,8 @@ void LumenLatentDiffusionModel::buildFromConfig(const Config& cfg) {
         vae_cfg.latent_c = cfg_.latent_c;
         vae_cfg.base_channels = cfg_.vae_base_channels;
         vae_cfg.stochastic_latent = cfg_.vae_stochastic_latent;
-        vae_cfg.use_attention = cfg_.vae_use_resnet;
-        vae_cfg.use_attn = cfg_.vae_use_attn;
+        vae_cfg.resnet = cfg_.vae_resnet;
+        vae_cfg.attention = cfg_.vae_attention;
         vae_cfg.use_skip_connections = cfg_.vae_use_skip_connections;
         vae_cfg.use_encoder_prior = cfg_.vae_use_encoder_prior;
         vae_cfg.enc_norm = cfg_.vae_enc_norm;
@@ -374,15 +585,18 @@ LumenLatentDiffusionModel::TrainStats LumenLatentDiffusionModel::trainDiffusionS
     }
 
     const int context_dim = std::max(8, cfg_.hidden_size);
-    const auto step_stats = trainStepNamed(
-        {{"__input__", noisy_latent},
-         {"timestep", timestepEmbedding(timestep, context_dim)}},
-        {{"text_ids", promptIds(prompt)}},
-        noise,
-        optimizer,
-        learning_rate,
-        0.0f,
-        0);
+    const std::vector<float> timestep_embedding = timestepEmbedding(timestep, context_dim);
+    const std::vector<int> text_ids = promptIds(prompt);
+    TrainStepRequest request;
+    request.float_inputs = {{"__input__", &noisy_latent}, {"timestep", &timestep_embedding}};
+    request.int_inputs = {{"text_ids", &text_ids}};
+    request.target = &noise;
+    request.optimizer = &optimizer;
+    request.learning_rate = learning_rate;
+    const auto step_result = trainStep(request);
+    if (!step_result.has_value()) {
+        throw std::runtime_error("LumenLatentDiffusionModel: training request rejected");
+    }
     if (isVizTapsEnabled()) {
         const int preview_timestep = std::clamp(
             modelConfig.value("preview_timestep", cfg_.preview_timestep),
@@ -434,17 +648,21 @@ LumenLatentDiffusionModel::TrainStats LumenLatentDiffusionModel::trainDiffusionS
     }
 
     TrainStats stats;
-    stats.loss = step_stats.loss;
-    stats.mse = step_stats.mse;
-    stats.kl = step_stats.kl_divergence;
-    stats.kl_beta_effective = step_stats.kl_beta_effective;
-    stats.grad_norm = step_stats.grad_norm;
-    stats.grad_max_abs = step_stats.grad_max_abs;
-    stats.wasserstein = step_stats.wasserstein;
-    stats.entropy_diff = step_stats.entropy_diff;
-    stats.moment_mismatch = step_stats.moment_mismatch;
-    stats.spatial_coherence = step_stats.spatial_coherence;
-    stats.temporal_consistency = step_stats.temporal_consistency;
+    const auto metric = [&](const char* name) {
+        const auto it = step_result->metrics.find(name);
+        return it != step_result->metrics.end() ? it->second : 0.0f;
+    };
+    stats.loss = step_result->loss;
+    stats.mse = metric("mse");
+    stats.kl = metric("kl");
+    stats.kl_beta_effective = 0.0f;
+    stats.grad_norm = step_result->grad_norm;
+    stats.grad_max_abs = step_result->grad_max_abs;
+    stats.wasserstein = metric("wasserstein");
+    stats.entropy_diff = metric("entropy_diff");
+    stats.moment_mismatch = metric("moment_mismatch");
+    stats.spatial_coherence = metric("spatial_coherence");
+    stats.temporal_consistency = metric("temporal_consistency");
     stats.timestep = timestep;
     return stats;
 }
@@ -540,13 +758,13 @@ LumenLatentDiffusionModel::TrainStats LumenLatentDiffusionModel::validateDiffusi
     TrainStats stats;
     stats.loss = static_cast<float>(squared_error / static_cast<double>(noise.size()));
     stats.mse = stats.loss;
-    const StepStats diagnostics = computeStepDiagnostics(prediction, noise);
-    stats.kl = diagnostics.kl_divergence;
-    stats.wasserstein = diagnostics.wasserstein;
-    stats.entropy_diff = diagnostics.entropy_diff;
-    stats.moment_mismatch = diagnostics.moment_mismatch;
-    stats.spatial_coherence = diagnostics.spatial_coherence;
-    stats.temporal_consistency = diagnostics.temporal_consistency;
+    const auto diagnostics = diffusionDiagnostics(prediction, noise);
+    stats.kl = diagnostics.at("kl");
+    stats.wasserstein = diagnostics.at("wasserstein");
+    stats.entropy_diff = diagnostics.at("entropy_diff");
+    stats.moment_mismatch = diagnostics.at("moment_mismatch");
+    stats.spatial_coherence = diagnostics.at("spatial_coherence");
+    stats.temporal_consistency = diagnostics.at("temporal_consistency");
     stats.reconstruction_mae = static_cast<float>(
         reconstruction_abs_error / static_cast<double>(reconstructed.size()));
     stats.reconstruction_mse = static_cast<float>(
@@ -585,6 +803,7 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["latent_h"] = latent_h;
     model.modelConfig["latent_c"] = latent_c;
     model.modelConfig["architecture"] = "dit_latent_vae_conv";
+    model.modelConfig["architecture_version"] = 2;
     model.modelConfig["patch_size"] = patch_size;
     model.modelConfig["patch_tokens"] = patch_tokens;
     model.modelConfig["hidden_size"] = context_dim;
@@ -672,19 +891,20 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
     std::string context = "lumen/text/context0";
     for (int index = 0; index < std::max(1, cfg.text_layers); ++index) {
         const std::string prefix = "lumen/text/block" + std::to_string(index + 1);
-        model.push(prefix + "/norm", "LayerNorm", static_cast<size_t>(2 * context_dim));
-        if (auto* layer = model.getLayerByName(prefix + "/norm")) {
+        model.push(prefix + "/norm1", "LayerNorm", static_cast<size_t>(2 * context_dim));
+        if (auto* layer = model.getLayerByName(prefix + "/norm1")) {
             layer->inputs = {context};
-            layer->output = prefix + "/norm_out";
+            layer->output = prefix + "/norm1_out";
             layer->in_features = context_dim;
             layer->affine = true;
             layer->use_bias = true;
+            layer->eps = 1e-5f;
         }
         model.push(prefix + "/attention", "SelfAttention",
                    static_cast<size_t>(4) * static_cast<size_t>(context_dim) *
                        static_cast<size_t>(context_dim));
         if (auto* layer = model.getLayerByName(prefix + "/attention")) {
-            layer->inputs = {prefix + "/norm_out"};
+            layer->inputs = {prefix + "/norm1_out"};
             layer->output = prefix + "/attention_out";
             layer->seq_len = text_len;
             layer->embed_dim = context_dim;
@@ -694,10 +914,62 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
         model.push(prefix + "/add", "Add", 0);
         if (auto* layer = model.getLayerByName(prefix + "/add")) {
             layer->inputs = {context, prefix + "/attention_out"};
+            layer->output = prefix + "/res1";
+        }
+        model.push(prefix + "/norm2", "LayerNorm", static_cast<size_t>(2 * context_dim));
+        if (auto* layer = model.getLayerByName(prefix + "/norm2")) {
+            layer->inputs = {prefix + "/res1"};
+            layer->output = prefix + "/norm2_out";
+            layer->in_features = context_dim;
+            layer->affine = true;
+            layer->use_bias = true;
+            layer->eps = 1e-5f;
+        }
+        model.push(prefix + "/mlp_fc1", "Linear",
+                   static_cast<size_t>(context_dim) * static_cast<size_t>(mlp_hidden) +
+                       static_cast<size_t>(mlp_hidden));
+        if (auto* layer = model.getLayerByName(prefix + "/mlp_fc1")) {
+            layer->inputs = {prefix + "/norm2_out"};
+            layer->output = prefix + "/mlp_hidden";
+            layer->seq_len = text_len;
+            layer->in_features = context_dim;
+            layer->out_features = mlp_hidden;
+            layer->use_bias = true;
+        }
+        model.push(prefix + "/mlp_gelu", "GELU", 0);
+        if (auto* layer = model.getLayerByName(prefix + "/mlp_gelu")) {
+            layer->inputs = {prefix + "/mlp_hidden"};
+            layer->output = prefix + "/mlp_activated";
+        }
+        model.push(prefix + "/mlp_fc2", "Linear",
+                   static_cast<size_t>(mlp_hidden) * static_cast<size_t>(context_dim) +
+                       static_cast<size_t>(context_dim));
+        if (auto* layer = model.getLayerByName(prefix + "/mlp_fc2")) {
+            layer->inputs = {prefix + "/mlp_activated"};
+            layer->output = prefix + "/mlp_out";
+            layer->seq_len = text_len;
+            layer->in_features = mlp_hidden;
+            layer->out_features = context_dim;
+            layer->use_bias = true;
+        }
+        model.push(prefix + "/add_mlp", "Add", 0);
+        if (auto* layer = model.getLayerByName(prefix + "/add_mlp")) {
+            layer->inputs = {prefix + "/res1", prefix + "/mlp_out"};
             layer->output = prefix + "/out";
         }
         context = prefix + "/out";
     }
+    model.push("lumen/text/final_norm", "LayerNorm",
+               static_cast<size_t>(2 * context_dim));
+    if (auto* layer = model.getLayerByName("lumen/text/final_norm")) {
+        layer->inputs = {context};
+        layer->output = "lumen/text/context";
+        layer->in_features = context_dim;
+        layer->affine = true;
+        layer->use_bias = true;
+        layer->eps = 1e-5f;
+    }
+    context = "lumen/text/context";
 
     model.push("lumen/time/input", "Identity", 0);
     if (auto* layer = model.getLayerByName("lumen/time/input")) {
@@ -721,7 +993,7 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
         layer->inputs = {"__input__"};
         layer->output = "lumen/dit/latent_chw";
     }
-        addConv("lumen/dit/patch_embed", "lumen/dit/latent_chw", "lumen/dit/patch_chw",
+    addConv("lumen/dit/patch_embed", "lumen/dit/latent_chw", "lumen/dit/patch_chw",
             latent_c, context_dim, latent_h, latent_w, patch_size, patch_size, 0);
     model.push("lumen/dit/to_tokens", "Permute", 0);
     if (auto* layer = model.getLayerByName("lumen/dit/to_tokens")) {

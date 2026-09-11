@@ -191,7 +191,7 @@ par `Mimir.Model.get_layers()`.
 Pour générer un package dans un outil ou un script :
 
 ```lua
-local MPK = dofile("scripts/modules/mpk.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
 
 local pkg, build_err = MPK.build({
   name = "tiny_mlp",

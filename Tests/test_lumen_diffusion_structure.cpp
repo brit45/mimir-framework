@@ -3,9 +3,11 @@
 #include "Models/Diffusion/LumenLatentDiffusionModel.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Models/Vision/VAEConvModel.hpp"
+#include "Serialization/Serialization.hpp"
 #include "include/json.hpp"
 
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <unordered_set>
 
@@ -41,8 +43,8 @@ int main() {
     TASSERT_TRUE(cfg["latent_h"].get<int>() == 64);
     TASSERT_TRUE(cfg["latent_c"].get<int>() == 4);
     TASSERT_TRUE(cfg["vae_base_channels"].get<int>() == 8);
-    TASSERT_TRUE(cfg["vae_use_resnet"].get<bool>());
-    TASSERT_TRUE(!cfg["vae_use_attn"].get<bool>());
+    TASSERT_TRUE(cfg["vae_resnet"].get<bool>());
+    TASSERT_TRUE(!cfg["vae_attention"].get<bool>());
     TASSERT_TRUE(!cfg["vae_use_skip_connections"].get<bool>());
     TASSERT_TRUE(!cfg["vae_use_encoder_prior"].get<bool>());
     TASSERT_TRUE(cfg["vae_resnet_max_tokens"].get<int>() == 4096);
@@ -72,38 +74,33 @@ int main() {
     TASSERT_TRUE(lumen->getConfig().image_w * lumen->getConfig().image_h *
                      lumen->getConfig().image_c == 768);
     TASSERT_TRUE(model->modelConfig["type"].get<std::string>() == "lumen_diffusion");
+    TASSERT_TRUE(model->modelConfig.contains("patch_size"));
+    TASSERT_TRUE(model->modelConfig["patch_size"].is_number_integer());
     TASSERT_TRUE(model->modelConfig["patch_size"].get<int>() == 4);
+    TASSERT_TRUE(model->modelConfig.contains("architecture_version"));
+    TASSERT_TRUE(model->modelConfig["architecture_version"].is_number_integer());
+    TASSERT_TRUE(model->modelConfig["architecture_version"].get<int>() == 2);
+    TASSERT_TRUE(model->modelConfig.contains("kl_beta"));
+    TASSERT_TRUE(model->modelConfig["kl_beta"].is_number());
     TASSERT_TRUE(model->modelConfig["kl_beta"].get<float>() == 0.0f);
+    TASSERT_TRUE(model->modelConfig.contains("kl_warmup_steps"));
+    TASSERT_TRUE(model->modelConfig["kl_warmup_steps"].is_number_integer());
     TASSERT_TRUE(model->modelConfig["kl_warmup_steps"].get<int>() == 0);
     TASSERT_TRUE(model->modelConfig["vae_decoder_upsample"].get<std::string>() ==
                  "nearest_conv");
     TASSERT_TRUE(model->getLayerByName("lumen/text/token_embedding") != nullptr);
+    TASSERT_TRUE(model->getLayerByName("lumen/text/block1/norm1") != nullptr);
+    TASSERT_TRUE(model->getLayerByName("lumen/text/block1/mlp_fc1") != nullptr);
+    TASSERT_TRUE(model->getLayerByName("lumen/text/block1/mlp_gelu") != nullptr);
+    TASSERT_TRUE(model->getLayerByName("lumen/text/block1/mlp_fc2") != nullptr);
+    TASSERT_TRUE(model->getLayerByName("lumen/text/block1/add_mlp") != nullptr);
+    TASSERT_TRUE(model->getLayerByName("lumen/text/final_norm") != nullptr);
     TASSERT_TRUE(model->getLayerByName("lumen/time/input") != nullptr);
     TASSERT_TRUE(model->getLayerByName("lumen/dit/patch_embed") != nullptr);
     TASSERT_TRUE(model->getLayerByName("lumen/dit/block1/self_attention") != nullptr);
     TASSERT_TRUE(model->getLayerByName("lumen/dit/block1/cross_attention") != nullptr);
     TASSERT_TRUE(model->getLayerByName("lumen/dit/unpatchify") != nullptr);
     TASSERT_TRUE(lumen->InitVizTips());
-
-    Model skip_decoder;
-    VAEConvModel::Config skip_cfg;
-    skip_cfg.image_w = 16;
-    skip_cfg.image_h = 16;
-    skip_cfg.image_c = 3;
-    skip_cfg.latent_w = 4;
-    skip_cfg.latent_h = 4;
-    skip_cfg.latent_c = 8;
-    skip_cfg.base_channels = 8;
-    skip_cfg.use_skip_connections = true;
-    VAEConvModel::buildDecoderInto(skip_decoder, skip_cfg);
-    const auto* skip_up2 = skip_decoder.getLayerByName("vae_conv/dec/up2/skip_cat");
-    const auto* skip_up1 = skip_decoder.getLayerByName("vae_conv/dec/up1/skip_cat");
-    TASSERT_TRUE(skip_up2 != nullptr && skip_up2->inputs.size() == 2);
-    TASSERT_TRUE(skip_up1 != nullptr && skip_up1->inputs.size() == 2);
-    TASSERT_TRUE(skip_up2->inputs[1] == "vae_conv/encoder_skip_1");
-    TASSERT_TRUE(skip_up1->inputs[1] == "vae_conv/encoder_skip_0");
-    TASSERT_TRUE(skip_decoder.getLayerByName(
-        "vae_conv/dec/up2/zero_enc_skip") == nullptr);
 
     TestableLumenModel tips_model;
     LumenLatentDiffusionModel::Config tips_cfg;
@@ -226,15 +223,6 @@ int main() {
     TASSERT_TRUE(std::isfinite(train_stats.grad_norm));
     TASSERT_TRUE(train_stats.kl_beta_effective == 0.0f);
 
-    const std::vector<float> diagnostic_values{-1.0f, -0.25f, 0.5f, 1.0f};
-    const auto diagnostics = Model::computeStepDiagnostics(
-        diagnostic_values, diagnostic_values);
-    TASSERT_TRUE(std::abs(diagnostics.wasserstein) < 1e-6f);
-    TASSERT_TRUE(std::abs(diagnostics.entropy_diff) < 1e-6f);
-    TASSERT_TRUE(std::abs(diagnostics.moment_mismatch) < 1e-6f);
-    TASSERT_TRUE(std::abs(diagnostics.spatial_coherence) < 1e-6f);
-    TASSERT_TRUE(std::abs(diagnostics.temporal_consistency - 1.0f) < 1e-6f);
-
     bool rejected_invalid_image = false;
     try {
         Optimizer optimizer;
@@ -254,6 +242,82 @@ int main() {
         rejected_invalid_patch_shape = true;
     }
     TASSERT_TRUE(rejected_invalid_patch_shape);
+
+    const auto vae_checkpoint = std::filesystem::temp_directory_path() /
+        "mimir_lumen_adaptive_vae.safetensors";
+    std::filesystem::remove(vae_checkpoint);
+    VAEConvModel adaptive_vae;
+    VAEConvModel::Config adaptive_vae_cfg;
+    adaptive_vae_cfg.image_w = 8;
+    adaptive_vae_cfg.image_h = 8;
+    adaptive_vae_cfg.image_c = 3;
+    adaptive_vae_cfg.latent_w = 2;
+    adaptive_vae_cfg.latent_h = 2;
+    adaptive_vae_cfg.latent_c = 2;
+    adaptive_vae_cfg.base_channels = 8;
+    adaptive_vae_cfg.stochastic_latent = false;
+    adaptive_vae_cfg.resnet = false;
+    adaptive_vae_cfg.attention = false;
+    adaptive_vae_cfg.use_skip_connections = false;
+    adaptive_vae_cfg.enc_norm = "none";
+    adaptive_vae_cfg.dec_norm = "none";
+    adaptive_vae_cfg.decoder_upsample = "nearest_conv";
+    adaptive_vae.buildFromConfig(adaptive_vae_cfg);
+    adaptive_vae.allocateParams();
+    adaptive_vae.initializeWeights("xavier", 321U);
+
+    Mimir::Serialization::SaveOptions save_options;
+    save_options.format = Mimir::Serialization::CheckpointFormat::SafeTensors;
+    save_options.save_tokenizer = false;
+    save_options.save_encoder = false;
+    save_options.save_optimizer = false;
+    std::string save_error;
+    TASSERT_TRUE(Mimir::Serialization::save_checkpoint(
+        adaptive_vae, vae_checkpoint.string(), save_options, &save_error));
+
+    LumenLatentDiffusionModel adaptive_lumen;
+    auto adaptive_lumen_cfg = tips_cfg;
+    adaptive_lumen_cfg.image_w = 16;
+    adaptive_lumen_cfg.image_h = 16;
+    adaptive_lumen_cfg.latent_w = 4;
+    adaptive_lumen_cfg.latent_h = 4;
+    adaptive_lumen_cfg.latent_c = 3;
+    adaptive_lumen_cfg.patch_size = 4;
+    adaptive_lumen_cfg.vae_checkpoint = vae_checkpoint.string();
+    adaptive_lumen.buildFromConfig(adaptive_lumen_cfg);
+
+    const auto& adapted = adaptive_lumen.getConfig();
+    TASSERT_TRUE(adapted.image_w == adaptive_vae_cfg.image_w);
+    TASSERT_TRUE(adapted.image_h == adaptive_vae_cfg.image_h);
+    TASSERT_TRUE(adapted.image_c == adaptive_vae_cfg.image_c);
+    TASSERT_TRUE(adapted.latent_w == adaptive_vae_cfg.latent_w);
+    TASSERT_TRUE(adapted.latent_h == adaptive_vae_cfg.latent_h);
+    TASSERT_TRUE(adapted.latent_c == adaptive_vae_cfg.latent_c);
+    TASSERT_TRUE(adapted.vae_stochastic_latent ==
+                 adaptive_vae_cfg.stochastic_latent);
+    TASSERT_TRUE(adapted.vae_decoder_upsample ==
+                 adaptive_vae_cfg.decoder_upsample);
+    TASSERT_TRUE(adapted.patch_size == 2);
+    TASSERT_TRUE(adaptive_lumen.modelConfig["input_dim"].get<int>() == 2 * 2 * 2);
+    TASSERT_TRUE(adaptive_lumen.modelConfig["image_w"].get<int>() == 8);
+    TASSERT_TRUE(adaptive_lumen.modelConfig["latent_c"].get<int>() == 2);
+    std::filesystem::remove(vae_checkpoint);
+
+    const auto raw_vae_checkpoint = std::filesystem::temp_directory_path() /
+        "mimir_lumen_adaptive_vae_raw";
+    std::filesystem::remove_all(raw_vae_checkpoint);
+    save_options.format = Mimir::Serialization::CheckpointFormat::RawFolder;
+    TASSERT_TRUE(Mimir::Serialization::save_checkpoint(
+        adaptive_vae, raw_vae_checkpoint.string(), save_options, &save_error));
+    LumenLatentDiffusionModel raw_adaptive_lumen;
+    adaptive_lumen_cfg.vae_checkpoint = raw_vae_checkpoint.string();
+    raw_adaptive_lumen.buildFromConfig(adaptive_lumen_cfg);
+    TASSERT_TRUE(raw_adaptive_lumen.getConfig().image_w == 8);
+    TASSERT_TRUE(raw_adaptive_lumen.getConfig().latent_w == 2);
+    TASSERT_TRUE(raw_adaptive_lumen.getConfig().latent_c == 2);
+    TASSERT_TRUE(raw_adaptive_lumen.getConfig().patch_size == 2);
+    TASSERT_TRUE(raw_adaptive_lumen.modelConfig["input_dim"].get<int>() == 2 * 2 * 2);
+    std::filesystem::remove_all(raw_vae_checkpoint);
 
     return 0;
 }

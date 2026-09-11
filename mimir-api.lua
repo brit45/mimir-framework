@@ -74,6 +74,7 @@ Mimir = {}
 ---| "vgg16_feat"
 ---| "vgg19"
 ---| "diffusion"
+---| "lumen_diffusion"
 ---| "gan_latent"
 ---| "cond_diffusion"
 ---| "sd3_5"
@@ -235,8 +236,8 @@ Mimir = {}
 ---@field latent_c? int
 ---@field base_channels? int
 ---@field stochastic_latent? boolean
----@field use_attention? boolean
----@field use_attn? boolean
+---@field resnet? boolean
+---@field attention? boolean
 ---@field enc_norm? string
 ---@field enc_gn_groups? int
 ---@field dec_norm? string
@@ -306,6 +307,29 @@ Mimir = {}
 ---@field image_c? int
 ---@field time_dim? int
 ---@field hidden_dim? int
+
+---@class LumenDiffusionConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field latent_w? int
+---@field latent_h? int
+---@field latent_c? int
+---@field vae_checkpoint? string
+---@field vae_scale? float
+---@field vae_shift? float
+---@field patch_size? int
+---@field hidden_size? int
+---@field depth? int
+---@field mlp_ratio? float
+---@field vocab_size? int
+---@field text_seq_len? int
+---@field text_layers? int
+---@field num_heads? int
+---@field diffusion_steps? int
+---@field beta_start? float
+---@field beta_end? float
+---@field preview_timestep? int
 
 ---@class CondDiffusionConfig: ModelConfig
 ---@field prompt_dim? int
@@ -477,6 +501,40 @@ Mimir = {}
 ---@field grad_max? float
 ---@field kl_beta_effective? float
 
+---@class LumenVaeCalibrationStats
+---@field items integer
+---@field values integer
+---@field shift float
+---@field scale float
+
+---@class LumenStepStats
+---@field loss float
+---@field mse float
+---@field kl float
+---@field kl_beta_effective float
+---@field grad_norm float
+---@field grad_max_abs float
+---@field reconstruction_mae float
+---@field reconstruction_mse float
+---@field wasserstein float
+---@field entropy_diff float
+---@field moment_mismatch float
+---@field spatial_coherence float
+---@field temporal_consistency float
+---@field timestep integer
+---@field stop_requested boolean
+---@field learning_rate? float @LR réellement appliqué après contrôle live Viz
+
+---@class LumenStepMonitorOptions
+---@field epoch? integer
+---@field total_epochs? integer
+---@field batch? integer
+---@field total_batches? integer
+---@field step? integer
+---@field completed_steps? integer
+---@field loss_sum_before? float
+---@field lr_warmup_steps? integer
+
 --=============================================================================
 -- Module: Mimir.Model
 --=============================================================================
@@ -506,6 +564,7 @@ Mimir.Model = {}
 ---@overload fun(model_type: "vgg19", config?: VGG19Config): (boolean, string?)
 ---@overload fun(model_type: "vgg16_feat", config?: VGG16FeatConfig): (boolean, string?)
 ---@overload fun(model_type: "diffusion", config?: DiffusionConfig): (boolean, string?)
+---@overload fun(model_type: "lumen_diffusion", config?: LumenDiffusionConfig): (boolean, string?)
 ---@overload fun(model_type: "cond_diffusion", config?: CondDiffusionConfig): (boolean, string?)
 ---@overload fun(model_type: "gan_latent", config?: GanLatentConfig): (boolean, string?)
 ---@overload fun(model_type: "sd3_5", config?: SD35Config): (boolean, string?)
@@ -519,6 +578,12 @@ Mimir.Model = {}
 ---@return boolean ok
 ---@return string? err
 function Mimir.Model.create(model_type, config) end
+
+---Retourner la configuration effective du modèle construit.
+---Elle peut différer de la requête lorsque le modèle s'adapte à un checkpoint externe.
+---@return ModelConfig|table|nil config
+---@return string? err
+function Mimir.Model.get_config() end
 
 ---Créer un modèle vide (hors registre) pour importer une architecture nodale custom.
 ---Utilisé pour les MPK standalone quand le type n'existe pas dans le registre.
@@ -669,6 +734,41 @@ function Mimir.Model.zero_grads() end
 ---@return float[]|nil @Vecteur de tous les gradients
 ---@return string? err
 function Mimir.Model.get_gradients() end
+
+---Commencer une calibration globale des latents du VAE associé à Lumen.
+---@return boolean ok
+---@return string? err
+function Mimir.Model.lumen_begin_vae_calibration() end
+
+---Ajouter une image RGB u8 à la calibration VAE courante.
+---@param image integer[]
+---@return LumenVaeCalibrationStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_add_vae_calibration_image(image) end
+
+---Finaliser et persister la calibration VAE courante.
+---@return LumenVaeCalibrationStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_finish_vae_calibration() end
+
+---Effectuer un step de diffusion Lumen et publier ses métriques vers Htop/Viz.
+---@param image integer[]
+---@param prompt string
+---@param seed integer
+---@param learning_rate float
+---@param optimizer? string @"sgd"|"adam"|"adamw"
+---@param monitor? LumenStepMonitorOptions
+---@return LumenStepStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_train_step(image, prompt, seed, learning_rate, optimizer, monitor) end
+
+---Effectuer une validation Lumen et publier ses previews vers Viz.
+---@param image integer[]
+---@param prompt string
+---@param seed integer
+---@return LumenStepStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_validate_step(image, prompt, seed) end
 
 ---Step optimiseur (si exposé). Le LR peut être transmis.
 ---@param learning_rate number
@@ -1240,8 +1340,10 @@ function Mimir.Tokenizer.extract_keywords(text, top_k) end
 ---@field audio_file? string Chemin du fichier audio
 ---@field video_file? string Chemin du fichier vidéo
 ---@field text? string Contenu texte (si chargé)
+---@field image? integer[] Pixels RGB u8 redimensionnés, si demandés et décodables
 ---@field width? int Largeur de l'image
 ---@field height? int Hauteur de l'image
+---@field channels? int Nombre de canaux de l'image retournée
 ---@field size? int Taille du fichier en bytes
 
 ---@class TextAnalysisResult
@@ -1275,11 +1377,18 @@ Mimir.Dataset = {}
 function Mimir.Dataset.load(dir, target_w, target_h, min_modalities, use_cache, cache_path, max_ram_mb, lazy_loading) end
 
 ---Récupérer un item du dataset par son index (1-based).
----Retourne une table avec les chemins et métadonnées de l'item.
+---Charge les pixels RGB par défaut; passer false pour ne lire que texte et métadonnées.
 ---@param index integer Index de l'item (commence à 1)
+---@param load_image? boolean Charge et retourne le tableau image (défaut: true)
 ---@return DatasetItem|nil item Item du dataset
 ---@return string? err Message d'erreur si échec
-function Mimir.Dataset.get(index) end
+function Mimir.Dataset.get(index, load_image) end
+
+---Libérer les données lazy actuellement chargées pour un item.
+---@param index integer Index de l'item (commence à 1)
+---@return boolean ok
+---@return string? err
+function Mimir.Dataset.release(index) end
 
 ---Préparer les séquences (stockées dans le contexte interne).
 ---La séquence length est utilisée ensuite par Mimir.Model.train().
@@ -1426,6 +1535,7 @@ Mimir.MemoryGuard = {}
 
 ---Définir la limite de mémoire RAM stricte.
 ---Accepte des valeurs en bytes (grands nombres) ou en GB (si <= 1000).
+---Active automatiquement l'éviction LRU avec spill disque.
 ---@param limit number @Limite en bytes ou en GB (si valeur <= 1000)
 ---@return boolean ok @true si succès
 ---
@@ -1664,6 +1774,9 @@ function Mimir.Viz.update_metrics(metrics) end
 ---@return string? err
 function Mimir.Viz.set_validation(state) end
 
+---@return boolean enabled
+function Mimir.Viz.validation_enabled() end
+
 ---Ajouter un point à l'historique de loss (pour graphe).
 ---@param loss number @Valeur de loss
 function Mimir.Viz.add_loss_point(loss) end
@@ -1871,7 +1984,7 @@ function write_json(path, obj) end
 function print(...) end
 
 --=============================================================================
--- Modules Lua (`dofile("scripts/modules/...")`)
+-- Modules Lua (`dofile(ROOTWORK.."/scripts/modules/...")`)
 --=============================================================================
 -- Ces types décrivent des helpers écrits en Lua. Ils ne sont pas membres de
 -- `Mimir` et leur chargement reste explicite.

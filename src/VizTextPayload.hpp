@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -25,6 +26,8 @@ inline std::string escapeTokenPiece(const std::string& s) {
     out.reserve(s.size());
     for (char c : s) {
         switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
@@ -34,13 +37,13 @@ inline std::string escapeTokenPiece(const std::string& s) {
     return out;
 }
 
-inline std::string formatTokens(const Tokenizer* tok, const std::vector<int>& token_ids, size_t max_tokens = 24) {
+inline std::string formatTokens(const Tokenizer* tok, const std::vector<int>& token_ids) {
     if (!tok || token_ids.empty()) return std::string();
 
     std::ostringstream oss;
-    const size_t n = std::min(max_tokens, token_ids.size());
-    for (size_t i = 0; i < n; ++i) {
-        if (i > 0) oss << " | ";
+    oss << "count=" << token_ids.size();
+    for (size_t i = 0; i < token_ids.size(); ++i) {
+        oss << "\n[" << i << "] ";
         const int tid = token_ids[i];
         std::string piece;
         try {
@@ -49,19 +52,12 @@ inline std::string formatTokens(const Tokenizer* tok, const std::vector<int>& to
             piece.clear();
         }
         piece = escapeTokenPiece(piece);
-        if (piece.size() > 20) piece = piece.substr(0, 17) + "...";
-        oss << tid;
-        if (!piece.empty()) oss << ":" << piece;
-    }
-    if (token_ids.size() > max_tokens) {
-        oss << " | ...("
-            << (token_ids.size() - max_tokens)
-            << " more)";
+        oss << "id=" << tid << " text=\"" << piece << "\"";
     }
     return oss.str();
 }
 
-inline std::string formatEncoding(const ConditioningEncoder* enc, const std::vector<int>& token_ids, size_t max_head = 8) {
+inline std::string formatEncoding(const ConditioningEncoder* enc, const std::vector<int>& token_ids) {
     if (!enc || token_ids.empty()) return std::string();
 
     try {
@@ -70,35 +66,62 @@ inline std::string formatEncoding(const ConditioningEncoder* enc, const std::vec
         if (values.empty()) return "dim=0";
 
         double sum = 0.0;
-        double n2 = 0.0;
-        float vmin = values[0];
-        float vmax = values[0];
+        double squared_sum = 0.0;
+        double absolute_sum = 0.0;
+        float vmin = std::numeric_limits<float>::infinity();
+        float vmax = -std::numeric_limits<float>::infinity();
+        size_t finite_count = 0;
+        size_t zero_count = 0;
+        size_t nan_count = 0;
+        size_t positive_inf_count = 0;
+        size_t negative_inf_count = 0;
         for (float x : values) {
+            if (std::isnan(x)) {
+                ++nan_count;
+                continue;
+            }
+            if (std::isinf(x)) {
+                if (x > 0.0f) ++positive_inf_count;
+                else ++negative_inf_count;
+                continue;
+            }
+            ++finite_count;
+            if (x == 0.0f) ++zero_count;
             sum += static_cast<double>(x);
-            n2 += static_cast<double>(x) * static_cast<double>(x);
+            squared_sum += static_cast<double>(x) * static_cast<double>(x);
+            absolute_sum += std::fabs(static_cast<double>(x));
             if (x < vmin) vmin = x;
             if (x > vmax) vmax = x;
         }
 
-        const double mean = sum / static_cast<double>(std::max<size_t>(1, values.size()));
-        const double l2 = std::sqrt(std::max(0.0, n2));
+        const double denominator = static_cast<double>(std::max<size_t>(1, finite_count));
+        const double mean = sum / denominator;
+        const double variance = std::max(0.0, squared_sum / denominator - mean * mean);
+        const double standard_deviation = std::sqrt(variance);
+        const double l2 = std::sqrt(std::max(0.0, squared_sum));
+        const double rms = std::sqrt(std::max(0.0, squared_sum / denominator));
 
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(4);
+        oss << std::fixed << std::setprecision(8);
         oss << "dim=" << values.size()
+            << " tokens=" << token_ids.size()
+            << " finite=" << finite_count
+            << " zeros=" << zero_count
+            << " nan=" << nan_count
+            << " +inf=" << positive_inf_count
+            << " -inf=" << negative_inf_count
             << " mean=" << mean
-            << " min=" << vmin
-            << " max=" << vmax
+            << " std=" << standard_deviation
+            << " min=" << (finite_count > 0 ? vmin : 0.0f)
+            << " max=" << (finite_count > 0 ? vmax : 0.0f)
+            << " l1=" << absolute_sum
             << " l2=" << l2
-            << " head=[";
+            << " rms=" << rms
+            << "\nvalues:";
 
-        const size_t hn = std::min(max_head, values.size());
-        for (size_t i = 0; i < hn; ++i) {
-            if (i > 0) oss << ",";
-            oss << values[i];
+        for (size_t i = 0; i < values.size(); ++i) {
+            oss << "\n[" << i << "]=" << values[i];
         }
-        if (values.size() > max_head) oss << ",...";
-        oss << "]";
         return oss.str();
     } catch (...) {
         return "encode_error";

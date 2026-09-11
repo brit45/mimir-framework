@@ -1,11 +1,11 @@
 -- Simple checkpoint resume helper (raw_folder + epoch_* layout)
 -- Usage:
---   local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
+--   local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
 --   local dir = Ckpt.resolve_dir("checkpoint/MyModel")
 
 ---@class MimirCheckpointResumeModule
 local M = {}
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function file_exists(path)
   return FS.file_exists(path)

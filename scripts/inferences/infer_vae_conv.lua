@@ -11,9 +11,9 @@
 
 ---@diagnostic disable: undefined-global, undefined-field
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
-local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
+local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
 local opts = Args.parse(arg) or {}
 
 local function logx(message)

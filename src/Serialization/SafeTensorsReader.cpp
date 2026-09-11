@@ -536,6 +536,10 @@ bool SafeTensorsReader::apply_tensors_to_model(
                 }
             }
         }
+
+        if (options.metadata_only) {
+            return true;
+        }
         
         // Load layer weight blocks
         for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
@@ -786,12 +790,24 @@ bool SafeTensorsReader::apply_tensors_to_model(
                         std::string s(reinterpret_cast<const char*>(buf.data()), buf.size());
                         json j = json::parse(s);
                         Optimizer opt;
-                        opt.type = static_cast<OptimizerType>(j.value("type", static_cast<int>(opt.type)));
+                        const int type = j.value("type", static_cast<int>(opt.type));
+                        if (type < static_cast<int>(OptimizerType::SGD)
+                            || type > static_cast<int>(OptimizerType::LAMB)) {
+                            throw std::runtime_error("invalid optimizer type");
+                        }
+                        opt.type = static_cast<OptimizerType>(type);
                         opt.step = static_cast<size_t>(j.value("step", 0));
                         opt.beta1 = j.value("beta1", opt.beta1);
                         opt.beta2 = j.value("beta2", opt.beta2);
                         opt.eps = j.value("eps", opt.eps);
                         opt.weight_decay = j.value("weight_decay", opt.weight_decay);
+                        opt.rmsprop_alpha = j.value("rmsprop_alpha", opt.rmsprop_alpha);
+                        opt.adafactor_clip_threshold = j.value("adafactor_clip_threshold", opt.adafactor_clip_threshold);
+                        opt.adafactor_decay_rate = j.value("adafactor_decay_rate", opt.adafactor_decay_rate);
+                        opt.adafactor_eps2 = j.value("adafactor_eps2", opt.adafactor_eps2);
+                        opt.adafactor_beta1 = j.value("adafactor_beta1", opt.adafactor_beta1);
+                        opt.adafactor_scale_parameter = j.value("adafactor_scale_parameter", opt.adafactor_scale_parameter);
+                        opt.adafactor_relative_step = j.value("adafactor_relative_step", opt.adafactor_relative_step);
                         opt.decay_strategy = static_cast<LRDecayStrategy>(j.value("decay_strategy", static_cast<int>(opt.decay_strategy)));
                         opt.initial_lr = j.value("initial_lr", opt.initial_lr);
                         opt.min_lr = j.value("min_lr", opt.min_lr);

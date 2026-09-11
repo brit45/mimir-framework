@@ -363,6 +363,7 @@ int LuaScripting::lua_getDataset(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
     int index = luaL_checkinteger(L, 1);
+    const bool load_image = lua_gettop(L) < 2 || lua_toboolean(L, 2);
     
     if (ctx.currentDataset.empty()) {
         lua_pushnil(L);
@@ -422,8 +423,8 @@ int LuaScripting::lua_getDataset(lua_State* L) {
 
         // Charger et retourner l'image en bytes RGB u8 (utile pour diffusion).
         if (!item.image_file.empty()) {
-            item.loadImageRGB(target_w, target_h);
-            if (item.img_loaded) {
+            if (load_image) item.loadImageRGB(target_w, target_h);
+            if (load_image && item.img_loaded) {
                 lua_newtable(L);
                 for (size_t i = 0; i < item.img.size(); ++i) {
                     lua_pushinteger(L, (lua_Integer)item.img[i]);
@@ -446,6 +447,19 @@ int LuaScripting::lua_getDataset(lua_State* L) {
         lua_pushstring(L, e.what());
         return 2;
     }
+}
+
+int LuaScripting::lua_releaseDatasetItem(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    const int index = luaL_checkinteger(L, 1);
+    if (index < 1 || index > static_cast<int>(ctx.currentDataset.size())) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Index hors limites");
+        return 2;
+    }
+    ctx.currentDataset[static_cast<size_t>(index - 1)].unload();
+    lua_pushboolean(L, true);
+    return 1;
 }
 
 int LuaScripting::lua_readImageRGBU8(lua_State* L) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env mimir --lua
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- Benchmark minimal: mesure le coût du forward d'un modèle avec attention.
@@ -82,7 +82,7 @@ bench("vae_conv", {
   image_c = 3,
   base_channels = 32,
   latent_channels = 32,
-  use_attn = true,
+  attention = true,
   attn_heads = 4,
   attn_max_tokens = 256,
 }, rand_floats(32 * 32 * 3), 20)

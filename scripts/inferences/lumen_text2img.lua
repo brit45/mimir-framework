@@ -1,8 +1,8 @@
 #!/usr/bin/env lua
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local Args = dofile("scripts/modules/args.lua")
-local Checkpoint = dofile("scripts/modules/checkpoint_resume.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local Checkpoint = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
 
 local function die(message)
   error("[lumen_text2img] " .. tostring(message), 0)
@@ -57,8 +57,8 @@ cfg.vae_checkpoint = Args.get_str(opts, "vae-checkpoint", cfg.vae_checkpoint or 
 cfg.vae_base_channels = Args.get_int(opts, "vae-base-channels", cfg.vae_base_channels or 16)
 cfg.vae_stochastic_latent = Args.get_bool(opts, "vae-stochastic-latent",
   cfg.vae_stochastic_latent ~= false)
-cfg.vae_use_resnet = Args.get_bool(opts, "vae-resnet", cfg.vae_use_resnet ~= false)
-cfg.vae_use_attn = Args.get_bool(opts, "vae-attn", cfg.vae_use_attn ~= false)
+cfg.vae_resnet = Args.get_bool(opts, "vae-resnet", cfg.vae_resnet ~= false)
+cfg.vae_attention = Args.get_bool(opts, "vae-attn", cfg.vae_attention ~= false)
 cfg.vae_use_skip_connections = Args.get_bool(opts, "vae-use-skip-connections",
   cfg.vae_use_skip_connections ~= false)
 cfg.vae_use_encoder_prior = Args.get_bool(opts, "vae-encoder-prior",

@@ -126,8 +126,8 @@
     "stochastic_latent": true,
     "use_encoder_prior": true,
     "use_skip_connections": false,
-    "use_attention": false,
-    "use_resnet": true,
+    "resnet": true,
+    "attention": false,
     "enc_norm": "groupnorm",
     "text_cond": false,
     "seq_len": 75

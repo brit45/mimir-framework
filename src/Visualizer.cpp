@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <cctype>
 #include <filesystem>
+#include <limits>
 
 static const char* kVizUISettingsFile = "viz_ui_settings.json";
 
@@ -565,6 +566,23 @@ static std::string canonical_recon_loss_name(const std::string& raw_name) {
     return name;
 }
 
+static int recon_loss_index(const std::string& raw_name) {
+    const std::string name = canonical_recon_loss_name(raw_name);
+    if (name == "l1" || name == "mae") return 1;
+    if (name == "huber" || name == "smooth_l1" || name == "smoothl1") return 2;
+    if (name == "charbonnier") return 3;
+    if (name == "gaussian_nll" || name == "nll_gaussian") return 4;
+    if (name == "bce") return 5;
+    return 0;
+}
+
+static const char* recon_loss_name(int index) {
+    static constexpr const char* names[] = {
+        "mse", "mae", "huber", "charbonnier", "gaussian_nll", "bce"
+    };
+    return names[std::clamp(index, 0, 5)];
+}
+
 static float normalized_recon_loss(float value, const std::string& raw_name) {
     const std::string name = canonical_recon_loss_name(raw_name);
     if (name == "mse") return value * 0.25f;
@@ -830,6 +848,7 @@ Visualizer::Visualizer(const json& config)
     , current_timestep(0.0f)
     , current_batch_time_ms(0)
     , current_memory_mb(0)
+    , current_allocator_memory_mb(0)
     , current_bps(0.0f)
     , current_params(0)
     , current_grad_norm(0.0f)
@@ -884,12 +903,16 @@ void Visualizer::setLossLogFile(const std::string& filepath) {
     std::cerr << "[viz] loss_log_file=" << loss_log_file << std::endl;
 }
 
+void Visualizer::setLossLogEnabled(bool enabled) {
+    loss_log_enabled_ = enabled;
+}
+
 Visualizer::~Visualizer() {
     shutdown();
 }
 
 void Visualizer::shutdown() {
-    if (pending_loss_log_flush_ && !loss_log_file.empty()) {
+    if (loss_log_enabled_ && pending_loss_log_flush_ && !loss_log_file.empty()) {
         saveLossHistory(loss_log_file);
         pending_loss_log_flush_ = false;
     }
@@ -1742,6 +1765,8 @@ void Visualizer::processEvents() {
         live_kl_beta_.store(std::clamp(live_ui_kl_beta_, 0.0f, 1.0f), std::memory_order_relaxed);
         live_kl_warmup_steps_.store(std::max(0, live_ui_kl_warmup_steps_), std::memory_order_relaxed);
         live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
+        live_recon_loss_index_.store(
+            std::clamp(live_ui_recon_loss_index_, 0, 5), std::memory_order_relaxed);
         if (bump_version) {
             live_params_version_.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1876,6 +1901,13 @@ void Visualizer::processEvents() {
 
                 if (metrics_content_hit && last_live_kl_enable_box_.has_value() && last_live_kl_enable_box_->contains(mouse)) {
                     live_ui_kl_enabled_ = !live_ui_kl_enabled_;
+                    live_overrides_enabled_.store(true, std::memory_order_relaxed);
+                    publish_live_params(true);
+                    continue;
+                }
+
+                if (metrics_content_hit && last_live_recon_loss_box_.has_value() && last_live_recon_loss_box_->contains(mouse)) {
+                    live_ui_recon_loss_index_ = (live_ui_recon_loss_index_ + 1) % 6;
                     live_overrides_enabled_.store(true, std::memory_order_relaxed);
                     publish_live_params(true);
                     continue;
@@ -2406,6 +2438,11 @@ void Visualizer::updateRuntimeValidationEnabled(bool enabled) {
     }
 }
 
+void Visualizer::applyValidationControl(bool enabled) {
+    validation_enabled_.store(enabled, std::memory_order_relaxed);
+    validation_control_version_.fetch_add(1, std::memory_order_relaxed);
+}
+
 bool Visualizer::validationEnabledSnapshot() const {
     return validation_enabled_.load(std::memory_order_relaxed);
 }
@@ -2426,16 +2463,31 @@ Visualizer::LiveTrainParams Visualizer::liveTrainParamsSnapshot() const {
     p.kl_beta = live_kl_beta_.load(std::memory_order_relaxed);
     p.kl_warmup_steps = live_kl_warmup_steps_.load(std::memory_order_relaxed);
     p.kl_enabled = live_kl_enabled_.load(std::memory_order_relaxed);
+    p.recon_loss = recon_loss_name(live_recon_loss_index_.load(std::memory_order_relaxed));
     p.version = live_params_version_.load(std::memory_order_relaxed);
     return p;
 }
 
+void Visualizer::applyLiveTrainParams(const LiveTrainParams& params) {
+    live_overrides_enabled_.store(params.overrides_enabled, std::memory_order_relaxed);
+    live_lr_.store(std::max(0.0f, params.lr), std::memory_order_relaxed);
+    live_lr_warmup_steps_.store(std::max(0, params.lr_warmup_steps), std::memory_order_relaxed);
+    live_kl_beta_.store(std::max(0.0f, params.kl_beta), std::memory_order_relaxed);
+    live_kl_warmup_steps_.store(std::max(0, params.kl_warmup_steps), std::memory_order_relaxed);
+    live_kl_enabled_.store(params.kl_enabled, std::memory_order_relaxed);
+    live_recon_loss_index_.store(recon_loss_index(params.recon_loss), std::memory_order_relaxed);
+    external_live_params_version_.fetch_add(1, std::memory_order_relaxed);
+    live_params_version_.fetch_add(1, std::memory_order_relaxed);
+}
+
 void Visualizer::updateRuntimeTrainParams(float lr, int lr_warmup_steps,
-                                          float kl_beta, int kl_warmup_steps) {
+                                          float kl_beta, int kl_warmup_steps,
+                                          const std::string& recon_loss) {
     if (std::isfinite(lr)) runtime_lr_.store(std::max(0.0f, lr), std::memory_order_relaxed);
     runtime_lr_warmup_steps_.store(std::max(0, lr_warmup_steps), std::memory_order_relaxed);
     if (std::isfinite(kl_beta)) runtime_kl_beta_.store(std::max(0.0f, kl_beta), std::memory_order_relaxed);
     runtime_kl_warmup_steps_.store(std::max(0, kl_warmup_steps), std::memory_order_relaxed);
+    runtime_recon_loss_index_.store(recon_loss_index(recon_loss), std::memory_order_relaxed);
 }
 
 void Visualizer::showValidationFeedback(ValidationFeedbackIcon icon) {
@@ -3154,7 +3206,8 @@ void Visualizer::renderZoomOverlay() {
     draw_value("time / grad", format_decimal(current_timestep, 6) + " / " +
         format_decimal(current_grad_norm, 6));
     draw_value("perf", std::to_string(current_batch_time_ms) + " ms / " +
-        std::to_string(current_memory_mb) + " MB");
+        std::to_string(current_memory_mb) + " MB RSS / " +
+        std::to_string(current_allocator_memory_mb) + " MB allocator");
 }
 
 void Visualizer::maybeLoadArchitecture() {
@@ -3553,7 +3606,8 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
                               float kl, float wass, float ent, float mom, float spat, float temp,
                               float timestep,
                               int total_epochs, int total_batches, float avg_loss,
-                              int batch_time_ms, size_t memory_mb, float bps, size_t params,
+                              int batch_time_ms, size_t memory_mb,
+                              double allocator_memory_mb, float bps, size_t params,
                               float grad_norm, float grad_max,
                               int opt_type, int opt_step,
                               float opt_beta1, float opt_beta2,
@@ -3584,6 +3638,7 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     current_timestep = timestep;
     current_batch_time_ms = batch_time_ms;
     current_memory_mb = memory_mb;
+    current_allocator_memory_mb = allocator_memory_mb;
     current_bps = bps;
     current_params = params;
     current_grad_norm = grad_norm;
@@ -3631,9 +3686,11 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     record.batch_time_ms = batch_time_ms;
     record.bps = bps;
     record.memory_mb = memory_mb;
+    record.allocator_memory_mb = allocator_memory_mb;
     record.params = params;
     record.mse = mse;
     record.kl_divergence = kl;
+    record.kl_beta_effective = kl_beta_effective;
     record.wasserstein = wass;
     record.entropy_diff = ent;
     record.moment_mismatch = mom;
@@ -3648,12 +3705,12 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     record.opt_beta2 = opt_beta2;
     record.opt_eps = opt_eps;
     record.opt_weight_decay = opt_weight_decay;
-    // Métriques de validation : renseignées uniquement quand val_ok=true.
+    // Métriques de validation : renseignées à la fin de chaque validation.
     // val_recon = loss primaire (img-space MSE pour DDPM, recon loss pour VAE).
     // val_kl    = second indicateur (eps-space MSE pour DDPM, KL pour VAE).
     // val_* reste affiché après la validation. Ne sérialiser toutefois qu'une
     // seule ligne par step de validation, pas une copie à chaque tick train.
-    const bool new_validation = val_ok && val_step >= 0 &&
+    const bool new_validation = val_has && !val_in_progress && val_step >= 0 &&
                                 val_step != last_recorded_validation_step_;
     record.is_val      = new_validation;
     record.val_loss    = new_validation ? val_recon : 0.f;
@@ -3666,7 +3723,8 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     // Flush CSV throttle: eviter une ecriture disque a chaque metric tick.
     pending_loss_log_flush_ = true;
     const uint64_t now_ms = steady_now_ms();
-    if (!loss_log_file.empty() && (last_loss_log_flush_ms_ == 0 || (now_ms - last_loss_log_flush_ms_) >= 1000)) {
+    if (loss_log_enabled_ && !loss_log_file.empty() &&
+        (last_loss_log_flush_ms_ == 0 || (now_ms - last_loss_log_flush_ms_) >= 1000)) {
         saveLossHistory(loss_log_file);
         last_loss_log_flush_ms_ = now_ms;
         pending_loss_log_flush_ = false;
@@ -4922,6 +4980,7 @@ void Visualizer::renderMetrics() {
     last_live_lrwu_value_box_.reset();
     last_live_klb_value_box_.reset();
     last_live_klwu_value_box_.reset();
+    last_live_recon_loss_box_.reset();
     last_live_kl_enable_box_.reset();
     last_live_overrides_box_.reset();
     for (auto& rect : dataset_text_section_rects_) rect = make_rect(0.f, 0.f, 0.f, 0.f);
@@ -5115,12 +5174,25 @@ void Visualizer::renderMetrics() {
         // -------------------------
         // Live tuning controls
         // -------------------------
+        const uint64_t external_version =
+            external_live_params_version_.load(std::memory_order_relaxed);
+        if (external_version != live_ui_external_version_) {
+            live_ui_lr_ = std::clamp(live_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
+            live_ui_lr_warmup_steps_ = live_lr_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_beta_ = std::clamp(live_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            live_ui_kl_warmup_steps_ = live_kl_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_enabled_ = live_kl_enabled_.load(std::memory_order_relaxed);
+            live_ui_recon_loss_index_ = live_recon_loss_index_.load(std::memory_order_relaxed);
+            live_ui_external_version_ = external_version;
+            live_ui_inited_ = true;
+        }
         if (!live_ui_inited_) {
             live_ui_lr_ = std::clamp(runtime_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
             live_ui_lr_warmup_steps_ = runtime_lr_warmup_steps_.load(std::memory_order_relaxed);
             live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
             live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
             live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
+            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
 
             // Démarre en mode NATIVE: aucun override tant que l'utilisateur n'interagit pas.
             live_overrides_enabled_.store(false, std::memory_order_relaxed);
@@ -5129,6 +5201,7 @@ void Visualizer::renderMetrics() {
             live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
             live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
             live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
+            live_recon_loss_index_.store(live_ui_recon_loss_index_, std::memory_order_relaxed);
             // Ne pas bump la version: on ne veut pas changer le training sans interaction.
             live_ui_inited_ = true;
         }
@@ -5143,6 +5216,7 @@ void Visualizer::renderMetrics() {
             live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
             live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
             live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
+            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
         }
 
         const int live_y0 = line_height * 4 + 6;
@@ -5152,7 +5226,7 @@ void Visualizer::renderMetrics() {
         const float track_h = 10.f;
         const float thumb_w = 10.f;
         const float thumb_h = 16.f;
-        const int rows = 5;
+        const int rows = 6;
 
         auto drawSliderRow = [&](int row,
                                  const std::string& label,
@@ -5412,6 +5486,38 @@ void Visualizer::renderMetrics() {
             window->draw(st);
         }
 
+        // Reconstruction loss selector
+        {
+            const float y = static_cast<float>(metrics_y + live_y0 + 5 * live_row_h);
+            const float x0 = static_cast<float>(metrics_x + 6);
+            const float box_x = static_cast<float>(metrics_x + label_w);
+            const float box_w = std::max(120.f, static_cast<float>(panel_w - label_w - 8));
+            const float box_h = 22.f;
+
+            sf::Text label(font);
+            label.setCharacterSize(13);
+            label.setFillColor(sf::Color(225, 225, 235));
+            label.setPosition(sf::Vector2f(x0, y));
+            label.setString("Recon");
+            window->draw(label);
+
+            sf::RectangleShape selector(sf::Vector2f(box_w, box_h));
+            selector.setPosition(sf::Vector2f(box_x, y));
+            selector.setFillColor(sf::Color(34, 36, 44, 215));
+            selector.setOutlineColor(sf::Color(98, 104, 120, 225));
+            selector.setOutlineThickness(1.f);
+            window->draw(selector);
+            last_live_recon_loss_box_ = make_rect(box_x, y, box_w, box_h);
+
+            const std::string value = std::string(recon_loss_name(live_ui_recon_loss_index_)) + "  >";
+            sf::Text text(font);
+            text.setCharacterSize(13);
+            text.setFillColor(sf::Color(225, 225, 235));
+            text.setPosition(sf::Vector2f(box_x + 6.f, y + 1.f));
+            text.setString(value);
+            window->draw(text);
+        }
+
         int extra_y = live_y0 + rows * live_row_h + 10;
         drawSection(extra_y - 22, "RUNTIME / OPTIMIZER", sf::Color(180, 145, 235));
         metrics_content_height = static_cast<float>(extra_y + 7 * line_height + 20);
@@ -5430,7 +5536,7 @@ void Visualizer::renderMetrics() {
         }
         drawTableRow(extra_y + line_height, "GRAD", "norm=" + format_decimal(current_grad_norm, 8) + "  max=" + format_decimal(current_grad_max, 8), sf::Color(235, 155, 80));
         drawTableRow(extra_y + 2 * line_height, "PERF", std::to_string(current_batch_time_ms) + "ms  bps=" + format_decimal(current_bps, 8), sf::Color(90, 205, 155));
-        drawTableRow(extra_y + 3 * line_height, "MEM", std::to_string(current_memory_mb) + "MB  params=" + std::to_string(current_params), sf::Color(105, 165, 235));
+        drawTableRow(extra_y + 3 * line_height, "MEM", std::to_string(current_memory_mb) + "MB RSS  alloc=" + std::to_string(current_allocator_memory_mb) + "MB  params=" + std::to_string(current_params), sf::Color(105, 165, 235));
         drawTableRow(extra_y + 4 * line_height, "OPT", "step=" + std::to_string(current_opt_step) + "  wd=" + format_decimal(current_opt_weight_decay, 10), sf::Color(215, 180, 80));
 
         {
@@ -5737,7 +5843,8 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
     }
     
     // En-tête CSV (métriques complètes)
-    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step,val_feedback,val_rewarded,val_penalized" << std::endl;
+    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,allocator_memory_mb,params,mse,kl_divergence,kl_beta_effective,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step,val_feedback,val_rewarded,val_penalized" << std::endl;
+    file << std::defaultfloat << std::setprecision(std::numeric_limits<float>::max_digits10);
     
     // Écrire tout l'historique complet (toutes les epochs et tous les steps)
     for (const auto& record : full_loss_history) {
@@ -5746,15 +5853,17 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
              << record.total_epochs << ","
              << record.batch << "," 
              << record.total_batches << ","
-             << std::fixed << std::setprecision(6) << record.loss << ","
+             << record.loss << ","
              << record.avg_loss << ","
-             << std::scientific << record.lr << ","
-             << std::fixed << record.batch_time_ms << ","
+             << record.lr << ","
+             << record.batch_time_ms << ","
              << record.bps << ","
              << record.memory_mb << ","
+             << record.allocator_memory_mb << ","
              << record.params << ","
-             << std::fixed << std::setprecision(6) << record.mse << ","
+             << record.mse << ","
              << record.kl_divergence << ","
+             << record.kl_beta_effective << ","
              << record.wasserstein << ","
              << record.entropy_diff << ","
              << record.moment_mismatch << ","
@@ -5767,10 +5876,8 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
              << record.opt_step << ","
              << record.opt_beta1 << ","
              << record.opt_beta2 << ","
-             // opt_eps est souvent ~1e-8 : en fixed(6) ça apparaît comme 0.000000.
-             // On l'encode en scientifique pour préserver l'information.
-             << std::scientific << std::setprecision(8) << record.opt_eps << ","
-             << std::fixed << std::setprecision(6) << record.opt_weight_decay;
+             << record.opt_eps << ","
+             << record.opt_weight_decay;
         // Colonnes de validation : vides si ce step n'est pas un step de validation.
         if (record.is_val) {
             file << "," << record.val_loss

@@ -5,9 +5,9 @@
 -- Usage:
 --   ./bin/mimir --lua scripts/tools/load_mpk.lua -- --in exports/model.mpk --create
 
-local Args = dofile("scripts/modules/args.lua")
-local MPK = dofile("scripts/modules/mpk.lua")
-local MPKLayers = dofile("scripts/modules/mpk_layers.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
+local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")
 
 local function log(...)
   local out = {}

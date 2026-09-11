@@ -8,6 +8,7 @@
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
 #include "Helpers.hpp"
+#include "runtimes/LayerOps.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -690,18 +691,12 @@ int LuaScripting::lua_optimizerStep(lua_State* L) {
         if (!ctx.currentModel->getSerializedOptimizer()) {
             Optimizer opt;
             opt.initial_lr = lr;
-            if (std::string(opt_type) == "sgd") {
-                opt.type = OptimizerType::SGD;
-            } else if (std::string(opt_type) == "adam") {
-                opt.type = OptimizerType::ADAM;
-            } else {
-                opt.type = OptimizerType::ADAMW;
+            if (!optimizerTypeFromString(opt_type, opt.type)) {
+                throw std::runtime_error("optimiseur inconnu: " + std::string(opt_type));
             }
             const auto& cfg = ctx.currentModel->modelConfig;
-            if (cfg.contains("beta1")) opt.beta1 = cfg["beta1"].get<float>();
-            if (cfg.contains("beta2")) opt.beta2 = cfg["beta2"].get<float>();
-            if (cfg.contains("epsilon")) opt.eps = cfg["epsilon"].get<float>();
-            if (cfg.contains("weight_decay")) opt.weight_decay = cfg["weight_decay"].get<float>();
+            configureOptimizerFromJson(opt, cfg);
+            optimizerTypeFromString(opt_type, opt.type);
             ctx.currentModel->setSerializedOptimizer(std::move(opt));
         }
         Optimizer* opt = ctx.currentModel->getMutableSerializedOptimizer();
@@ -719,7 +714,7 @@ int LuaScripting::lua_optimizerStep(lua_State* L) {
 
 int LuaScripting::lua_setHardwareAccel(lua_State* L) {
     bool enable = lua_toboolean(L, 1);
-    Model::setHardwareAcceleration(enable);
+    RuntimeLayerOps::setHardwareAcceleration(enable);
     lua_pushboolean(L, true);
     return 1;
 }
@@ -1581,7 +1576,11 @@ int LuaScripting::lua_guardSetLimit(lua_State* L) {
         bytes = static_cast<size_t>(value);
     }
     
-    guard.setLimit(bytes);
+    const double max_ram_gb = static_cast<double>(bytes) /
+                              (1024.0 * 1024.0 * 1024.0);
+
+    // Un guard actif doit toujours disposer du chemin d'éviction LRU/spill.
+    DynamicTensorAllocator::instance().configure(max_ram_gb, true, true);
     
     lua_pushboolean(L, true);
     return 1;
@@ -1787,31 +1786,11 @@ int LuaScripting::lua_htopCreate(lua_State* L) {
 
         ctx.asyncMonitor->start(enable_htop, enable_viz, viz_config);
 
-        // Appliquer les options CSV côté HtopDisplay si présent.
-        // Par défaut, AsyncMonitor désactive le CSV Htop si la Viz est active,
-        // pour éviter les écritures concurrentes.
-        if (enable_htop) {
-            auto h = ctx.asyncMonitor->getHtop();
-            if (h) {
-                if (csv_path.has_value() && !csv_path->empty()) {
-                    h->setCsvLogFile(*csv_path);
-                }
-
-                bool enable_csv = !enable_viz;
-                if (csv_path.has_value()) {
-                    // Si l'utilisateur fournit un chemin, activer par défaut.
-                    enable_csv = true;
-                }
-                if (csv_flag.has_value()) {
-                    enable_csv = *csv_flag;
-                }
-                if (csv_enabled.has_value()) {
-                    enable_csv = *csv_enabled;
-                }
-
-                h->setCsvEnabled(enable_csv);
-            }
-        }
+        bool enable_csv = true;
+        if (csv_flag.has_value()) enable_csv = *csv_flag;
+        if (csv_enabled.has_value()) enable_csv = *csv_enabled;
+        ctx.asyncMonitor->configureMetricsCsv(
+            csv_path.value_or("checkpoints/loss_history.csv"), enable_csv);
 
         ctx.addLog(std::string("AsyncMonitor démarré (") + (enable_htop ? "htop enabled" : "htop disabled") + ")");
         lua_pushboolean(L, true);
@@ -1908,11 +1887,8 @@ int LuaScripting::lua_htopUpdate(lua_State* L) {
         metrics.opt_weight_decay = get_num("opt_weight_decay", get_num("optWeightDecay", 0.0f));
 
         auto parse_opt_type = [&](const std::string& s) -> int {
-            std::string t = s;
-            std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-            if (t == "sgd") return 0;
-            if (t == "adam") return 1;
-            if (t == "adamw") return 2;
+            OptimizerType type;
+            if (optimizerTypeFromString(s, type)) return static_cast<int>(type);
             return metrics.opt_type;
         };
 
@@ -2341,9 +2317,25 @@ int LuaScripting::lua_vizSetValidation(lua_State* L) {
     const float kl = getNumField("kl", 0.0f);
     const float align = getNumField("align", 0.0f);
 
+    lua_getfield(L, 1, "enabled");
+    if (lua_isboolean(L, -1)) {
+        ctx.asyncMonitor->updateRuntimeValidationEnabled(lua_toboolean(L, -1));
+    }
+    lua_pop(L, 1);
+
     ctx.asyncMonitor->updateValidation(in_progress, step, done, total, has, ok, recon, kl, align);
 
     lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizValidationEnabled(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    lua_pushboolean(L, ctx.asyncMonitor->validationEnabledSnapshot());
     return 1;
 }
 

@@ -141,6 +141,15 @@ public:
 
     virtual RuntimeCapabilityLevel queryForwardCapability(LayerType type) const;
     virtual RuntimeCapabilityLevel queryBackwardCapability(LayerType type) const;
+    virtual RuntimeCapabilityLevel queryForwardOperationCapability(
+        const Layer& layer,
+        const std::vector<const std::vector<float>*>& inputs,
+        bool training) const;
+    virtual RuntimeCapabilityLevel queryBackwardOperationCapability(
+        const Layer& layer,
+        const std::vector<const std::vector<float>*>& inputs,
+        const std::vector<const std::vector<float>*>& grad_outputs,
+        bool training) const;
     RuntimeCapability queryCapability(LayerType type) const {
         return {queryForwardCapability(type), queryBackwardCapability(type)};
     }
@@ -169,5 +178,9 @@ public:
     );
 
 protected:
+    RuntimeCapabilityLevel queryConfiguredForwardOperationCapability(
+        const Layer& layer,
+        const std::vector<const std::vector<float>*>& inputs,
+        bool elementwise_requires_linear_flag) const;
     RuntimeConfig config_{};
 };

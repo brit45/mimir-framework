@@ -43,6 +43,8 @@ Notes :
 
 - Le label de la métrique de reconstruction est dynamique et suit `recon_loss_type` quand fourni.
 - Si `recon_loss_type` est absent, l'affichage retombe sur un label générique `RECON`.
+- `Tab` ou `↑`/`↓` sélectionne `RECON`, puis `←`/`→` ou `-`/`+` change la loss pendant l'entraînement.
+- `R` restaure tous les paramètres live, dont la reconstruction loss, à leur valeur native.
 
 ## `Mimir.Viz`
 
@@ -106,6 +108,8 @@ Les sliders live supportent :
 - drag souris sur le track/thumb,
 - graduation visuelle (repères min/max),
 - saisie directe via cellule de valeur (clic).
+
+La ligne `Recon` est un sélecteur cyclique cliquable. Elle applique immédiatement l'une des losses supportées : `mse`, `mae`, `huber`, `charbonnier`, `gaussian_nll` ou `bce`.
 
 Formats de saisie acceptés :
 

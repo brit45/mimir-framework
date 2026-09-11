@@ -666,6 +666,15 @@ RuntimeCapabilityLevel CudaRuntime::queryBackwardCapability(const LayerType type
 #endif
 }
 
+RuntimeCapabilityLevel CudaRuntime::queryForwardOperationCapability(
+    const Layer& layer,
+    const std::vector<const std::vector<float>*>& inputs,
+    bool training
+) const {
+    (void)training;
+    return queryConfiguredForwardOperationCapability(layer, inputs, true);
+}
+
 bool CudaRuntime::linearForward(
     const float* input,
     const float* weights,

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 WORKROOT="${WORKROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-BUILD_DIR="${BUILD_DIR:-$WORKROOT/build}"
-BUILD_TYPE="${BUILD_TYPE:-Release}"
+BUILD_DIR="$WORKROOT/build"
+BUILD_TYPE="Release"
 
 if [[ ! -f "$WORKROOT/CMakeLists.txt" ]]; then
   echo "[error] CMakeLists.txt introuvable dans WORKROOT=$WORKROOT"
@@ -75,9 +75,9 @@ declare -A FEATURE_DEFAULTS=(
   [ENABLE_SFML]=1
   [ENABLE_LZ4]=1
   [ENABLE_SCRIPTING_REST]=0
-  [ENABLE_SCRIPTING_JS]=1
-  [ENABLE_SCRIPTING_CSHARP]=1
-  [ENABLE_SCRIPTING_RUST]=1
+  [ENABLE_SCRIPTING_JS]=0
+  [ENABLE_SCRIPTING_CSHARP]=0
+  [ENABLE_SCRIPTING_RUST]=0
   [MIMIR_ENABLE_TESTS]=0
 )
 
@@ -91,36 +91,13 @@ fi
 
 get_feature() {
   local key="$1"
-  local env_val="${!key:-}"
-  if [[ -n "$env_val" ]]; then
-    case "$env_val" in
-      1|ON|on|true|TRUE|yes|YES) echo 1 ;;
-      0|OFF|off|false|FALSE|no|NO) echo 0 ;;
-      *) echo "${FEATURE_DEFAULTS[$key]}" ;;
-    esac
-  else
-    echo "${FEATURE_DEFAULTS[$key]}"
-  fi
+  echo "${FEATURE_DEFAULTS[$key]}"
 }
 
 declare -A FEATURE_VALUES
 for key in "${FEATURE_KEYS[@]}"; do
   FEATURE_VALUES[$key]="$(get_feature "$key")"
 done
-
-if [[ -n "${PRESET_MINIMAL:-}" ]]; then
-  for key in "${FEATURE_KEYS[@]}"; do
-    FEATURE_VALUES[$key]=0
-  done
-  FEATURE_VALUES[ENABLE_SIMD]=1
-  FEATURE_VALUES[ENABLE_OPENMP]=1
-fi
-
-if [[ -n "${PRESET_FULL:-}" ]]; then
-  for key in "${FEATURE_KEYS[@]}"; do
-    FEATURE_VALUES[$key]=1
-  done
-fi
 
 cmake_bool() {
   if [[ "$1" == "1" ]]; then
@@ -215,10 +192,6 @@ interactive_configure() {
   echo
   echo "Aucune modification interactive effectuée (fallback)."
 }
-
-if (( is_interactive == 1 )) && [[ "${AUTO_ACCEPT:-0}" != "1" ]]; then
-  interactive_configure
-fi
 
 detect_sfml_version() {
   if command -v pkg-config >/dev/null 2>&1; then
@@ -356,6 +329,8 @@ CMAKE_ARGS=(
   -S "$WORKROOT"
   -B "$BUILD_DIR"
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+  -DBUILD_EXAMPLES=OFF
+  -DMIMIR_ENABLE_LEGACY_PARAMS=OFF
 )
 
 for key in "${FEATURE_KEYS[@]}"; do

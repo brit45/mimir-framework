@@ -69,6 +69,7 @@ private:
     static int lua_saveModel(lua_State* L);
     static int lua_loadModel(lua_State* L);
     static int lua_modelDType(lua_State* L);
+    static int lua_modelGetConfig(lua_State* L);
     
     // === New Serialization API ===
     static int lua_saveCheckpoint(lua_State* L);    // Serialization API v2.3
@@ -85,6 +86,11 @@ private:
     static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
     static int lua_forwardPromptImageSeed(lua_State* L);
+    static int lua_lumenBeginVaeCalibration(lua_State* L);
+    static int lua_lumenAddVaeCalibrationImage(lua_State* L);
+    static int lua_lumenFinishVaeCalibration(lua_State* L);
+    static int lua_lumenTrainStep(lua_State* L);
+    static int lua_lumenValidateStep(lua_State* L);
 
     // === Image IO helpers (Lua) ===
     // Charge une image depuis le disque via stb_image et renvoie des pixels RGB u8.
@@ -134,6 +140,7 @@ private:
     static int lua_vizAddImage(lua_State* L);
     static int lua_vizUpdateMetrics(lua_State* L);
     static int lua_vizSetValidation(lua_State* L);
+    static int lua_vizValidationEnabled(lua_State* L);
     static int lua_vizAddLossPoint(lua_State* L);
     static int lua_vizClear(lua_State* L);
     static int lua_vizSetEnabled(lua_State* L);
@@ -206,6 +213,7 @@ private:
     // === Dataset API ===
     static int lua_loadDataset(lua_State* L);
     static int lua_getDataset(lua_State* L);
+    static int lua_releaseDatasetItem(lua_State* L);
     static int lua_prepareSequences(lua_State* L);
 
     // === Database API (dataset loader with caching builder) ===

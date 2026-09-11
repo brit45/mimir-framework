@@ -137,7 +137,7 @@ initialisé, capacité native, fallback hôte, et backend effectivement exécut�
 Il n'existe pas de `Mimir.Args`. Utilisez :
 
 ```lua
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg)
 ```
 

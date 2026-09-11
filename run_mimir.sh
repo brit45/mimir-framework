@@ -5,13 +5,13 @@ export MIMIR_ALLOCATOR_LOG_VERBOSE=0
 
 # Global execution planner (override possible via environment).
 export MIMIR_ENABLE_PLANNER="${MIMIR_ENABLE_PLANNER:-1}"
-export MIMIR_PLANNER_MODE="${MIMIR_PLANNER_MODE:-legacy}" # legacy | static | cost
-export MIMIR_PLANNER_BUFFER_REUSE="${MIMIR_PLANNER_BUFFER_REUSE:-0}"
+export MIMIR_PLANNER_MODE="${MIMIR_PLANNER_MODE:-cost}" # legacy | static | cost
+export MIMIR_PLANNER_BUFFER_REUSE="${MIMIR_PLANNER_BUFFER_REUSE:-1}"
 export MIMIR_PLANNER_FUSION="${MIMIR_PLANNER_FUSION:-1}"
 export MIMIR_PLANNER_COST_MODEL="${MIMIR_PLANNER_COST_MODEL:-1}"
-export MIMIR_PLANNER_DUMP="${MIMIR_PLANNER_DUMP:-0}"
+export MIMIR_PLANNER_DUMP="${MIMIR_PLANNER_DUMP:-1}"
 export MIMIR_PLANNER_JSON="${MIMIR_PLANNER_JSON:-.mimir-spill/execution-plan.json}"
-export MIMIR_PLANNER_DEVICE_RESIDENCY="${MIMIR_PLANNER_DEVICE_RESIDENCY:-0}"
+export MIMIR_PLANNER_DEVICE_RESIDENCY="${MIMIR_PLANNER_DEVICE_RESIDENCY:-1}"
 
 # OpenCL Rusticl (AMD/Mesa): activer automatiquement sur iGPU AMD.
 # Override possible: RUSTICL_ENABLE=... ./run_mimir.sh
@@ -25,6 +25,9 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$NPROC}"
 export OMP_PROC_BIND=false
 export OMP_PLACES=cores
 export OMP_SCHEDULE="static"
+
+# Limiter la rétention des gros buffers temporaires dans une arène glibc par worker.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
 # Désactiver nested parallelism
 export OMP_NESTED=false

@@ -44,7 +44,7 @@ enregistrés dans l'API actuelle.
 | `forward(input, training?)` | `lua_forwardPass` | liste int/float ou tenseurs nommés |
 | `backward(gradient)` | `lua_backwardPass` | rétropropagation |
 | `zero_grads()`, `get_gradients()` | `lua_zeroGradients`, `lua_getGradients` | gestion des gradients |
-| `optimizer_step(lr, type?)` | `lua_optimizerStep` | SGD, Adam ou AdamW |
+| `optimizer_step(lr, type?)` | `lua_optimizerStep` | SGD, Adam, AdamW, Lion, Adafactor, RAdam, NAdam, RMSprop ou LAMB |
 | `dtype()`, `dtype(name)` | `lua_modelDType` | lit/fixe le dtype du modèle |
 | `hardware_caps()`, `set_hardware(bool)` | `lua_getHardwareCaps`, `lua_setHardwareAccel` | capacités et activation matérielle |
 
@@ -105,7 +105,7 @@ Alias de tables : `model`, `architectures`, `tokenizer`, `dataset`, `Memory`,
 `Mimir.Model`.
 
 Il n'existe pas de global `Mimir.Args` : utilisez
-`dofile("scripts/modules/args.lua")` puis `Args.parse(arg)`.
+`dofile(ROOTWORK.."/scripts/modules/args.lua")` puis `Args.parse(arg)`.
 
 ## Étapes suivantes
 

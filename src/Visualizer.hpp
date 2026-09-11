@@ -49,6 +49,7 @@ public:
     // Validation runtime: la configuration initialise l'état, puis tout clic
     // utilisateur devient prioritaire jusqu'à la fin de l'entraînement.
     void updateRuntimeValidationEnabled(bool enabled);
+    void applyValidationControl(bool enabled);
     bool validationEnabledSnapshot() const;
     uint64_t validationControlVersion() const;
 
@@ -60,14 +61,17 @@ public:
         float kl_beta = 0.0f;
         int kl_warmup_steps = 0;
         bool kl_enabled = false;
+        std::string recon_loss = "mse";
         uint64_t version = 0;
     };
     uint64_t liveTrainParamsVersion() const;
     LiveTrainParams liveTrainParamsSnapshot() const;
+    void applyLiveTrainParams(const LiveTrainParams& params);
 
     enum class ValidationFeedbackIcon { None = 0, Reward = 1, Penalty = 2 };
     void updateRuntimeTrainParams(float lr, int lr_warmup_steps,
-                                  float kl_beta, int kl_warmup_steps);
+                                  float kl_beta, int kl_warmup_steps,
+                                  const std::string& recon_loss);
     void showValidationFeedback(ValidationFeedbackIcon icon);
 
     // Mettre à jour l'affichage
@@ -109,7 +113,8 @@ public:
                       float mom = 0.0f, float spat = 0.0f, float temp = 0.0f,
                       float timestep = 0.0f,
                       int total_epochs = 0, int total_batches = 0, float avg_loss = 0.0f,
-                      int batch_time_ms = 0, size_t memory_mb = 0, float bps = 0.0f, size_t params = 0,
+                      int batch_time_ms = 0, size_t memory_mb = 0,
+                      double allocator_memory_mb = 0.0, float bps = 0.0f, size_t params = 0,
                       float grad_norm = 0.0f, float grad_max = 0.0f,
                       int opt_type = 0, int opt_step = 0,
                       float opt_beta1 = 0.0f, float opt_beta2 = 0.0f,
@@ -135,12 +140,14 @@ public:
 
     // Sauvegarder l'historique de loss dans un fichier CSV
     void saveLossHistory(const std::string& filepath) const;
+    void setLossLogEnabled(bool enabled);
 
     // Définir dynamiquement le chemin du CSV loss (appelé typiquement via AsyncMonitor).
     void setLossLogFile(const std::string& filepath);
 
 private:
     std::string loss_log_file;  // Chemin du fichier de log
+    bool loss_log_enabled_ = true;
     // Configuration
     bool enabled;
     int window_width;
@@ -167,6 +174,8 @@ private:
     std::atomic<float> live_kl_beta_{0.0f};
     std::atomic<int> live_kl_warmup_steps_{0};
     std::atomic<bool> live_kl_enabled_{false};
+    std::atomic<int> live_recon_loss_index_{0};
+    std::atomic<uint64_t> external_live_params_version_{0};
 
     // Valeurs effectivement appliquées par le thread d'entraînement. Elles
     // alimentent les range-box en mode NATIVE sans publier d'override UI.
@@ -174,6 +183,7 @@ private:
     std::atomic<int> runtime_lr_warmup_steps_{0};
     std::atomic<float> runtime_kl_beta_{0.0f};
     std::atomic<int> runtime_kl_warmup_steps_{0};
+    std::atomic<int> runtime_recon_loss_index_{0};
     std::atomic<int> validation_feedback_icon_{0};
 
     // État UI live (thread UI uniquement, non atomique).
@@ -183,6 +193,8 @@ private:
     float live_ui_kl_beta_ = 0.0f;
     int live_ui_kl_warmup_steps_ = 0;
     bool live_ui_kl_enabled_ = false;
+    int live_ui_recon_loss_index_ = 0;
+    uint64_t live_ui_external_version_ = 0;
 
     // Drag des sliders live.
     enum class LiveDragTarget { None, LR, LRWarmup, KLBeta, KLWarmup };
@@ -209,6 +221,7 @@ private:
     std::optional<sf::FloatRect> last_live_lrwu_value_box_;
     std::optional<sf::FloatRect> last_live_klb_value_box_;
     std::optional<sf::FloatRect> last_live_klwu_value_box_;
+    std::optional<sf::FloatRect> last_live_recon_loss_box_;
 
     // Toggles UI (panneau Blocks/Layers)
     std::optional<sf::FloatRect> last_blocks_hide_act_box_;
@@ -373,6 +386,7 @@ private:
     float current_timestep;
     int current_batch_time_ms;
     size_t current_memory_mb;
+    double current_allocator_memory_mb;
     float current_bps;
     size_t current_params;
     float current_grad_norm;
@@ -423,9 +437,11 @@ private:
         int batch_time_ms;
         float bps;
         size_t memory_mb;
+        double allocator_memory_mb;
         size_t params;
         float mse;
         float kl_divergence;
+        float kl_beta_effective;
         float wasserstein;
         float entropy_diff;
         float moment_mismatch;
@@ -645,6 +661,7 @@ public:
     void requestStopTraining() {}
     bool consumeStopTrainingRequested() { return false; }
     void updateRuntimeValidationEnabled(bool) {}
+    void applyValidationControl(bool) {}
     bool validationEnabledSnapshot() const { return false; }
     uint64_t validationControlVersion() const { return 0; }
 
@@ -655,12 +672,14 @@ public:
         float kl_beta = 0.0f;
         int kl_warmup_steps = 0;
         bool kl_enabled = false;
+        std::string recon_loss = "mse";
         uint64_t version = 0;
     };
     uint64_t liveTrainParamsVersion() const { return 0; }
     LiveTrainParams liveTrainParamsSnapshot() const { return {}; }
+    void applyLiveTrainParams(const LiveTrainParams&) {}
     enum class ValidationFeedbackIcon { None = 0, Reward = 1, Penalty = 2 };
-    void updateRuntimeTrainParams(float, int, float, int) {}
+    void updateRuntimeTrainParams(float, int, float, int, const std::string&) {}
     void showValidationFeedback(ValidationFeedbackIcon) {}
 
     void addGeneratedImage(const std::vector<uint8_t>&, int, int, int, const std::string&) {}
@@ -685,7 +704,7 @@ public:
                       float = 0.0f, float = 0.0f, float = 0.0f,
                       float = 0.0f,
                       int = 0, int = 0, float = 0.0f,
-                      int = 0, size_t = 0, float = 0.0f, size_t = 0,
+                      int = 0, size_t = 0, size_t = 0, float = 0.0f, size_t = 0,
                       float = 0.0f, float = 0.0f,
                       int = 0, int = 0,
                       float = 0.0f, float = 0.0f,
@@ -705,6 +724,7 @@ public:
     void setEnabled(bool) {}
     bool isEnabled() const { return false; }
     void saveLossHistory(const std::string&) const {}
+    void setLossLogEnabled(bool) {}
 };
 
 #endif

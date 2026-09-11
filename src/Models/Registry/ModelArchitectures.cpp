@@ -21,6 +21,7 @@
 #include "Models/Diffusion/DiffusionModel.hpp"
 #include "Models/Diffusion/CondDiffusionModel.hpp"
 #include "Models/Diffusion/HFSDXLTransformerBlockModel.hpp"
+#include "Models/Diffusion/LumenLatentDiffusionModel.hpp"
 #include "Models/Diffusion/SD35Model.hpp"
 #include "Models/Vision/PatchDiscriminatorModel.hpp"
 
@@ -323,7 +324,7 @@ static json vaeTextDefaultConfigJson() {
         {"stochastic_latent", d.stochastic_latent},
         {"dropout", d.dropout},
 
-        // Training helper defaults (Model::trainStepVAEText)
+        // VAE text training defaults consumed by the model trainStep override.
         {"image_dim", logits_dim},
         {"output_dim", output_dim},
         {"target_tensor", "vae_text/target"},
@@ -417,8 +418,11 @@ static VAEConvModel::Config vaeConvCfgFromJson(const json& cfg) {
     out.stochastic_latent = jget<bool>(cfg, "stochastic_latent", out.stochastic_latent);
 
     // Blocs optionnels
-    out.use_attention      = jget<bool>(cfg, "use_attention", out.use_attention);
-    out.use_attn           = jget<bool>(cfg, "use_attn", out.use_attn);
+    out.resnet = jget<bool>(cfg, "use_resnet",
+                     jget<bool>(cfg, "use_attention",
+                         jget<bool>(cfg, "resnet", out.resnet)));
+    out.attention = jget<bool>(cfg, "use_attn",
+                        jget<bool>(cfg, "attention", out.attention));
     out.enc_norm           = jget<std::string>(cfg, "enc_norm", out.enc_norm);
     out.enc_gn_groups      = jget<int>(cfg, "enc_gn_groups", out.enc_gn_groups);
     out.dec_norm           = jget<std::string>(cfg, "dec_norm", out.dec_norm);
@@ -450,8 +454,8 @@ static json vaeConvDefaultConfigJson() {
                 {"latent_c", d.latent_c},
                 {"base_channels", d.base_channels},
                 {"stochastic_latent", d.stochastic_latent},
-                {"use_attention", d.use_attention},
-                {"use_attn", d.use_attn},
+                {"resnet", d.resnet},
+                {"attention", d.attention},
                 {"enc_norm", d.enc_norm},
                 {"enc_gn_groups", d.enc_gn_groups},
                 {"dec_norm", d.dec_norm},
@@ -678,6 +682,80 @@ static json condDiffusionDefaultConfigJson() {
                 {"dropout", d.dropout}};
 }
 
+static LumenLatentDiffusionModel::Config lumenCfgFromJson(const json& cfg) {
+    LumenLatentDiffusionModel::Config out;
+    out.seed = jget<int>(cfg, "seed", out.seed);
+    out.image_w = jget<int>(cfg, "image_w", out.image_w);
+    out.image_h = jget<int>(cfg, "image_h", out.image_h);
+    out.image_c = jget<int>(cfg, "image_c", out.image_c);
+    out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
+    out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
+    out.latent_c = jget<int>(cfg, "latent_c", out.latent_c);
+    out.vae_base_channels = jget<int>(cfg, "vae_base_channels", out.vae_base_channels);
+    out.vae_stochastic_latent = jget<bool>(cfg, "vae_stochastic_latent", out.vae_stochastic_latent);
+    out.vae_resnet = jget<bool>(cfg, "vae_use_resnet",
+                         jget<bool>(cfg, "vae_resnet", out.vae_resnet));
+    out.vae_attention = jget<bool>(cfg, "vae_use_attn",
+                            jget<bool>(cfg, "vae_attention", out.vae_attention));
+    out.vae_use_skip_connections = jget<bool>(cfg, "vae_use_skip_connections", out.vae_use_skip_connections);
+    out.vae_use_encoder_prior = jget<bool>(cfg, "vae_use_encoder_prior", out.vae_use_encoder_prior);
+    out.vae_enc_norm = jget<std::string>(cfg, "vae_enc_norm", out.vae_enc_norm);
+    out.vae_dec_norm = jget<std::string>(cfg, "vae_dec_norm", out.vae_dec_norm);
+    out.vae_decoder_upsample = jget<std::string>(cfg, "vae_decoder_upsample", out.vae_decoder_upsample);
+    out.vae_enc_gn_groups = jget<int>(cfg, "vae_enc_gn_groups", out.vae_enc_gn_groups);
+    out.vae_dec_gn_groups = jget<int>(cfg, "vae_dec_gn_groups", out.vae_dec_gn_groups);
+    out.vae_attn_heads = jget<int>(cfg, "vae_attn_heads", out.vae_attn_heads);
+    out.vae_attn_max_tokens = jget<int>(cfg, "vae_attn_max_tokens", out.vae_attn_max_tokens);
+    out.vae_resnet_max_tokens = jget<int>(cfg, "vae_resnet_max_tokens", out.vae_resnet_max_tokens);
+    out.vae_scale = jget<float>(cfg, "vae_scale", out.vae_scale);
+    out.vae_shift = jget<float>(cfg, "vae_shift", out.vae_shift);
+    out.vae_checkpoint = jget<std::string>(cfg, "vae_checkpoint", out.vae_checkpoint);
+    out.patch_size = jget<int>(cfg, "patch_size", out.patch_size);
+    out.hidden_size = jget<int>(cfg, "hidden_size", out.hidden_size);
+    out.depth = jget<int>(cfg, "depth", out.depth);
+    out.mlp_ratio = jget<float>(cfg, "mlp_ratio", out.mlp_ratio);
+    out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
+    out.text_seq_len = jget<int>(cfg, "text_seq_len", out.text_seq_len);
+    out.text_layers = jget<int>(cfg, "text_layers", out.text_layers);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.diffusion_steps = jget<int>(cfg, "diffusion_steps", out.diffusion_steps);
+    out.beta_start = jget<float>(cfg, "beta_start", out.beta_start);
+    out.beta_end = jget<float>(cfg, "beta_end", out.beta_end);
+    out.preview_timestep = jget<int>(cfg, "preview_timestep", out.preview_timestep);
+    out.kl_beta = jget<float>(cfg, "kl_beta", out.kl_beta);
+    out.kl_warmup_steps = jget<int>(cfg, "kl_warmup_steps", out.kl_warmup_steps);
+    return out;
+}
+
+static json lumenDefaultConfigJson() {
+    const LumenLatentDiffusionModel::Config d;
+    return json{
+        {"seed", d.seed}, {"image_w", d.image_w}, {"image_h", d.image_h},
+        {"image_c", d.image_c}, {"latent_w", d.latent_w}, {"latent_h", d.latent_h},
+        {"latent_c", d.latent_c}, {"vae_base_channels", d.vae_base_channels},
+        {"vae_stochastic_latent", d.vae_stochastic_latent},
+        {"vae_resnet", d.vae_resnet}, {"vae_attention", d.vae_attention},
+        {"vae_use_skip_connections", d.vae_use_skip_connections},
+        {"vae_use_encoder_prior", d.vae_use_encoder_prior},
+        {"vae_enc_norm", d.vae_enc_norm}, {"vae_dec_norm", d.vae_dec_norm},
+        {"vae_decoder_upsample", d.vae_decoder_upsample},
+        {"vae_enc_gn_groups", d.vae_enc_gn_groups},
+        {"vae_dec_gn_groups", d.vae_dec_gn_groups},
+        {"vae_attn_heads", d.vae_attn_heads},
+        {"vae_attn_max_tokens", d.vae_attn_max_tokens},
+        {"vae_resnet_max_tokens", d.vae_resnet_max_tokens},
+        {"vae_scale", d.vae_scale}, {"vae_shift", d.vae_shift},
+        {"vae_checkpoint", d.vae_checkpoint}, {"patch_size", d.patch_size},
+        {"hidden_size", d.hidden_size}, {"depth", d.depth},
+        {"mlp_ratio", d.mlp_ratio}, {"vocab_size", d.vocab_size},
+        {"text_seq_len", d.text_seq_len}, {"text_layers", d.text_layers},
+        {"num_heads", d.num_heads}, {"diffusion_steps", d.diffusion_steps},
+        {"beta_start", d.beta_start}, {"beta_end", d.beta_end},
+        {"preview_timestep", d.preview_timestep}, {"kl_beta", d.kl_beta},
+        {"kl_warmup_steps", d.kl_warmup_steps},
+    };
+}
+
 static SD35Model::Config sd35CfgFromJson(const json& cfg) {
     SD35Model::Config out;
     out.stub_only = jget<bool>(cfg, "stub_only", out.stub_only);
@@ -850,8 +928,11 @@ std::shared_ptr<Model> Registry::create(const std::string& name, const json& con
         throw std::runtime_error("ModelArchitectures::create: factory returned null for: " + name);
     }
 
-    // Attach standardized config to the model (used by planner/serialization/runtime knobs).
-    model->modelConfig = cfg;
+    // Preserve graph-derived metadata while retaining parent configuration
+    // sections used by serialization and scripting.
+    json effective_config = cfg;
+    mergeInto(effective_config, model->modelConfig);
+    model->modelConfig = std::move(effective_config);
 
     // Propagate dtype from config -> runtime default dtype.
     // This must be done here (framework-level) so callers don't need to manually call Model.dtype().
@@ -1201,6 +1282,20 @@ void Registry::ensureBuiltinsRegistered() const {
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<CondDiffusionModel>();
                     m->buildFromConfig(condDiffusionCfgFromJson(cfg));
+                    return m;
+                },
+            }
+        );
+
+        entries_.emplace(
+            "lumen_diffusion",
+            Entry{
+                "lumen_diffusion",
+                "Latent text-to-image Diffusion Transformer with a frozen VAE",
+                lumenDefaultConfigJson(),
+                [](const json& cfg) -> std::shared_ptr<Model> {
+                    auto m = std::make_shared<LumenLatentDiffusionModel>();
+                    m->buildFromConfig(lumenCfgFromJson(cfg));
                     return m;
                 },
             }

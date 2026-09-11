@@ -1,7 +1,7 @@
 ---@diagnostic disable: undefined-global
 
-local MPK = dofile("scripts/modules/mpk.lua")
-local MPKLayers = dofile("scripts/modules/mpk_layers.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
+local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")
 
 local structure = {
   template = "dynamic_nms_test",
@@ -62,7 +62,7 @@ arg = {
   "--init", "zeros",
   "--seed", "7",
 }
-local ok_load, load_err = pcall(dofile, "scripts/tools/load_mpk.lua")
+local ok_load, load_err = pcall(dofile, ROOTWORK.."/scripts/tools/load_mpk.lua")
 arg = saved_arg
 assert(ok_load, load_err)
 

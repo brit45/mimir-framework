@@ -30,7 +30,9 @@ Sources principales :
 ## Vue d’ensemble
 
 - `Mimir.Dataset.load(dir)` indexe récursivement un dossier et construit une liste d’items (métadonnées uniquement).
-- `Mimir.Dataset.get(i)` retourne **des chemins** (et des dimensions cibles), pas les données binaires.
+- `Mimir.Dataset.get(i)` charge le texte et les pixels RGB redimensionnés à la demande.
+- `Mimir.Dataset.get(i, false)` retourne texte, chemins et dimensions sans décoder l'image.
+- `Mimir.Dataset.release(i)` libère les buffers lazy de l'item après utilisation.
 - `Mimir.Dataset.prepare_sequences(seq_len)` construit des séquences de tokens à partir des fichiers texte du dataset (tokenizer requis pour que des séquences soient effectivement produites).
 
 ## Format disque et règle de “linking”
@@ -81,26 +83,28 @@ Remarques:
 
 - La fonction vérifie que le dossier existe.
 - Elle appelle `loadDataset(dataset_dir)` côté C++.
-- **Important**: l’API Lua actuelle ne lit que le premier argument; des paramètres supplémentaires passés depuis Lua seront ignorés. En pratique, cela signifie que l’indexation utilise les valeurs par défaut C++: `target_w=64`, `target_h=64`, `min_modalities=1`.
+- Les paramètres optionnels permettent de choisir les dimensions cibles, le seuil de modalités, le cache, la limite RAM et le chargement lazy.
 - L’indexation est en mode “lazy”: les données (texte/image/audio/vidéo) ne sont pas chargées en RAM à ce stade.
 
-### `Mimir.Dataset.get(index)`
+### `Mimir.Dataset.get(index, load_image?)`
 
 Retourne un item du dataset (Lua est 1-indexed).
 
-- Entrée: `index` (integer), doit être dans `[1, num_items]`
+- Entrées: `index` dans `[1, num_items]`; `load_image` vaut `true` par défaut
 - Sortie: `(item)` en cas de succès, ou `(nil, err)` en cas d’erreur
 
 Champs possibles dans `item`:
 
 - `text_file`, `image_file`, `audio_file`, `video_file`: chemins vers les fichiers (si présents)
-- `width`, `height`: dimensions **cibles** stockées dans l’item (par défaut 64x64)
-- `text`: contenu texte **uniquement si déjà chargé en mémoire côté C++**
+- `width`, `height`, `channels`: dimensions cibles et canaux
+- `text`: contenu texte chargé à la demande
+- `image`: pixels RGB u8 si `load_image` est vrai et le décodage réussit
 
-Limitation importante:
+Pour les grands datasets, appeler `Mimir.Dataset.release(index)` après avoir consommé
+l'image. Cela évite que les buffers lazy s'accumulent jusqu'à la limite RAM configurée.
 
-- Les données binaires (image/audio/vidéo) ne sont **pas** retournées par `get()`.
-- Dans l’état actuel, `Mimir.Dataset.load()` n’effectue pas de chargement de texte, donc `item.text` est généralement absent avec un flux standard `load()` → `get()`.
+Si seul le texte est requis, utiliser `Mimir.Dataset.get(index, false)` pour éviter le
+décodage et la construction de la table de pixels Lua.
 
 ### `Mimir.Dataset.prepare_sequences(seq_len)`
 
@@ -176,9 +180,8 @@ end
 
 ## Limites actuelles (et implications)
 
-- `Mimir.Dataset.load()` ne permet pas (encore) de choisir `target_w/target_h/min_modalities` via l’API Lua, même si le C++ le supporte.
-- `Mimir.Dataset.get()` ne charge pas les fichiers à la demande: il expose principalement des chemins.
-- Si vous avez besoin des buffers image/audio/vidéo en Lua, il faut ajouter des fonctions dédiées côté C++ (ex: `Dataset.load_image(i)`), ou traiter ces données côté C++ dans la pipeline.
+- `Mimir.Dataset.get()` expose actuellement les pixels image RGB, mais pas les buffers audio ou vidéo.
+- Le chargement image lazy reste explicite côté appelant: utiliser `release(index)` après consommation sur les grands datasets.
 
 ## Étapes suivantes
 

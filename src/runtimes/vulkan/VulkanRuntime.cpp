@@ -138,6 +138,15 @@ RuntimeCapabilityLevel VulkanRuntime::queryBackwardCapability(const LayerType ty
     return RuntimeCapabilityLevel::Unsupported;
 }
 
+RuntimeCapabilityLevel VulkanRuntime::queryForwardOperationCapability(
+    const Layer& layer,
+    const std::vector<const std::vector<float>*>& inputs,
+    bool training
+) const {
+    (void)training;
+    return queryConfiguredForwardOperationCapability(layer, inputs, false);
+}
+
 bool VulkanRuntime::linearForward(
     const float* input,
     const float* weights,

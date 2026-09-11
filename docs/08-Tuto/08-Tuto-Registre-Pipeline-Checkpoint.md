@@ -36,7 +36,7 @@ Le registre fournit :
 Le template exécute conceptuellement :
 
 ```lua
-local P = dofile("scripts/modules/pipeline.lua")
+local P = dofile(ROOTWORK.."/scripts/modules/pipeline.lua")
 local pipe = assert(P.FromRegistry("basic_mlp"))
 
 assert(pipe:loadDefaultConfig("basic_mlp"))
