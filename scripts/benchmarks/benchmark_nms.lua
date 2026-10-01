@@ -29,7 +29,9 @@ local function has(name)
 end
 
 local function number_option(flag, env, default)
-  return tonumber(arg_value(flag) or os.getenv(env) or default) or default
+  local value = tonumber(arg_value(flag) or os.getenv(env) or default)
+  assert(value and value == value and math.abs(value) < math.huge, "option invalide: " .. flag)
+  return value
 end
 
 local function bool_env(name, default)
@@ -100,6 +102,9 @@ if max_detections > 0 then
   assert(#first <= max_detections, "nms_max_detections non respecté")
 end
 
+for _, index in ipairs(first) do
+  assert(index % 1 == 0 and index >= 0 and index < box_count, "indice NMS invalide")
+end
 local started = os.clock()
 for _ = 1, iterations do forward() end
 local elapsed = os.clock() - started
@@ -113,5 +118,5 @@ log(string.format(
   box_count, class_count, #first, iou_threshold, score_threshold,
   max_detections, tostring(class_agnostic)))
 log(string.format(
-  "  warmup=%d iterations=%d total=%.3f ms average=%.3f ms throughput=%.0f boxes/s",
+  "  warmup=%d iterations=%d cpu_total=%.3f ms cpu_average=%.3f ms cpu_throughput=%.0f boxes/s",
   warmup, iterations, elapsed * 1000, average_ms, boxes_per_second))

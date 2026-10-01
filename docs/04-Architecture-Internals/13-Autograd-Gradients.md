@@ -16,9 +16,12 @@ L’objectif est pragmatique : expliquer ce qui est *vraiment* supporté, commen
 Source de vérité :
 
 - Déclarations : `src/Model.hpp` (API training/gradients/optimizer)
-- Backward principal : `src/Model.cpp` (`Model::backwardPass`, `zeroGradients`, `getGradients`)
+- Orchestration du graphe : `src/Model.cpp` (`Model::backwardPass`, `zeroGradients`, `getGradients`)
+- Dispatch forward/backward : `src/runtimes/RuntimeRouter.hpp`
+- État sauvegardé et activations intégrées : `src/runtimes/AbstractRuntime.hpp`
+- Backward natif OpenCL/Vulkan : `src/runtimes/NativeBackward.hpp`
 - Dispatch CPU partagé : `src/runtimes/cpu/RuntimeLayerDispatch.hpp`
-- Helpers autograd : `src/Autograd.hpp`
+- Types et pertes autograd : `src/Autograd.hpp` ; adaptateurs de layers : `src/runtimes/Autograd.cpp`
 - Layout poids & champs layer : `src/Layers.hpp`
 - Primitives mathématiques : `src/runtimes/LayerOps.hpp`, `src/runtimes/cpu/LayerOps.hpp` et `src/runtimes/cpu/LayerOpsExt.hpp`
 
@@ -39,13 +42,13 @@ Source de vérité :
 | Appel Lua | Binding C++ | Cible | Effet |
 |---|---|---|---|
 | `Mimir.Model.zero_gradients()` | `LuaScripting::lua_zeroGradients` | `Model::zeroGradients` | Met tous les gradients à zéro + invalide l’état forward. |
-| `Mimir.Model.backward(loss_grad)` | `LuaScripting::lua_backwardPass` | `Model::backwardPass` | Backprop “best-effort” à travers les layers supportés. |
+| `Mimir.Model.backward(loss_grad)` | `LuaScripting::lua_backwardPass` | `Model::backwardPass` | Traverse le graphe et délègue les dérivées au dispatcher. |
 | `Mimir.Model.get_gradients()` | `LuaScripting::lua_getGradients` | `Model::getGradients` | Exporte un dictionnaire d’index→valeur (format plat). |
 
 Notes :
 
-- Le backward n’est pas un moteur symbolique général : c’est un backward **implémenté à la main** par type de layer, avec des branches “skip si non supporté”.
-- Une partie des fonctions utilitaires (ex: MSE backward, GELU backward) vit dans `src/Autograd.hpp`.
+- Les dérivées des layers sont implémentées dans les runtimes. Une opération refusée par tous les runtimes provoque une erreur explicite.
+- Les utilitaires de pertes restent dans `src/Autograd.hpp`. Les adaptateurs GELU, LayerNorm et résiduel passent par `RuntimeRouter` et nécessitent un routeur configuré.
 
 ## 2) Deux notions à distinguer
 
@@ -53,10 +56,10 @@ Notes :
 
 Chaque `Layer` stocke :
 
-- `grad_weights` : gradient du bloc de poids
-- `grad_bias` : gradient du biais (si applicable)
+- `grad_weights` : gradient du bloc compact de paramètres, biais inclus.
+- `grad_bias` : vue de compatibilité pour les appels directs aux runtimes.
 
-Ces buffers sont remplis par `Model::backwardPass`.
+Les runtimes accumulent ces buffers. `Model::backwardPass` efface ensuite la vue de compatibilité pour éviter de compter deux fois les biais dans les normes, le clipping et les gradients exportés.
 
 ### B) Gradients “plats” (`Gradients`)
 
@@ -94,7 +97,8 @@ Pattern :
 - initialisation : `grad_store["x"] = loss_gradient`
 - pour chaque layer (ordre inverse) :
   - on lit `grad_out = grad_store[layer.output]`
-  - on calcule les gradients vers les inputs
+  - on consomme cette version du gradient avant toute accumulation (important pour `x → x`)
+  - le dispatcher calcule les gradients vers les inputs
   - on accumule dans `grad_store[input_name]`
 
 Accumulation = somme, avec vérification de taille.
@@ -106,7 +110,7 @@ Accumulation = somme, avec vérification de taille.
 - `Identity`, `Reshape` : gradient recopié (si tailles compatibles).
 - `Add` : support du broadcast (même logique que `LayerOps::add_forward`), avec réduction du gradient pour l’entrée “petite”.
 - `Concat` : découpe du gradient en tranches.
-- `Split` : recolle les gradients des sorties `base_i`.
+- `Split` et `Chunk` : recollent les gradients des sorties `base_i`, avec zéro pour les branches non utilisées.
 - `Multiply`, `Subtract`, `Divide` : élément-wise (avec règles de base).
 
 ### Ops avec paramètres
@@ -117,15 +121,14 @@ Accumulation = somme, avec vérification de taille.
   - pas de gradient d’entrée float utile (ids).
 
 - `LayerNorm` :
-  - backward implémenté en re-calculant mean/var (best-effort) et en accumulant `dgamma/dbeta` si `affine`.
+  - le runtime CPU recalcule mean/var et accumule `dgamma/dbeta` si `affine`.
 
-- `Conv2d` (au moins une partie) :
-  - chemin de backward tuilé (im2col + GEMM) quand AVX2+FMA et conditions OK.
-  - sinon fallback/skip selon cas.
+- `Conv2d` : forward et backward CPU tuilés (im2col + GEMM), avec voie SIMD ou scalaire dans `src/runtimes/cpu/ConvolutionKernels.hpp`. Les tests numériques couvrent stride et dilation.
+- Dropout, Dropout2d et AlphaDropout sauvegardent le masque réellement tiré, y compris lorsque l’entrée vaut zéro. Le backward d’entraînement refuse un masque manquant.
 
 ### Attention
 
-Une partie du backward attention est implémentée dans `Model.cpp` (fonction(s) locales). Les poids sont layoutés en blocs (`Wqkv`, `Wout`) et les gradients sont écrits dans `grad_weights`.
+Le backward attention est implémenté dans le dispatcher CPU partagé. Les poids sont layoutés en blocs (`Wqkv`, `Wout`) et les gradients sont écrits dans `grad_weights`.
 
 ### Réparamétrisation VAE
 
@@ -135,7 +138,7 @@ Une partie du backward attention est implémentée dans `Model.cpp` (fonction(s)
 z = mu + exp(0.5 * clamp(logvar, -20, 20)) * epsilon
 ```
 
-Le forward state conserve `z`. Le backward principal reconstruit ensuite :
+Le forward state conserve `z`. Le runtime reconstruit ensuite :
 
 ```text
 epsilon = (z - mu) / exp(0.5 * clamp(logvar, -20, 20))
@@ -177,7 +180,7 @@ Cette distinction est utilisée par `vae_conv/z_prior_bias`. Elle évite de rend
 
 Dans le runtime actuel :
 
-- la logique principale du backward est dans `Model::backwardPass`.
+- `Model::backwardPass` orchestre les snapshots, les branches nommées et l’accumulation ; les runtimes calculent les dérivées.
 - `Autograd.hpp` sert de bibliothèque d’outils et de types (notamment `Gradients`).
 
 ## 8) Debug : comment vérifier que le backward “fait quelque chose”
@@ -186,7 +189,7 @@ Dans le runtime actuel :
 
 ```bash
 ctest --test-dir build --output-on-failure \
-  -R 'AutogradTest.Numerical|ModelTest.VAEConvContract|RuntimeTest.Math'
+  -R 'AutogradTest\.|ModelTest.VAEConvContract|RuntimeTest.Math|RuntimeTest.*BackwardParity'
 ```
 
 - Vérifier :
@@ -195,6 +198,12 @@ ctest --test-dir build --output-on-failure \
   - l’optimizer step change effectivement les poids.
 
 Pour VAEConv, `ModelTest.VAEConvContract` vérifie aussi qu’un gradient de reconstruction traverse le décodeur et atteint le prior appris.
+
+## Couverture OpenCL et Vulkan
+
+Les deux runtimes partagent 17 types de backward natif : Linear, MatMul, BatchMatMul, Add, Subtract, Multiply, Divide et dix activations. Le dispatcher conserve le CPU pour les opérations ou formes non prises en charge. Cela fournit un chemin fonctionnel commun, sans constituer une couverture GPU native complète des convolutions, normalisations et attentions.
+
+`RuntimeTest.OPENCLBackwardParity` et `RuntimeTest.VULKANBackwardParity` vérifient les valeurs, les gradients et leur accumulation, ainsi que le runtime effectivement sélectionné. Les tests sont ignorés (code 77) si le backend est indisponible.
 
 ## Étapes suivantes
 

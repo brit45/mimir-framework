@@ -267,6 +267,7 @@ Points importants :
 - `attn_max_tokens=0` signifie aucune limite et peut être très coûteux ;
 - `use_encoder_prior=true` ajoute un biais latent global apprenable à `z`, sans modifier la zone `mu` de la sortie ;
 - `stochastic_latent=false` donne `z=mu`, alors que `true` active la réparamétrisation pendant l’entraînement ;
+- `decoder_upsample` accepte `nearest_conv`, `bilinear_conv`, `pixel_shuffle` et l'ancien mode `conv_transpose` ;
 - les ratios `image_h/latent_h` et `image_w/latent_w` doivent être identiques et être une puissance de deux.
 
 Guide détaillé : [VAEConv : architecture, configuration et entraînement](../02-User-Guide/14-VAEConv.md).

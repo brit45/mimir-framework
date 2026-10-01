@@ -235,7 +235,7 @@ cmake -S . -B build [OPTIONS]
 ./bin/mimir --help
 
 # Expected output:
-# ========== Mímir v3.1.0 ==========
+# ========== Mímir v3.5.0 ==========
 # Capabilities: [AVX2] [FMA] [F16C] [BMI2] [OpenMP] [Vulkan] ...
 # Usage: ./bin/mimir [OPTIONS]
 

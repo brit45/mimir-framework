@@ -1,6 +1,7 @@
 #include "runtimes/AbstractRuntime.hpp"
 
 #include "Layers.hpp"
+#include "runtimes/RuntimeRouter.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -107,6 +108,93 @@ RuntimeConfig RuntimeConfig::fromEnv(const char* backend_upper) {
     return cfg;
 }
 
+bool AbstractRuntime::forwardLayerWithContext(
+    const std::vector<const std::vector<float>*>& inputs,
+    std::vector<std::vector<float>>& outputs, const Layer& layer, bool training,
+    const RuntimeForwardContext& context
+) {
+    if (context.output_mask) context.output_mask->clear();
+    const bool sample = training && (layer.type_enum != LayerType::Reparameterize || context.stochastic_latent);
+    if (!forwardLayer(inputs, outputs, layer, sample)) return false;
+    if ((layer.type_enum == LayerType::Conv2d || layer.type_enum == LayerType::ConvTranspose2d) &&
+        layer.activation != ActivationType::NONE && !outputs.empty())
+        Activation::apply_inplace(outputs[0], layer.activation, layer.activation_param);
+    return true;
+}
+
+bool AbstractRuntime::backwardLayerWithContext(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs,
+    Layer& layer, bool training, const RuntimeBackwardContext& context
+) {
+    auto saved_inputs = inputs;
+    auto gradients = grad_outputs;
+    std::vector<float> saved_mask, gated_gradient;
+    const bool dropout = layer.type_enum == LayerType::Dropout ||
+        layer.type_enum == LayerType::Dropout2d || layer.type_enum == LayerType::AlphaDropout;
+    if (dropout && training && context.output_mask) {
+        const float alpha_p = -1.6732632423543772848f * 1.0507009873554804934f;
+        const float p = std::clamp(layer.dropout_p, 0.0f, 1.0f);
+        const float a = p < 1.0f ? 1.0f / std::sqrt((1-p)*(1+p*alpha_p*alpha_p)) : 0.0f;
+        const float dropped = layer.type_enum == LayerType::AlphaDropout ? a*alpha_p*(1-p) : 0.0f;
+        for (uint8_t kept : *context.output_mask) saved_mask.push_back(kept ? dropped + 1.0f : dropped);
+        saved_inputs.push_back(&saved_mask);
+    } else if ((dropout || layer.type_enum == LayerType::Reparameterize) && context.output) {
+        saved_inputs.push_back(context.output);
+    }
+    if ((layer.type_enum == LayerType::Conv2d || layer.type_enum == LayerType::ConvTranspose2d) &&
+        layer.activation != ActivationType::NONE) {
+        if (gradients.empty() || !gradients[0]) return false;
+        gated_gradient = *gradients[0];
+        if (layer.activation == ActivationType::RELU && context.output_mask &&
+            context.output_mask->size() == gated_gradient.size()) {
+            for (size_t i = 0; i < gated_gradient.size(); ++i)
+                if (!(*context.output_mask)[i]) gated_gradient[i] = 0.0f;
+        } else {
+            // Recompute the deterministic pre-activation with this backend.
+            // The activation derivative then uses the same layer dispatcher.
+            std::vector<std::vector<float>> raw;
+            if (!forwardLayer(inputs,raw,layer,training) || raw.size()!=1 || raw[0].size()!=gated_gradient.size()) return false;
+            LayerType activation_type = LayerType::UNKNOWN;
+            switch (layer.activation) {
+                case ActivationType::RELU: activation_type=LayerType::ReLU; break;
+                case ActivationType::GELU: activation_type=LayerType::GELU; break;
+                case ActivationType::SWISH: activation_type=LayerType::SiLU; break;
+                case ActivationType::MISH: activation_type=LayerType::Mish; break;
+                case ActivationType::TANH: activation_type=LayerType::Tanh; break;
+                case ActivationType::SIGMOID: activation_type=LayerType::Sigmoid; break;
+                case ActivationType::SOFTPLUS: activation_type=LayerType::Softplus; break;
+                case ActivationType::SOFTMAX: activation_type=LayerType::Softmax; break;
+                default: break;
+            }
+            if (activation_type!=LayerType::UNKNOWN) {
+                Layer activation(layer.name+"/activation",LayerRegistry::type_to_string(activation_type),0);
+                activation.shape={static_cast<int>(raw[0].size())};
+                std::vector<std::vector<float>> derivative;
+                if (!RuntimeRouter::instance().dispatchBackwardLayer({&raw[0]},gradients,derivative,activation,training) || derivative.size()!=1) return false;
+                gated_gradient=std::move(derivative[0]);
+            } else {
+                for (size_t i=0;i<gated_gradient.size();++i) {
+                    const float x=raw[0][i];
+                    float derivative=0.0f;
+                    switch(layer.activation) {
+                        case ActivationType::RELU6: derivative=x>0 && x<6 ? 1.0f:0.0f; break;
+                        case ActivationType::LEAKY_RELU: derivative=x>0 ? 1.0f:layer.activation_param; break;
+                        case ActivationType::ELU: derivative=x>0 ? 1.0f:layer.activation_param*std::exp(x); break;
+                        case ActivationType::SELU: derivative=1.0507009873554805f*(x>0 ? 1.0f:1.6732632423543773f*std::exp(x)); break;
+                        case ActivationType::SOFTSIGN: derivative=1.0f/((1+std::abs(x))*(1+std::abs(x))); break;
+                        default: return false;
+                    }
+                    gated_gradient[i]*=derivative;
+                }
+            }
+        }
+        gradients[0] = &gated_gradient;
+    }
+    return backwardLayer(saved_inputs, gradients, grad_inputs, layer, training);
+}
+
 bool AbstractRuntime::backwardLayer(
     const std::vector<const std::vector<float>*>& inputs,
     const std::vector<const std::vector<float>*>& grad_outputs,
@@ -151,7 +239,7 @@ RuntimeCapabilityLevel AbstractRuntime::queryForwardOperationCapability(
 ) const {
     (void)training;
     const RuntimeCapabilityLevel capability = queryForwardCapability(layer.type_enum);
-    if (!runtimeCapabilityIsNative(capability) || inputs.empty() || !inputs[0]) {
+    if (!runtimeCapabilityIsNative(capability) || (layer.type_enum != LayerType::Constant && (inputs.empty() || !inputs[0]))) {
         return RuntimeCapabilityLevel::Unsupported;
     }
     return capability;
@@ -164,7 +252,7 @@ RuntimeCapabilityLevel AbstractRuntime::queryBackwardOperationCapability(
     bool training
 ) const {
     (void)training;
-    if (inputs.empty() || !inputs[0] || grad_outputs.empty() || !grad_outputs[0]) {
+    if ((layer.type_enum != LayerType::Constant && (inputs.empty() || !inputs[0])) || grad_outputs.empty() || !grad_outputs[0]) {
         return RuntimeCapabilityLevel::Unsupported;
     }
     return queryBackwardCapability(layer.type_enum);
@@ -347,7 +435,7 @@ bool AbstractRuntime::dispatchForwardLayer(
                 rt->queryForwardOperationCapability(layer, inputs, training))) continue;
 
         std::vector<std::vector<float>> local_outputs;
-        if (!rt->forwardLayer(inputs, local_outputs, layer, training)) {
+        if (!rt->forwardLayerWithContext(inputs, local_outputs, layer, training)) {
             continue;
         }
         if (local_outputs.empty() || !tensors_are_finite(local_outputs)) {
@@ -394,7 +482,7 @@ bool AbstractRuntime::dispatchBackwardLayer(
         if (!rt->backwardLayer(inputs, grad_outputs, local_grad_inputs, layer, training)) {
             continue;
         }
-        if (local_grad_inputs.empty() || !tensors_are_finite(local_grad_inputs)) {
+        if ((local_grad_inputs.empty() && layer.type_enum != LayerType::Constant) || !tensors_are_finite(local_grad_inputs)) {
             continue;
         }
 

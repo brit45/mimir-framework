@@ -59,6 +59,59 @@ int main() {
     rectangular_vae.buildFromConfig(rectangular_cfg);
     TASSERT_TRUE(!rectangular_vae.getLayers().empty());
 
+    // Decoder upsampling is selectable while preserving the same output shape.
+    const auto assert_upsample_graph = [&](const std::string& mode,
+                                           const std::string& up_type) -> int {
+        VAEConvModel::Config upsample_cfg = rectangular_cfg;
+        upsample_cfg.decoder_upsample = mode;
+
+        VAEConvModel full_model;
+        full_model.buildFromConfig(upsample_cfg);
+        Model decoder_model;
+        VAEConvModel::buildDecoderInto(decoder_model, upsample_cfg);
+
+        for (Model* candidate : std::vector<Model*>{&full_model, &decoder_model}) {
+            const Layer* up = candidate->getLayerByName("vae_conv/dec/up1/up");
+            TASSERT_TRUE(up != nullptr);
+            TASSERT_TRUE(up->type == up_type);
+
+            const Layer* conv = candidate->getLayerByName("vae_conv/dec/up1/conv");
+            TASSERT_TRUE(conv != nullptr);
+            TASSERT_TRUE(conv->type == "Conv2d");
+            if (mode == "pixel_shuffle") {
+                TASSERT_TRUE(conv->out_channels == 4 * upsample_cfg.base_channels);
+                TASSERT_TRUE(up->in_channels == 4 * upsample_cfg.base_channels);
+                TASSERT_TRUE(up->out_channels == upsample_cfg.base_channels);
+            }
+        }
+
+        decoder_model.allocateParams();
+        decoder_model.initializeWeights("xavier", 123u);
+        const std::vector<float> latent(
+            static_cast<size_t>(upsample_cfg.latent_w) * upsample_cfg.latent_h *
+                upsample_cfg.latent_c,
+            0.25f);
+        const std::vector<float> decoded = decoder_model.forwardPass(latent, false);
+        TASSERT_TRUE(decoded.size() ==
+                     static_cast<size_t>(upsample_cfg.image_w) * upsample_cfg.image_h *
+                         upsample_cfg.image_c);
+        return 0;
+    };
+    TASSERT_TRUE(assert_upsample_graph("nearest_conv", "UpsampleNearest") == 0);
+    TASSERT_TRUE(assert_upsample_graph("bilinear_conv", "UpsampleBilinear") == 0);
+    TASSERT_TRUE(assert_upsample_graph("pixel_shuffle", "PixelShuffle") == 0);
+
+    bool invalid_upsample_rejected = false;
+    try {
+        VAEConvModel::Config invalid_cfg = rectangular_cfg;
+        invalid_cfg.decoder_upsample = "unknown";
+        VAEConvModel invalid_vae;
+        invalid_vae.buildFromConfig(invalid_cfg);
+    } catch (const std::runtime_error&) {
+        invalid_upsample_rejected = true;
+    }
+    TASSERT_TRUE(invalid_upsample_rejected);
+
     // Decoder normalization can be disabled independently from the encoder.
     // This protects the CLI/config contract `enc_norm=groupnorm, dec_norm=none`.
     VAEConvModel::Config decoder_no_norm_cfg = rectangular_cfg;
@@ -210,6 +263,94 @@ int main() {
     }
     for (const auto& layer : vae.getLayers()) {
         TASSERT_TRUE(tapped_layers.find(layer.name) != tapped_layers.end());
+    }
+
+    // Training RGB previews must preserve geometry and channel order through
+    // HWC->CHW, decoder Tanh and CHW->HWC. Compare the actual rendered bytes.
+    {
+        VAEConvModel::Config rgb_cfg;
+        rgb_cfg.image_w = 8;
+        rgb_cfg.image_h = 8;
+        rgb_cfg.image_c = 3;
+        rgb_cfg.latent_w = 4;
+        rgb_cfg.latent_h = 4;
+        rgb_cfg.latent_c = 4;
+        rgb_cfg.base_channels = 8;
+        rgb_cfg.resnet = false;
+        rgb_cfg.attention = false;
+        rgb_cfg.enc_norm = "none";
+        rgb_cfg.dec_norm = "none";
+        VAEConvModel rgb_model;
+        rgb_model.buildFromConfig(rgb_cfg);
+        rgb_model.allocateParams();
+        rgb_model.initializeWeights("xavier", 123u);
+        rgb_model.setVizTapsEnabled(true);
+        rgb_model.setVizTapsLimits(100, 32);
+        std::vector<float> rgb_input(8 * 8 * 3);
+        for (size_t i = 0; i < rgb_input.size(); i += 3) {
+            rgb_input[i] = 1.0f;
+            rgb_input[i + 1] = 0.0f;
+            rgb_input[i + 2] = -1.0f;
+        }
+        (void)rgb_model.forwardPass(rgb_input, true);
+        const auto frames = rgb_model.consumeVizTaps();
+        const auto find_frame = [&](const std::string& name) -> const Model::VizFrame* {
+            for (const auto& frame : frames) {
+                if (frame.label.find("/blocks/" + name + "/") != std::string::npos)
+                    return &frame;
+            }
+            return nullptr;
+        };
+        const auto* raw = find_frame("vae_conv/raw_in");
+        const auto* chw = find_frame("vae_conv/in_to_chw");
+        const auto* tanh = find_frame("vae_conv/dec/tanh");
+        const auto* recon = find_frame("vae_conv/recon_to_hwc");
+        TASSERT_TRUE(raw && chw && tanh && recon);
+        const auto* feature = find_frame("vae_conv/enc/conv_in");
+        TASSERT_TRUE(feature != nullptr);
+        TASSERT_TRUE(feature->heatmap_kind == 1);
+        TASSERT_TRUE(feature->pixels_real.size() == static_cast<size_t>(feature->w) * feature->h * 3);
+        TASSERT_TRUE(feature->tensor_info.find("Capture: entrainement") != std::string::npos);
+        TASSERT_TRUE(feature->tensor_info.find("non finies: 0") != std::string::npos);
+        bool distinct_channels = false;
+        for (size_t i = 0; i < feature->pixels_real.size(); i += 3)
+            distinct_channels = distinct_channels || feature->pixels_real[i] != feature->pixels_real[i + 1] ||
+                feature->pixels_real[i + 1] != feature->pixels_real[i + 2];
+        TASSERT_TRUE(distinct_channels);
+        for (const auto* frame : {raw, chw, tanh, recon}) {
+            TASSERT_TRUE(frame->w == 8 && frame->h == 8 && frame->channels == 3);
+            TASSERT_TRUE(frame->pixels.size() == 8 * 8 * 3);
+            TASSERT_TRUE(frame->pixels_real.empty() || frame->pixels_real.size() == 8 * 8 * 3);
+        }
+        TASSERT_TRUE(raw->pixels == chw->pixels);
+        TASSERT_TRUE(tanh->pixels == recon->pixels);
+        TASSERT_TRUE(raw->pixels[0] > raw->pixels[1] && raw->pixels[1] > raw->pixels[2]);
+        TASSERT_TRUE(rgb_model.getTensor("vae_conv/in_hwc") == rgb_input);
+        TASSERT_TRUE(rgb_model.getTensor("vae_conv/recon").size() == rgb_input.size());
+    }
+
+    // Rectangular feature previews retain their RGB alternative after resizing.
+    {
+        Model features;
+        features.modelConfig["image_w"] = 4;
+        features.modelConfig["image_h"] = 2;
+        features.push("features", "Identity", 0);
+        features.getLayerByName("features")->inputs = {"__input__"};
+        features.getLayerByName("features")->output = "features";
+        features.allocateParams();
+        features.setVizTapsEnabled(true);
+        features.setVizTapsLimits(10, 32);
+        std::vector<float> values(32);
+        for (size_t i = 0; i < values.size(); i += 4) {
+            values[i] = -1; values[i + 1] = 0; values[i + 2] = 1; values[i + 3] = 0;
+        }
+        (void)features.forwardPass(values, true);
+        const auto frames = features.consumeVizTaps();
+        TASSERT_TRUE(frames.size() == 1);
+        TASSERT_TRUE(frames[0].w == 4 && frames[0].h == 4);
+        TASSERT_TRUE(frames[0].pixels_real.size() == 48);
+        TASSERT_TRUE(frames[0].pixels_real[0] < frames[0].pixels_real[1]);
+        TASSERT_TRUE(frames[0].pixels_real[1] < frames[0].pixels_real[2]);
     }
 
     // Composition contract: a child model executed before the root taps are

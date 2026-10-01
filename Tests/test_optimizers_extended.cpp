@@ -1,6 +1,7 @@
 #include "test_utils.hpp"
 
 #include "Model.hpp"
+#include "runtimes/ops_loss_and_grad.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -48,6 +49,23 @@ Optimizer optimizer(OptimizerType type) {
 int main() {
     constexpr float learning_rate = 0.01f;
 
+    // A zero gradient must not clip valid parameters outside [-3, 3].
+    for (const auto type : {OptimizerType::SGD, OptimizerType::ADAM,
+         OptimizerType::ADAMW, OptimizerType::LION, OptimizerType::ADAFACTOR,
+         OptimizerType::RADAM, OptimizerType::NADAM, OptimizerType::RMSPROP,
+         OptimizerType::LAMB}) {
+        Fixture fixture;
+        auto opt = optimizer(type);
+        fixture.weights[0] = 5.0f;
+        fixture.weights[1] = -6.0f;
+        fixture.layer->grad_weights = {0.0f, 0.0f, 0.0f};
+        fixture.model.optimizerStep(opt, learning_rate);
+        TASSERT_NEAR(fixture.weights[0], 5.0f, 0.0f);
+        TASSERT_NEAR(fixture.weights[1], -6.0f, 0.0f);
+        TASSERT_NEAR(fixture.weights[2], 0.5f, 0.0f);
+    }
+
+
     {
         Fixture fixture;
         auto opt = optimizer(OptimizerType::LION);
@@ -56,6 +74,45 @@ int main() {
         TASSERT_NEAR(fixture.weights[1], -1.99f, 1e-6f);
         TASSERT_NEAR(fixture.moments(opt).m[0], 0.02f, 1e-6f);
         TASSERT_TRUE(opt.step == 1);
+    }
+
+    // Lion + Huber: distinct moment coefficients, sign reversals, zero gradient,
+    // and decoupled decay, compared with an independent double reference.
+    {
+        Fixture fixture;
+        auto opt = optimizer(OptimizerType::LION);
+        opt.beta1 = 0.9f;
+        opt.beta2 = 0.99f;
+        opt.weight_decay = 0.1f;
+        RuntimeLossGrad::PixelLossOptions loss_options;
+        loss_options.huber_delta = 0.02f;
+        double expected_weights[] = {1.0, -2.0, 0.5};
+        double momentum[] = {0.0, 0.0, 0.0};
+        for (int step = 0; step < 8; ++step) {
+            const float residual = step < 2 ? 0.5f : (step < 5 ? -0.01f : 0.0f);
+            std::vector<float> prediction(fixture.weights, fixture.weights + 3);
+            const std::vector<float> target = {
+                prediction[0] - residual, prediction[1] + residual, prediction[2]};
+            const auto loss = RuntimeLossGrad::pixel_loss_and_grad(
+                prediction, target, "huber", loss_options);
+            fixture.layer->grad_weights = loss.grad;
+            for (int i = 0; i < 3; ++i) {
+                const double residual_i = static_cast<double>(prediction[i]) - target[i];
+                const double gradient = std::clamp(residual_i,
+                    -static_cast<double>(loss_options.huber_delta),
+                    static_cast<double>(loss_options.huber_delta)) / 3.0;
+                TASSERT_NEAR(loss.grad[i], gradient, 1e-9f);
+                const double update = opt.beta1 * momentum[i] + (1.0 - opt.beta1) * gradient;
+                expected_weights[i] *= 1.0 - learning_rate * opt.weight_decay;
+                expected_weights[i] -= learning_rate * ((update > 0) - (update < 0));
+                momentum[i] = opt.beta2 * momentum[i] + (1.0 - opt.beta2) * gradient;
+            }
+            fixture.model.optimizerStep(opt, learning_rate);
+            for (int i = 0; i < 3; ++i) {
+                TASSERT_NEAR(fixture.weights[i], expected_weights[i], 1e-6f);
+                TASSERT_NEAR(fixture.moments(opt).m[i], momentum[i], 1e-8f);
+            }
+        }
     }
 
     {

@@ -110,8 +110,12 @@ int main() {
             optimizer.adafactor_beta1 = 0.8f;
             optimizer.adafactor_scale_parameter = false;
             optimizer.adafactor_relative_step = true;
-            optimizer.m = {0.1f, 0.2f};
-            optimizer.v = {0.3f, 0.4f};
+            size_t moment_count = 0;
+            for (const auto& layer : modelA->getLayers()) moment_count += layer.getWeightsSize();
+            optimizer.m.assign(moment_count, 0.1f);
+            optimizer.v.assign(moment_count, 0.3f);
+            optimizer.m[1] = 0.2f;
+            optimizer.v[1] = 0.4f;
             modelA->setSerializedOptimizer(std::move(optimizer));
         }
 
@@ -183,7 +187,7 @@ int main() {
             TASSERT_NEAR(optimizer->adafactor_beta1, 0.8f, 1e-6f);
             TASSERT_TRUE(!optimizer->adafactor_scale_parameter);
             TASSERT_TRUE(optimizer->adafactor_relative_step);
-            TASSERT_TRUE(optimizer->m.size() == 2 && optimizer->v.size() == 2);
+            TASSERT_TRUE(optimizer->m.size() == modelA->getSerializedOptimizer()->m.size() && optimizer->v.size() == modelA->getSerializedOptimizer()->v.size());
         }
 
         // Weights should match (within dtype quantization error if any).

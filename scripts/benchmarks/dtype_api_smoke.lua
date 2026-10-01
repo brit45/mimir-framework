@@ -12,13 +12,18 @@ if not ok then
 end
 
 -- Setter (via requested API path)
-local ok2, dt = Mimir.model.dtype("float16")
+local ok2, dt = Mimir.Model.dtype("float16")
 if not ok2 then
   error("dtype setter failed: " .. tostring(dt))
 end
 
 -- Getter
-local cur = Mimir.model.dtype()
+local cur = Mimir.Model.dtype()
+assert(cur == "float16", "dtype getter mismatch")
+assert(Mimir.Model.dtype("float32"))
+assert(Mimir.Model.dtype() == "float32")
+local accepted = Mimir.Model.dtype("invalid_dtype")
+assert(accepted == false, "invalid dtype accepted")
 log("dtype_api_smoke: dtype now = " .. tostring(cur))
 
 log("dtype_api_smoke: ok")

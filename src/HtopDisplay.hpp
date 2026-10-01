@@ -1,4 +1,6 @@
 #pragma once
+#include "SkipConnectionControl.hpp"
+#include "LiveModelConfig.hpp"
 
 #include <iostream>
 #include <iomanip>
@@ -409,6 +411,15 @@ public:
         viz_action_state_.store(static_cast<int>(state), std::memory_order_relaxed);
     }
 
+    void setRuntimeConfiguration(std::shared_ptr<LiveModelConfig> config) {
+        std::atomic_store(&runtime_config_, std::move(config));
+    }
+    std::shared_ptr<LiveModelConfig> runtime_config_ = std::make_shared<LiveModelConfig>();
+    RuntimeConfigEditor config_editor_;
+    void setSkipConnectionControl(std::shared_ptr<SkipConnectionControl> control) {
+        std::atomic_store(&skip_control_, std::move(control));
+    }
+    std::shared_ptr<SkipConnectionControl> skip_control_ = std::make_shared<SkipConnectionControl>();
     void setHelpVisible(bool visible)
     {
         help_visible_.store(visible, std::memory_order_relaxed);
@@ -696,12 +707,72 @@ public:
         std::cerr << "[htop] csv_log_file=" << csv_log_file << std::endl;
     }
 
+    void configKey(char key) {
+        auto config = std::atomic_load(&runtime_config_);
+        auto& editor = config_editor_;
+        if (!editor.editing && (key == 'c' || key == 'C')) editor.toggle();
+        else if (key == '\033') editor.cancel();
+        else if (key == '\r' || key == '\n') editor.enter(*config);
+        else if (key == '\t') editor.move(1, config->snapshot().size());
+        else editor.text(static_cast<unsigned char>(key));
+    }
+    void configMove(int delta) {
+        config_editor_.move(delta, std::atomic_load(&runtime_config_)->snapshot().size());
+    }
+    bool configVisible() const { return config_editor_.visible; }
+
+    void renderConfiguration() {
+        if (width < 32 || height < 10) {
+            resetCursor(); clearLine();
+            out() << clipToWidth("Config: agrandir le terminal (C fermer)", std::max(1, width)) << std::flush;
+            return;
+        }
+        const auto rows = std::atomic_load(&runtime_config_)->snapshot();
+        auto& editor = config_editor_;
+        if (!rows.empty()) editor.selected = std::min(editor.selected, rows.size() - 1);
+        if (editor.editing) for (size_t i = 0; i < rows.size(); ++i)
+            if (rows[i].key == editor.editing_key) editor.selected = i;
+        const int columns = std::max(1, width - 4);
+        const size_t count = static_cast<size_t>(std::max(1, height - 9));
+        const size_t first = (editor.selected / count) * count;
+        auto line = [&](int row, const std::string& text) {
+            moveCursor(row, 1); clearLine();
+            const std::string shown = clipToWidth(text, columns);
+            out() << "| " << shown << std::string(std::max(0, columns - static_cast<int>(shown.size())), ' ') << " |";
+        };
+        line(1, std::string(columns, '='));
+        line(2, "CONFIGURATION DU MODELE  [C] fermer  [Esc] annuler");
+        line(3, "Fleches: choisir / pages  Entree: modifier puis valider");
+        line(4, "DIRECT = modifiable  FIXE = reconstruction / redemarrage requis");
+        int row = 5;
+        for (size_t i = first; i < rows.size() && i < first + count; ++i) {
+            const auto& e = rows[i];
+            const bool selected = i == editor.selected;
+            std::string value = LiveModelConfig::display(e.value);
+            if (e.pending) value += " -> " + LiveModelConfig::display(*e.pending) + " (en attente)";
+            const auto text = std::string(selected ? "> " : "  ") +
+                (e.owner == LiveModelConfig::Owner::ReadOnly ? "FIXE   " : "DIRECT ") + e.key + " = " + value;
+            line(row++, text);
+        }
+        while (row < height - 3) line(row++, "");
+        if (height >= 8) {
+            const std::string selected_note = rows.empty() ? "Aucun modele attache" : rows[editor.selected].note;
+            line(height - 3, editor.message.empty() ? selected_note : editor.message);
+            line(height - 2, editor.editing ? editor.editing_key + " > " + editor.buffer + "_" :
+                "Entree pour modifier. Valeurs appliquees par le thread d'entrainement.");
+            line(height - 1, std::to_string(rows.empty() ? 0 : editor.selected + 1) + "/" + std::to_string(rows.size()));
+            line(height, std::string(columns, '='));
+        }
+        out() << std::flush;
+    }
+
     void render()
     {
         if (!display_enabled)
             return;
 
         getTerminalSize();
+        if (config_editor_.visible) { renderConfiguration(); return; }
 
         // Retourner au début sans effacer l'écran entier (optimisation)
         resetCursor();
@@ -739,8 +810,10 @@ public:
             const std::vector<std::string> help = {
                 "HTOP CONTROLS",
                 "H                 Close this help",
+                "C                 Open model configuration (Enter to edit/apply)",
                 "V                 Open Viz",
                 "N                 Toggle validation on/off",
+                "S                 Toggle encoder-decoder skip connections",
                 "Tab / Up / Down   Select LR, warmups, KL beta or recon loss",
                 "Left / Right      Decrease / increase selected value",
                 "- / +             Decrease / increase selected value",
@@ -772,7 +845,9 @@ public:
             const int recon_index = std::clamp(
                 live_recon_loss_index_.load(std::memory_order_relaxed), 0, 5);
             std::ostringstream controls;
-            controls << "LIVE "
+            const auto skips = std::atomic_load(&skip_control_);
+            controls << "[S] SKIPS " << (!skips->available.load() ? "N/A" :
+                (skips->enabled.load() ? "ON" : "OFF")) << " | LIVE "
                      << (live_overrides_enabled_.load(std::memory_order_relaxed) ? "ON" : "NATIVE")
                      << " | VAL "
                      << (validation_enabled_.load(std::memory_order_relaxed) ? "ON" : "OFF")
@@ -1018,7 +1093,7 @@ public:
                 out() << colorText("Viz: unavailable", 91);
                 break;
         }
-        out() << colorText("  |  [H] Help  |  Ctrl+C: safe stop", 90);
+        out() << colorText("  |  [H] Help  [C] Config  |  Ctrl+C: safe stop", 90);
 
         // Effacer les lignes restantes pour éviter les artefacts
         for (int i = row; i < height; ++i)

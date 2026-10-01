@@ -241,6 +241,9 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_getGradients);
     lua_setfield(L, -2, "get_gradients");
 
+    lua_pushcfunction(L, lua_lumenText2Img);
+    lua_setfield(L, -2, "lumen_text2img");
+
     lua_pushcfunction(L, lua_lumenBeginVaeCalibration);
     lua_setfield(L, -2, "lumen_begin_vae_calibration");
 
@@ -592,9 +595,15 @@ void LuaScripting::registerAPI() {
     
     lua_setfield(L, -2, "Htop");  // Mimir.Htop
     
-    // ========== Sous-table "Mimir.Viz" (Visualizer SFML) ==========
+    // ========== Sous-table "Mimir.Viz" (backend sélectionné) ==========
     lua_newtable(L);
     
+    lua_pushcfunction(L, lua_vizConfigure);
+    lua_setfield(L, -2, "configure");
+    lua_pushcfunction(L, lua_vizPollEvents);
+    lua_setfield(L, -2, "poll_events");
+    lua_pushcfunction(L, lua_vizBackend);
+    lua_setfield(L, -2, "backend");
     lua_pushcfunction(L, lua_vizCreate);
     lua_setfield(L, -2, "create");
     

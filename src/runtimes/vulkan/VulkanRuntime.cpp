@@ -6,6 +6,7 @@
 
 #include "Layers.hpp"
 #include "runtimes/LayerOps.hpp"
+#include "runtimes/NativeBackward.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -126,16 +127,35 @@ RuntimeCapabilityLevel VulkanRuntime::queryForwardCapability(const LayerType typ
         case LayerType::Mish:
         case LayerType::HardSigmoid:
         case LayerType::HardSwish:
-            return RuntimeCapabilityLevel::HostFallback;
+            return RuntimeCapabilityLevel::Native;
         default:
             return RuntimeCapabilityLevel::Unsupported;
     }
 #endif
 }
 
-RuntimeCapabilityLevel VulkanRuntime::queryBackwardCapability(const LayerType type) const {
+bool VulkanRuntime::supportsBackwardLayerType(const LayerType type) const {
+#ifdef ENABLE_VULKAN
+    return !config_.disabled && NativeBackward::supports(type);
+#else
     (void)type;
-    return RuntimeCapabilityLevel::Unsupported;
+    return false;
+#endif
+}
+
+RuntimeCapabilityLevel VulkanRuntime::queryBackwardCapability(const LayerType type) const {
+    return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::Native : RuntimeCapabilityLevel::Unsupported;
+}
+
+RuntimeCapabilityLevel VulkanRuntime::queryBackwardOperationCapability(
+    const Layer& layer, const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs, bool training) const {
+    if (config_.disabled || !config_.linear_enabled || inputs.empty() || !inputs[0] ||
+        grad_outputs.size()!=1 || !grad_outputs[0]) return RuntimeCapabilityLevel::Unsupported;
+    if (!runtimeCapabilityIsNative(queryConfiguredForwardOperationCapability(layer,inputs,true)))
+        return RuntimeCapabilityLevel::Unsupported;
+    (void)training;
+    return queryBackwardCapability(layer.type_enum);
 }
 
 RuntimeCapabilityLevel VulkanRuntime::queryForwardOperationCapability(
@@ -429,8 +449,8 @@ bool VulkanRuntime::forwardLayer(
             if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op)) return false;
 
             outputs.resize(1);
-            RuntimeLayerOps::binaryForwardHost(A, B, outputs[0], op);
-            return true;
+            outputs[0].resize(A.size());
+            return impl_->engine.binaryForward(A.data(),B.data(),outputs[0].data(),static_cast<int>(A.size()),op);
         }
         case LayerType::ReLU: {
             if (inputs.empty() || !inputs[0]) return false;
@@ -492,11 +512,24 @@ bool VulkanRuntime::forwardLayer(
             if (!RuntimeLayerOps::resolveUnaryOp(layer.type_enum, layer, op, alpha)) return false;
 
             outputs.resize(1);
-            RuntimeLayerOps::unaryForwardHost(A, outputs[0], op, alpha);
-            return true;
+            outputs[0].resize(A.size());
+            return impl_->engine.binaryForward(A.data(),A.data(),outputs[0].data(),static_cast<int>(A.size()),10+op,alpha);
         }
         default:
             return false;
     }
+#endif
+}
+
+bool VulkanRuntime::backwardLayer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs, Layer& layer, bool training) {
+#ifdef ENABLE_VULKAN
+    if (!isInitialized() || !runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training))) return false;
+    return NativeBackward::execute(impl_->engine,inputs,grad_outputs,grad_inputs,layer);
+#else
+    (void)inputs; (void)grad_outputs; (void)grad_inputs; (void)layer; (void)training;
+    return false;
 #endif
 }

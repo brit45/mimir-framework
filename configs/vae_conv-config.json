@@ -122,6 +122,7 @@
     "latent_w": 64,
     "latent_c": 128,
     "base_channels": 8,
+    "decoder_upsample": "nearest_conv",
     "d_model": 512,
     "stochastic_latent": true,
     "use_encoder_prior": true,

@@ -22,6 +22,9 @@
 
 -- Les rapports doivent rester propres et sans préfixes runtime.
 -- On écrit donc directement sur stdout au lieu d'utiliser le logger Mimir.
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("inspect_architectures")
+
 local function log(...)
   local out = {}
   for i = 1, select("#", ...) do
@@ -239,24 +242,7 @@ local function parse_flags(argv)
 end
 
 local function print_usage()
-  log(colorize("Usage: ", C.bold) .. "mimir --lua scripts/tools/inspect_architectures.lua -- [options]")
-  log("")
-  log(colorize("Options:", C.bold, C.cyan))
-  log("  " .. colorize("-a, --show-archs", C.green) .. "        Liste les architectures disponibles (+ dtypes)")
-  log("  " .. colorize("-l, --list <arch>", C.green) .. "       Sélectionne une architecture par son nom")
-  log("  " .. colorize("-e, --export <path>", C.green) .. "     Exporte l'architecture sélectionnée")
-  log("    " .. colorize("formats", C.bold) .. ": .json -> debugJSON, / -> rawFolder, .safetensors -> safetensors")
-  log("  " .. colorize("-p, --params", C.green) .. "            Affiche les paramètres de l'archi sélectionnée")
-  log("  " .. colorize("    --layers", C.green) .. "            Affiche les layers de l'archi sélectionnée")
-  log("  " .. colorize("    --stats", C.green) .. "             Affiche les statistiques théoriques (params par layer)")
-  log("  " .. colorize("    --ops", C.green) .. "               Inventorie les layer types / ops présents dans les graphes")
-  log("  " .. colorize("    --ops-compact", C.green) .. "       Vue compacte de --ops, regroupée par famille")
-  log("  " .. colorize("    --runtime", C.green) .. "           Affiche les capacités runtime exposées au Lua API")
-  log("  " .. colorize("-d, --dtypes", C.green) .. "            Liste les dtypes pris en charge par le framework")
-  log("  " .. colorize("    --optimizers", C.green) .. "        Liste les algorithmes d'optimisation disponibles")
-  log("  " .. colorize("    --recon-losses", C.green) .. "      Liste les fonctions de reconstruction disponibles")
-  log("  " .. colorize("    --json", C.green) .. "              Export JSON complet du registre")
-  log("  " .. colorize("-h, --help", C.green) .. "              Affiche cette aide")
+  ToolHelp.print("inspect_architectures")
 end
 
 local function bool_text(v)

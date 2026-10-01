@@ -15,9 +15,9 @@ struct RunResult {
 };
 
 static RunResult run(const char* mode) {
-    setenv("MIMIR_ENABLE_PLANNER", "1", 1);
-    setenv("MIMIR_PLANNER_MODE", mode, 1);
-    setenv("MIMIR_ENABLE_FUSION", "0", 1);
+    setTestEnvironment("MIMIR_ENABLE_PLANNER", "1");
+    setTestEnvironment("MIMIR_PLANNER_MODE", mode);
+    setTestEnvironment("MIMIR_ENABLE_FUSION", "0");
 
     Model model;
     model.push("linear", "Linear", 0);
@@ -47,11 +47,11 @@ static RunResult run(const char* mode) {
 }
 
 static std::vector<float> run_reuse_chain(const char* mode, const bool reuse) {
-    setenv("MIMIR_ENABLE_PLANNER", "1", 1);
-    setenv("MIMIR_PLANNER_MODE", mode, 1);
-    setenv("MIMIR_ENABLE_FUSION", "0", 1);
-    setenv("MIMIR_PLANNER_BUFFER_REUSE", reuse ? "1" : "0", 1);
-    setenv("MIMIR_PLANNER_BUFFER_POISON", reuse ? "1" : "0", 1);
+    setTestEnvironment("MIMIR_ENABLE_PLANNER", "1");
+    setTestEnvironment("MIMIR_PLANNER_MODE", mode);
+    setTestEnvironment("MIMIR_ENABLE_FUSION", "0");
+    setTestEnvironment("MIMIR_PLANNER_BUFFER_REUSE", reuse ? "1" : "0");
+    setTestEnvironment("MIMIR_PLANNER_BUFFER_POISON", reuse ? "1" : "0");
 
     Model model;
     const char* outputs[] = {"t0", "t1", "t2", "x"};
@@ -68,12 +68,12 @@ static std::vector<float> run_reuse_chain(const char* mode, const bool reuse) {
 }
 
 static std::vector<float> run_resident_unary_chain() {
-    setenv("MIMIR_ENABLE_PLANNER", "1", 1);
-    setenv("MIMIR_PLANNER_MODE", "static", 1);
-    setenv("MIMIR_ENABLE_FUSION", "0", 1);
-    setenv("MIMIR_PLANNER_DEVICE_RESIDENCY", "1", 1);
-    setenv("MIMIR_VULKAN_LINEAR", "1", 1);
-    setenv("MIMIR_VULKAN_LINEAR_MIN_OPS", "0", 1);
+    setTestEnvironment("MIMIR_ENABLE_PLANNER", "1");
+    setTestEnvironment("MIMIR_PLANNER_MODE", "static");
+    setTestEnvironment("MIMIR_ENABLE_FUSION", "0");
+    setTestEnvironment("MIMIR_PLANNER_DEVICE_RESIDENCY", "1");
+    setTestEnvironment("MIMIR_VULKAN_LINEAR", "1");
+    setTestEnvironment("MIMIR_VULKAN_LINEAR_MIN_OPS", "0");
 
     Model model;
     model.push("relu", "ReLU", 0);

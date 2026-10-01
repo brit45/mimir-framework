@@ -13,12 +13,18 @@ local function shell_quote(value)
 end
 
 local function project_root()
-  local conf_dir = type(CONF_DIR) == "string" and CONF_DIR or ""
-  if conf_dir ~= "" then return conf_dir end
-  return "."
+  assert(type(ROOTWORK) == "string" and ROOTWORK ~= "", "ROOTWORK absent")
+  return ROOTWORK
 end
 
-local suite = "all"
+local suite = "core"
+for i, value in ipairs(arg or {}) do
+  if value == "--suite" then
+    assert(arg[i+1] and not arg[i+1]:match("^%-%-"), "--suite: valeur manquante")
+  elseif value:match("^%-%-") then
+    assert(value == "--" or value == "--keep-going" or value == "--quick", "option inconnue: " .. value)
+  end
+end
 for i = 1, #(arg or {}) do
   if arg[i] == "--suite" and arg[i + 1] then suite = arg[i + 1] end
 end
@@ -31,11 +37,11 @@ local groups = {
   },
   core = {
     {"NMS", "scripts/benchmarks/benchmark_nms.lua", "--quick"},
-    {"attention", "scripts/benchmarks/benchmark_attention.lua"},
-    {"convolution training", "scripts/benchmarks/benchmark_conv_train.lua"},
+    {"attention", "scripts/benchmarks/benchmark_attention.lua", "--quick"},
+    {"convolution training", "scripts/benchmarks/benchmark_conv_train.lua", "--quick"},
     {"général", "scripts/benchmarks/benchmark.lua", "--quick"},
-    {"complet", "scripts/benchmarks/benchmark_complet.lua"},
-    {"officiel", "scripts/benchmarks/benchmark_official.lua", "--safe", "--iters", "1"},
+    {"complet", "scripts/benchmarks/benchmark_complet.lua", "--quick"},
+    {"officiel", "scripts/benchmarks/benchmark_official.lua", "--quick", "--iters", "1"},
   },
   stress = {
     {"stress", "scripts/benchmarks/benchmark_stress.lua"},
@@ -67,9 +73,10 @@ for index, entry in ipairs(selected) do
     "cd", shell_quote(root), "&&", shell_quote(mimir_bin),
     "--lua", shell_quote(entry[2]),
   }
-  if #entry > 2 then
+  if #entry > 2 or has("--quick") then
     command[#command + 1] = "--"
     for i = 3, #entry do command[#command + 1] = shell_quote(entry[i]) end
+    if has("--quick") then command[#command + 1] = "--quick" end
   end
 
   log(string.format("\n[%d/%d] %s", index, #selected, entry[1]))

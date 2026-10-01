@@ -248,7 +248,37 @@ cfg.latent_w = latent_w_explicit
 cfg.latent_c = opt_int("latent-c", cfg.latent_c or 32)
 
 cfg.base_channels = opt_int("base-channels", cfg.base_channels or 64)
-cfg.decoder_upsample = "nearest_conv"
+
+-- Upsampling du décodeur. Un nouveau run conserve le défaut historique du
+-- script, tandis qu'une reprise réutilise la topologie du checkpoint sauf
+-- surcharge explicite dans CONF ou en CLI.
+local decoder_upsample_default = "nearest_conv"
+if resume_architecture and type(resume_architecture.model_config) == "table" then
+  decoder_upsample_default = resume_architecture.model_config.decoder_upsample
+      or decoder_upsample_default
+end
+decoder_upsample_default = conf_model.decoder_upsample
+    or conf_training.decoder_upsample
+    or decoder_upsample_default
+cfg.decoder_upsample = opt_str(
+  "decoder-upsample",
+  opt_str("decoder_upsample", decoder_upsample_default)
+)
+
+do
+  local valid_decoder_upsample = {
+    conv_transpose = true,
+    nearest_conv = true,
+    bilinear_conv = true,
+    pixel_shuffle = true,
+  }
+  if not valid_decoder_upsample[cfg.decoder_upsample] then
+    error(
+      "Upsampling décodeur invalide: " .. tostring(cfg.decoder_upsample) ..
+      " (attendu: nearest_conv, bilinear_conv, pixel_shuffle ou conv_transpose)"
+    )
+  end
+end
 
 do
   local function downsample_steps(image_size, latent_size, axis)
@@ -441,6 +471,12 @@ cfg.attn_max_tokens = opt_int(
 cfg.use_skip_connections = opt_bool(
   "skip-connections",
   opt_bool("skip_connections", opt_bool("use-skip-connections", cfg.use_skip_connections or false))
+)
+
+-- État initial du contrôle live, indépendant de la présence des skips.
+-- Exemple : --skip-connections=true --skip-connections-enabled=false
+cfg.skip_connections_enabled = opt_bool(
+  "skip-connections-enabled", cfg.skip_connections_enabled ~= false
 )
 
 -- Prior appris dans le graphe (couche Constant entraînée par backprop).
@@ -675,7 +711,7 @@ cfg.perceptual_prior_momentum = opt_num("perceptual-prior-momentum", cfg.percept
 cfg.perceptual_prior_scale = opt_num("perceptual-prior-scale", cfg.perceptual_prior_scale or 0.05)
 
 -- Paramètres recon loss
-cfg.huber_delta = opt_num("huber-delta", cfg.huber_delta or 0.0)
+cfg.huber_delta = opt_num("huber-delta", cfg.huber_delta or 1.0)
 cfg.charbonnier_eps = opt_num("charbonnier-eps", cfg.charbonnier_eps or 3e-5)
 cfg.nll_sigma = opt_num("nll-sigma", cfg.nll_sigma or 1.0)
 

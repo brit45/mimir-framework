@@ -19,6 +19,9 @@
 
 ---@diagnostic disable: undefined-field, need-check-nil, param-type-mismatch
 
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("inspect_z_prior_raw_folder")
+
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 
 local function die(msg)

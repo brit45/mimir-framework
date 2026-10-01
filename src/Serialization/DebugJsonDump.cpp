@@ -1,5 +1,6 @@
 #include "DebugJsonDump.hpp"
 #include "../Model.hpp"
+#include "CheckpointState.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
 #include "../LayerTypes.hpp"
@@ -75,7 +76,7 @@ bool DebugJsonDump::save(
 ) {
     try {
         // Build JSON representation
-        json debug_json = build_json(model, options);
+        json debug_json = build_json(model, effective_save_options(model, options));
         
         // Ensure directory exists
         fs::path file_path(path);
@@ -569,6 +570,7 @@ json DebugJsonDump::extract_layer_config(const Layer& layer) {
             break;
     }
     
+    if (layer.skip_input_index >= 0) config["skip_input_index"] = layer.skip_input_index;
     return config;
 }
 
@@ -983,8 +985,8 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     model_info["logical_parameter_elements"] = logical_params;
     model_info["total_params"] = logical_params;
     model_info["parameters_frozen"] = model.parametersFrozen();
-    model_info["has_encoder"] = model.getHasEncoder();
-    model_info["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
+    model_info["has_encoder"] = options.save_encoder;
+    if (options.save_tokenizer) model_info["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
     if (root["model_config"].contains("type") && root["model_config"]["type"].is_string()) {
         model_info["type"] = root["model_config"]["type"];
     }
@@ -996,28 +998,11 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     // Optimizer state (if requested)
     if (options.include_optimizer_state) {
         json opt_state;
-        if (const Optimizer* opt = model.getSerializedOptimizer()) {
+        if (const Optimizer* live = model.getSerializedOptimizer()) {
+            const auto snapshot = model.optimizerSnapshot(*live);
+            const Optimizer* opt = &snapshot;
+            opt_state = optimizer_metadata(*opt);
             opt_state["type"] = optimizerTypeName(opt->type);
-            opt_state["step"] = opt->step;
-            opt_state["lr_current"] = opt->getCurrentLR();
-            opt_state["beta1"] = opt->beta1;
-            opt_state["beta2"] = opt->beta2;
-            opt_state["eps"] = opt->eps;
-            opt_state["weight_decay"] = opt->weight_decay;
-            opt_state["rmsprop_alpha"] = opt->rmsprop_alpha;
-            opt_state["adafactor_clip_threshold"] = opt->adafactor_clip_threshold;
-            opt_state["adafactor_decay_rate"] = opt->adafactor_decay_rate;
-            opt_state["adafactor_eps2"] = opt->adafactor_eps2;
-            opt_state["adafactor_beta1"] = opt->adafactor_beta1;
-            opt_state["adafactor_scale_parameter"] = opt->adafactor_scale_parameter;
-            opt_state["adafactor_relative_step"] = opt->adafactor_relative_step;
-            opt_state["decay_strategy"] = static_cast<int>(opt->decay_strategy);
-            opt_state["initial_lr"] = opt->initial_lr;
-            opt_state["min_lr"] = opt->min_lr;
-            opt_state["decay_rate"] = opt->decay_rate;
-            opt_state["decay_steps"] = opt->decay_steps;
-            opt_state["total_steps"] = opt->total_steps;
-            opt_state["warmup_steps"] = opt->warmup_steps;
 
             // State vectors (debug-only): stats + small sample
             if (!opt->m.empty()) {
@@ -1290,9 +1275,14 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
 bool DebugJsonDump::save_enhanced(
     const std::string& path,
     const Model& model,
-    const DebugJsonOptions& options,
+    const DebugJsonOptions& requested_options,
     std::string* error
 ) {
+    auto options = requested_options;
+    options.save_encoder = options.save_encoder && component_enabled(model, "encoder", model.getHasEncoder());
+    options.save_tokenizer = options.save_tokenizer && component_enabled(model, "tokenizer", model.getHasTokenizer());
+    options.include_optimizer_state = options.include_optimizer_state && model.getSerializedOptimizer();
+
     try {
         json j = build_json_enhanced(model, options);
 

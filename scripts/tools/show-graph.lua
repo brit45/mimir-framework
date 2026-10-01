@@ -33,6 +33,9 @@
 -- HELPERS FICHIERS / SYSTÈME
 -- ══════════════════════════════════════════════════════════════
 
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("show-graph")
+
 local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function file_exists(p)
@@ -2308,39 +2311,7 @@ local function parse_args()
   local i = 1
   while i <= #raw do
     local a = raw[i]
-    if a == "-h" or a == "--help" then
-      io.write([[
-show-graph.lua — Visualisation métriques d'entraînement
-Génère un rapport HTML interactif (Chart.js).
-
-Usage:
-  ./bin/mimir --lua scripts/tools/show-graph.lua -- [CSV] [OPTIONS]
-  lua scripts/tools/show-graph.lua [CSV] [OPTIONS]
-
-OPTIONS:
-  [CSV]                    CSV (défaut: checkpoints/loss_history.csv)
-                           Accepte aussi les patterns *part[0-9].csv (fusion auto)
-  --csv PATH               Alias (idem que positional)
-  --csv-dir DIR            Dossier contenant des CSV *part[0-9].csv à fusionner
-  --model NAME             Nom du modèle
-  --algo NAME              Algorithme d'optimisation (alias de --optimizer)
-  --optimizer NAME         Algorithme d'optimisation (adamw, adam, sgd, ...)
-  --recon-loss NAME        Fonction de reconstruction (mse, l1, charbonnier, ...)
-  --checkpoint PATH        Dossier checkpoint ou fichier DEBUGJSON Mímir
-  --checkpoint-dir PATH    Alias rétrocompatible de --checkpoint
-  -n, --no-interactive     Pas de prompts stdin
-  --out PATH               HTML de sortie (défaut: ./graph_report.html)
-  --out-text PATH          Rapport .md/.txt; rapport.{md,txt} génère les deux
-  --watch                  Surveille le CSV et régénère le rapport à chaque changement
-                           Ouvre le navigateur automatiquement au démarrage
-  --watch-interval N       Intervalle de polling en secondes (défaut: 2)
-  --validate-every-steps N Fréquence de validation (en opt_steps) — auto-détecté si absent
-  --validate-items N       Nombre d'images évaluées par validation — auto-détecté si absent
-  --n-dataset N            Taille du dataset (items par epoch) — auto-détecté si absent
-  -h, --help               Cette aide
-]])
-      os.exit(0)
-    elseif a == "--csv"            then opts.csv            = raw[i+1]; i = i+1
+    if a == "--csv"            then opts.csv            = raw[i+1]; i = i+1
     elseif a:match("^--csv=")     then opts.csv            = a:sub(7)
     elseif a == "--csv-dir"        then opts.csv_dir        = raw[i+1]; i = i+1
     elseif a:match("^--csv%-dir=") then opts.csv_dir        = a:match("^--csv%-dir=(.+)")

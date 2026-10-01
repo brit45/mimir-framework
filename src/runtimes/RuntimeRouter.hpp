@@ -59,12 +59,17 @@ public:
     bool voteForwardLayerType(LayerType type) const;
     bool voteBackwardLayerType(LayerType type) const;
 
+    bool dispatchBranchMerge(const std::vector<float>& left,
+                             const std::vector<float>& right,
+                             std::vector<float>& output, const Layer& layer) const;
+
     bool dispatchForwardLayer(
         const std::vector<const std::vector<float>*>& inputs,
         std::vector<std::vector<float>>& outputs,
         const Layer& layer,
         bool training,
-        AbstractRuntime** selected_runtime = nullptr
+        AbstractRuntime** selected_runtime = nullptr,
+        const RuntimeForwardContext& context = {}
     ) const;
 
     // Execute the planner choice first, then lower native routes without
@@ -75,7 +80,8 @@ public:
         std::vector<std::vector<float>>& outputs,
         const Layer& layer,
         bool training,
-        AbstractRuntime** selected_runtime = nullptr
+        AbstractRuntime** selected_runtime = nullptr,
+        const RuntimeForwardContext& context = {}
     ) const;
 
     bool dispatchBackwardLayer(
@@ -84,7 +90,8 @@ public:
         std::vector<std::vector<float>>& grad_inputs,
         Layer& layer,
         bool training,
-        AbstractRuntime** selected_runtime = nullptr
+        AbstractRuntime** selected_runtime = nullptr,
+        const RuntimeBackwardContext& context = {}
     ) const;
 
 private:

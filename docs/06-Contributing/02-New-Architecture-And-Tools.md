@@ -201,7 +201,7 @@ Exemple de sortie réelle (commande complète) :
 ```text
 ./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a -l vae_conv -p --layers --stats
 ╔════════════════════════════════════════╗
-║       Mímir Framework v3.1.0           ║
+║       Mímir Framework v3.5.0           ║
 ║     Deep Learning Architectures        ║
 ╚════════════════════════════════════════╝
 

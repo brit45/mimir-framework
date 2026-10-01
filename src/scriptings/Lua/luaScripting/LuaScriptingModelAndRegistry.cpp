@@ -170,6 +170,8 @@ static void _mimir_publish_lumen_viz(
         frame.h = tap.h;
         frame.channels = tap.channels;
         frame.pixels_real = std::move(tap.pixels_real);
+        frame.heatmap_kind = tap.heatmap_kind;
+        frame.tensor_info = std::move(tap.tensor_info);
         frame.label = std::move(tap.label);
         frames.push_back(std::move(frame));
     }
@@ -738,6 +740,32 @@ int LuaScripting::lua_modelDType(lua_State* L) {
     }
 }
 
+int LuaScripting::lua_lumenText2Img(lua_State* L) {
+    const char* prompt = luaL_checkstring(L, 1);
+    const int seed = static_cast<int>(luaL_optinteger(L, 2, 1337));
+    const int steps = static_cast<int>(luaL_optinteger(L, 3, 30));
+    const float guidance = static_cast<float>(luaL_optnumber(L, 4, 5.0));
+    try {
+        if (steps < 1 || !std::isfinite(guidance) || guidance < 0.0f) {
+            throw std::invalid_argument("Lumen: steps must be positive and guidance finite and non-negative");
+        }
+        const auto image = _mimir_current_lumen_model().generate(prompt, seed, steps, guidance);
+        lua_createtable(L, static_cast<int>(image.pixels.size()), 0);
+        for (size_t index = 0; index < image.pixels.size(); ++index) {
+            lua_pushinteger(L, image.pixels[index]);
+            lua_rawseti(L, -2, static_cast<lua_Integer>(index + 1));
+        }
+        lua_pushinteger(L, image.w);
+        lua_pushinteger(L, image.h);
+        lua_pushinteger(L, image.channels);
+        return 4;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
 int LuaScripting::lua_lumenBeginVaeCalibration(lua_State* L) {
     try {
         _mimir_current_lumen_model().beginVaeCalibration();
@@ -779,6 +807,12 @@ int LuaScripting::lua_lumenTrainStep(lua_State* L) {
     try {
         auto& ctx = LuaContext::getInstance();
         auto& lumen = _mimir_current_lumen_model();
+    if (ctx.asyncMonitor) {
+        ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
+        ctx.currentModel->publishRuntimeConfiguration();
+        ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+    }
+
         const auto step_started_at = std::chrono::steady_clock::now();
         const std::vector<unsigned char> image = _mimir_lua_u8_array(L, 1);
         const std::string prompt = luaL_checkstring(L, 2);
@@ -799,10 +833,12 @@ int LuaScripting::lua_lumenTrainStep(lua_State* L) {
             if (_mimir_live_params_overrides_enabled(live) &&
                 std::isfinite(live.lr) && live.lr > 0.0f) {
                 learning_rate = live.lr;
+                lr_warmup_steps = live.lr_warmup_steps;
             }
         }
         Optimizer& optimizer = _mimir_lumen_optimizer(
             *ctx.currentModel, optimizer_name, learning_rate);
+        optimizer.warmup_steps = lr_warmup_steps;
         const bool viz_active = ctx.asyncMonitor && ctx.asyncMonitor->getViz();
         if (viz_active && !ctx.currentModel->isVizTapsEnabled()) {
             ctx.currentModel->setVizTapsEnabled(true);
@@ -913,6 +949,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         return 2;
     }
     
+    if (ctx.asyncMonitor) {
+        ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
+        ctx.currentModel->publishRuntimeConfiguration();
+        ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+    }
+
     // Arguments: epochs (number), learning_rate (number)
     int epochs = luaL_checkinteger(L, 1);
     double lr = luaL_checknumber(L, 2);
@@ -1271,6 +1313,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         VaeValidationFeedback vae_validation_feedback(vae_feedback_config);
 
         auto poll_viz_live_params = [&]() {
+            ctx.currentModel->applyRuntimeConfiguration();
             if (!ctx.asyncMonitor) return;
             const uint64_t ver = ctx.asyncMonitor->liveTrainParamsVersion();
             if (ver == 0 || ver == last_live_ver) return;
@@ -1306,6 +1349,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 opt.initial_lr = std::max(1e-12f, p.lr);
             }
             opt.warmup_steps = std::max(0, p.lr_warmup_steps);
+            ctx.currentModel->modelConfig["learning_rate"] = opt.initial_lr;
+            ctx.currentModel->modelConfig["lr_warmup_steps"] = opt.warmup_steps;
 
             const float kl_beta = (p.kl_enabled ? std::max(0.0f, p.kl_beta) : 0.0f);
             const int kl_warmup_steps = std::max(0, p.kl_warmup_steps);
@@ -2583,6 +2628,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                             bf.h = f.h;
                             bf.channels = f.channels;
                             bf.pixels_real = std::move(f.pixels_real);
+                            bf.heatmap_kind = f.heatmap_kind;
+                            bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
                             frames.push_back(std::move(bf));
                         }
@@ -2684,6 +2731,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     bf.h = f.h;
                     bf.channels = f.channels;
                     bf.pixels_real = std::move(f.pixels_real);
+                    bf.heatmap_kind = f.heatmap_kind;
+                    bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
                     frames.push_back(std::move(bf));
                 }
@@ -3146,6 +3195,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     bf.h = f.h;
                     bf.channels = f.channels;
                     bf.pixels_real = std::move(f.pixels_real);
+                    bf.heatmap_kind = f.heatmap_kind;
+                    bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
                     frames.push_back(std::move(bf));
                 }
@@ -4203,6 +4254,13 @@ int LuaScripting::lua_saveCheckpoint(lua_State* L) {
         lua_pop(L, 1);
     }
     
+    // Caller-owned loop state (cursor, RNG, validation feedback) travels with model_config.
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "training_state");
+        if (lua_istable(L, -1)) ctx.currentModel->modelConfig["training_state"] = luaTableToJson(L, -1);
+        lua_pop(L, 1);
+    }
+
     // Save
     std::string error;
     bool success = save_checkpoint(*ctx.currentModel, path, options, &error);
@@ -4296,10 +4354,12 @@ int LuaScripting::lua_loadCheckpoint(lua_State* L) {
         // On resynchronise le contexte Lua pour que l'entraînement utilise bien
         // le tokenizer/encoder du checkpoint (et non un asset précédemment chargé).
         if (options.load_tokenizer && ctx.currentModel) {
-            ctx.currentTokenizer = std::make_shared<Tokenizer>(ctx.currentModel->getTokenizer());
+            ctx.currentTokenizer = ctx.currentModel->getHasTokenizer()
+                ? std::make_shared<Tokenizer>(ctx.currentModel->getTokenizer()) : nullptr;
         }
         if (options.load_encoder && ctx.currentModel) {
-            ctx.currentEncoder = std::make_shared<ConditioningEncoder>(ctx.currentModel->getEncoder());
+            ctx.currentEncoder = ctx.currentModel->getHasEncoder()
+                ? std::make_shared<ConditioningEncoder>(ctx.currentModel->getEncoder()) : nullptr;
         }
 
         ctx.addLog("Checkpoint chargé: " + std::string(path));

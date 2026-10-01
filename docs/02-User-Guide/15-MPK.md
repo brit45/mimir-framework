@@ -42,6 +42,46 @@ Les usages principaux sont :
 Un MPK ne contient pas les poids entraînés. Pour sauvegarder ou reprendre un
 état numérique, utilisez un checkpoint RawFolder ou SafeTensors.
 
+## Générer depuis un checkpoint ou le registre
+
+Les deux commandes `build_mpk.lua` et `export_arch_mpk.lua` acceptent
+`--checkpoint <chemin>`. Elles exportent les couches sérialisées, leurs connexions,
+les paramètres de couches disponibles et `model_config`, sans charger les poids.
+
+```bash
+./bin/mimir --lua scripts/tools/build_mpk.lua -- --checkpoint checkpoints/run --out exports/run.mpk
+./bin/mimir --lua scripts/tools/build_mpk.lua -- --checkpoint model.safetensors --out exports/model.mpk --compile
+./bin/mimir --lua scripts/tools/build_mpk.lua -- --checkpoint debug.json --out exports/debug.mpk
+./bin/mimir --lua scripts/tools/build_mpk.lua -- --register transformer --out exports/transformer.mpk
+```
+
+`--format auto` est implicite : `.safetensors`/`.st`, `.json`, sinon dossier.
+Pour imposer le format, utilisez `rawfolder`, `safetensor` ou `debugjson` ;
+`raw_folder`, `safetensors` et `debug_json` sont également acceptés.
+RawFolder accepte `model/architecture.json` ou `architecture.json` à la racine.
+SafeTensors exige le tenseur Mímir `model/architecture_json` : un fichier externe
+contenant seulement des poids est refusé explicitement.
+
+`--register <nom>` et `--arch <nom>` exportent le graphe réel du registre.
+La commande historique `--type <nom> --from-registry` utilise le même export.
+Sans source, `build_mpk.lua` conserve la création par template ou structure JSON.
+Les options de description, auteur, date et modification restent utilisables.
+Les formats MPK existants restent lisibles ; aucune migration des fichiers
+présents n'est effectuée. `--out` désigne le fichier à écrire et remplace ce
+fichier s'il existe déjà.
+
+Un export ne peut conserver que les champs présents dans le checkpoint : les
+anciens RawFolder/SafeTensors ne sérialisent pas toutes les options de couches.
+Le MPK produit ne constitue donc pas une sauvegarde des poids ni une garantie
+de reprise d'entraînement. Le DebugJSON est lu en mémoire, tandis que le lecteur
+SafeTensors ne lit que l'en-tête et le tenseur d'architecture.
+
+Validation ciblée :
+
+```bash
+./bin/mimir --lua scripts/tests/test_mpk_checkpoint_export.lua
+```
+
 ## Ce que contient un MPK
 
 Le package logique possède les sections suivantes :

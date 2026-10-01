@@ -10,6 +10,19 @@
 
 struct Layer;
 
+struct RuntimeForwardContext {
+    bool skip_connections_enabled = true;
+    std::vector<uint8_t>* output_mask = nullptr;
+    bool stochastic_latent = true;
+};
+
+// State captured by a training forward, independent of backend selection.
+struct RuntimeBackwardContext {
+    bool skip_connections_enabled = true;
+    const std::vector<float>* output = nullptr;
+    const std::vector<uint8_t>* output_mask = nullptr;
+};
+
 enum class RuntimeKind : uint8_t {
     Unknown = 0,
     CPU,
@@ -121,6 +134,20 @@ public:
         bool training
     ) = 0;
 
+    // Complete layer semantics, shared by direct and planned dispatch.
+    virtual bool forwardLayerWithContext(
+        const std::vector<const std::vector<float>*>& inputs,
+        std::vector<std::vector<float>>& outputs, const Layer& layer, bool training,
+        const RuntimeForwardContext& context = {});
+
+    // Legacy branch merges have an explicit runtime entry point as well.
+    virtual bool mergeBranches(const std::vector<float>& left,
+                               const std::vector<float>& right,
+                               std::vector<float>& output, const Layer& layer) {
+        (void)left; (void)right; (void)output; (void)layer;
+        return false;
+    }
+
     // API backward générique. Retourne false si non supporté par ce runtime.
     // Convention:
     // - grad_outputs[0] = gradient en sortie du layer
@@ -133,6 +160,12 @@ public:
         Layer& layer,
         bool training
     );
+
+    virtual bool backwardLayerWithContext(
+        const std::vector<const std::vector<float>*>& inputs,
+        const std::vector<const std::vector<float>*>& grad_outputs,
+        std::vector<std::vector<float>>& grad_inputs,
+        Layer& layer, bool training, const RuntimeBackwardContext& context);
 
     // Vote de support (sans calcul): indique si ce runtime prend en charge
     // la famille d'ops d'un LayerType donné.

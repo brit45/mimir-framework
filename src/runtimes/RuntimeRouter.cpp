@@ -263,8 +263,19 @@ bool RuntimeRouter::dispatchForwardLayer(
     std::vector<std::vector<float>>& outputs,
     const Layer& layer,
     bool training,
-    AbstractRuntime** selected_runtime
+    AbstractRuntime** selected_runtime,
+    const RuntimeForwardContext& context
 ) const {
+    const int skip = layer.skipInputIndex();
+    if (!context.skip_connections_enabled && skip >= 0 &&
+        static_cast<size_t>(skip) < inputs.size() && inputs[skip]) {
+        auto gated_inputs = inputs;
+        std::vector<float> zeros(inputs[skip]->size(), 0.0f);
+        gated_inputs[skip] = &zeros;
+        auto gated_context = context;
+        gated_context.skip_connections_enabled = true;
+        return dispatchForwardLayer(gated_inputs, outputs, layer, training, selected_runtime, gated_context);
+    }
     ensureActivatedAndComposed();
 
     if (selected_runtime) *selected_runtime = nullptr;
@@ -293,7 +304,7 @@ bool RuntimeRouter::dispatchForwardLayer(
         }
 
         std::vector<std::vector<float>> local_outputs;
-        if (rt->forwardLayer(inputs, local_outputs, layer, training) &&
+        if (rt->forwardLayerWithContext(inputs, local_outputs, layer, training, context) &&
             !local_outputs.empty() &&
             tensorsAreFinite(local_outputs)) {
             outputs = std::move(local_outputs);
@@ -314,8 +325,19 @@ bool RuntimeRouter::dispatchForwardLayerPlanned(
     std::vector<std::vector<float>>& outputs,
     const Layer& layer,
     const bool training,
-    AbstractRuntime** selected_runtime
+    AbstractRuntime** selected_runtime,
+    const RuntimeForwardContext& context
 ) const {
+    const int skip = layer.skipInputIndex();
+    if (!context.skip_connections_enabled && skip >= 0 &&
+        static_cast<size_t>(skip) < inputs.size() && inputs[skip]) {
+        auto gated_inputs = inputs;
+        std::vector<float> zeros(inputs[skip]->size(), 0.0f);
+        gated_inputs[skip] = &zeros;
+        auto gated_context = context;
+        gated_context.skip_connections_enabled = true;
+        return dispatchForwardLayerPlanned(preferred, gated_inputs, outputs, layer, training, selected_runtime, gated_context);
+    }
     ensureActivatedAndComposed();
     if (selected_runtime) *selected_runtime = nullptr;
     outputs.clear();
@@ -334,7 +356,7 @@ bool RuntimeRouter::dispatchForwardLayerPlanned(
     };
     auto execute = [&](AbstractRuntime* runtime) -> bool {
         std::vector<std::vector<float>> local;
-        if (!runtime->forwardLayer(inputs, local, layer, training) ||
+        if (!runtime->forwardLayerWithContext(inputs, local, layer, training, context) ||
             local.empty() || !tensorsAreFinite(local)) return false;
         outputs = std::move(local);
         if (selected_runtime) *selected_runtime = runtime;
@@ -372,20 +394,31 @@ bool RuntimeRouter::dispatchBackwardLayer(
     std::vector<std::vector<float>>& grad_inputs,
     Layer& layer,
     bool training,
-    AbstractRuntime** selected_runtime
+    AbstractRuntime** selected_runtime,
+    const RuntimeBackwardContext& context
 ) const {
+    const int skip = layer.skipInputIndex();
+    if (!context.skip_connections_enabled && skip >= 0 &&
+        static_cast<size_t>(skip) < inputs.size() && inputs[skip]) {
+        auto gated_inputs = inputs;
+        std::vector<float> zeros(inputs[skip]->size(), 0.0f);
+        gated_inputs[skip] = &zeros;
+        auto gated_context = context;
+        gated_context.skip_connections_enabled = true;
+        const bool ok = dispatchBackwardLayer(gated_inputs, grad_outputs,
+            grad_inputs, layer, training, selected_runtime, gated_context);
+        if (ok && static_cast<size_t>(skip) < grad_inputs.size())
+            std::fill(grad_inputs[skip].begin(), grad_inputs[skip].end(), 0.0f);
+        return ok;
+    }
     ensureActivatedAndComposed();
 
     if (selected_runtime) *selected_runtime = nullptr;
     grad_inputs.clear();
 
-    auto it = backward_layer_routes_.find(&layer);
-    if (it == backward_layer_routes_.end()) {
-        auto inserted = backward_layer_routes_.emplace(&layer, buildBackwardRouteForLayer(layer));
-        it = inserted.first;
-    }
-
-    std::vector<AbstractRuntime*>& route = it->second;
+    // Temporary/rewritten layers can reuse an address. Backward capability is
+    // cheap to resolve and must describe this operation, not a previous layer.
+    std::vector<AbstractRuntime*> route = buildBackwardRouteForLayer(layer);
     if (route.empty()) return false;
 
     size_t i = 0;
@@ -402,8 +435,8 @@ bool RuntimeRouter::dispatchBackwardLayer(
         }
 
         std::vector<std::vector<float>> local_grad_inputs;
-        if (rt->backwardLayer(inputs, grad_outputs, local_grad_inputs, layer, training) &&
-            !local_grad_inputs.empty() &&
+        if (rt->backwardLayerWithContext(inputs, grad_outputs, local_grad_inputs, layer, training, context) &&
+            (layer.type_enum == LayerType::Constant || !local_grad_inputs.empty()) &&
             tensorsAreFinite(local_grad_inputs)) {
             grad_inputs = std::move(local_grad_inputs);
             if (selected_runtime) *selected_runtime = rt;
@@ -414,5 +447,20 @@ bool RuntimeRouter::dispatchBackwardLayer(
         route.erase(route.begin() + static_cast<std::ptrdiff_t>(i));
     }
 
+    return false;
+}
+
+bool RuntimeRouter::dispatchBranchMerge(const std::vector<float>& left,
+                                        const std::vector<float>& right,
+                                        std::vector<float>& output, const Layer& layer) const {
+    ensureActivatedAndComposed();
+    for (auto* runtime : runtime_priority_) {
+        if (!runtime || !runtime->isInitialized()) continue;
+        std::vector<float> candidate;
+        if (runtime->mergeBranches(left, right, candidate, layer)) {
+            output = std::move(candidate);
+            return true;
+        }
+    }
     return false;
 }

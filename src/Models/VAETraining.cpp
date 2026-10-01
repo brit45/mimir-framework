@@ -220,6 +220,7 @@ Model::TrainStepResult VAETraining::trainImage(Model& model,
                                                float learning_rate,
                                                Model::TrainStepMode mode,
                                                float grad_scale) {
+    model.applyRuntimeConfiguration();
     validate_model(model, "VAETraining::trainImage");
 
     const std::vector<float>& expected = target ? *target : input;
@@ -621,6 +622,7 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
                                               float learning_rate,
                                               Model::TrainStepMode mode,
                                               float grad_scale) {
+    model.applyRuntimeConfiguration();
     validate_model(model, "VAETraining::trainText");
 
     std::string recon_loss = "mse";

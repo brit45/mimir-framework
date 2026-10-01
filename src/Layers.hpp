@@ -176,6 +176,21 @@ struct Layer {
     std::vector<int> permute_dims;  // Ordre des dimensions pour permute [0,2,1]
     
     // === Concat / Split ===
+    // Explicit graph annotation; -1 preserves ordinary merge semantics.
+    int skip_input_index = -1;
+    int skipInputIndex() const {
+        if (type_enum != LayerType::Concat && type_enum != LayerType::Add) return -1;
+        if (skip_input_index >= 0 && static_cast<size_t>(skip_input_index) < inputs.size())
+            return skip_input_index;
+        // Older checkpoints predate the annotation. Recognize only native
+        // encoder-decoder skips, never arbitrary concatenations/residuals.
+        if (type_enum == LayerType::Concat && inputs.size() == 2 &&
+            ((name.rfind("vae_conv/dec/", 0) == 0 && name.size() >= 9 &&
+              name.compare(name.size() - 9, 9, "/skip_cat") == 0) ||
+             (name.rfind("unet/up", 0) == 0 && name.size() >= 7 &&
+              name.compare(name.size() - 7, 7, "/concat") == 0))) return 1;
+        return -1;
+    }
     int concat_axis = 1;               // Axis de concatenation (default: channels)
     int num_splits = 2;                // Nombre de splits (splits égaux si split_sizes vide)
     std::vector<int> split_sizes;      // Tailles explicites de chaque split (si vide: splits égaux)
@@ -644,6 +659,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
                 __m256 acc = _mm256_setzero_ps();
+                float scalar_tail = 0.0f;
                 
                 for (int ic = 0; ic < in_channels; ++ic) {
                     for (int kh = 0; kh < kernel_size; ++kh) {
@@ -679,7 +695,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
                                 int in_idx = (ic * in_height + ih) * in_width + iw;
                                 int kernel_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
                                 float prod = input[in_idx] * kernel[kernel_idx];
-                                acc = _mm256_add_ps(acc, _mm256_set1_ps(prod));
+                                scalar_tail += prod;
                             }
                         }
                     }
@@ -693,7 +709,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
                 __m128 sums = _mm_add_ps(sum, shuf);
                 shuf = _mm_movehl_ps(shuf, sums);
                 sums = _mm_add_ss(sums, shuf);
-                float result = _mm_cvtss_f32(sums);
+                float result = _mm_cvtss_f32(sums) + scalar_tail;
                 
                 // Ajout du bias
                 if (!bias.empty()) {

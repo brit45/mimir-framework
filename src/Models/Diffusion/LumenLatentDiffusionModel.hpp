@@ -85,6 +85,7 @@ public:
     };
 
     LumenLatentDiffusionModel();
+    std::shared_ptr<SkipConnectionControl> skipConnectionControl() override;
 
     void buildFromConfig(const Config& cfg);
     const Config& getConfig() const { return cfg_; }

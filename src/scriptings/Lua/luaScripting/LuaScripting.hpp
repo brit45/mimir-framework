@@ -86,6 +86,7 @@ private:
     static int lua_setLayerIO(lua_State* L);  // NEW: Configure inputs/outputs
     static int lua_forwardPass(lua_State* L);
     static int lua_forwardPromptImageSeed(lua_State* L);
+    static int lua_lumenText2Img(lua_State* L);
     static int lua_lumenBeginVaeCalibration(lua_State* L);
     static int lua_lumenAddVaeCalibrationImage(lua_State* L);
     static int lua_lumenFinishVaeCalibration(lua_State* L);
@@ -133,6 +134,9 @@ private:
     
     // === Visualizer API ===
     static int lua_vizCreate(lua_State* L);
+    static int lua_vizConfigure(lua_State* L);
+    static int lua_vizPollEvents(lua_State* L);
+    static int lua_vizBackend(lua_State* L);
     static int lua_vizInitialize(lua_State* L);
     static int lua_vizIsOpen(lua_State* L);
     static int lua_vizProcessEvents(lua_State* L);

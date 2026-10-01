@@ -3,7 +3,7 @@ local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- ══════════════════════════════════════════════════════════════
---  TEMPLATE SCRIPT - Mímir Framework v2.4.0
+--  TEMPLATE SCRIPT - Mímir Framework v3.5.0
 --  Utilisez ce template pour créer vos propres modèles
 --  
 --  📚 Synchronisé avec l'API enregistrée dans
@@ -86,7 +86,7 @@ CONFIG.learning_rate = CONFIG.learning_rate or 1e-4
 CONFIG.epochs = CONFIG.epochs or 1
 
 log("╔════════════════════════════════════════════════════════╗")
-log("║      Template Script - Mímir Framework v2.4.0          ║")
+log("║      Template Script - Mímir Framework v3.5.0          ║")
 log("╚════════════════════════════════════════════════════════╝")
 log("Arch: " .. tostring(MODEL_TYPE))
 
@@ -558,4 +558,4 @@ log("  • Support multi-input avec Mimir.Model.set_layer_io()")
 log("  • Résidual & skip connections")
 log("  • 115+ fonctions API documentées")
 
-log("\n✨ Bon apprentissage avec Mímir Framework v2.4.0! ✨\n")
+log("\n✨ Bon apprentissage avec Mímir Framework v3.5.0! ✨\n")

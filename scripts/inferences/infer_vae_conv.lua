@@ -11,6 +11,27 @@
 
 ---@diagnostic disable: undefined-global, undefined-field
 
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
+Help.auto_exit_help({
+  script_path = "scripts/inferences/infer_vae_conv.lua",
+  description = "VAEConv natif : image PPM vers moyenne latente, ou latent RAW vers image PPM.",
+  options = {
+    "--encode / --decode : mode requis, mutuellement exclusifs",
+    "--checkpoint, --ckpt PATH : checkpoint ou dossier contenant epoch_*",
+    "--input, --in PATH : image PPM P6/P3 en encodage ; RAW en décodage",
+    "--output, --out PATH : RAW en encodage ; PPM en décodage",
+    "--format FORMAT : raw_folder ou safetensors (détecté par extension)",
+    "--no-resize : refuse une image dont les dimensions diffèrent du checkpoint",
+    "--mem-gb N : budget allocateur (8 Go)",
+    "--dtype TYPE : float32, float16 ou bfloat16",
+    "RAW : float32 little-endian sans en-tête, ordre latent CHW du modèle.",
+    "SafeTensors : fournir la configuration modèle correspondante via --config.",
+  },
+  examples = {
+    "./bin/mimir --lua scripts/inferences/infer_vae_conv.lua -- --encode --checkpoint checkpoint/vae --input image.ppm --output outputs/image.raw",
+    "./bin/mimir --lua scripts/inferences/infer_vae_conv.lua -- --decode --checkpoint checkpoint/vae --input outputs/image.raw --output outputs/decoded.ppm",
+  },
+})
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
@@ -70,6 +91,8 @@ local architecture_name = mode == "encode" and "vae_conv" or "vae_conv_decode"
 local cfg, cfg_err = Mimir.Architectures.default_config(architecture_name)
 if type(cfg) ~= "table" then die("default_config(" .. architecture_name .. "): " .. tostring(cfg_err)) end
 
+for key, value in pairs(conf_model) do if key ~= "architecture" then cfg[key] = value end end
+local checkpoint_cfg = nil
 -- Le checkpoint est la source de vérité de la topologie.
 if format == "raw_folder" then
   local architecture_path = FS.join(checkpoint, "model", "architecture.json")
@@ -78,12 +101,22 @@ if format == "raw_folder" then
     local ok_json, value = pcall(read_json, architecture_path)
     if ok_json and type(value) == "table" then architecture = value end
   end
-  local checkpoint_cfg = type(architecture) == "table"
+  checkpoint_cfg = type(architecture) == "table"
       and (architecture.model_config or architecture.modelConfig) or nil
   if type(checkpoint_cfg) ~= "table" then die("model_config absent ou illisible dans " .. architecture_path) end
+  if checkpoint_cfg.type ~= "vae_conv" then die("checkpoint attendu: vae_conv") end
   for key, value in pairs(checkpoint_cfg) do cfg[key] = value end
+  if type(architecture.layers) == "table" then
+    cfg.dec_norm = "none"
+    for _, layer in ipairs(architecture.layers) do
+      if tostring(layer.name):match("^vae_conv/dec/") then
+        local kind = tostring(layer.type):lower()
+        if kind == "groupnorm" then cfg.dec_norm = "groupnorm"; break end
+        if kind == "layernorm" then cfg.dec_norm = "layernorm" end
+      end
+    end
+  end
 end
-for key, value in pairs(conf_model) do if key ~= "architecture" then cfg[key] = value end end
 
 local integer_overrides = {
   { "image-w", "image_w" }, { "image-h", "image_h" }, { "image-c", "image_c" },
@@ -91,7 +124,17 @@ local integer_overrides = {
   { "base-channels", "base_channels" },
 }
 for _, names in ipairs(integer_overrides) do
-  if opts[names[1]] ~= nil then cfg[names[2]] = opt_int(names[1], cfg[names[2]]) end
+  if opts[names[1]] ~= nil then
+    local value = opt_int(names[1], cfg[names[2]])
+    if checkpoint_cfg and value ~= cfg[names[2]] then
+      die("configuration incompatible avec le checkpoint: --" .. names[1])
+    end
+    cfg[names[2]] = value
+  end
+end
+for _, key in ipairs({"image_w", "image_h", "image_c", "latent_w", "latent_h", "latent_c"}) do
+  local value = tonumber(cfg[key])
+  if not value or value <= 0 or value ~= math.floor(value) then die("dimension invalide: " .. key) end
 end
 cfg.latent_dim = cfg.latent_w * cfg.latent_h * cfg.latent_c
 cfg.stochastic_latent = false -- encodage déterministe : z = mu en inférence
@@ -153,11 +196,20 @@ local function read_ppm(path)
   if (magic ~= "P6" and magic ~= "P3") or not width or not height or not max_value then
     file:close(); return nil, "PPM invalide (P6/P3 attendu)"
   end
+  if width < 1 or height < 1 or width ~= math.floor(width) or height ~= math.floor(height) then
+    file:close(); return nil, "dimensions PPM invalides"
+  end
   if max_value < 1 or max_value > 255 then file:close(); return nil, "maxval PPM non supporté" end
   local count = width * height * 3
   local pixels = {}; pixels[count] = 0
   if magic == "P6" then
-    skip_space_and_comments()
+    -- Un seul séparateur termine l'en-tête : les pixels peuvent être 10, 32 ou 35.
+    local separator = file:read(1)
+    if not separator or not separator:match("%s") then file:close(); return nil, "séparateur P6 absent" end
+    if separator == "\r" then
+      local position = file:seek()
+      if file:read(1) ~= "\n" then file:seek("set", position) end
+    end
     local bytes = file:read(count); file:close()
     if bytes == nil or #bytes ~= count then return nil, "pixels P6 tronqués" end
     for index = 1, count do pixels[index] = math.floor((bytes:byte(index) or 0) * 255 / max_value + 0.5) end
@@ -230,14 +282,14 @@ create_and_load()
 local image_dim = cfg.image_w * cfg.image_h * cfg.image_c
 local latent_dim = cfg.latent_dim
 logx(string.format("[infer_vae_conv] mode=%s checkpoint=%s image=%dx%dx%d latent=%dx%dx%d",
-  mode, checkpoint, cfg.image_h, cfg.image_w, cfg.image_c, cfg.latent_h, cfg.latent_w, cfg.latent_c))
+  mode, checkpoint, cfg.image_w, cfg.image_h, cfg.image_c, cfg.latent_w, cfg.latent_h, cfg.latent_c))
 
 if mode == "encode" then
   local ppm, ppm_err = read_ppm(input_path)
   if not ppm then die("lecture PPM: " .. tostring(ppm_err)) end
   local pixels = ppm.pixels
   if ppm.width ~= cfg.image_w or ppm.height ~= cfg.image_h then
-    if opts["no-resize"] == true then
+    if not Args.get_bool(opts, "resize", true) then
       die(string.format("dimensions PPM %dx%d, attendu %dx%d", ppm.width, ppm.height, cfg.image_w, cfg.image_h))
     end
     pixels = resize_rgb_nearest(pixels, ppm.width, ppm.height, cfg.image_w, cfg.image_h)
@@ -247,7 +299,7 @@ if mode == "encode" then
   for index = 1, image_dim do input[index] = (pixels[index] / 255.0) * 2.0 - 1.0 end
   local packed, forward_err = Mimir.Model.forward(input, false)
   if type(packed) ~= "table" then die("Model.forward(encode): " .. tostring(forward_err)) end
-  if #packed ~= image_dim + 2 * latent_dim then die("taille de sortie encoder inattendue: " .. tostring(#packed)) end
+  if #packed < image_dim + 2 * latent_dim then die("taille de sortie encoder inattendue: " .. tostring(#packed)) end
   local latent = {}; latent[latent_dim] = 0.0
   for index = 1, latent_dim do latent[index] = packed[image_dim + index] end
   local ok_raw, raw_err = write_raw(output_path, latent)

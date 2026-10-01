@@ -4,6 +4,7 @@ set -euo pipefail
 WORKROOT="${WORKROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BUILD_DIR="$WORKROOT/build"
 BUILD_TYPE="Release"
+VIZ_BACKEND="${MIMIR_VIZ_BACKEND:-SFML}"
 
 if [[ ! -f "$WORKROOT/CMakeLists.txt" ]]; then
   echo "[error] CMakeLists.txt introuvable dans WORKROOT=$WORKROOT"
@@ -38,7 +39,6 @@ declare -a FEATURE_KEYS=(
   ENABLE_CUDA
   ENABLE_ROCM
   ENABLE_FFMPEG
-  ENABLE_SFML
   ENABLE_LZ4
   ENABLE_SCRIPTING_REST
   ENABLE_SCRIPTING_JS
@@ -55,7 +55,6 @@ declare -A FEATURE_LABELS=(
   [ENABLE_CUDA]="CUDA Compute"
   [ENABLE_ROCM]="ROCm Compute"
   [ENABLE_FFMPEG]="FFmpeg (audio/vidéo)"
-  [ENABLE_SFML]="Visualizer (SFML)"
   [ENABLE_LZ4]="Compression LZ4"
   [ENABLE_SCRIPTING_REST]="Bridge REST (placeholder)"
   [ENABLE_SCRIPTING_JS]="Bridge JavaScript"
@@ -72,7 +71,6 @@ declare -A FEATURE_DEFAULTS=(
   [ENABLE_CUDA]=0
   [ENABLE_ROCM]=0
   [ENABLE_FFMPEG]=1
-  [ENABLE_SFML]=1
   [ENABLE_LZ4]=1
   [ENABLE_SCRIPTING_REST]=0
   [ENABLE_SCRIPTING_JS]=0
@@ -193,6 +191,23 @@ interactive_configure() {
   echo "Aucune modification interactive effectuée (fallback)."
 }
 
+if [[ "$is_interactive" == "1" ]]; then
+  interactive_configure
+  if command -v whiptail >/dev/null 2>&1; then
+    VIZ_BACKEND="$(whiptail --title "Mímir Viz" --menu "Interface Viz (scène commune, moteurs indépendants)" 18 80 5 \
+      SFML "Fenêtre SFML" QT "Qt 6" GTK "GTK 3" WEB "Navigateur local" NONE "Sans interface" 3>&1 1>&2 2>&3)" || exit 0
+  else
+    read -r -p "Interface Viz [SFML/QT/GTK/WEB/NONE] ($VIZ_BACKEND): " selected_viz
+    VIZ_BACKEND="${selected_viz:-$VIZ_BACKEND}"
+  fi
+fi
+VIZ_BACKEND="${VIZ_BACKEND^^}"
+case "$VIZ_BACKEND" in
+  SFML) FEATURE_VALUES[ENABLE_SFML]=1 ;;
+  QT|GTK|WEB|NONE) FEATURE_VALUES[ENABLE_SFML]=0 ;;
+  *) echo "[error] Interface Viz inconnue: $VIZ_BACKEND"; exit 1 ;;
+esac
+
 detect_sfml_version() {
   if command -v pkg-config >/dev/null 2>&1; then
     if pkg-config --exists sfml-graphics; then
@@ -210,13 +225,13 @@ detect_sfml_version() {
 SFML_DETECTED_VERSION=""
 SFML_MODE="disabled"
 
-# Compat Visualizer: le code UI cible SFML3.
-if [[ "${FEATURE_VALUES[ENABLE_SFML]}" == "1" ]]; then
+# SFML n'est requis que par son backend historique.
+if [[ "$VIZ_BACKEND" == "SFML" ]]; then
   SFML_DETECTED_VERSION="$(detect_sfml_version)"
   if [[ -z "$SFML_DETECTED_VERSION" ]]; then
     SFML_MODE="missing"
     echo "[warn] SFML non détecté via pkg-config (sfml-graphics/sfml-all)."
-    echo "[note] Le build continue. CMake désactivera la partie viz si SFML est introuvable."
+    echo "[note] CMake exigera SFML 3 pour cette interface."
   else
     SFML_MAJOR="${SFML_DETECTED_VERSION%%.*}"
     if [[ "$SFML_MAJOR" =~ ^[0-9]+$ ]]; then
@@ -224,10 +239,9 @@ if [[ "${FEATURE_VALUES[ENABLE_SFML]}" == "1" ]]; then
         SFML_MODE="sfml3-enabled"
         echo "[ok] SFML $SFML_DETECTED_VERSION détecté: visualizer SFML3 activé."
       else
-        FEATURE_VALUES[ENABLE_SFML]=0
-        SFML_MODE="sfml2-headless"
+        SFML_MODE="sfml2-incompatible"
         echo "[warn] SFML $SFML_DETECTED_VERSION détecté (v2): visualizer SFML3 non compatible."
-        echo "[note] ENABLE_SFML basculé à OFF pour un build headless stable."
+        echo "[note] Installe SFML 3 ou choisis MIMIR_VIZ_BACKEND=NONE."
       fi
     else
       SFML_MODE="unknown-version"
@@ -250,6 +264,7 @@ done
 if [[ -n "$SFML_DETECTED_VERSION" ]]; then
   printf "  - %-24s : %s\n" "SFML_DETECTED_VERSION" "$SFML_DETECTED_VERSION"
 fi
+printf "  - %-24s : %s\n" "MIMIR_VIZ_BACKEND" "$VIZ_BACKEND"
 printf "  - %-24s : %s\n" "SFML_MODE" "$SFML_MODE"
 printf "  - %-24s : %s\n" "CMAKE_BUILD_TYPE" "$BUILD_TYPE"
 printf "  - %-24s : %s\n" "BUILD_DIR" "$BUILD_DIR"
@@ -278,6 +293,11 @@ if [[ "${FEATURE_VALUES[ENABLE_OPENMP]}" == "1" ]]; then
 fi
 
 OPTIONAL_PACKAGES=()
+if [[ "$VIZ_BACKEND" == "QT" ]]; then OPTIONAL_PACKAGES+=(qt6-base-dev); fi
+if [[ "$VIZ_BACKEND" == "GTK" ]]; then OPTIONAL_PACKAGES+=(libgtk-3-dev); fi
+if [[ "$VIZ_BACKEND" == "QT" || "$VIZ_BACKEND" == "GTK" || "$VIZ_BACKEND" == "WEB" ]]; then
+  OPTIONAL_PACKAGES+=(libcairo2-dev)
+fi
 if [[ "${FEATURE_VALUES[ENABLE_VULKAN]}" == "1" ]]; then
   OPTIONAL_PACKAGES+=(vulkan-tools libvulkan-dev glslang-tools)
 fi
@@ -287,7 +307,7 @@ fi
 if [[ "${FEATURE_VALUES[ENABLE_FFMPEG]}" == "1" ]]; then
   OPTIONAL_PACKAGES+=(ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev)
 fi
-if [[ "${FEATURE_VALUES[ENABLE_SFML]}" == "1" ]]; then
+if [[ "$VIZ_BACKEND" == "SFML" ]]; then
   # Privilégier SFML3 si disponible; fallback SFML2 uniquement si nécessaire.
   if apt-cache show libsfml3-dev >/dev/null 2>&1; then
     OPTIONAL_PACKAGES+=(libsfml3-dev)
@@ -329,6 +349,8 @@ CMAKE_ARGS=(
   -S "$WORKROOT"
   -B "$BUILD_DIR"
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+  -DMIMIR_VIZ_BACKEND="$VIZ_BACKEND"
+  -DENABLE_SFML="$(cmake_bool "${FEATURE_VALUES[ENABLE_SFML]}")"
   -DBUILD_EXAMPLES=OFF
   -DMIMIR_ENABLE_LEGACY_PARAMS=OFF
 )

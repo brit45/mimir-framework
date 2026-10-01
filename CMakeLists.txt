@@ -24,6 +24,9 @@ option(ENABLE_ROCM "Enable ROCm GPU compute (rocBLAS/HIP)" OFF)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
 option(ENABLE_FFMPEG "Enable FFmpeg-backed audio/video loading" ON)
 option(ENABLE_SFML "Enable SFML visualization" ON)
+set(MIMIR_VIZ_BACKEND "SFML" CACHE STRING
+    "Viz interface selected at compile time: SFML, QT, GTK, WEB, or NONE")
+set_property(CACHE MIMIR_VIZ_BACKEND PROPERTY STRINGS SFML QT GTK WEB NONE)
 option(ENABLE_SCRIPTING_REST "Enable REST scripting bridge" OFF)
 option(ENABLE_SCRIPTING_RUST "Enable Rust scripting bridge" ON)
 option(ENABLE_SCRIPTING_JS "Enable JavaScript scripting bridge" ON)
@@ -31,6 +34,30 @@ option(ENABLE_SCRIPTING_CSHARP "Enable C# scripting bridge" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
 option(MIMIR_ENABLE_FACE_RECOGNITION_TOOL "Build OpenCV face detection/recognition tool" OFF)
 option(MIMIR_PORTABLE_BUILD "Disable host-specific CPU optimizations for portable binaries" OFF)
+
+string(TOUPPER "${MIMIR_VIZ_BACKEND}" MIMIR_VIZ_BACKEND)
+set(_MIMIR_VIZ_BACKENDS SFML QT GTK WEB NONE)
+if(NOT MIMIR_VIZ_BACKEND IN_LIST _MIMIR_VIZ_BACKENDS)
+    message(FATAL_ERROR
+        "MIMIR_VIZ_BACKEND='${MIMIR_VIZ_BACKEND}' invalide. "
+        "Valeurs possibles: SFML, QT, GTK, WEB, NONE.")
+endif()
+
+# Compatibilité historique : avec le backend par défaut SFML,
+# ENABLE_SFML=OFF signifie encore NONE. Les autres backends sont indépendants.
+if(NOT ENABLE_SFML)
+    if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+        set(MIMIR_VIZ_BACKEND "NONE")
+    endif()
+endif()
+if(MIMIR_VIZ_BACKEND STREQUAL "NONE")
+    set(ENABLE_SFML OFF)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+    set(ENABLE_SFML ON)
+else()
+    set(ENABLE_SFML OFF)
+endif()
+message(STATUS "Viz interface: ${MIMIR_VIZ_BACKEND}")
 
 if(ENABLE_SCRIPTING_REST)
     message(WARNING "ENABLE_SCRIPTING_REST=ON demandé, mais aucun bridge REST natif n'est implémenté dans ce dépôt. Option forcée à OFF.")
@@ -206,6 +233,7 @@ if(ENABLE_VULKAN)
         file(MAKE_DIRECTORY "${MIMIR_SHADER_OUT_DIR}")
 
         set(MIMIR_VULKAN_SHADER_NAMES
+            elementwise
             linear_forward
             add_forward
             mul_forward
@@ -276,14 +304,23 @@ endif()
 # Threads
 find_package(Threads REQUIRED)
 
-# SFML (visualisation)
-if(ENABLE_SFML)
-    find_package(SFML COMPONENTS Graphics Window System)
-    if(SFML_FOUND)
-        message(STATUS "SFML found: ${SFML_VERSION}")
-    else()
-        message(WARNING "SFML not found - Visualization may be limited")
-    endif()
+# SFML is used only by the legacy SFML backend. Alternative backends use the
+# independent CPU renderer below.
+if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+    find_package(SFML 3 REQUIRED COMPONENTS Graphics Window System)
+endif()
+if(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK|WEB)$" AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "The QT/GTK/WEB Viz hosts currently require Linux")
+endif()
+if(MIMIR_VIZ_BACKEND STREQUAL "QT")
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "GTK")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(VIZ_GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
+endif()
+if(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK|WEB)$")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(VIZ_CAIRO REQUIRED IMPORTED_TARGET cairo)
 endif()
 
 # OpenCL (calcul GPU)
@@ -367,12 +404,32 @@ endif()
 # Fichiers sources
 # ============================================================================
 
+set(MIMIR_VIZ_WINDOW_SOURCES)
+if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/backends/SfmlVizWindow.cpp)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "QT")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/SoftwareVizWindow.cpp
+        src/viz/backends/QtVizWindow.cpp)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "GTK")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/SoftwareVizWindow.cpp
+        src/viz/backends/GtkVizWindow.cpp)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "WEB")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/SoftwareVizWindow.cpp
+        src/viz/backends/WebVizWindow.cpp)
+endif()
+
 set(MIMIR_SOURCES
     src/Model.cpp
+    src/ModelRuntimeConfig.cpp
     src/Models/VAETraining.cpp
     src/Encoder.cpp
     src/Tokenizer.cpp
     src/Visualizer.cpp
+    ${MIMIR_VIZ_WINDOW_SOURCES}
     src/tensors.cpp
     src/Sha256.cpp
     src/scriptings/Lua/luaScripting/LuaScripting.cpp
@@ -384,6 +441,7 @@ set(MIMIR_SOURCES
     src/Helpers.cpp
     src/stb_image_impl.cpp
     src/runtimes/AbstractRuntime.cpp
+    src/runtimes/Autograd.cpp
     src/runtimes/RuntimeRouter.cpp
     src/runtimes/ops_loss_and_grad.cpp
     src/runtimes/cpu/CpuRuntime.cpp
@@ -525,9 +583,10 @@ endif()
 
 list(APPEND MIMIR_SOURCES src/runtimes/LayerOps.cpp)
 
-# Variante de sources sans SFML (utile pour builds headless / statiques)
+# Variante de sources sans Viz (utile pour builds headless / statiques)
 set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})
 list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML src/Visualizer.cpp)
+list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML ${MIMIR_VIZ_WINDOW_SOURCES})
 
 # Variante stricte pour build statique: sans runtimes GPU afin d'eviter des
 # dependances dynamiques (Vulkan/OpenCL/CUDA/ROCm) lors du linkage statique.
@@ -543,17 +602,81 @@ list(REMOVE_ITEM MIMIR_SOURCES_STATIC
 # Bibliothèque principale Mímir
 # ============================================================================
 
-if(ENABLE_SFML AND SFML_FOUND)
+if(NOT MIMIR_VIZ_BACKEND STREQUAL "NONE")
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES}
         ${MIMIR_HEADERS}
     )
-    target_compile_definitions(mimir_core PUBLIC ENABLE_SFML)
+    target_compile_definitions(mimir_core PUBLIC ENABLE_VIZ)
 else()
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES_NO_SFML}
         ${MIMIR_HEADERS}
     )
+endif()
+
+if(NOT MIMIR_VIZ_BACKEND STREQUAL "NONE")
+    # Graphics.hpp fait partie de l'interface de Visualizer.hpp : le backend doit
+    # être visible par les consommateurs pour conserver exactement les mêmes
+    # types et le même layout ABI que mimir_core.
+    target_compile_definitions(mimir_core PUBLIC MIMIR_VIZ_BACKEND_${MIMIR_VIZ_BACKEND})
+    if(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK|WEB)$")
+        target_sources(mimir_core PRIVATE src/viz/SoftwareGraphics.cpp)
+        target_link_libraries(mimir_core PUBLIC PkgConfig::VIZ_CAIRO)
+    endif()
+    if(MIMIR_VIZ_BACKEND STREQUAL "WEB")
+        target_sources(mimir_core PRIVATE src/viz/WebHost.cpp)
+    elseif(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK)$")
+        target_sources(mimir_core PRIVATE src/viz/ProcessHost.cpp)
+        add_executable(mimir_viz_host src/viz/DesktopHost.cpp)
+        target_compile_definitions(mimir_viz_host PRIVATE MIMIR_VIZ_BACKEND_${MIMIR_VIZ_BACKEND})
+        target_link_libraries(mimir_viz_host PRIVATE Threads::Threads)
+        if(MIMIR_VIZ_BACKEND STREQUAL "QT")
+            target_link_libraries(mimir_viz_host PRIVATE Qt6::Widgets)
+        else()
+            target_link_libraries(mimir_viz_host PRIVATE PkgConfig::VIZ_GTK)
+        endif()
+        set_target_properties(mimir_viz_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
+        install(TARGETS mimir_viz_host RUNTIME DESTINATION bin)
+        add_dependencies(mimir_core mimir_viz_host)
+    endif()
+endif()
+
+# Opt-in graphical integration executable (requires a display / Xvfb).
+if(NOT MIMIR_VIZ_BACKEND STREQUAL "NONE")
+    add_executable(mimir_viz_smoke EXCLUDE_FROM_ALL
+        Tests/test_viz_window.cpp
+        ${MIMIR_VIZ_WINDOW_SOURCES})
+    target_include_directories(mimir_viz_smoke PRIVATE src)
+    target_compile_definitions(mimir_viz_smoke PRIVATE MIMIR_VIZ_BACKEND_${MIMIR_VIZ_BACKEND})
+    target_link_libraries(mimir_viz_smoke PRIVATE Threads::Threads)
+    if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+        target_link_libraries(mimir_viz_smoke PRIVATE SFML::Graphics SFML::Window SFML::System)
+    else()
+        target_sources(mimir_viz_smoke PRIVATE src/viz/SoftwareGraphics.cpp)
+        target_link_libraries(mimir_viz_smoke PRIVATE PkgConfig::VIZ_CAIRO)
+    endif()
+    if(MIMIR_VIZ_BACKEND STREQUAL "WEB")
+        target_sources(mimir_viz_smoke PRIVATE src/viz/WebHost.cpp)
+    elseif(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK)$")
+        target_sources(mimir_viz_smoke PRIVATE src/viz/ProcessHost.cpp)
+        add_dependencies(mimir_viz_smoke mimir_viz_host)
+    endif()
+    set_target_properties(mimir_viz_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
+
+    add_executable(mimir_viz_script_smoke EXCLUDE_FROM_ALL Tests/test_viz_script.cpp Tests/test_log_stub.cpp)
+    target_link_libraries(mimir_viz_script_smoke PRIVATE mimir_core)
+    set_target_properties(mimir_viz_script_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
+    if(TARGET mimir_viz_host)
+        add_dependencies(mimir_viz_script_smoke mimir_viz_host)
+    endif()
+    add_executable(mimir_viz_scene_smoke EXCLUDE_FROM_ALL Tests/test_viz_scene.cpp)
+    target_link_libraries(mimir_viz_scene_smoke PRIVATE mimir_core)
+    if(TARGET mimir_viz_host)
+        add_dependencies(mimir_viz_scene_smoke mimir_viz_host)
+    endif()
+    set_target_properties(mimir_viz_scene_smoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
 endif()
 
 target_include_directories(mimir_core PUBLIC
@@ -634,7 +757,7 @@ if(ENABLE_FFMPEG AND FFMPEG_FOUND)
 endif()
 
 # SFML (visualisation)
-if(ENABLE_SFML AND SFML_FOUND)
+if(MIMIR_VIZ_BACKEND STREQUAL "SFML" AND SFML_FOUND)
     if(TARGET SFML::Graphics)
         target_link_libraries(mimir_core PUBLIC SFML::Graphics SFML::Window SFML::System)
     else()

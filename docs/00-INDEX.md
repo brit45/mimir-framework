@@ -108,6 +108,7 @@ cmake --build build -j"$(nproc)"
 - [`Mimir.IO`](03-API-Reference/21-IO.md)
 - [Mémoire](03-API-Reference/14-Memory.md)
 - [Visualisation et monitoring](03-API-Reference/15-Viz-Htop.md)
+- [Interfaces Viz : SFML, Qt, GTK, Web](02-User-Guide/17-Viz-Backends.md)
 - [Sérialisation](03-API-Reference/02-Serialization.md)
 - [Variables d'environnement](03-API-Reference/22-Environment-Variables.md)
 - [Correspondance Lua vers C++](03-API-Reference/20-Lua-API-Cpp-Mapping.md)

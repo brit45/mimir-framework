@@ -1455,3 +1455,8 @@ LumenLatentDiffusionModel::GeneratedImage LumenLatentDiffusionModel::generate(
     }
     return image;
 }
+
+std::shared_ptr<SkipConnectionControl> LumenLatentDiffusionModel::skipConnectionControl() {
+    if (vae_decoder_) return vae_decoder_->skipConnectionControl();
+    return Model::skipConnectionControl();
+}

@@ -1,6 +1,6 @@
 # État réel du projet
 
-Cette page est la carte de maturité du checkout Mímir 3.1.0 au 30 août 2026.
+Cette page est la carte de maturité du checkout Mímir 3.5.0 au 1 octobre 2026.
 Elle distingue ce qui est compilé et exploitable de ce qui est partiel, en test,
 prototype ou simple placeholder. Une entrée dans le registre, un fichier source
 ou un bouton d'interface ne constitue pas à lui seul une garantie de production.

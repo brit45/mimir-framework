@@ -19,6 +19,7 @@
           "--latent-w", "32",
           "--latent-c", "4",
           "--base-channels", "8",
+          "--decoder-upsample", "nearest_conv",
           "--stochastic-latent", "true",
           "--kl-beta", "0.001",
           "--kl-warmup-steps", "1500",

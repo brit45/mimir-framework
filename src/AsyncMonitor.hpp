@@ -190,6 +190,8 @@ public:
             }
 
             htop_ = std::make_shared<HtopDisplay>(ui_fd_);
+            htop_->setSkipConnectionControl(std::atomic_load(&skip_control_));
+            htop_->setRuntimeConfiguration(std::atomic_load(&runtime_config_));
             htop_->setCsvLogFile(metrics_csv_file_);
             htop_->setCsvEnabled(metrics_csv_enabled_ && !enable_viz && !getViz());
             htop_->enterAltScreen();
@@ -223,6 +225,8 @@ public:
 
             if (!current_viz) {
                 current_viz = std::make_shared<Visualizer>(effective_viz_config);
+                current_viz->setSkipConnectionControl(std::atomic_load(&skip_control_));
+                current_viz->setRuntimeConfiguration(std::atomic_load(&runtime_config_));
             }
 
             // Best-effort: permettre de configurer la cadence Viz depuis config.
@@ -254,9 +258,9 @@ public:
                 bool ok = false;
                 std::string err;
                 try {
-#if !defined(ENABLE_SFML)
+#if !defined(ENABLE_VIZ)
                     ok = false;
-                    err = "Visualizer indisponible (ENABLE_SFML inactif ou SFML non detecte au configure CMake)";
+                    err = "Visualizer indisponible (MIMIR_VIZ_BACKEND=NONE)";
 #else
 #if !defined(_WIN32)
                     const char* display = std::getenv("DISPLAY");
@@ -467,6 +471,7 @@ public:
         if (std::isfinite(kl_beta)) runtime_kl_beta_.store(std::max(0.0f, kl_beta), std::memory_order_relaxed);
         runtime_kl_warmup_steps_.store(std::max(0, kl_warmup_steps), std::memory_order_relaxed);
         runtime_recon_loss_index_.store(reconLossIndex(recon_loss), std::memory_order_relaxed);
+        publishRuntimeConfigurationFields();
         if (auto current_viz = getViz()) {
             current_viz->updateRuntimeTrainParams(
                 lr, lr_warmup_steps, kl_beta, kl_warmup_steps, recon_loss);
@@ -474,13 +479,86 @@ public:
         refreshHtopControlState();
     }
 
+    void publishRuntimeConfigurationFields() {
+        auto config = std::atomic_load(&runtime_config_);
+        using Owner = LiveModelConfig::Owner;
+        std::vector<LiveModelConfig::Entry> entries;
+        const auto live = liveTrainParamsSnapshotNoSync();
+        const bool enabled = live.overrides_enabled;
+        entries.push_back({"learning_rate", enabled ? live.lr : runtime_lr_.load(), Owner::Training,
+            1e-12, 100, {}, "Direct; 0 < learning_rate <= 100", {}});
+        entries.push_back({"lr_warmup_steps", enabled ? live.lr_warmup_steps : runtime_lr_warmup_steps_.load(),
+            Owner::Training, 0, 1000000000, {}, "Direct; entier >= 0", {}});
+        entries.push_back({"validation_enabled", validation_enabled_.load(), Owner::Training,
+            0, 1, {}, "Direct; true / false", {}});
+        for (auto e : config->snapshot()) {
+            if (e.owner == Owner::ReadOnly) continue;
+            if (e.key == "kl_beta" || e.key == "kl_warmup_steps" || e.key == "recon_loss") {
+                e.owner = Owner::Training;
+                if (enabled) {
+                    if (e.key == "kl_beta") e.value = live.kl_enabled ? live.kl_beta : 0.f;
+                    if (e.key == "kl_warmup_steps") e.value = live.kl_warmup_steps;
+                    if (e.key == "recon_loss") e.value = live.recon_loss;
+                }
+                entries.push_back(std::move(e));
+            }
+        }
+        config->publish(std::move(entries));
+    }
+
+    void syncRuntimeConfigurationEdits() {
+        auto config = std::atomic_load(&runtime_config_);
+        json changes = json::object();
+        config->apply(LiveModelConfig::Owner::Training, [&](const std::string& key, const json& value) {
+            changes[key] = value;
+        });
+        if (changes.empty()) return;
+        if (changes.contains("validation_enabled")) {
+            applyValidationControl(changes["validation_enabled"].get<bool>());
+            changes.erase("validation_enabled");
+        }
+        if (!changes.empty()) {
+            if (!live_overrides_enabled_.load()) {
+                live_lr_ = runtime_lr_.load();
+                live_lr_warmup_steps_ = runtime_lr_warmup_steps_.load();
+                live_kl_beta_ = runtime_kl_beta_.load();
+                live_kl_warmup_steps_ = runtime_kl_warmup_steps_.load();
+                live_kl_enabled_ = runtime_kl_beta_.load() > 0;
+                live_recon_loss_index_ = runtime_recon_loss_index_.load();
+                // Metrics can show beta after warmup. Editing LR must preserve
+                // the configured beta, not install its temporary effective value.
+                for (const auto& entry : config->snapshot()) {
+                    if (entry.key == "kl_beta" && entry.value.is_number()) {
+                        live_kl_beta_ = entry.value.get<float>();
+                        live_kl_enabled_ = live_kl_beta_.load() > 0;
+                    }
+                    if (entry.key == "kl_warmup_steps" && entry.value.is_number_integer()) live_kl_warmup_steps_ = entry.value.get<int>();
+                    if (entry.key == "recon_loss" && entry.value.is_string()) live_recon_loss_index_ = reconLossIndex(entry.value.get<std::string>());
+                }
+            }
+            if (changes.contains("learning_rate")) live_lr_ = changes["learning_rate"].get<float>();
+            if (changes.contains("lr_warmup_steps")) live_lr_warmup_steps_ = changes["lr_warmup_steps"].get<int>();
+            if (changes.contains("kl_beta")) {
+                live_kl_beta_ = changes["kl_beta"].get<float>();
+                live_kl_enabled_ = live_kl_beta_.load() > 0;
+            }
+            if (changes.contains("kl_warmup_steps")) live_kl_warmup_steps_ = changes["kl_warmup_steps"].get<int>();
+            if (changes.contains("recon_loss")) live_recon_loss_index_ = reconLossIndex(changes["recon_loss"].get<std::string>());
+            live_overrides_enabled_ = true;
+            publishHtopLiveControls(true);
+        }
+        publishRuntimeConfigurationFields();
+    }
+
     uint64_t liveTrainParamsVersion() {
         syncLiveControlsFromViz();
+        syncRuntimeConfigurationEdits();
         return live_params_version_.load(std::memory_order_relaxed);
     }
 
     LiveTrainParams liveTrainParamsSnapshot() {
         syncLiveControlsFromViz();
+        syncRuntimeConfigurationEdits();
         LiveTrainParams params;
         params.overrides_enabled = live_overrides_enabled_.load(std::memory_order_relaxed);
         params.lr = live_lr_.load(std::memory_order_relaxed);
@@ -494,6 +572,18 @@ public:
         return params;
     }
 
+    void bindRuntimeConfiguration(std::shared_ptr<LiveModelConfig> config) {
+        std::atomic_store(&runtime_config_, config);
+        if (auto viz = getViz()) viz->setRuntimeConfiguration(config);
+        if (htop_) htop_->setRuntimeConfiguration(config);
+    }
+
+    void bindSkipConnectionControl(std::shared_ptr<SkipConnectionControl> control) {
+        std::atomic_store(&skip_control_, control);
+        if (auto viz = getViz()) viz->setSkipConnectionControl(control);
+        if (htop_) htop_->setSkipConnectionControl(control);
+    }
+
     void updateRuntimeValidationEnabled(bool enabled) {
         if (validation_control_version_.load(std::memory_order_relaxed) == 0) {
             validation_enabled_.store(enabled, std::memory_order_relaxed);
@@ -504,6 +594,7 @@ public:
 
     bool validationEnabledSnapshot() {
         syncValidationControlFromViz();
+        syncRuntimeConfigurationEdits();
         return validation_enabled_.load(std::memory_order_relaxed);
     }
 
@@ -900,6 +991,11 @@ private:
     }
 
     void processHtopKey(char key) {
+        if (htop_ && (htop_->configVisible() || key == 'c' || key == 'C')) {
+            htop_->configKey(key);
+            htop_->render();
+            return;
+        }
         switch (key) {
             case 'h': case 'H':
                 htop_help_visible_ = !htop_help_visible_.load(std::memory_order_relaxed);
@@ -907,6 +1003,9 @@ private:
                 return;
             case 'v': case 'V':
                 htop_open_viz_requested_ = true;
+                return;
+            case 's': case 'S':
+                std::atomic_load(&skip_control_)->toggle();
                 return;
             case 'n': case 'N':
                 applyValidationControl(!validation_enabled_.load(std::memory_order_relaxed));
@@ -934,6 +1033,18 @@ private:
         }
     }
 
+    void processHtopArrow(char arrow) {
+        if (htop_ && htop_->configVisible()) {
+            htop_->configMove(arrow == 'A' ? -1 : arrow == 'B' ? 1 :
+                             (arrow == 'D' || arrow == '5') ? -10 : 10);
+            htop_->render();
+        } else if (arrow == 'A' || arrow == 'B') {
+            const int delta = arrow == 'A' ? 4 : 1;
+            live_selected_parameter_ = (live_selected_parameter_.load() + delta) % 5;
+            refreshHtopControlState();
+        } else if (arrow == 'C' || arrow == 'D') adjustHtopSelectedParameter(arrow == 'C' ? 1 : -1);
+    }
+
     void processHtopInput() {
         if (!htop_input_ready_) return;
 #if defined(_WIN32)
@@ -941,36 +1052,39 @@ private:
             const int key = _getch();
             if (key == 0 || key == 224) {
                 const int extended = _getch();
-                if (extended == 72 || extended == 80) {
-                    const int delta = extended == 72 ? 4 : 1;
-                    live_selected_parameter_ =
-                        (live_selected_parameter_.load(std::memory_order_relaxed) + delta) % 5;
-                    refreshHtopControlState();
-                } else if (extended == 75 || extended == 77) {
-                    adjustHtopSelectedParameter(extended == 77 ? 1 : -1);
-                }
-            } else {
-                processHtopKey(static_cast<char>(key));
-            }
+                if (extended == 72) processHtopArrow('A');
+                if (extended == 80) processHtopArrow('B');
+                if (extended == 75) processHtopArrow('D');
+                if (extended == 77) processHtopArrow('C');
+            } else processHtopKey(static_cast<char>(key));
         }
 #else
-        char input[32];
+        char input[128];
         const int count = mimir_os_read(htop_input_fd_, input, sizeof(input));
         for (int index = 0; index < count; ++index) {
-            if (input[index] == '\033' && index + 2 < count && input[index + 1] == '[') {
-                const char arrow = input[index + 2];
-                if (arrow == 'A' || arrow == 'B') {
-                    const int delta = arrow == 'A' ? 4 : 1;
-                    live_selected_parameter_ =
-                        (live_selected_parameter_.load(std::memory_order_relaxed) + delta) % 5;
-                    refreshHtopControlState();
-                } else if (arrow == 'C' || arrow == 'D') {
-                    adjustHtopSelectedParameter(arrow == 'C' ? 1 : -1);
-                }
-                index += 2;
+            const char key = input[index];
+            if (htop_escape_sequence_.empty()) {
+                if (key == '\033') {
+                    htop_escape_sequence_ = "\033";
+                    htop_escape_started_ = std::chrono::steady_clock::now();
+                } else if (!(key == '\n' && htop_previous_cr_)) processHtopKey(key);
+                htop_previous_cr_ = key == '\r';
                 continue;
             }
-            processHtopKey(input[index]);
+            htop_escape_sequence_ += key;
+            if (htop_escape_sequence_.size() == 2 && key == '[') continue;
+            if (htop_escape_sequence_.size() == 3 && (key == '5' || key == '6')) continue;
+            if (htop_escape_sequence_[1] == '[') {
+                const char code = htop_escape_sequence_[2];
+                if (code == 'A' || code == 'B' || code == 'C' || code == 'D' ||
+                    ((code == '5' || code == '6') && key == '~')) processHtopArrow(code);
+            } else { processHtopKey('\033'); processHtopKey(key); }
+            htop_escape_sequence_.clear();
+        }
+        if (!htop_escape_sequence_.empty() &&
+            std::chrono::steady_clock::now() - htop_escape_started_ > std::chrono::milliseconds(150)) {
+            if (htop_escape_sequence_.size() == 1) processHtopKey('\033');
+            htop_escape_sequence_.clear();
         }
 #endif
     }
@@ -1251,6 +1365,11 @@ private:
     std::atomic<bool> capture_running_{false};
     std::atomic<bool> viz_launch_requested_{false};
     std::atomic<bool> viz_thread_finished_{false};
+    std::shared_ptr<LiveModelConfig> runtime_config_ = std::make_shared<LiveModelConfig>();
+    std::string htop_escape_sequence_;
+    std::chrono::steady_clock::time_point htop_escape_started_;
+    bool htop_previous_cr_ = false;
+    std::shared_ptr<SkipConnectionControl> skip_control_ = std::make_shared<SkipConnectionControl>();
     std::atomic<bool> htop_open_viz_requested_{false};
     std::atomic<bool> htop_help_visible_{false};
     std::atomic<bool> safe_stop_requested_{false};

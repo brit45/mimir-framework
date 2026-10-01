@@ -897,14 +897,16 @@ inline std::vector<float> sigmoid_forward(const std::vector<float>& input) {
 inline std::vector<float> dropout_forward(
     const std::vector<float>& input,
     const Layer& layer,
-    bool training = true
+    bool training = true,
+    std::vector<uint8_t>* mask = nullptr
 ) {
+    if (mask) mask->assign(input.size(),1);
     if (!training) {
         return input;  // No dropout during inference
     }
     
-    const float p = layer.dropout_p;
-    const float scale = 1.0f / (1.0f - p);
+    const float p = std::clamp(layer.dropout_p,0.0f,1.0f);
+    const float scale = p < 1.0f ? 1.0f / (1.0f - p) : 0.0f;
     
     std::vector<float> output(input.size());
     auto& gen = MimirRng::generator();
@@ -915,6 +917,7 @@ inline std::vector<float> dropout_forward(
             output[i] = input[i] * scale;
         } else {
             output[i] = 0.0f;
+            if (mask) (*mask)[i]=0;
         }
     }
     

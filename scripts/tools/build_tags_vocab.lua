@@ -30,6 +30,9 @@
 --   copies, or converts images but never decodes them inside Lua.
 -- - Output is sorted by (freq desc, tag asc) for determinism.
 
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("build_tags_vocab")
+
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
 local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
@@ -161,6 +164,16 @@ local function run_command(cmd)
   if type(ok) == "number" then return ok == 0 end
   if type(ok) == "boolean" then return ok end
   return why == "exit" and code == 0
+end
+
+local function is_symlink(path)
+  if FS.is_windows() then return false end
+  return run_command("test -L " .. FS.quote(path) .. " >/dev/null 2>&1")
+end
+
+local function unlink_symlink(path)
+  if not is_symlink(path) then return true end
+  return run_command("unlink -- " .. FS.quote(path))
 end
 
 local function parent_dir(path)
@@ -329,7 +342,7 @@ local vindr_images_root = opt_str("vindr-images-root", "")
 local vindr_prepared_root = opt_str("vindr-prepared-root", "")
 local vindr_split = opt_str("vindr-split", "training") -- training|test|all
 local vindr_labels = opt_str("vindr-labels", "all") -- findings|diagnostic|all
-local vindr_image_mode = opt_str("vindr-image-mode", "auto") -- auto|copy|symlink|convert
+local vindr_image_mode = opt_str("vindr-image-mode", "auto") -- auto|copy|hardlink|symlink|convert
 local vindr_dicom_converter = opt_str("vindr-dicom-converter", "")
 local mvindr_manifest = opt_str("mvindr-manifest", "")
 local mvindr_mask_tags = opt_bool("mvindr-mask-tags", true)
@@ -357,8 +370,9 @@ end
 if vindr_labels ~= "findings" and vindr_labels ~= "diagnostic" and vindr_labels ~= "all" then
   error("vindr-labels invalide (findings|diagnostic|all): " .. tostring(vindr_labels))
 end
-if vindr_image_mode ~= "auto" and vindr_image_mode ~= "copy" and vindr_image_mode ~= "symlink" and vindr_image_mode ~= "convert" then
-  error("vindr-image-mode invalide (auto|copy|symlink|convert): " .. tostring(vindr_image_mode))
+if vindr_image_mode ~= "auto" and vindr_image_mode ~= "copy" and vindr_image_mode ~= "hardlink"
+    and vindr_image_mode ~= "symlink" and vindr_image_mode ~= "convert" then
+  error("vindr-image-mode invalide (auto|copy|hardlink|symlink|convert): " .. tostring(vindr_image_mode))
 end
 if mvindr_small_max <= 0 or mvindr_large_min <= mvindr_small_max then
   error("seuils MVinDr invalides: 0 < --mvindr-small-max < --mvindr-large-min requis")
@@ -381,14 +395,14 @@ collect_txt_files(dataset_root, files)
 
 local detected_format = dataset_format
 if detected_format == "auto" then
-  if #files > 0 then
-    detected_format = "txt"
-  elseif FS.file_exists(FS.join(dataset_root, "manifest.csv"))
+  if FS.file_exists(FS.join(dataset_root, "manifest.csv"))
       and FS.is_dir(FS.join(dataset_root, "images"))
       and FS.is_dir(FS.join(dataset_root, "masks")) then
     detected_format = "mvindr-mass"
   elseif FS.file_exists(FS.join(dataset_root, "breast-level_annotations.csv")) then
     detected_format = "vindr-mammo"
+  elseif #files > 0 then
+    detected_format = "txt"
   else
     local coco_json = guess_coco_annotations(dataset_root, coco_annotations)
     if coco_json then
@@ -739,11 +753,24 @@ local function process_mvindr_mass()
       table.sort(tags)
 
       local dest_image = FS.join(vindr_prepared_root, stem .. source_ext)
-      local image_ok = FS.file_exists(dest_image)
+      local mode = vindr_image_mode == "auto" and "symlink" or vindr_image_mode
+      -- Mímir canonicalise les symlinks pendant fs::relative(); une image liée
+      -- hors du dataset ne partage alors plus la clé de son sidecar `.txt`.
+      -- Réparer les sorties créées par les anciennes versions du préparateur.
+      if mode ~= "symlink" and is_symlink(dest_image) and not unlink_symlink(dest_image) then
+        error("MVinDr: impossible de remplacer l'ancien lien symbolique " .. tostring(dest_image))
+      end
+      local image_ok = FS.file_exists(dest_image) and not is_symlink(dest_image)
       if not image_ok then
-        local mode = vindr_image_mode == "auto" and "symlink" or vindr_image_mode
         if mode == "convert" then
           image_ok = run_command("magick " .. FS.quote(source) .. " " .. FS.quote(dest_image))
+        elseif mode == "hardlink" and not FS.is_windows() then
+          image_ok = run_command("ln " .. FS.quote(source) .. " " .. FS.quote(dest_image) .. " >/dev/null 2>&1")
+          if not image_ok then
+            -- Les hardlinks ne traversent pas les systèmes de fichiers. Une
+            -- copie est le seul format portable que l'indexeur Mímir apparie.
+            image_ok = run_command("cp " .. FS.quote(source) .. " " .. FS.quote(dest_image))
+          end
         elseif mode == "copy" or FS.is_windows() then
           local cmd = FS.is_windows() and ("copy /Y " .. FS.quote(source) .. " " .. FS.quote(dest_image) .. " >NUL")
             or ("cp " .. FS.quote(source) .. " " .. FS.quote(dest_image))

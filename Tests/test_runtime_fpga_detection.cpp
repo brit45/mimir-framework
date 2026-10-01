@@ -68,8 +68,8 @@ int main() {
 
     const fs::path fake_tty = tree.path() / "ttyACM0";
     writeFile(fake_tty, "");
-    setenv("MIMIR_FPGA_SYSFS_ROOT", tree.path().c_str(), 1);
-    setenv("MIMIR_FPGA_DEVICE", fake_tty.c_str(), 1);
+    setTestEnvironment("MIMIR_FPGA_SYSFS_ROOT", tree.path().string().c_str());
+    setTestEnvironment("MIMIR_FPGA_DEVICE", fake_tty.string().c_str());
 
     FpgaRuntime runtime;
     TASSERT_TRUE(!runtime.initialize(RuntimeConfig::fromEnv("FPGA")));
@@ -102,12 +102,12 @@ int main() {
         response.data(), response.size(), capabilities
     ));
 
-    setenv("MIMIR_DISABLE_FPGA", "1", 1);
+    setTestEnvironment("MIMIR_DISABLE_FPGA", "1");
     TASSERT_TRUE(!runtime.initialize(RuntimeConfig::fromEnv("FPGA")));
     TASSERT_TRUE(!runtime.isInitialized());
 
-    unsetenv("MIMIR_DISABLE_FPGA");
-    unsetenv("MIMIR_FPGA_DEVICE");
-    unsetenv("MIMIR_FPGA_SYSFS_ROOT");
+    unsetTestEnvironment("MIMIR_DISABLE_FPGA");
+    unsetTestEnvironment("MIMIR_FPGA_DEVICE");
+    unsetTestEnvironment("MIMIR_FPGA_SYSFS_ROOT");
     return 0;
 }

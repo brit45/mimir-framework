@@ -145,6 +145,10 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     const std::string dec_norm_str = cfg.dec_norm.empty() ? enc_norm_str : cfg.dec_norm;
     const int dec_gn_groups_val    = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
+    if (dec_upsample != "conv_transpose" && dec_upsample != "nearest_conv" &&
+        dec_upsample != "bilinear_conv" && dec_upsample != "pixel_shuffle") {
+        throw std::runtime_error("VAEConvModel: unsupported decoder_upsample '" + dec_upsample + "'");
+    }
     const int resnet_max_tok       = cfg.resnet_max_tokens;  // 0 = no gate
     const int attn_max_tok         = cfg.attn_max_tokens;    // 0 = no gate
     int attn_heads                 = std::max(1, cfg.attn_heads);
@@ -269,10 +273,11 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
                           const std::string& out,
                           int channels,
                           int in_h,
-                          int in_w) {
+                          int in_w,
+                          const std::string& layer_type) {
         const int out_h = std::max(1, in_h * 2);
         const int out_w = std::max(1, in_w * 2);
-        model.push(name, "UpsampleNearest", 0);
+        model.push(name, layer_type, 0);
         if (auto* U = model.getLayerByName(name)) {
             U->inputs = {in};
             U->output = out;
@@ -283,6 +288,30 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
             U->output_width = out_w;
             U->out_h = out_h;
             U->out_w = out_w;
+            U->scale_h = 2.0f;
+            U->scale_w = 2.0f;
+        }
+        return out;
+    };
+
+    auto pixel_shuffle2x = [&](const std::string& name,
+                               const std::string& in,
+                               const std::string& out,
+                               int out_channels,
+                               int in_h,
+                               int in_w) {
+        model.push(name, "PixelShuffle", 0);
+        if (auto* U = model.getLayerByName(name)) {
+            U->inputs = {in};
+            U->output = out;
+            U->in_channels = out_channels * 4;
+            U->out_channels = out_channels;
+            U->input_height = in_h;
+            U->input_width = in_w;
+            U->output_height = in_h * 2;
+            U->output_width = in_w * 2;
+            U->out_h = in_h * 2;
+            U->out_w = in_w * 2;
             U->scale_h = 2.0f;
             U->scale_w = 2.0f;
         }
@@ -615,11 +644,18 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         const std::string b = "vae_conv/dec/up" + std::to_string(i + 1);
         const int in_h = dy_h;
         const int in_w = dy_w;
-        if (dec_upsample == "nearest_conv") {
-            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+        if (dec_upsample == "nearest_conv" || dec_upsample == "bilinear_conv") {
+            const std::string layer_type = dec_upsample == "nearest_conv"
+                ? "UpsampleNearest" : "UpsampleBilinear";
+            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w, layer_type);
             dy_h = in_h * 2;
             dy_w = in_w * 2;
             y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c, dy_h, dy_w, 3, 1, 1, true);
+        } else if (dec_upsample == "pixel_shuffle") {
+            y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c * 4, in_h, in_w, 3, 1, 1, false);
+            y = pixel_shuffle2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+            dy_h = in_h * 2;
+            dy_w = in_w * 2;
         } else {
             y = deconv2d(b + "/up", y, b + "/up_y", dy_c, dy_c, in_h, in_w, 4, 2, 1, true);
             dy_h = in_h * 2;
@@ -629,6 +665,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         if (use_skip_conn && i < static_cast<int>(enc_skips.size())) {
             model.push(b + "/skip_cat", "Concat", 0);
             if (auto* L = model.getLayerByName(b + "/skip_cat")) {
+                L->skip_input_index = 1;
                 L->inputs      = {y, enc_skips[static_cast<size_t>(i)]};
                 L->output      = b + "/sc";
                 L->concat_axis = 0;
@@ -787,6 +824,10 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         cfg.dec_norm.empty() ? (cfg.enc_norm.empty() ? "none" : cfg.enc_norm) : cfg.dec_norm;
     const int dec_gn_groups_val = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
+    if (dec_upsample != "conv_transpose" && dec_upsample != "nearest_conv" &&
+        dec_upsample != "bilinear_conv" && dec_upsample != "pixel_shuffle") {
+        throw std::runtime_error("VAEConvModel(decode): unsupported decoder_upsample '" + dec_upsample + "'");
+    }
 
     model.modelConfig["task"] = "vae_conv_decoder";
     model.modelConfig["image_w"] = W;
@@ -853,10 +894,11 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
                           const std::string& out,
                           int channels,
                           int in_h,
-                          int in_w) {
+                          int in_w,
+                          const std::string& layer_type) {
         const int out_h = std::max(1, in_h * 2);
         const int out_w = std::max(1, in_w * 2);
-        model.push(name, "UpsampleNearest", 0);
+        model.push(name, layer_type, 0);
         if (auto* U = model.getLayerByName(name)) {
             U->inputs = {in};
             U->output = out;
@@ -867,6 +909,30 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
             U->output_width = out_w;
             U->out_h = out_h;
             U->out_w = out_w;
+            U->scale_h = 2.0f;
+            U->scale_w = 2.0f;
+        }
+        return out;
+    };
+
+    auto pixel_shuffle2x = [&](const std::string& name,
+                               const std::string& in,
+                               const std::string& out,
+                               int out_channels,
+                               int in_h,
+                               int in_w) {
+        model.push(name, "PixelShuffle", 0);
+        if (auto* U = model.getLayerByName(name)) {
+            U->inputs = {in};
+            U->output = out;
+            U->in_channels = out_channels * 4;
+            U->out_channels = out_channels;
+            U->input_height = in_h;
+            U->input_width = in_w;
+            U->output_height = in_h * 2;
+            U->output_width = in_w * 2;
+            U->out_h = in_h * 2;
+            U->out_w = in_w * 2;
             U->scale_h = 2.0f;
             U->scale_w = 2.0f;
         }
@@ -1067,11 +1133,18 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         const std::string b = "vae_conv/dec/up" + std::to_string(i + 1);
         const int in_h = dy_h;
         const int in_w = dy_w;
-        if (dec_upsample == "nearest_conv") {
-            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+        if (dec_upsample == "nearest_conv" || dec_upsample == "bilinear_conv") {
+            const std::string layer_type = dec_upsample == "nearest_conv"
+                ? "UpsampleNearest" : "UpsampleBilinear";
+            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w, layer_type);
             dy_h = in_h * 2;
             dy_w = in_w * 2;
             y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c, dy_h, dy_w, 3, 1, 1, true);
+        } else if (dec_upsample == "pixel_shuffle") {
+            y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c * 4, in_h, in_w, 3, 1, 1, false);
+            y = pixel_shuffle2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+            dy_h = in_h * 2;
+            dy_w = in_w * 2;
         } else {
             y = deconv2d(b + "/up", y, b + "/up_y", dy_c, dy_c, in_h, in_w, 4, 2, 1, true);
             dy_h = in_h * 2;
@@ -1096,6 +1169,7 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
             }
             model.push(b + "/skip_cat", "Concat", 0);
             if (auto* L = model.getLayerByName(b + "/skip_cat")) {
+                L->skip_input_index = 1;
                 L->inputs      = {y, zero_name + "_out"};
                 L->output      = b + "/sc";
                 L->concat_axis = 0;

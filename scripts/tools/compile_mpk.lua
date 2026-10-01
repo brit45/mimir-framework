@@ -2,6 +2,8 @@
 
 -- Compile a modern MPK pseudocode source to opaque typed binary-v4.
 
+dofile(ROOTWORK.."/scripts/modules/mpk_help.lua").show("compile_mpk")
+
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
@@ -11,22 +13,8 @@ local function die(msg)
   os.exit(1)
 end
 
-local function usage()
-  io.stdout:write([[
-Usage:
-  ./bin/mimir --lua scripts/tools/compile_mpk.lua -- \
-    --in <source.mpk> --out <compiled.mpk.bin>
-
-The input must be modern MPK pseudocode. Legacy JSON and an already compiled
-binary are rejected as compiler inputs.
-]])
-end
 
 local opts = Args.parse(arg) or {}
-if Args.has(opts, "help") then
-  usage()
-  return
-end
 
 local input = Args.get_str(opts, "in", "")
 local output = Args.get_str(opts, "out", "")

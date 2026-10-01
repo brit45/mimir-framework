@@ -1,4 +1,4 @@
-# Scripts Mímir v3.1.0
+# Scripts Mímir v3.5.0
 
 Organisation des scripts Lua pour le framework Mímir.
 
@@ -361,4 +361,4 @@ pipe:save("model.safetensors")
 
 ---
 
-**Version**: 3.1.0 | **Date**: 23 juillet 2026
+**Version**: 3.5.0 | **Date**: 1 octobre 2026

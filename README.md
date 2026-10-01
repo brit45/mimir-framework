@@ -13,8 +13,8 @@
 | `main` | [![unit-tests main](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=main)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki main](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=main)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 | `develop` | [![unit-tests develop](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki develop](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 
-Version engine : **3.1.0**
-Révision documentation : **2026-08-30**
+Version engine : **3.5.0**
+Révision documentation : **2026-10-01**
 
 Consultez d'abord l'[état réel du projet](./docs/00-PROJECT-STATUS.md) : cette
 page distingue les chemins stables, partiels, expérimentaux, placeholders et
@@ -191,9 +191,9 @@ machine de build. Elle active Lua, OpenMP, LZ4 et FFmpeg, mais désactive SFML,
 CUDA, ROCm, Vulkan, OpenCL et les bridges externes.
 
 ```bash
-docker build --build-arg BUILD_JOBS=4 -t mimir:3.1.0 .
-docker run --rm mimir:3.1.0 --version
-docker run --rm mimir:3.1.0 \
+docker build --build-arg BUILD_JOBS=4 -t mimir:3.5.0 .
+docker run --rm mimir:3.5.0 --version
+docker run --rm mimir:3.5.0 \
   --lua scripts/templates/template_new_model.lua
 ```
 
@@ -203,7 +203,7 @@ Pour utiliser des données et conserver les checkpoints :
 docker run --rm \
   -v "$PWD/datasets:/workspace/datasets:ro" \
   -v "$PWD/checkpoint:/workspace/checkpoint" \
-  mimir:3.1.0 \
+  mimir:3.5.0 \
   --conf configs/vae_conv-training.json
 ```
 

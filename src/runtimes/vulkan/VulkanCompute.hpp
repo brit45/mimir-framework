@@ -64,6 +64,22 @@ static inline std::optional<std::string> find_shader_path_add() {
     return std::nullopt;
 }
 
+static inline std::optional<std::string> find_shader_path_elementwise() {
+    const char* candidates[] = {
+        "./bin/shaders/elementwise.comp.spv",
+        "./shaders/elementwise.comp.spv",
+        "../bin/shaders/elementwise.comp.spv",
+        "../shaders/elementwise.comp.spv",
+        "./build/shaders/elementwise.comp.spv",
+        "./build_static/shaders/elementwise.comp.spv",
+        "./build_sfml/shaders/elementwise.comp.spv",
+    };
+    for (const char* c : candidates) {
+        if (fs::exists(c)) return std::string(c);
+    }
+    return std::nullopt;
+}
+
 static inline std::optional<std::string> find_shader_path_mul() {
     const char* candidates[] = {
         "./bin/shaders/mul_forward.comp.spv",
@@ -218,6 +234,12 @@ private:
     VkPipelineLayout linear_pl_ = VK_NULL_HANDLE;
     VkPipeline linear_pipe_ = VK_NULL_HANDLE;
     VkDescriptorPool linear_dp_ = VK_NULL_HANDLE;
+
+    bool elementwise_ready_ = false;
+    VkDescriptorSetLayout elementwise_dsl_ = VK_NULL_HANDLE;
+    VkPipelineLayout elementwise_pl_ = VK_NULL_HANDLE;
+    VkPipeline elementwise_pipe_ = VK_NULL_HANDLE;
+    VkDescriptorPool elementwise_dp_ = VK_NULL_HANDLE;
 
     bool add_ready_ = false;
     VkDescriptorSetLayout add_dsl_ = VK_NULL_HANDLE;
@@ -656,6 +678,16 @@ public:
             }
         }
         return true;
+    }
+
+    bool binaryForward(const float* a, const float* b, float* out, int n, int op, float alpha = 0.01f) {
+        std::lock_guard<std::recursive_mutex> lk(linear_mutex_);
+        if (!initialized || !a || !b || !out || n <= 0) return false;
+        struct Parameters { uint32_t n; int32_t op; float alpha; } params{static_cast<uint32_t>(n),op,alpha};
+        if (!ensureVectorKernel(elementwise_ready_,elementwise_dsl_,elementwise_pl_,elementwise_pipe_,
+                elementwise_dp_,find_shader_path_elementwise(),3,"elementwise",sizeof(params))) return false;
+        return runBinaryVectorKernel(elementwise_pipe_,elementwise_pl_,elementwise_dsl_,elementwise_dp_,
+            a,b,out,n,&params,sizeof(params));
     }
 
     bool addForward(const float* a, const float* b, float* out, int n) {
@@ -1133,7 +1165,9 @@ private:
         const float* a,
         const float* b,
         float* out,
-        int n
+        int n,
+        const void* parameters = nullptr,
+        uint32_t parameter_size = 0
     ) {
         const size_t bytes = static_cast<size_t>(n) * sizeof(float);
 
@@ -1215,7 +1249,8 @@ private:
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, nullptr);
 
         VecDims dims{ static_cast<uint32_t>(n) };
-        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VecDims), &dims);
+        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+            parameters ? parameter_size : sizeof(VecDims), parameters ? parameters : &dims);
         const uint32_t gx = (static_cast<uint32_t>(n) + 255u) / 256u;
         vkCmdDispatch(cmd, gx, 1, 1);
 
@@ -1616,6 +1651,7 @@ private:
     }
 
     void cleanupAddKernel() {
+        cleanupVectorKernel(elementwise_ready_, elementwise_dsl_, elementwise_pl_, elementwise_pipe_, elementwise_dp_);
         cleanupVectorKernel(add_ready_, add_dsl_, add_pl_, add_pipe_, add_dp_);
     }
 

@@ -149,7 +149,7 @@ Un latent peut être spatialement plus petit tout en contenant davantage de scal
 | `resnet_max_tokens` | `0` | Limite `H×W` des ResBlocks ; `0` signifie sans limite. |
 | `attn_max_tokens` | `0` | Limite `H×W` de l’attention ; `0` signifie sans limite. |
 | `enc_norm`, `dec_norm` | `groupnorm` | `none`, `groupnorm`/`gn`, `layernorm`/`ln`. |
-| `decoder_upsample` | `conv_transpose` | `conv_transpose` ou `nearest_conv`. |
+| `decoder_upsample` | `conv_transpose` | `conv_transpose`, `nearest_conv`, `bilinear_conv` ou `pixel_shuffle`. |
 | `use_skip_connections` | `false` | Skips encodeur-décodeur par concaténation puis Conv 1×1. |
 | `use_encoder_prior` | `false` | Ajoute le biais latent global appris. |
 | `text_cond` | `false` | Ajoute la branche texte et les deux projections. |
@@ -232,6 +232,7 @@ OMP_NUM_THREADS=8 ./bin/mimir \
   --image-w 64 --image-h 64 \
   --latent-w 16 --latent-h 16 --latent-c 16 \
   --base-channels 32 \
+  --decoder-upsample bilinear_conv \
   --epochs 2 --lr 3e-5 \
   --stochastic-latent true \
   --encoder-prior true \

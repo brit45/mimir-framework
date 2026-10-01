@@ -1,8 +1,11 @@
 #ifndef __TENSOR_VISUALIZER_HPP__
 #define __TENSOR_VISUALIZER_HPP__
+#include "SkipConnectionControl.hpp"
+#include "LiveModelConfig.hpp"
 
-#ifdef ENABLE_SFML
-#include <SFML/Graphics.hpp>
+#ifdef ENABLE_VIZ
+#include "viz/Graphics.hpp"
+#include "VizWindow.hpp"
 #endif
 #include <vector>
 #include <string>
@@ -14,17 +17,18 @@
 #include <optional>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include "include/json.hpp"
 
 using json = nlohmann::json;
 
-#ifdef ENABLE_SFML
+#ifdef ENABLE_VIZ
 class Visualizer {
 public:
     Visualizer(const json& config);
     ~Visualizer();
 
-    // Ferme la fenêtre et libère les ressources SFML.
+    // Ferme la fenêtre et libère les ressources du backend sélectionné.
     // À appeler idéalement depuis le thread qui a créé la fenêtre.
     void shutdown();
 
@@ -36,6 +40,9 @@ public:
 
     // Traiter les événements (fermeture, etc.)
     void processEvents();
+    // Thread-safe mailbox. Scene mutations are applied only by the Viz thread.
+    void configureScript(const json& config);
+    json pollScriptEvents();
 
     // Requête de resynchronisation (thread-safe): utilisée pour que le thread
     // d'entraînement puisse détecter que l'utilisateur a pressé 'R' dans la Viz.
@@ -48,6 +55,15 @@ public:
 
     // Validation runtime: la configuration initialise l'état, puis tout clic
     // utilisateur devient prioritaire jusqu'à la fin de l'entraînement.
+    void setRuntimeConfiguration(std::shared_ptr<LiveModelConfig> config) {
+        std::atomic_store(&runtime_config_, std::move(config));
+    }
+    std::shared_ptr<LiveModelConfig> runtime_config_ = std::make_shared<LiveModelConfig>();
+    RuntimeConfigEditor config_editor_;
+    void setSkipConnectionControl(std::shared_ptr<SkipConnectionControl> control) {
+        std::atomic_store(&skip_control_, std::move(control));
+    }
+    std::shared_ptr<SkipConnectionControl> skip_control_ = std::make_shared<SkipConnectionControl>();
     void updateRuntimeValidationEnabled(bool enabled);
     void applyValidationControl(bool enabled);
     bool validationEnabledSnapshot() const;
@@ -99,11 +115,13 @@ public:
     // Définir les images intermédiaires (traitement par blocs/layers)
     struct BlockFrame {
         std::vector<uint8_t> pixels;      // heatmap (ou naturel pour image_like)
-        std::vector<uint8_t> pixels_real; // niveaux de gris naturels (1ch), vide si image_like
+        std::vector<uint8_t> pixels_real; // RGB des canaux, vide si image_like
         int w = 0;
         int h = 0;
         int channels = 1;
         std::string label;
+        int heatmap_kind = 0; // 0: image/scalar, 1: signed mean + energy
+        std::string tensor_info;
     };
     void setLayerBlockImages(const std::vector<BlockFrame>& frames);
 
@@ -207,26 +225,26 @@ private:
     uint64_t live_input_error_until_ms_ = 0;
 
     // Rects des contrôles live (reset à chaque frame).
-    std::optional<sf::FloatRect> last_live_overrides_box_;
-    std::optional<sf::FloatRect> last_live_kl_enable_box_;
-    std::optional<sf::FloatRect> last_live_lr_track_;
-    std::optional<sf::FloatRect> last_live_lr_thumb_;
-    std::optional<sf::FloatRect> last_live_lrwu_track_;
-    std::optional<sf::FloatRect> last_live_lrwu_thumb_;
-    std::optional<sf::FloatRect> last_live_klb_track_;
-    std::optional<sf::FloatRect> last_live_klb_thumb_;
-    std::optional<sf::FloatRect> last_live_klwu_track_;
-    std::optional<sf::FloatRect> last_live_klwu_thumb_;
-    std::optional<sf::FloatRect> last_live_lr_value_box_;
-    std::optional<sf::FloatRect> last_live_lrwu_value_box_;
-    std::optional<sf::FloatRect> last_live_klb_value_box_;
-    std::optional<sf::FloatRect> last_live_klwu_value_box_;
-    std::optional<sf::FloatRect> last_live_recon_loss_box_;
+    std::optional<vizgfx::FloatRect> last_live_overrides_box_;
+    std::optional<vizgfx::FloatRect> last_live_kl_enable_box_;
+    std::optional<vizgfx::FloatRect> last_live_lr_track_;
+    std::optional<vizgfx::FloatRect> last_live_lr_thumb_;
+    std::optional<vizgfx::FloatRect> last_live_lrwu_track_;
+    std::optional<vizgfx::FloatRect> last_live_lrwu_thumb_;
+    std::optional<vizgfx::FloatRect> last_live_klb_track_;
+    std::optional<vizgfx::FloatRect> last_live_klb_thumb_;
+    std::optional<vizgfx::FloatRect> last_live_klwu_track_;
+    std::optional<vizgfx::FloatRect> last_live_klwu_thumb_;
+    std::optional<vizgfx::FloatRect> last_live_lr_value_box_;
+    std::optional<vizgfx::FloatRect> last_live_lrwu_value_box_;
+    std::optional<vizgfx::FloatRect> last_live_klb_value_box_;
+    std::optional<vizgfx::FloatRect> last_live_klwu_value_box_;
+    std::optional<vizgfx::FloatRect> last_live_recon_loss_box_;
 
     // Toggles UI (panneau Blocks/Layers)
-    std::optional<sf::FloatRect> last_blocks_hide_act_box_;
-    std::optional<sf::FloatRect> last_blocks_hide_norm_box_;
-    std::optional<sf::FloatRect> last_blocks_tips_limit_box_;
+    std::optional<vizgfx::FloatRect> last_blocks_hide_act_box_;
+    std::optional<vizgfx::FloatRect> last_blocks_hide_norm_box_;
+    std::optional<vizgfx::FloatRect> last_blocks_tips_limit_box_;
 
     // Label parsing / architecture hints
     bool hide_activation_blocks = false;
@@ -244,22 +262,22 @@ private:
     int image_grid_cols;
     int image_grid_rows;
 
-    // SFML
-    std::unique_ptr<sf::RenderWindow> window;
-    sf::Font font;
+    // Backend graphique sélectionné à la compilation
+    std::unique_ptr<VizWindow> window;
+    vizgfx::Font font;
     bool font_loaded = false;
 
     // Logo framework/programme (chargé depuis ./logo.png)
-    sf::Texture logo_texture_;
-    sf::Sprite logo_sprite_{logo_texture_};
+    vizgfx::Texture logo_texture_;
+    vizgfx::Sprite logo_sprite_{logo_texture_};
     bool logo_loaded_ = false;
-    sf::Clock logo_clock_;
+    vizgfx::Clock logo_clock_;
     float logo_splash_seconds_ = 2.5f;
 
-    sf::Texture validation_reward_texture_;
-    sf::Sprite validation_reward_sprite_{validation_reward_texture_};
-    sf::Texture validation_penalty_texture_;
-    sf::Sprite validation_penalty_sprite_{validation_penalty_texture_};
+    vizgfx::Texture validation_reward_texture_;
+    vizgfx::Sprite validation_reward_sprite_{validation_reward_texture_};
+    vizgfx::Texture validation_penalty_texture_;
+    vizgfx::Sprite validation_penalty_sprite_{validation_penalty_texture_};
     bool validation_reward_icon_loaded_ = false;
     bool validation_penalty_icon_loaded_ = false;
 
@@ -273,8 +291,8 @@ private:
         int channels = 1;     // canaux de pixels
         int channels_alt = 1; // canaux de pixels_alt
         int display_size = 0;
-        sf::Texture texture;
-        sf::Sprite sprite{texture};
+        vizgfx::Texture texture;
+        vizgfx::Sprite sprite{texture};
 
         ImageData() = default;
 
@@ -360,9 +378,10 @@ private:
     enum class DatasetTextSection { Prompt = 0, Tags = 1, Tokens = 2, Encoder = 3, Count = 4 };
     std::array<float, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_scroll_y_{};
     std::array<float, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_scroll_max_{};
-    std::array<sf::FloatRect, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_section_rects_{};
+    std::array<vizgfx::FloatRect, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_section_rects_{};
     static constexpr float kDatasetTextScrollSpeed = 32.0f;
 
+    std::vector<BlockFrame> last_block_frames_;
     std::vector<ImageData> layer_block_images;
     std::vector<std::string> layer_block_labels;
     bool has_layer_blocks = false;
@@ -479,12 +498,23 @@ private:
     // Helpers
     void createImageTexture(ImageData& img_data, int w, int h, int channels, int display_size);
     void createLayerBlockTexture(ImageData& img_data, const std::string& label);
-    sf::Color getLossColor(float loss);
+    vizgfx::Color getLossColor(float loss);
 
     // UI
     bool show_help_overlay_ = false;
+    std::mutex script_mutex_;
+    std::optional<json> script_pending_;
+    json script_scene_ = json::object();
+    json script_events_ = json::array();
+    void applyScriptScene();
+    void renderScriptControls();
+    void renderConfigurationOverlay();
+    std::vector<std::pair<vizgfx::FloatRect, size_t>> config_row_rects_;
+    void emitScriptEvent(const json& event);
     bool show_prompt_text_ = true;
     bool zoom_active_ = false;
+    float zoom_info_scroll_ = 0.0f;
+    float zoom_info_scroll_max_ = 0.0f;
     bool smooth_layer_block_previews_ = true;
     enum class FocusTarget {
         Dataset,
@@ -504,8 +534,8 @@ private:
     // Layout: panneaux déplaçables (drag & drop)
     enum class PanelId { Context = 0, Blocks = 1, Generated = 2, Training = 3, Metrics = 4, Graph = 5, Output = 6, Count = 7 };
     struct Panel {
-        sf::Vector2f pos{0.f, 0.f};
-        sf::Vector2f size{0.f, 0.f};
+        vizgfx::Vector2f pos{0.f, 0.f};
+        vizgfx::Vector2f size{0.f, 0.f};
         std::string title;
         bool visible = true;
         bool allow_drag = true;
@@ -514,12 +544,12 @@ private:
     bool panels_initialized_ = false;
     bool dragging_panel_ = false;
     PanelId dragged_panel_ = PanelId::Context;
-    sf::Vector2f drag_grab_offset_{0.f, 0.f};
+    vizgfx::Vector2f drag_grab_offset_{0.f, 0.f};
 
     bool resizing_panel_ = false;
     PanelId resized_panel_ = PanelId::Context;
-    sf::Vector2f resize_start_mouse_{0.f, 0.f};
-    sf::Vector2f resize_start_size_{0.f, 0.f};
+    vizgfx::Vector2f resize_start_mouse_{0.f, 0.f};
+    vizgfx::Vector2f resize_start_size_{0.f, 0.f};
 
     static constexpr float kPanelResizeHandle = 14.f;
     static constexpr float kPanelMinW = 220.f;
@@ -532,18 +562,18 @@ private:
     void clampPanelsToWindow();
     void syncUIView();
     bool isPanelVisible(PanelId id) const;
-    sf::FloatRect panelRect(PanelId id) const;
-    sf::FloatRect panelTitleRect(PanelId id) const;
-    sf::FloatRect panelContentRect(PanelId id) const;
-    sf::FloatRect panelResizeHandleRect(PanelId id) const;
-    sf::FloatRect panelCloseButtonRect(PanelId id) const;
-    std::optional<PanelId> hitTestPanelTitle(const sf::Vector2f& mouse) const;
-    std::optional<PanelId> hitTestPanelResizeHandle(const sf::Vector2f& mouse) const;
-    std::optional<PanelId> hitTestPanelCloseButton(const sf::Vector2f& mouse) const;
+    vizgfx::FloatRect panelRect(PanelId id) const;
+    vizgfx::FloatRect panelTitleRect(PanelId id) const;
+    vizgfx::FloatRect panelContentRect(PanelId id) const;
+    vizgfx::FloatRect panelResizeHandleRect(PanelId id) const;
+    vizgfx::FloatRect panelCloseButtonRect(PanelId id) const;
+    std::optional<PanelId> hitTestPanelTitle(const vizgfx::Vector2f& mouse) const;
+    std::optional<PanelId> hitTestPanelResizeHandle(const vizgfx::Vector2f& mouse) const;
+    std::optional<PanelId> hitTestPanelCloseButton(const vizgfx::Vector2f& mouse) const;
     void drawPanelChrome(PanelId id);
     void setPanelContentHeight(PanelId id, float content_height);
     void drawPanelScrollbar(PanelId id);
-    sf::Color panelAccent(PanelId id) const;
+    vizgfx::Color panelAccent(PanelId id) const;
 
     // Cursor
     bool cursors_loaded_ = false;
@@ -551,10 +581,10 @@ private:
     bool cursor_ok_hand_ = false;
     bool cursor_ok_cross_ = false;
     bool cursor_ok_resize_ = false;
-    std::optional<sf::Cursor> cursor_arrow_;
-    std::optional<sf::Cursor> cursor_hand_;
-    std::optional<sf::Cursor> cursor_cross_;
-    std::optional<sf::Cursor> cursor_resize_;
+    std::optional<vizgfx::Cursor> cursor_arrow_;
+    std::optional<vizgfx::Cursor> cursor_hand_;
+    std::optional<vizgfx::Cursor> cursor_cross_;
+    std::optional<vizgfx::Cursor> cursor_resize_;
     enum class CursorKind { Arrow, Hand, Cross, Resize };
     CursorKind cursor_kind_ = CursorKind::Arrow;
     void initCursorsIfNeeded();
@@ -565,18 +595,19 @@ private:
     void renderZoomOverlay();
 
     // Focus outline
-    std::optional<sf::FloatRect> last_dataset_rect_;
-    std::optional<sf::FloatRect> last_projection_rect_;
-    std::optional<sf::FloatRect> last_understanding_rect_;
-    std::optional<sf::FloatRect> last_output_rect_;
-    std::vector<sf::FloatRect> last_block_rects_;
-    std::vector<sf::FloatRect> last_generated_rects_;
+    std::optional<vizgfx::FloatRect> last_dataset_rect_;
+    std::optional<vizgfx::FloatRect> last_projection_rect_;
+    std::optional<vizgfx::FloatRect> last_understanding_rect_;
+    std::optional<vizgfx::FloatRect> last_output_rect_;
+    std::vector<vizgfx::FloatRect> last_block_rects_;
+    std::vector<vizgfx::FloatRect> last_generated_rects_;
     std::vector<int> last_generated_indices_;
     void renderFocusOutline();
 
     // Stop button (Metrics panel)
-    std::optional<sf::FloatRect> last_stop_button_rect_;
-    std::optional<sf::FloatRect> last_validation_button_rect_;
+    std::optional<vizgfx::FloatRect> last_stop_button_rect_;
+    std::optional<vizgfx::FloatRect> last_validation_button_rect_;
+    std::optional<vizgfx::FloatRect> last_skip_button_rect_;
 
     // Scroll (Blocks/Layers panel)
     float blocks_scroll_y_ = 0.0f;
@@ -586,14 +617,14 @@ private:
     // Scrollbar (slicer) cliquable pour Blocks/Layers
     bool dragging_blocks_scrollbar_ = false;
     float blocks_scroll_drag_grab_y_ = 0.0f;
-    sf::FloatRect last_blocks_scroll_track_rect_{};
-    sf::FloatRect last_blocks_scroll_thumb_rect_{};
+    vizgfx::FloatRect last_blocks_scroll_track_rect_{};
+    vizgfx::FloatRect last_blocks_scroll_thumb_rect_{};
 
     // Scroll vertical commun aux panneaux hors Blocks/Layers.
     std::array<float, static_cast<size_t>(PanelId::Count)> panel_scroll_y_{};
     std::array<float, static_cast<size_t>(PanelId::Count)> panel_scroll_max_{};
-    std::array<sf::FloatRect, static_cast<size_t>(PanelId::Count)> panel_scroll_track_rects_{};
-    std::array<sf::FloatRect, static_cast<size_t>(PanelId::Count)> panel_scroll_thumb_rects_{};
+    std::array<vizgfx::FloatRect, static_cast<size_t>(PanelId::Count)> panel_scroll_track_rects_{};
+    std::array<vizgfx::FloatRect, static_cast<size_t>(PanelId::Count)> panel_scroll_thumb_rects_{};
     bool dragging_panel_scrollbar_ = false;
     PanelId scrolled_panel_ = PanelId::Context;
     float panel_scroll_drag_grab_y_ = 0.0f;
@@ -642,7 +673,7 @@ private:
 
 #else
 
-// Version headless (sans SFML) : API compatible, pas de rendu.
+// Version headless (MIMIR_VIZ_BACKEND=NONE) : API compatible, pas de rendu.
 class Visualizer {
 public:
     explicit Visualizer(const json&) {}
@@ -651,6 +682,8 @@ public:
     bool initialize() { return false; }
     bool isOpen() const { return false; }
     void processEvents() {}
+    void configureScript(const json&) { throw std::runtime_error("Viz backend NONE"); }
+    json pollScriptEvents() { return json::array(); }
     void update() {}
 
     void shutdown() {}
@@ -660,6 +693,15 @@ public:
 
     void requestStopTraining() {}
     bool consumeStopTrainingRequested() { return false; }
+    void setRuntimeConfiguration(std::shared_ptr<LiveModelConfig> config) {
+        std::atomic_store(&runtime_config_, std::move(config));
+    }
+    std::shared_ptr<LiveModelConfig> runtime_config_ = std::make_shared<LiveModelConfig>();
+    RuntimeConfigEditor config_editor_;
+    void setSkipConnectionControl(std::shared_ptr<SkipConnectionControl> control) {
+        std::atomic_store(&skip_control_, std::move(control));
+    }
+    std::shared_ptr<SkipConnectionControl> skip_control_ = std::make_shared<SkipConnectionControl>();
     void updateRuntimeValidationEnabled(bool) {}
     void applyValidationControl(bool) {}
     bool validationEnabledSnapshot() const { return false; }
@@ -696,6 +738,8 @@ public:
         int h = 0;
         int channels = 1;
         std::string label;
+        int heatmap_kind = 0; // 0: image/scalar, 1: signed mean + energy
+        std::string tensor_info;
     };
     void setLayerBlockImages(const std::vector<BlockFrame>&) {}
 

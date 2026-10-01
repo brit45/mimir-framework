@@ -800,6 +800,10 @@ function M.decode_pseudocode(s)
   return parse_pseudocode(s)
 end
 
+function M.decode_json(text)
+  return parse_json_with_fallback(text)
+end
+
 function M.read_json_file(path)
   if type(read_json) == "function" then
     local v = read_json(path)

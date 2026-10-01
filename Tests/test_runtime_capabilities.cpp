@@ -105,9 +105,9 @@ int main() {
     TASSERT_TRUE(concrete_vulkan.queryForwardCapability(LayerType::Add) ==
                  RuntimeCapabilityLevel::NativeOptimized);
     TASSERT_TRUE(concrete_vulkan.queryForwardCapability(LayerType::Subtract) ==
-                 RuntimeCapabilityLevel::HostFallback);
+                 RuntimeCapabilityLevel::Native);
     TASSERT_TRUE(concrete_vulkan.queryBackwardCapability(LayerType::Linear) ==
-                 RuntimeCapabilityLevel::Unsupported);
+                 RuntimeCapabilityLevel::Native);
 #endif
 
 #ifdef ENABLE_OPENCL
@@ -115,7 +115,7 @@ int main() {
     TASSERT_TRUE(concrete_opencl.queryForwardCapability(LayerType::Add) ==
                  RuntimeCapabilityLevel::Native);
     TASSERT_TRUE(concrete_opencl.queryBackwardCapability(LayerType::Add) ==
-                 RuntimeCapabilityLevel::HostFallback);
+                 RuntimeCapabilityLevel::Native);
 #endif
 
     CapabilityRuntime cuda("CUDA", RuntimeCapabilityLevel::HostFallback,

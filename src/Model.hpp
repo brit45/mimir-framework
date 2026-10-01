@@ -14,6 +14,8 @@
 #include "Encoder.hpp"
 #include "Autograd.hpp"   // Pour la structure Gradients
 #include "HardwareOpt.hpp" // Optimisations hardware avancées
+#include "SkipConnectionControl.hpp"
+#include "LiveModelConfig.hpp"
 #include "Layers.hpp"      // Pour la structure Layer
 #include "MemoryGuard.hpp" // Pour le strict mode
 #include "DType.hpp"
@@ -61,6 +63,20 @@ struct Optimizer {
     // The runtime optimizerStep uses mv_by_param_ptr.
     std::vector<float> m;
     std::vector<float> v;
+    // Stable checkpoint mapping; runtime pointers are never persisted.
+    struct StateBlock {
+        std::string name;
+        size_t offset = 0;
+        size_t size = 0;
+    };
+    std::vector<StateBlock> parameter_layout;
+    bool usesFirstMoment() const {
+        return type != OptimizerType::SGD && type != OptimizerType::RMSPROP &&
+            (type != OptimizerType::ADAFACTOR || adafactor_beta1 > 0.0f);
+    }
+    bool usesSecondMoment() const {
+        return type != OptimizerType::SGD && type != OptimizerType::LION;
+    }
     float beta1 = 0.9f;
     float beta2 = 0.999f;
     float eps = 1e-8f;
@@ -152,6 +168,12 @@ void configureOptimizerFromJson(Optimizer& optimizer, const json& config);
 // -------------------- Model class --------------------
 class Model {
 public:
+    virtual std::shared_ptr<SkipConnectionControl> skipConnectionControl();
+    std::shared_ptr<LiveModelConfig> runtimeConfiguration() { return runtime_config_; }
+    void publishRuntimeConfiguration(Optimizer* optimizer = nullptr);
+    void applyRuntimeConfiguration();
+    void applyRuntimeOptimizerConfiguration(Optimizer& optimizer);
+
     Model();
     virtual ~Model();
 
@@ -228,11 +250,13 @@ public:
     // ========================================================================
     struct VizFrame {
         std::vector<uint8_t> pixels;      // heatmap (ou naturel pour image_like)
-        std::vector<uint8_t> pixels_real; // niveaux de gris naturels (1ch), vide si image_like
+        std::vector<uint8_t> pixels_real; // RGB des canaux, vide si image_like
         int w = 0;
         int h = 0;
         int channels = 1;
         std::string label;
+        int heatmap_kind = 0; // 0: image/scalar, 1: signed mean + energy
+        std::string tensor_info;
     };
 
     void setVizTapsEnabled(bool enabled) {
@@ -325,6 +349,8 @@ public:
 
         // Optional training state (for checkpoint/debug)
         void setSerializedOptimizer(Optimizer opt);
+        Optimizer optimizerSnapshot(const Optimizer& opt) const;
+        void restoreOptimizerState(Optimizer& opt) const;
         const Optimizer* getSerializedOptimizer() const { return serialized_optimizer_ ? &(*serialized_optimizer_) : nullptr; }
         Optimizer* getMutableSerializedOptimizer() { return serialized_optimizer_ ? &(*serialized_optimizer_) : nullptr; }
         void clearSerializedOptimizer() { serialized_optimizer_.reset(); }
@@ -345,9 +371,9 @@ public:
     const std::vector<Layer>& getLayers() const { return layers; }
     std::vector<Layer>& getMutableLayers() { return layers; }
     bool getHasEncoder() const { return hasEncoder; }
-    // Invariant framework: tous les modèles doivent avoir un encoder.
-    // On autorise uniquement l'activation explicite; ignorer les tentatives de désactivation.
-    void setHasEncoder(bool val) { if (val) hasEncoder = true; }
+    bool getHasTokenizer() const { return hasTokenizer; }
+    void setHasTokenizer(bool val) { hasTokenizer = val; }
+    void setHasEncoder(bool val) { hasEncoder = val; }
     const std::string& getModelName() const { return model_name; }
     void setModelName(const std::string& name) { model_name = name; }
 
@@ -452,6 +478,7 @@ public:
 
         std::vector<std::vector<float>> activations;
         std::vector<float> final_output;
+        bool skip_connections_enabled = true;
         bool is_valid = false;
         
         void clear() {
@@ -467,6 +494,9 @@ public:
         }
     };
     ForwardState forward_state;
+    std::shared_ptr<SkipConnectionControl> skip_control_ = std::make_shared<SkipConnectionControl>();
+    bool skip_control_initialized_ = false;
+    std::shared_ptr<LiveModelConfig> runtime_config_ = std::make_shared<LiveModelConfig>();
     
     // ========================================================================
     // TENSOR STORE (Multi-input/Branch Support)

@@ -57,7 +57,8 @@ public:
         // Si <= 0, reprend enc_gn_groups.
         int dec_gn_groups = 32;
 
-        // Upsampling du décodeur : "conv_transpose" | "nearest_conv".
+        // Upsampling du décodeur : "conv_transpose" | "nearest_conv" |
+        // "bilinear_conv" | "pixel_shuffle".
         std::string decoder_upsample = "conv_transpose";
 
         // Nombre de têtes SelfAttention (sera clampé à un diviseur valide de channels).

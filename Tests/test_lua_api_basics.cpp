@@ -11,6 +11,10 @@ int main() {
 
     const fs::path rootwork = fs::temp_directory_path() / "mimir lua rootwork";
     fs::create_directories(rootwork / "modules");
+    fs::create_directories(rootwork / "scripts" / "modules");
+    fs::copy_file(fs::current_path() / "scripts" / "modules" / "mpk.lua",
+                  rootwork / "scripts" / "modules" / "mpk.lua",
+                  fs::copy_options::overwrite_existing);
     {
         std::ofstream module(rootwork / "modules" / "dependency.lua");
         module << "return { value = 'loaded' }\n";
@@ -46,6 +50,12 @@ int main() {
         if type(Mimir.Model.lumen_add_vae_calibration_image) ~= "function" then TEST_ERR = "Lumen calibration image missing" return end
         if type(Mimir.Model.lumen_finish_vae_calibration) ~= "function" then TEST_ERR = "Lumen calibration finish missing" return end
         if type(Mimir.Model.lumen_train_step) ~= "function" then TEST_ERR = "Lumen train step missing" return end
+        assert(type(Mimir.Viz.backend()) == "string")
+        assert(type(Mimir.Viz.poll_events()) == "table")
+        local scene_ok, scene_err = Mimir.Viz.configure({controls={}})
+        assert(scene_ok == false and type(scene_err) == "string")
+        assert(not pcall(Mimir.Viz.poll_events, -1))
+        assert(not pcall(Mimir.Viz.poll_events, 1001))
         if type(Mimir.Viz.validation_enabled) ~= "function" then TEST_ERR = "Viz.validation_enabled missing" return end
         if type(Mimir.Model.lumen_validate_step) ~= "function" then TEST_ERR = "Lumen validation step missing" return end
         if type(Mimir.Dataset.release) ~= "function" then TEST_ERR = "Dataset.release missing" return end
@@ -90,6 +100,11 @@ int main() {
             return
         end
 
+        local pixels, generation_err = Mimir.Model.lumen_text2img("test", 1, 1, 1.0)
+        if pixels ~= nil or type(generation_err) ~= "string" then
+            TEST_ERR = "Lumen generation should reject a non-Lumen model"
+            return
+        end
         local calibration_ok, calibration_err = Mimir.Model.lumen_begin_vae_calibration()
         if calibration_ok ~= false or type(calibration_err) ~= "string" then
             TEST_ERR = "Lumen calibration should reject a non-Lumen model"

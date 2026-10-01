@@ -4,6 +4,8 @@
 -- Their registry execution delegates to an existing native backbone; the MPK
 -- graph documents the intended detection/segmentation head for development.
 
+dofile(ROOTWORK.."/scripts/modules/mpk_help.lua").show("add_vision_mpk_architectures")
+
 local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
 local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")

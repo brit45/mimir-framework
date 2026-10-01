@@ -120,8 +120,12 @@ int main() {
             optimizer.type = OptimizerType::LAMB;
             optimizer.step = 23;
             optimizer.weight_decay = 0.02f;
-            optimizer.m = {0.1f, 0.2f};
-            optimizer.v = {0.3f, 0.4f};
+            size_t moment_count = 0;
+            for (const auto& layer : modelA->getLayers()) moment_count += layer.getWeightsSize();
+            optimizer.m.assign(moment_count, 0.1f);
+            optimizer.v.assign(moment_count, 0.3f);
+            optimizer.m[1] = 0.2f;
+            optimizer.v[1] = 0.4f;
             modelA->setSerializedOptimizer(std::move(optimizer));
         }
 
@@ -208,7 +212,7 @@ int main() {
             TASSERT_TRUE(optimizer->type == OptimizerType::LAMB);
             TASSERT_TRUE(optimizer->step == 23);
             TASSERT_NEAR(optimizer->weight_decay, 0.02f, 1e-6f);
-            TASSERT_TRUE(optimizer->m.size() == 2 && optimizer->v.size() == 2);
+            TASSERT_TRUE(optimizer->m.size() == modelA->getSerializedOptimizer()->m.size() && optimizer->v.size() == modelA->getSerializedOptimizer()->v.size());
         }
 
         std::filesystem::remove(p);

@@ -22,6 +22,7 @@
 #include <unordered_set>
 #include <type_traits>
 #include <utility>
+#include <thread>
 
 int LuaScripting::lua_allocateParams(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
@@ -146,6 +147,7 @@ int LuaScripting::lua_getModelLayers(lua_State* L) {
         lua_pushinteger(L, la.num_groups);    lua_setfield(L, -2, "num_groups");
         lua_pushnumber(L, la.dropout_p);      lua_setfield(L, -2, "dropout_p");
         lua_pushinteger(L, la.axis);          lua_setfield(L, -2, "axis");
+        lua_pushinteger(L, la.skipInputIndex()); lua_setfield(L, -2, "skip_input_index");
         lua_pushinteger(L, la.concat_axis);   lua_setfield(L, -2, "concat_axis");
         lua_pushinteger(L, la.split_axis);    lua_setfield(L, -2, "split_axis");
         lua_pushinteger(L, la.num_splits);    lua_setfield(L, -2, "num_splits");
@@ -282,6 +284,7 @@ int LuaScripting::lua_pushLayer(lua_State* L) {
             set_ints("shape", layer->shape);
             set_ints("permute_dims", layer->permute_dims);
             set_int("concat_axis", layer->concat_axis);
+            set_int("skip_input_index", layer->skip_input_index);
             set_int("num_splits", layer->num_splits);
             set_ints("split_sizes", layer->split_sizes);
             set_int("split_axis", layer->split_axis);
@@ -384,6 +387,12 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
         return 2;
     }
     
+    if (ctx.asyncMonitor) {
+        ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
+        ctx.currentModel->publishRuntimeConfiguration();
+        ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+    }
+
     // Argument 1: input
     // - soit un tableau (array) de floats/ints
     // - soit une table nommée { __input__ = <array_float>, text_ids = <array_int> }
@@ -416,6 +425,8 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
             bf.h = f.h;
             bf.channels = f.channels;
             bf.pixels_real = std::move(f.pixels_real);
+            bf.heatmap_kind = f.heatmap_kind;
+            bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
             frames.push_back(std::move(bf));
         }
@@ -702,6 +713,13 @@ int LuaScripting::lua_optimizerStep(lua_State* L) {
         Optimizer* opt = ctx.currentModel->getMutableSerializedOptimizer();
         if (!opt) throw std::runtime_error("optimizer state unavailable");
         opt->initial_lr = lr;
+        if (ctx.asyncMonitor) {
+            ctx.currentModel->publishRuntimeConfiguration(opt);
+            ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+            ctx.asyncMonitor->updateRuntimeTrainParams(static_cast<float>(lr), opt->warmup_steps, 0, 0, "mse");
+            const auto live = ctx.asyncMonitor->liveTrainParamsSnapshot();
+            if (live.overrides_enabled) { lr = live.lr; opt->initial_lr = live.lr; opt->warmup_steps = live.lr_warmup_steps; }
+        }
         ctx.currentModel->optimizerStep(*opt, lr, nullptr);
         lua_pushboolean(L, true);
         return 1;
@@ -2421,5 +2439,46 @@ int LuaScripting::lua_extractKeywords(lua_State* L) {
         lua_rawseti(L, -2, i + 1);
     }
     
+    return 1;
+}
+
+int LuaScripting::lua_vizBackend(lua_State* L) {
+#ifdef ENABLE_VIZ
+    lua_pushstring(L, vizBackendName());
+#else
+    lua_pushstring(L, "NONE");
+#endif
+    return 1;
+}
+
+int LuaScripting::lua_vizConfigure(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    auto& ctx = LuaContext::getInstance();
+    auto viz = ctx.asyncMonitor ? ctx.asyncMonitor->getViz() : nullptr;
+    if (!viz) { lua_pushboolean(L, false); lua_pushstring(L, "Viz non créée"); return 2; }
+    try {
+        json config = luaTableToJson(L, 1);
+        if (config.is_array() && config.empty()) config = json::object();
+        viz->configureScript(config);
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false); lua_pushstring(L, e.what()); return 2;
+    }
+}
+
+int LuaScripting::lua_vizPollEvents(lua_State* L) {
+    const auto timeout = luaL_optinteger(L, 1, 0);
+    luaL_argcheck(L, timeout >= 0 && timeout <= 1000, 1, "timeout_ms must be 0..1000");
+    auto& ctx = LuaContext::getInstance();
+    auto viz = ctx.asyncMonitor ? ctx.asyncMonitor->getViz() : nullptr;
+    json events = json::array();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+    do {
+        if (viz) events = viz->pollScriptEvents();
+        if (!events.empty() || !viz || timeout == 0 || std::chrono::steady_clock::now() >= deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    } while (true);
+    jsonToLuaTable(L, events);
     return 1;
 }

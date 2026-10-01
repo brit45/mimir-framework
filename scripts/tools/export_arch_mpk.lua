@@ -2,9 +2,11 @@
 
 -- Export a complete model architecture to MPK, from registry or standalone/current model.
 
+dofile(ROOTWORK.."/scripts/modules/mpk_help.lua").show("export_arch_mpk")
+
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
-local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
+local MPKTools = dofile(ROOTWORK.."/scripts/modules/mpk_tools.lua")
 local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")
 
 local function log(...)
@@ -20,24 +22,6 @@ local function die(msg)
   os.exit(1)
 end
 
-local function print_usage()
-  log("Usage:")
-  log("  ./bin/mimir --lua scripts/tools/export_arch_mpk.lua -- --out <file.mpk> [options]")
-  log("")
-  log("Options:")
-  log("  --out <file.mpk>             sortie MPK (required)")
-  log("  --name <string>              nom package (default: exported_arch)")
-  log("  --author <string>            auteur (default: unknown)")
-  log("  --description <text>         description")
-  log("  --arch <registry_name>       architecture du registre à instancier avant export")
-  log("  --config-json <path>         overrides config pour --arch")
-  log("  --from-current-model         exporter le modèle actuellement chargé (standalone ou registre)")
-  log("  --type <string>              type à écrire dans le header (utile hors registre)")
-  log("  (sortie)                     toujours écrite en pseudocode MPK style Visu")
-  log("  --compile [path.mpk.bin]     produit aussi le binaire v4 opaque")
-  log("  --viz                        header.viz_specified=true")
-  log("  --help                       aide")
-end
 
 local function read_json_or_die(path, label)
   local obj, err = MPK.read_json_file(path)
@@ -47,68 +31,7 @@ local function read_json_or_die(path, label)
   return obj
 end
 
-local function collect_layer_params(layer)
-  local p = {}
-  local scalar_keys = {
-    "in_features", "out_features", "in_channels", "out_channels",
-    "input_height", "input_width", "kernel_size", "kernel_h", "kernel_w",
-    "stride", "stride_h", "stride_w", "padding", "pad_h", "pad_w",
-    "dilation", "groups", "eps", "num_groups", "dropout_p", "vocab_size",
-    "embed_dim", "axis", "concat_axis", "split_axis", "num_splits",
-    "scale_h", "scale_w", "out_h", "out_w", "num_heads", "head_dim",
-    "seq_len", "causal", "use_bias", "nms_iou_threshold",
-    "nms_score_threshold", "nms_max_detections", "nms_class_agnostic",
-  }
-  for _, key in ipairs(scalar_keys) do
-    local value = layer[key]
-    if type(value) == "number" or type(value) == "boolean" then
-      p[key] = value
-    end
-  end
-  for _, key in ipairs({"target_shape", "permute_dims", "split_sizes"}) do
-    if type(layer[key]) == "table" and #layer[key] > 0 then
-      p[key] = layer[key]
-    end
-  end
-  return p
-end
-
-local function build_graph_from_layers(layers)
-  local nodes, links = {}, {}
-  for i = 1, #layers do
-    local la = layers[i]
-    local name = tostring(la.name or ("layer_" .. i))
-    local output = tostring(la.output or (name .. "_out"))
-    local inputs = type(la.inputs) == "table" and la.inputs or { "x" }
-
-    local node = {
-      id = name,
-      name = name,
-      type = tostring(la.type or "Identity"),
-      params_count = tonumber(la.param_count) or 0,
-      inputs = inputs,
-      output = output,
-      params = collect_layer_params(la),
-      position = { x = 80 + ((i - 1) * 180), y = 80 },
-    }
-    nodes[#nodes + 1] = node
-
-    for _, inp in ipairs(inputs) do
-      links[#links + 1] = {
-        from = tostring(inp),
-        to = name,
-        kind = "tensor",
-      }
-    end
-  end
-  return nodes, links
-end
-
 local opts = Args.parse(arg) or {}
-if Args.has(opts, "help") then
-  print_usage()
-  return
-end
 if Args.has(opts, "j" .. "son") or Args.has(opts, "bin" .. "ary") then
   die("--json/--binary supprimés : exportez le pseudocode puis utilisez compile_mpk.lua")
 end
@@ -121,16 +44,27 @@ local out_path = Args.get_str(opts, "out", "")
 if out_path == "" then die("missing --out <file.mpk>") end
 if not out_path:lower():match("%.mpk$") then die("--out must end with .mpk") end
 
+local paths, path_err = MPKTools.output_paths(opts, out_path)
+if not paths then die(path_err) end
+
 local package_name = Args.get_str(opts, "name", "exported_arch")
 local author = Args.get_str(opts, "author", "unknown")
 local description = Args.get_str(opts, "description", "Architecture exportee vers MPK")
+local description_file = Args.get_str(opts, "description-file", "")
+if description_file ~= "" then
+  local err
+  description, err = MPK.read_text_file(description_file)
+  if not description then die(err) end
+end
 local viz_specified = Args.get_bool(opts, "viz", false)
 
-local arch = Args.get_str(opts, "arch", "")
+local arch = Args.get_str(opts, "arch", Args.get_str(opts, "register", ""))
 local from_current = Args.get_bool(opts, "from-current-model", false)
 local type_override = Args.get_str(opts, "type", "")
 local config_json_path = Args.get_str(opts, "config-json", "")
 
+local checkpoint = Args.get_str(opts, "checkpoint", "")
+local checkpoint_data
 local base_config = {}
 
 local function shallow_copy_table(src)
@@ -144,7 +78,14 @@ local function shallow_copy_table(src)
   return out
 end
 
-if arch ~= "" then
+if arch ~= "" and from_current then die("--arch conflicts with --from-current-model") end
+if checkpoint ~= "" then
+  if arch ~= "" or from_current or config_json_path ~= "" then die("--checkpoint conflicts with --arch, --from-current-model and --config-json") end
+  local err
+  checkpoint_data, err = MPKTools.checkpoint(checkpoint, Args.get_str(opts, "format", "auto"))
+  if not checkpoint_data then die(err) end
+  base_config = checkpoint_data.config
+elseif arch ~= "" then
   local cfg = {}
   if config_json_path ~= "" then
     cfg = read_json_or_die(config_json_path, "config-json")
@@ -170,7 +111,7 @@ if type(get_layers_fn) ~= "function" then
   die("Mimir.Model.get_layers indisponible")
 end
 
-local layers = get_layers_fn()
+local layers = checkpoint_data and checkpoint_data.layers or get_layers_fn()
 if type(layers) ~= "table" or #layers == 0 then
   die("aucun layer disponible à exporter")
 end
@@ -179,11 +120,11 @@ if next(base_config) == nil then
   base_config = {}
 end
 
-local nodes, links = build_graph_from_layers(layers)
+local nodes, links = MPKTools.build_graph_from_layers(layers)
 
 local model_type = type_override
 if model_type == "" then
-  model_type = arch ~= "" and arch or "custom_graph"
+  model_type = checkpoint_data and checkpoint_data.type or (arch ~= "" and arch or "custom_graph")
 end
 
 local model_structure = {
@@ -193,7 +134,7 @@ local model_structure = {
   build = {
     dynamic_layer_assembly = true,
     generated_by = "scripts/tools/export_arch_mpk.lua",
-    source = (arch ~= "") and "registry" or "current_model",
+    source = checkpoint_data and checkpoint_data.source or ((arch ~= "") and "registry" or "current_model"),
   },
   graph = {
     mode = "node",
@@ -211,7 +152,8 @@ local pkg, err_build = MPK.build({
   name = package_name,
   type = model_type,
   author = author,
-  modifiable = true,
+  modifiable = Args.get_bool(opts, "modifiable", true),
+  created_at = Args.get_str(opts, "created-at", nil),
   viz_specified = viz_specified,
   base_config = base_config,
   model_structure = model_structure,
@@ -222,31 +164,14 @@ if not pkg then
   die("build failed: " .. tostring(err_build))
 end
 
-local parent = FS.dirname(out_path)
-if parent and parent ~= "" then FS.mkdir_p(parent) end
-
-local ok_write, err_write = MPK.write(out_path, pkg)
-if not ok_write then
-  die("write failed: " .. tostring(err_write))
-end
-
-local compiled_path = nil
-if opts.compile ~= nil and opts.compile ~= false then
-  compiled_path = type(opts.compile) == "string" and opts.compile or
-    (out_path .. ".bin")
-  if not compiled_path:lower():match("%.mpk%.bin$") then
-    die("--compile output must end with .mpk.bin")
-  end
-  local compiled_parent = FS.dirname(compiled_path)
-  if compiled_parent and compiled_parent ~= "" then FS.mkdir_p(compiled_parent) end
-  local ok_compile, err_compile = MPK.compile(out_path, compiled_path)
-  if not ok_compile then die("compile failed: " .. tostring(err_compile)) end
-end
+local ok_write, err_write = MPKTools.write_outputs(pkg, paths)
+if not ok_write then die("write/compile failed: "..tostring(err_write)) end
+local compiled_path = paths.compiled
 
 log("[export_arch_mpk] OK")
 log("  out:        " .. out_path)
 log("  type:       " .. tostring(model_type))
-log("  source:     " .. ((arch ~= "") and ("registry:" .. arch) or "current_model"))
+log("  source:     " .. (checkpoint_data and (checkpoint_data.source..":"..checkpoint) or ((arch ~= "") and ("registry:" .. arch) or "current_model")))
 log("  nodes:      " .. tostring(#nodes))
 log("  container:  " .. tostring(pkg.container))
 if compiled_path then log("  binary-v4:  " .. compiled_path) end

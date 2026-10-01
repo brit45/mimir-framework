@@ -6,7 +6,7 @@
 
 #include "Layers.hpp"
 #include "runtimes/LayerOps.hpp"
-#include "runtimes/cpu/RuntimeLayerDispatch.hpp"
+#include "runtimes/NativeBackward.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -98,44 +98,6 @@ bool OpenCLRuntime::supportsForwardLayerType(const LayerType type) const {
     }
 }
 
-bool OpenCLRuntime::supportsBackwardLayerType(const LayerType type) const {
-    switch (config_.disabled) {
-        case true:
-            return false;
-        case false:
-            break;
-    }
-
-    switch (type) {
-        case LayerType::Linear:
-        case LayerType::MatMul:
-        case LayerType::BatchMatMul:
-        case LayerType::Add:
-        case LayerType::Subtract:
-        case LayerType::Multiply:
-        case LayerType::Divide:
-        case LayerType::ReLU:
-        case LayerType::LeakyReLU:
-        case LayerType::Sigmoid:
-        case LayerType::Tanh:
-        case LayerType::SiLU:
-        case LayerType::GELU:
-        case LayerType::Softplus:
-        case LayerType::Mish:
-        case LayerType::HardSigmoid:
-        case LayerType::HardSwish:
-        case LayerType::MaxPool2d:
-        case LayerType::MaxPool1d:
-        case LayerType::AvgPool2d:
-        case LayerType::AvgPool1d:
-        case LayerType::GlobalAvgPool2d:
-        case LayerType::AdaptiveAvgPool2d:
-            return true;
-        default:
-            return false;
-    }
-}
-
 RuntimeCapabilityLevel OpenCLRuntime::queryForwardCapability(const LayerType type) const {
 #ifndef ENABLE_OPENCL
     return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
@@ -166,9 +128,28 @@ RuntimeCapabilityLevel OpenCLRuntime::queryForwardCapability(const LayerType typ
 #endif
 }
 
+bool OpenCLRuntime::supportsBackwardLayerType(const LayerType type) const {
+#ifdef ENABLE_OPENCL
+    return !config_.disabled && NativeBackward::supports(type);
+#else
+    (void)type;
+    return false;
+#endif
+}
+
 RuntimeCapabilityLevel OpenCLRuntime::queryBackwardCapability(const LayerType type) const {
-    return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
-                                           : RuntimeCapabilityLevel::Unsupported;
+    return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::Native : RuntimeCapabilityLevel::Unsupported;
+}
+
+RuntimeCapabilityLevel OpenCLRuntime::queryBackwardOperationCapability(
+    const Layer& layer, const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs, bool training) const {
+    if (config_.disabled || !config_.linear_enabled || inputs.empty() || !inputs[0] ||
+        grad_outputs.size()!=1 || !grad_outputs[0]) return RuntimeCapabilityLevel::Unsupported;
+    if (!runtimeCapabilityIsNative(queryConfiguredForwardOperationCapability(layer,inputs,true)))
+        return RuntimeCapabilityLevel::Unsupported;
+    (void)training;
+    return queryBackwardCapability(layer.type_enum);
 }
 
 RuntimeCapabilityLevel OpenCLRuntime::queryForwardOperationCapability(
@@ -332,56 +313,16 @@ bool OpenCLRuntime::forwardLayer(
 #endif
 }
 
+
 bool OpenCLRuntime::backwardLayer(
     const std::vector<const std::vector<float>*>& inputs,
     const std::vector<const std::vector<float>*>& grad_outputs,
-    std::vector<std::vector<float>>& grad_inputs,
-    Layer& layer,
-    bool training
-) {
-#ifndef ENABLE_OPENCL
-    (void)inputs;
-    (void)grad_outputs;
-    (void)grad_inputs;
-    (void)layer;
-    (void)training;
-    return false;
+    std::vector<std::vector<float>>& grad_inputs, Layer& layer, bool training) {
+#ifdef ENABLE_OPENCL
+    if (!isInitialized() || !runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training))) return false;
+    return NativeBackward::execute(impl_->engine,inputs,grad_outputs,grad_inputs,layer);
 #else
-    if (!isInitialized() || !impl_) return false;
-    if (config_.disabled) return false;
-    if (!supportsBackwardLayerType(layer.type_enum)) return false;
-
-    switch (layer.type_enum) {
-        case LayerType::Linear:
-        case LayerType::MatMul:
-        case LayerType::BatchMatMul:
-        case LayerType::Add:
-        case LayerType::Subtract:
-        case LayerType::Multiply:
-        case LayerType::Divide:
-        case LayerType::ReLU:
-        case LayerType::LeakyReLU:
-        case LayerType::Sigmoid:
-        case LayerType::Tanh:
-        case LayerType::SiLU:
-        case LayerType::GELU:
-        case LayerType::Softplus:
-        case LayerType::Mish:
-        case LayerType::HardSigmoid:
-        case LayerType::HardSwish:
-            if (!config_.linear_enabled) return false;
-            break;
-        case LayerType::MaxPool2d:
-        case LayerType::MaxPool1d:
-        case LayerType::AvgPool2d:
-        case LayerType::AvgPool1d:
-        case LayerType::GlobalAvgPool2d:
-        case LayerType::AdaptiveAvgPool2d:
-            break;
-        default:
-            return false;
-    }
-
-    return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);
+    (void)inputs; (void)grad_outputs; (void)grad_inputs; (void)layer; (void)training;
+    return false;
 #endif
 }

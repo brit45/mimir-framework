@@ -350,36 +350,31 @@ logf(
   training_count, validation_count, tostring(validation_holdout))
 
 local function hydrate_tokenizer(reason)
-  if type(Mimir.Dataset.hydrate_tokenizer) == "function" then
-    local stats, hydrate_err = Mimir.Dataset.hydrate_tokenizer()
-    if type(stats) ~= "table" then
-      die("Dataset.hydrate_tokenizer: " .. tostring(hydrate_err or "échec"))
-    end
-    logf(
-      "tokenizer hydraté (%s): captions=%d/%d vocab=%d->%d max=%d erreurs=%d",
-      reason, stats.captions or 0, stats.items or 0, stats.vocab_before or 0,
-      stats.vocab_after or 0, tokenizer_max_vocab, stats.errors or 0)
-    return
-  end
-
   local ensure_vocab = Mimir.Tokenizer.ensure_vocab_from_text
-  local tokenize_ensure = Mimir.Tokenizer.tokenize_ensure
-  if type(ensure_vocab) ~= "function" and type(tokenize_ensure) ~= "function" then
-    die("tokenizer: aucune API d'enrichissement du vocabulaire disponible")
+  local tokenize_ensure = Mimir.Tokenizer.learn_bpe
+  if type(ensure_vocab) ~= "function" or type(tokenize_ensure) ~= "function" then
+    die("tokenizer: ensure_vocab_from_text et learn_bpe sont requis")
   end
   local vocab_before = math.floor(tonumber(Mimir.Tokenizer.vocab_size()) or 0)
   local captions = 0
+  local corpus = {}
   local errors = 0
   for index = 1, dataset_total do
     local item = Mimir.Dataset.get(index, false)
     local text = type(item) == "table" and tostring(item.text or "") or ""
     if text ~= "" then
       captions = captions + 1
-      local ok_call, result = pcall(ensure_vocab or tokenize_ensure, text)
-      if not ok_call or result == false then errors = errors + 1 end
+      local ok_call, result = pcall(ensure_vocab, text)
+      if not ok_call or result == false then
+        errors = errors + 1
+      else
+        corpus[#corpus + 1] = text
+      end
     end
     release_dataset_item(index)
   end
+  local ok_bpe, bpe_err = tokenize_ensure(corpus)
+  check(ok_bpe, bpe_err, "Tokenizer.learn_bpe")
   local vocab_after = math.floor(tonumber(Mimir.Tokenizer.vocab_size()) or 0)
   logf(
     "tokenizer hydraté (%s): captions=%d/%d vocab=%d->%d max=%d erreurs=%d",
@@ -425,6 +420,7 @@ end
 local ok_allocate, allocate_err = Mimir.Model.allocate_params()
 check(ok_allocate, allocate_err, "Model.allocate_params")
 
+local resume_training_state = nil
 if resume_path ~= "" then
   local ok_resume, resume_err = Mimir.Serialization.load(resume_path, "raw_folder", {
     load_tokenizer = true,
@@ -434,6 +430,8 @@ if resume_path ~= "" then
     validate_checksums = true,
   })
   check(ok_resume, resume_err, "Serialization.load")
+  local resumed_config = Mimir.Model.get_config()
+  resume_training_state = type(resumed_config) == "table" and resumed_config.training_state or nil
   logf("reprise: " .. resume_path)
 else
   local ok_init, init_err =
@@ -486,24 +484,45 @@ check(Mimir.Serialization.save(output_dir .. "/starttrain.json", "debug_json", {
   include_git_info = true,
 }), nil, "Serialization.save(starttrain)")
 
-math.randomseed(seed)
-local order = {}
-for index = 1, training_count do order[index] = index end
-local global_step = 0
-local running_loss = 0.0
-local total_loss = 0.0
+local saved_loop = type(resume_training_state) == "table" and resume_training_state or {}
+if saved_loop.training_count and saved_loop.training_count ~= training_count then
+  die("reprise incompatible: le nombre d'items d'entraînement a changé")
+end
+if saved_loop.seed and saved_loop.seed ~= seed then die("reprise incompatible: seed différent du checkpoint") end
+local rng_state = tonumber(saved_loop.rng_state) or ((seed % 2147483646) + 1)
+local function random_uniform()
+  rng_state = (rng_state * 48271) % 2147483647
+  return rng_state / 2147483647
+end
+local order = saved_loop.order or {}
+if #order == 0 then for index = 1, training_count do order[index] = index end end
+if #order ~= training_count then die("ordre du dataset invalide dans le checkpoint") end
+local global_step = tonumber(saved_loop.global_step) or 0
+local running_loss = tonumber(saved_loop.running_loss) or 0.0
+local total_loss = tonumber(saved_loop.total_loss) or 0.0
 local stop_requested = false
-local validation_lr_scale = 1.0
-local best_validation_score = math.huge
-local validation_score_ema = nil
-local validation_bad_rounds = 0
-local validation_penalties = 0
+local validation_lr_scale = tonumber(saved_loop.validation_lr_scale) or 1.0
+local best_validation_score = tonumber(saved_loop.best_validation_score) or math.huge
+local validation_score_ema = tonumber(saved_loop.validation_score_ema)
+local validation_bad_rounds = tonumber(saved_loop.validation_bad_rounds) or 0
+local validation_penalties = tonumber(saved_loop.validation_penalties) or 0
+local next_epoch = tonumber(saved_loop.next_epoch) or 1
+local next_position = tonumber(saved_loop.next_position) or 1
 
 local function save_checkpoint(label)
   local path = output_dir .. "/" .. label
   FS.mkdir_p(path)
   check(Mimir.Serialization.save(path, "raw_folder", {
     save_optimizer = true,
+    training_state = {
+      global_step = global_step, next_epoch = next_epoch, next_position = next_position,
+      training_count = training_count, order = order, rng_state = rng_state, seed = seed,
+      running_loss = running_loss, total_loss = total_loss,
+      validation_lr_scale = validation_lr_scale,
+      best_validation_score = best_validation_score < math.huge and best_validation_score or nil,
+      validation_score_ema = validation_score_ema, validation_bad_rounds = validation_bad_rounds,
+      validation_penalties = validation_penalties,
+    },
     save_tokenizer = true,
     save_encoder = false,
     include_checksums = true,
@@ -672,20 +691,25 @@ local function run_validation(reason)
   return validation_score
 end
 
-for epoch = 1, epochs do
-  for index = training_count, 2, -1 do
-    local other = math.random(index)
-    order[index], order[other] = order[other], order[index]
+for epoch = next_epoch, next_epoch + epochs - 1 do
+  local first_position = next_position
+  if first_position == 1 then
+    for index = training_count, 2, -1 do
+      local other = math.floor(random_uniform() * index) + 1
+      order[index], order[other] = order[other], order[index]
+    end
   end
 
-  for position = 1, training_count do
+  for position = first_position, training_count do
+    next_epoch = position == training_count and epoch + 1 or epoch
+    next_position = position == training_count and 1 or position + 1
     local dataset_index = order[position]
     local item = get_image_item(dataset_index, "entraînement")
     if item then
 
     global_step = global_step + 1
     local prompt = tostring(item.text or "")
-    if math.random() < cfg_dropout then prompt = "" end
+    if random_uniform() < cfg_dropout then prompt = "" end
     local warmup = warmup_steps > 0 and math.min(1.0, global_step / warmup_steps) or 1.0
     local step_lr = learning_rate * warmup * validation_lr_scale
     local step_seed = seed + global_step * 1000003
@@ -728,12 +752,12 @@ for epoch = 1, epochs do
       running_loss = 0.0
     end
 
-    if save_every > 0 and global_step % save_every == 0 then
-      save_checkpoint(string.format("step_%08d", global_step))
-    end
     if validation_every_steps > 0 and global_step % validation_every_steps == 0 then
       run_validation("step")
       if stop_requested then break end
+    end
+    if save_every > 0 and global_step % save_every == 0 then
+      save_checkpoint(string.format("step_%08d", global_step))
     end
     end
   end
