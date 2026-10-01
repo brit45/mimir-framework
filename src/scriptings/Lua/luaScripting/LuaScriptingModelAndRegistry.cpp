@@ -1,5 +1,6 @@
 #include "LuaScripting.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
+#include "Models/Diffusion/LumenLatentDiffusionModel.hpp"
 #include "Serialization/Serialization.hpp"
 #include "Serialization/DebugJsonDump.hpp"
 #include "DType.hpp"
@@ -9,6 +10,12 @@
 #include "AsyncMonitor.hpp"
 #include "VizTextPayload.hpp"
 #include "Helpers.hpp"
+#include "runtimes/ops_loss_and_grad.hpp"
+#if defined(MIMIR_ENABLE_FPGA_RUNTIME)
+#include "runtimes/fpga/FpgaRuntime.hpp"
+#include "runtimes/fpga/FpgaValidationRunner.hpp"
+#endif
+#include "training/VaeValidationFeedback.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -22,8 +29,172 @@
 #include <unordered_set>
 #include <type_traits>
 #include <utility>
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 namespace {
+
+static LumenLatentDiffusionModel& _mimir_current_lumen_model() {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentModel) throw std::runtime_error("Aucun modèle créé");
+    auto* lumen = dynamic_cast<LumenLatentDiffusionModel*>(ctx.currentModel.get());
+    if (!lumen) {
+        throw std::runtime_error(
+            "Le modèle courant n'est pas un LumenLatentDiffusionModel");
+    }
+    return *lumen;
+}
+
+static std::vector<unsigned char> _mimir_lua_u8_array(lua_State* L, int index) {
+    luaL_checktype(L, index, LUA_TTABLE);
+    const size_t count = lua_rawlen(L, index);
+    std::vector<unsigned char> values;
+    values.reserve(count);
+    for (size_t item = 1; item <= count; ++item) {
+        lua_rawgeti(L, index, static_cast<lua_Integer>(item));
+        if (!lua_isnumber(L, -1)) {
+            lua_pop(L, 1);
+            throw std::runtime_error("image Lumen: valeur non numérique");
+        }
+        const lua_Number value = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+        if (!std::isfinite(static_cast<double>(value)) || value < 0.0 || value > 255.0) {
+            throw std::runtime_error("image Lumen: les pixels doivent être dans [0,255]");
+        }
+        values.push_back(static_cast<unsigned char>(std::lround(value)));
+    }
+    return values;
+}
+
+static void _mimir_push_lumen_train_stats(
+    lua_State* L,
+    const LumenLatentDiffusionModel::TrainStats& stats,
+    bool stop_requested
+) {
+    lua_createtable(L, 0, 15);
+    auto number = [L](const char* name, double value) {
+        lua_pushnumber(L, value);
+        lua_setfield(L, -2, name);
+    };
+    number("loss", stats.loss);
+    number("mse", stats.mse);
+    number("kl", stats.kl);
+    number("kl_beta_effective", stats.kl_beta_effective);
+    number("grad_norm", stats.grad_norm);
+    number("grad_max_abs", stats.grad_max_abs);
+    number("reconstruction_mae", stats.reconstruction_mae);
+    number("reconstruction_mse", stats.reconstruction_mse);
+    number("wasserstein", stats.wasserstein);
+    number("entropy_diff", stats.entropy_diff);
+    number("moment_mismatch", stats.moment_mismatch);
+    number("spatial_coherence", stats.spatial_coherence);
+    number("temporal_consistency", stats.temporal_consistency);
+    lua_pushinteger(L, stats.timestep);
+    lua_setfield(L, -2, "timestep");
+    lua_pushboolean(L, stop_requested);
+    lua_setfield(L, -2, "stop_requested");
+}
+
+static void _mimir_push_lumen_calibration_stats(
+    lua_State* L,
+    const LumenLatentDiffusionModel::VaeCalibrationStats& stats
+) {
+    lua_createtable(L, 0, 4);
+    lua_pushinteger(L, static_cast<lua_Integer>(stats.items));
+    lua_setfield(L, -2, "items");
+    lua_pushinteger(L, static_cast<lua_Integer>(stats.values));
+    lua_setfield(L, -2, "values");
+    lua_pushnumber(L, stats.shift);
+    lua_setfield(L, -2, "shift");
+    lua_pushnumber(L, stats.scale);
+    lua_setfield(L, -2, "scale");
+}
+
+static Optimizer& _mimir_lumen_optimizer(
+    Model& model,
+    const std::string& optimizer_name,
+    float learning_rate
+) {
+    if (!model.getSerializedOptimizer()) {
+        Optimizer optimizer;
+        optimizer.initial_lr = learning_rate;
+        const auto& config = model.modelConfig;
+        configureOptimizerFromJson(optimizer, config);
+        if (!optimizerTypeFromString(optimizer_name, optimizer.type)) {
+            throw std::runtime_error("optimiseur Lumen inconnu: " + optimizer_name);
+        }
+        model.setSerializedOptimizer(std::move(optimizer));
+    }
+    Optimizer* optimizer = model.getMutableSerializedOptimizer();
+    if (!optimizer) throw std::runtime_error("état optimiseur Lumen indisponible");
+    optimizer->initial_lr = learning_rate;
+    return *optimizer;
+}
+
+static void _mimir_publish_lumen_viz(
+    ScriptingContext& ctx,
+    LumenLatentDiffusionModel& lumen,
+    const std::vector<unsigned char>& image,
+    const std::string& prompt,
+    const char* sample_label
+) {
+    if (!ctx.asyncMonitor || !ctx.asyncMonitor->getViz()) return;
+
+    const auto& config = lumen.getConfig();
+    const int pad_id = ctx.currentTokenizer ? ctx.currentTokenizer->getPadId() : -1;
+    const auto text = VizTextPayload::buildDatasetTextPayload(
+        ctx.currentModel.get(),
+        ctx.currentTokenizer.get(),
+        prompt,
+        nullptr,
+        pad_id);
+    ctx.asyncMonitor->setDatasetSample(
+        image,
+        config.image_w,
+        config.image_h,
+        config.image_c,
+        sample_label,
+        text.prompt,
+        text.tags,
+        text.tokens,
+        text.encoding);
+
+    auto taps = ctx.currentModel->consumeVizTaps();
+    std::vector<Visualizer::BlockFrame> frames;
+    frames.reserve(taps.size());
+    for (auto& tap : taps) {
+        Visualizer::BlockFrame frame;
+        frame.pixels = std::move(tap.pixels);
+        frame.w = tap.w;
+        frame.h = tap.h;
+        frame.channels = tap.channels;
+        frame.pixels_real = std::move(tap.pixels_real);
+        frame.heatmap_kind = tap.heatmap_kind;
+        frame.tensor_info = std::move(tap.tensor_info);
+        frame.label = std::move(tap.label);
+        frames.push_back(std::move(frame));
+    }
+    ctx.asyncMonitor->setLayerBlockImages(frames);
+}
+
+static size_t _mimir_process_resident_memory_mb() {
+#if defined(__linux__)
+    std::ifstream statm("/proc/self/statm");
+    size_t total_pages = 0;
+    size_t resident_pages = 0;
+    if (statm >> total_pages >> resident_pages) {
+        (void)total_pages;
+        const long page_size = ::sysconf(_SC_PAGESIZE);
+        if (page_size > 0) {
+            const uint64_t resident_bytes = static_cast<uint64_t>(resident_pages) *
+                                            static_cast<uint64_t>(page_size);
+            return static_cast<size_t>(resident_bytes / (1024ULL * 1024ULL));
+        }
+    }
+#endif
+    return MemoryGuard::instance().getCurrentBytes() / 1024 / 1024;
+}
 
 static bool _mimir_ends_with(const std::string& value, const std::string& suffix) {
     if (value.size() < suffix.size()) return false;
@@ -359,7 +530,7 @@ int LuaScripting::lua_createModel(lua_State* L) {
         ctx.currentModel = ModelArchitectures::create(name, config);
 
         // Important: faire remonter les hyperparams de training (KL, recon_loss, clip, etc.)
-        // dans `model.modelConfig` pour que Model::trainStepVAE/optimizerStep les voient.
+        // dans `model.modelConfig` pour que le contrat trainStep du modèle et optimizerStep les voient.
         if (ctx.currentModel) {
             mergeLuaConfigIntoModelConfig(*ctx.currentModel, config);
         }
@@ -373,7 +544,7 @@ int LuaScripting::lua_createModel(lua_State* L) {
         }
 
         ctx.modelType = name;
-        ctx.modelConfig = config;
+        ctx.modelConfig = ctx.currentModel->modelConfig;
 
         // Si la viz est active, activer automatiquement les viz taps sur le modèle.
         // (sinon, les "blocks" ne seront jamais produits et la Viz semblera vide.)
@@ -400,6 +571,17 @@ int LuaScripting::lua_createModel(lua_State* L) {
         return 2;
     }
     
+    return 1;
+}
+
+int LuaScripting::lua_modelGetConfig(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentModel) {
+        lua_pushnil(L);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    jsonToLuaTable(L, ctx.currentModel->modelConfig);
     return 1;
 }
 
@@ -558,6 +740,206 @@ int LuaScripting::lua_modelDType(lua_State* L) {
     }
 }
 
+int LuaScripting::lua_lumenText2Img(lua_State* L) {
+    const char* prompt = luaL_checkstring(L, 1);
+    const int seed = static_cast<int>(luaL_optinteger(L, 2, 1337));
+    const int steps = static_cast<int>(luaL_optinteger(L, 3, 30));
+    const float guidance = static_cast<float>(luaL_optnumber(L, 4, 5.0));
+    try {
+        if (steps < 1 || !std::isfinite(guidance) || guidance < 0.0f) {
+            throw std::invalid_argument("Lumen: steps must be positive and guidance finite and non-negative");
+        }
+        const auto image = _mimir_current_lumen_model().generate(prompt, seed, steps, guidance);
+        lua_createtable(L, static_cast<int>(image.pixels.size()), 0);
+        for (size_t index = 0; index < image.pixels.size(); ++index) {
+            lua_pushinteger(L, image.pixels[index]);
+            lua_rawseti(L, -2, static_cast<lua_Integer>(index + 1));
+        }
+        lua_pushinteger(L, image.w);
+        lua_pushinteger(L, image.h);
+        lua_pushinteger(L, image.channels);
+        return 4;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_lumenBeginVaeCalibration(lua_State* L) {
+    try {
+        _mimir_current_lumen_model().beginVaeCalibration();
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_lumenAddVaeCalibrationImage(lua_State* L) {
+    try {
+        const auto stats = _mimir_current_lumen_model().addVaeCalibrationImage(
+            _mimir_lua_u8_array(L, 1));
+        _mimir_push_lumen_calibration_stats(L, stats);
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_lumenFinishVaeCalibration(lua_State* L) {
+    try {
+        const auto stats = _mimir_current_lumen_model().finishVaeCalibration();
+        _mimir_push_lumen_calibration_stats(L, stats);
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_lumenTrainStep(lua_State* L) {
+    try {
+        auto& ctx = LuaContext::getInstance();
+        auto& lumen = _mimir_current_lumen_model();
+    if (ctx.asyncMonitor) {
+        ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
+        ctx.currentModel->publishRuntimeConfiguration();
+        ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+    }
+
+        const auto step_started_at = std::chrono::steady_clock::now();
+        const std::vector<unsigned char> image = _mimir_lua_u8_array(L, 1);
+        const std::string prompt = luaL_checkstring(L, 2);
+        const unsigned int seed = static_cast<unsigned int>(luaL_checkinteger(L, 3));
+        const float requested_learning_rate = static_cast<float>(luaL_checknumber(L, 4));
+        const std::string optimizer_name = luaL_optstring(L, 5, "adamw");
+        float learning_rate = requested_learning_rate;
+        int lr_warmup_steps = 0;
+        if (lua_istable(L, 6)) {
+            lua_getfield(L, 6, "lr_warmup_steps");
+            lr_warmup_steps = std::max(0, static_cast<int>(lua_tointeger(L, -1)));
+            lua_pop(L, 1);
+        }
+        if (ctx.asyncMonitor) {
+            ctx.asyncMonitor->updateRuntimeTrainParams(
+                requested_learning_rate, lr_warmup_steps, 0.0f, 0, "mse");
+            const auto live = ctx.asyncMonitor->liveTrainParamsSnapshot();
+            if (_mimir_live_params_overrides_enabled(live) &&
+                std::isfinite(live.lr) && live.lr > 0.0f) {
+                learning_rate = live.lr;
+                lr_warmup_steps = live.lr_warmup_steps;
+            }
+        }
+        Optimizer& optimizer = _mimir_lumen_optimizer(
+            *ctx.currentModel, optimizer_name, learning_rate);
+        optimizer.warmup_steps = lr_warmup_steps;
+        const bool viz_active = ctx.asyncMonitor && ctx.asyncMonitor->getViz();
+        if (viz_active && !ctx.currentModel->isVizTapsEnabled()) {
+            ctx.currentModel->setVizTapsEnabled(true);
+        }
+        const auto stats = lumen.trainDiffusionStep(
+            image, prompt, seed, optimizer, learning_rate);
+        const auto step_finished_at = std::chrono::steady_clock::now();
+
+        bool stop_requested = false;
+        if (ctx.asyncMonitor) {
+            AsyncMonitor::Metrics metrics;
+            metrics.loss = stats.loss;
+            metrics.avg_loss = stats.loss;
+            metrics.lr = learning_rate;
+            metrics.mse = stats.mse;
+            metrics.kl = stats.kl;
+            metrics.kl_beta_effective = stats.kl_beta_effective;
+            metrics.wass = stats.wasserstein;
+            metrics.ent = stats.entropy_diff;
+            metrics.mom = stats.moment_mismatch;
+            metrics.spat = stats.spatial_coherence;
+            metrics.temp = stats.temporal_consistency;
+            metrics.timestep = static_cast<float>(stats.timestep);
+            metrics.grad_norm = stats.grad_norm;
+            metrics.grad_max = stats.grad_max_abs;
+            metrics.params = ctx.currentModel->totalParamCount();
+            metrics.recon_loss_type = "MSE";
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                step_finished_at - step_started_at).count();
+            metrics.batch_time_ms = static_cast<int>(std::max<int64_t>(1, elapsed_ms));
+            metrics.bps = 1000.0f / static_cast<float>(metrics.batch_time_ms);
+            metrics.memory_mb = _mimir_process_resident_memory_mb();
+            metrics.allocator_memory_mb =
+                static_cast<double>(MemoryGuard::instance().getCurrentBytes()) / (1024.0 * 1024.0);
+            metrics.opt_type = static_cast<int>(optimizer.type);
+            metrics.opt_step = static_cast<int>(optimizer.step);
+            metrics.opt_beta1 = optimizer.beta1;
+            metrics.opt_beta2 = optimizer.beta2;
+            metrics.opt_eps = optimizer.eps;
+            metrics.opt_weight_decay = optimizer.weight_decay;
+            if (lua_istable(L, 6)) {
+                auto integer_field = [L](const char* name) {
+                    lua_getfield(L, 6, name);
+                    const int value = static_cast<int>(lua_tointeger(L, -1));
+                    lua_pop(L, 1);
+                    return value;
+                };
+                metrics.epoch = integer_field("epoch");
+                metrics.total_epochs = integer_field("total_epochs");
+                metrics.batch = integer_field("batch");
+                metrics.total_batches = integer_field("total_batches");
+                const int completed_steps = integer_field("completed_steps");
+                lua_getfield(L, 6, "loss_sum_before");
+                const double loss_sum_before = lua_tonumber(L, -1);
+                lua_pop(L, 1);
+                metrics.avg_loss = static_cast<float>(
+                    (loss_sum_before + stats.loss) / std::max(1, completed_steps + 1));
+            }
+            ctx.asyncMonitor->updateMetrics(metrics);
+            if (auto viz = ctx.asyncMonitor->getViz()) {
+                _mimir_publish_lumen_viz(
+                    ctx, lumen, image, prompt, "Lumen training sample");
+            }
+            stop_requested = ctx.asyncMonitor->consumeStopTrainingRequested();
+        }
+        _mimir_push_lumen_train_stats(L, stats, stop_requested);
+        lua_pushnumber(L, learning_rate);
+        lua_setfield(L, -2, "learning_rate");
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_lumenValidateStep(lua_State* L) {
+    try {
+        auto& ctx = LuaContext::getInstance();
+        auto& lumen = _mimir_current_lumen_model();
+        const std::vector<unsigned char> image = _mimir_lua_u8_array(L, 1);
+        const std::string prompt = luaL_checkstring(L, 2);
+        if (ctx.asyncMonitor && ctx.asyncMonitor->getViz() &&
+            !ctx.currentModel->isVizTapsEnabled()) {
+            ctx.currentModel->setVizTapsEnabled(true);
+        }
+        const auto stats = lumen.validateDiffusionStep(
+            image,
+            prompt,
+            static_cast<unsigned int>(luaL_checkinteger(L, 3)));
+        _mimir_publish_lumen_viz(
+            ctx, lumen, image, prompt, "Lumen validation sample");
+        _mimir_push_lumen_train_stats(L, stats, false);
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
 int LuaScripting::lua_trainModel(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
@@ -567,6 +949,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         return 2;
     }
     
+    if (ctx.asyncMonitor) {
+        ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
+        ctx.currentModel->publishRuntimeConfiguration();
+        ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+    }
+
     // Arguments: epochs (number), learning_rate (number)
     int epochs = luaL_checkinteger(L, 1);
     double lr = luaL_checknumber(L, 2);
@@ -576,8 +964,14 @@ int LuaScripting::lua_trainModel(lua_State* L) {
     try {
         // Si la viz est active, activer les "viz taps" côté modèle et préparer
         // un pont vers AsyncMonitor pour afficher les blocs/layers.
-        const bool viz_active = (ctx.asyncMonitor && ctx.asyncMonitor->getViz() != nullptr);
-        if (viz_active && ctx.currentModel) {
+        bool viz_active = false;
+        auto refresh_viz_activation = [&]() {
+            if (viz_active || !ctx.asyncMonitor || !ctx.currentModel ||
+                ctx.asyncMonitor->getViz() == nullptr) {
+                return;
+            }
+
+            viz_active = true;
             ctx.currentModel->setVizTapsEnabled(true);
             try {
                 int max_frames = 12;
@@ -587,39 +981,14 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 ctx.currentModel->setVizTapsLimits(max_frames, max_side);
             } catch (...) {
             }
-        }
+        };
+        refresh_viz_activation();
 
         // Instancier l'Optimizer à partir de la configuration
         Optimizer opt;
         opt.initial_lr = static_cast<float>(lr);
-        
-        // Type d'optimizer depuis la config (défaut: ADAMW)
-        if (ctx.modelConfig.contains("optimizer")) {
-            std::string opt_type = ctx.modelConfig["optimizer"];
-            if (opt_type == "sgd" || opt_type == "SGD") {
-                opt.type = OptimizerType::SGD;
-            } else if (opt_type == "adam" || opt_type == "ADAM") {
-                opt.type = OptimizerType::ADAM;
-            } else if (opt_type == "adamw" || opt_type == "ADAMW") {
-                opt.type = OptimizerType::ADAMW;
-            }
-        } else {
-            opt.type = OptimizerType::ADAMW;  // Défaut
-        }
-        
-        // Paramètres de l'optimizer depuis la config
-        if (ctx.modelConfig.contains("beta1")) {
-            opt.beta1 = ctx.modelConfig["beta1"];
-        }
-        if (ctx.modelConfig.contains("beta2")) {
-            opt.beta2 = ctx.modelConfig["beta2"];
-        }
-        if (ctx.modelConfig.contains("epsilon")) {
-            opt.eps = ctx.modelConfig["epsilon"];
-        }
-        if (ctx.modelConfig.contains("weight_decay")) {
-            opt.weight_decay = ctx.modelConfig["weight_decay"];
-        }
+        opt.type = OptimizerType::ADAMW;
+        configureOptimizerFromJson(opt, ctx.modelConfig);
         
         // Paramètres de LR decay depuis la config
         if (ctx.modelConfig.contains("min_lr")) {
@@ -644,6 +1013,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             else if (s == "step") opt.decay_strategy = LRDecayStrategy::STEP;
             else if (s == "exponential") opt.decay_strategy = LRDecayStrategy::EXPONENTIAL;
             else if (s == "linear") opt.decay_strategy = LRDecayStrategy::LINEAR;
+            else throw std::runtime_error("decay_strategy invalide: " + s);
         }
 
         // Reprise éventuelle de l'état optimiseur (checkpoint)
@@ -653,6 +1023,23 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             opt = *saved_opt;
             // S'assurer que lr reflète l'argument (opt.initial_lr sert de base au scheduler)
             opt.initial_lr = static_cast<float>(lr);
+
+            // La reprise conserve les moments et le step, mais la configuration
+            // d'entraînement courante reste autoritaire pour le scheduler.
+            if (ctx.modelConfig.contains("min_lr")) opt.min_lr = ctx.modelConfig["min_lr"];
+            if (ctx.modelConfig.contains("decay_rate")) opt.decay_rate = ctx.modelConfig["decay_rate"];
+            if (ctx.modelConfig.contains("decay_steps")) opt.decay_steps = ctx.modelConfig["decay_steps"];
+            if (ctx.modelConfig.contains("warmup_steps")) opt.warmup_steps = ctx.modelConfig["warmup_steps"];
+            if (ctx.modelConfig.contains("decay_strategy")) {
+                std::string s = ctx.modelConfig["decay_strategy"].get<std::string>();
+                std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+                if (s == "none") opt.decay_strategy = LRDecayStrategy::NONE;
+                else if (s == "cosine") opt.decay_strategy = LRDecayStrategy::COSINE;
+                else if (s == "step") opt.decay_strategy = LRDecayStrategy::STEP;
+                else if (s == "exponential") opt.decay_strategy = LRDecayStrategy::EXPONENTIAL;
+                else if (s == "linear") opt.decay_strategy = LRDecayStrategy::LINEAR;
+                else throw std::runtime_error("decay_strategy invalide: " + s);
+            }
         }
         
         ctx.addLog("Optimizer configuré: type=" + std::to_string(static_cast<int>(opt.type)) + 
@@ -697,6 +1084,15 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         max_items = std::max(0, max_items);
         log_every = std::max(1, log_every);
         autosave_every_epochs = std::max(0, autosave_every_epochs);
+        if (checkpoint_dir.empty()) {
+            std::string safe_model_type = model_type.empty() ? std::string("model") : model_type;
+            for (char& character : safe_model_type) {
+                const unsigned char value = static_cast<unsigned char>(character);
+                if (!(std::isalnum(value) || character == '_' || character == '-')) character = '_';
+            }
+            checkpoint_dir = (std::filesystem::path("checkpoints") /
+                              "emergency" / safe_model_type).string();
+        }
 
         // -----------------------------------------------------------------
         // CSV : csv_file / csv_path / csv_dir depuis la config du modèle.
@@ -736,17 +1132,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             }
 
             if (ctx.asyncMonitor && !csv_viz_file.empty()) {
-                // ── HtopDisplay ──────────────────────────────────────────
-                auto h = ctx.asyncMonitor->getHtop();
-                if (h) {
-                    h->setCsvLogFile(csv_viz_file);
-                    h->setCsvEnabled(true);
-                    ctx.addLog("CSV htop  (cfg): " + csv_viz_file);
-                }
-                // ── Visualizer ───────────────────────────────────────────
-                // setLossLogFile() est thread-safe (pending appliqué au prochain tick).
-                ctx.asyncMonitor->setLossLogFile(csv_viz_file);
-                ctx.addLog("CSV viz   (cfg): " + csv_viz_file);
+                ctx.asyncMonitor->configureMetricsCsv(csv_viz_file, true);
+                ctx.addLog("CSV metrics (cfg): " + csv_viz_file);
             }
         }
 
@@ -839,6 +1226,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             if (ctx.modelConfig.contains("recon_loss")) recon_loss_type = ctx.modelConfig["recon_loss"].get<std::string>();
         } catch (...) {
         }
+        if (recon_loss_type.empty()) recon_loss_type = "mse";
 
         auto recon_metric_label = [&]() -> std::string {
             std::string t = recon_loss_type;
@@ -861,6 +1249,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         // Baselines (pour retour au comportement natif)
         const float baseline_lr = static_cast<float>(lr);
         const int baseline_lr_warmup_steps = std::max(0, opt.warmup_steps);
+        const std::string baseline_recon_loss = recon_loss_type;
         float baseline_kl_beta = 0.0f;
         int baseline_kl_warmup_steps = 0;
         try {
@@ -898,16 +1287,39 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             if (ctx.modelConfig.contains("val_feedback_min_steps")) val_feedback_min_steps = ctx.modelConfig["val_feedback_min_steps"].get<int>();
         } catch (...) {}
 
-        auto poll_viz_live_params = [&]() {
-            if (!ctx.asyncMonitor) return;
-            auto viz = ctx.asyncMonitor->getViz();
-            if (!viz) return;
+        VaeValidationFeedback::Config vae_feedback_config;
+        vae_feedback_config.enabled = val_feedback_enabled;
+        vae_feedback_config.lr_reward_factor = val_reward_factor;
+        vae_feedback_config.lr_penalty_factor = val_penalty_factor;
+        vae_feedback_config.lr_scale_min = val_lr_scale_min;
+        vae_feedback_config.lr_scale_max = val_lr_scale_max;
+        vae_feedback_config.improve_threshold = val_improve_thresh;
+        vae_feedback_config.min_steps = val_feedback_min_steps;
+        vae_feedback_config.initial_kl_beta = baseline_kl_beta;
+        vae_feedback_config.kl_beta_min = baseline_kl_beta * 0.05f;
+        vae_feedback_config.kl_beta_max = baseline_kl_beta * 2.0f;
+        try {
+            if (ctx.modelConfig.contains("val_kl_feedback_enabled")) vae_feedback_config.kl_enabled = ctx.modelConfig["val_kl_feedback_enabled"].get<bool>();
+            if (ctx.modelConfig.contains("val_kl_beta_min")) vae_feedback_config.kl_beta_min = ctx.modelConfig["val_kl_beta_min"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_beta_max")) vae_feedback_config.kl_beta_max = ctx.modelConfig["val_kl_beta_max"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_target_min")) vae_feedback_config.kl_target_min = ctx.modelConfig["val_kl_target_min"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_target_max")) vae_feedback_config.kl_target_max = ctx.modelConfig["val_kl_target_max"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_reward_factor")) vae_feedback_config.kl_reward_factor = ctx.modelConfig["val_kl_reward_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_penalty_factor")) vae_feedback_config.kl_penalty_factor = ctx.modelConfig["val_kl_penalty_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_plateau_factor")) vae_feedback_config.kl_plateau_factor = ctx.modelConfig["val_kl_plateau_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_collapse_factor")) vae_feedback_config.kl_collapse_factor = ctx.modelConfig["val_kl_collapse_factor"].get<float>();
+            if (ctx.modelConfig.contains("val_kl_excess_factor")) vae_feedback_config.kl_excess_factor = ctx.modelConfig["val_kl_excess_factor"].get<float>();
+        } catch (...) {}
+        VaeValidationFeedback vae_validation_feedback(vae_feedback_config);
 
-            const uint64_t ver = viz->liveTrainParamsVersion();
+        auto poll_viz_live_params = [&]() {
+            ctx.currentModel->applyRuntimeConfiguration();
+            if (!ctx.asyncMonitor) return;
+            const uint64_t ver = ctx.asyncMonitor->liveTrainParamsVersion();
             if (ver == 0 || ver == last_live_ver) return;
             last_live_ver = ver;
 
-            const auto p = viz->liveTrainParamsSnapshot();
+            const auto p = ctx.asyncMonitor->liveTrainParamsSnapshot();
             if (p.version == 0) return;
 
             // Si on repasse en mode natif, restaurer la baseline une fois.
@@ -919,9 +1331,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                     ctx.modelConfig["kl_beta"] = baseline_kl_beta;
                     ctx.modelConfig["kl_warmup_steps"] = baseline_kl_warmup_steps;
+                    ctx.modelConfig["recon_loss"] = baseline_recon_loss;
+                    recon_loss_type = baseline_recon_loss;
                     if (ctx.currentModel) {
                         ctx.currentModel->modelConfig["kl_beta"] = baseline_kl_beta;
                         ctx.currentModel->modelConfig["kl_warmup_steps"] = baseline_kl_warmup_steps;
+                        ctx.currentModel->modelConfig["recon_loss"] = baseline_recon_loss;
                     }
 
                 }
@@ -934,24 +1349,53 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 opt.initial_lr = std::max(1e-12f, p.lr);
             }
             opt.warmup_steps = std::max(0, p.lr_warmup_steps);
+            ctx.currentModel->modelConfig["learning_rate"] = opt.initial_lr;
+            ctx.currentModel->modelConfig["lr_warmup_steps"] = opt.warmup_steps;
 
             const float kl_beta = (p.kl_enabled ? std::max(0.0f, p.kl_beta) : 0.0f);
             const int kl_warmup_steps = std::max(0, p.kl_warmup_steps);
 
-            // Propager vers la config runtime (consommée par Model::trainStepVAE, etc.)
+            // Propager vers la config runtime consommée par le contrat trainStep du modèle.
             ctx.modelConfig["kl_beta"] = kl_beta;
             ctx.modelConfig["kl_warmup_steps"] = kl_warmup_steps;
+            ctx.modelConfig["recon_loss"] = p.recon_loss;
+            recon_loss_type = p.recon_loss;
             if (ctx.currentModel) {
                 ctx.currentModel->modelConfig["kl_beta"] = kl_beta;
                 ctx.currentModel->modelConfig["kl_warmup_steps"] = kl_warmup_steps;
+                ctx.currentModel->modelConfig["recon_loss"] = p.recon_loss;
             }
 
         };
 
+        auto optimizer_learning_rate = [&]() -> float {
+            return opt.initial_lr * val_lr_scale;
+        };
+
         auto step_learning_rate = [&]() -> float {
-            // Avant toute interaction UI, conserver le comportement historique (arg `lr`).
-            const float base = live_override_active ? opt.getCurrentLR() : static_cast<float>(lr);
-            return base * val_lr_scale;
+            return opt.getCurrentLR() * val_lr_scale;
+        };
+
+        auto train_metric = [](const Model::TrainStepResult& result, const char* name, float fallback = 0.0f) {
+            const auto it = result.metrics.find(name);
+            return it == result.metrics.end() ? fallback : it->second;
+        };
+
+        auto update_viz_runtime_params = [&](const Model::TrainStepResult* stats = nullptr) {
+            if (!ctx.asyncMonitor) return;
+            float kl_beta = 0.0f;
+            int kl_warmup_steps = 0;
+            try {
+                if (ctx.modelConfig.contains("kl_beta")) kl_beta = ctx.modelConfig["kl_beta"].get<float>();
+                else if (ctx.modelConfig.contains("vae_kl_beta")) kl_beta = ctx.modelConfig["vae_kl_beta"].get<float>();
+                if (ctx.modelConfig.contains("kl_warmup_steps")) kl_warmup_steps = ctx.modelConfig["kl_warmup_steps"].get<int>();
+            } catch (...) {}
+            const float displayed_kl_beta = stats
+                ? std::max(0.0f, train_metric(*stats, "kl_beta_effective"))
+                : std::max(0.0f, kl_beta);
+            ctx.asyncMonitor->updateRuntimeTrainParams(
+                step_learning_rate(), opt.warmup_steps,
+                displayed_kl_beta, kl_warmup_steps, recon_loss_type);
         };
 
         // Feedback de validation: récompense ou punit le modèle en ajustant val_lr_scale.
@@ -997,10 +1441,49 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             }
         };
 
+        auto apply_vae_val_feedback = [&](float reconstruction, float kl, int step) -> std::string {
+            const auto decision = vae_validation_feedback.update(
+                reconstruction, kl, step, !live_override_active);
+            val_lr_scale = decision.lr_scale;
+            if (decision.kl_changed && !live_override_active) {
+                ctx.modelConfig["kl_beta"] = decision.kl_beta;
+                if (ctx.currentModel) ctx.currentModel->modelConfig["kl_beta"] = decision.kl_beta;
+            }
+            update_viz_runtime_params();
+            if (ctx.asyncMonitor) {
+                auto viz = ctx.asyncMonitor->getViz();
+                if (viz) {
+                    viz->showValidationFeedback(
+                        decision.rewarded ? Visualizer::ValidationFeedbackIcon::Reward :
+                        decision.penalized ? Visualizer::ValidationFeedbackIcon::Penalty :
+                                  Visualizer::ValidationFeedbackIcon::None);
+                }
+            }
+            if (decision.action == VaeValidationFeedback::Action::Ignored) return "none";
+
+            const char* action = "first";
+            switch (decision.action) {
+                case VaeValidationFeedback::Action::Reward: action = "reward"; break;
+                case VaeValidationFeedback::Action::Penalty: action = "penalty"; break;
+                case VaeValidationFeedback::Action::Plateau: action = "plateau"; break;
+                case VaeValidationFeedback::Action::KlCollapse: action = "kl_collapse"; break;
+                case VaeValidationFeedback::Action::KlExcess: action = "kl_excess"; break;
+                default: break;
+            }
+            ctx.addLog(std::string("[vae_val_feedback] action=") + action +
+                       " recon=" + std::to_string(reconstruction) +
+                       " kl=" + std::to_string(kl) +
+                       " rel=" + std::to_string(decision.relative_change) +
+                       " lr_scale=" + std::to_string(decision.lr_scale) +
+                       " kl_beta=" + std::to_string(decision.kl_beta) +
+                       (live_override_active ? " kl_override=viz" : ""));
+            return action;
+        };
+
         // Perf stats pour la viz: time/mem/bps (best-effort).
         // - time: ms entre 2 updates successifs (approx temps/batch)
         // - bps: batches/sec (approx)
-        // - mem: MemoryGuard current bytes en MB
+        // - mem: mémoire réellement résidente du processus (RSS) en MB
         std::chrono::steady_clock::time_point last_metrics_ts;
         bool has_last_metrics_ts = false;
         auto apply_perf_stats = [&](AsyncMonitor::Metrics& m) {
@@ -1015,24 +1498,27 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             last_metrics_ts = now;
             has_last_metrics_ts = true;
 
-            auto& guard = MemoryGuard::instance();
-            m.memory_mb = guard.getCurrentBytes() / 1024 / 1024;
+            m.memory_mb = _mimir_process_resident_memory_mb();
+            m.allocator_memory_mb =
+                static_cast<double>(MemoryGuard::instance().getCurrentBytes()) / (1024.0 * 1024.0);
         };
 
-        auto log_step = [&](int global_step, const Model::VAEStepStats& st, const char* prefix) {
+        auto log_step = [&](int global_step, const Model::TrainStepResult& st, const char* prefix) {
             if ((global_step % log_every) != 0) return;
             const std::string recon_label = recon_metric_label();
             ctx.addLog(std::string(prefix) +
                        " step=" + std::to_string(global_step) +
                        " loss=" + std::to_string(st.loss) +
-                       " " + recon_label + "=" + std::to_string(st.mse) +
-                       " kl=" + std::to_string(st.kl) +
-                       " beta_eff=" + std::to_string(st.kl_beta_effective) +
+                       " " + recon_label + "=" + std::to_string(train_metric(st, "mse", st.loss)) +
+                       " kl=" + std::to_string(train_metric(st, "kl")) +
+                       " beta_eff=" + std::to_string(train_metric(st, "kl_beta_effective")) +
                        " grad_norm=" + std::to_string(st.grad_norm));
         };
 
-        auto monitor_step = [&](int epoch_1based, int batch_1based, int total_batches, const Model::VAEStepStats& st) {
+        auto monitor_step = [&](int epoch_1based, int batch_1based, int total_batches, const Model::TrainStepResult& st) {
             if (!ctx.asyncMonitor) return;
+
+            update_viz_runtime_params(&st);
 
             AsyncMonitor::Metrics m;
             m.epoch = epoch_offset + epoch_1based;
@@ -1041,18 +1527,18 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             m.total_batches = total_batches;
             m.loss = st.loss;
             m.avg_loss = st.loss;
-            m.lr = opt.getCurrentLR();
-            m.mse = st.mse;
-            m.kl = st.kl;
-            m.kl_beta_effective = st.kl_beta_effective;
-            m.wass = st.wass;
-            m.spat = st.spatial_coherence;
-            m.temp = st.temp;
-            m.timestep = st.timestep;
+            m.lr = step_learning_rate();
+            m.mse = train_metric(st, "mse", st.loss);
+            m.kl = train_metric(st, "kl");
+            m.kl_beta_effective = train_metric(st, "kl_beta_effective");
+            m.wass = train_metric(st, "wass", train_metric(st, "wasserstein"));
+            m.spat = train_metric(st, "spatial_coherence");
+            m.temp = train_metric(st, "temp", train_metric(st, "temporal_consistency"));
+            m.timestep = train_metric(st, "timestep");
             m.grad_norm = st.grad_norm;
             m.grad_max = st.grad_max_abs;
-            m.ent = st.entropy_diff;
-            m.mom = st.moment_mismatch;
+            m.ent = train_metric(st, "entropy_diff");
+            m.mom = train_metric(st, "moment_mismatch");
             m.params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
             m.recon_loss_type = recon_loss_type;
 
@@ -1252,13 +1738,27 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             float validate_holdout_frac = 0.0f;
             int validate_holdout_items = 0;
             bool validate_holdout = true;
+            bool fpga_validation_enabled = true;
+            int fpga_validation_every_steps = 0;
             try {
                 if (ctx.modelConfig.contains("validate_every_steps")) validate_every_steps = std::max(0, ctx.modelConfig["validate_every_steps"].get<int>());
                 if (ctx.modelConfig.contains("validate_items")) validate_items = std::max(0, ctx.modelConfig["validate_items"].get<int>());
                 if (ctx.modelConfig.contains("validate_holdout_frac")) validate_holdout_frac = ctx.modelConfig["validate_holdout_frac"].get<float>();
                 if (ctx.modelConfig.contains("validate_holdout_items")) validate_holdout_items = std::max(0, ctx.modelConfig["validate_holdout_items"].get<int>());
                 if (ctx.modelConfig.contains("validate_holdout")) validate_holdout = ctx.modelConfig["validate_holdout"].get<bool>();
+                if (ctx.modelConfig.contains("fpga_validation_enabled")) fpga_validation_enabled = ctx.modelConfig["fpga_validation_enabled"].get<bool>();
+                if (ctx.modelConfig.contains("fpga_validation_every_steps")) fpga_validation_every_steps = std::max(0, ctx.modelConfig["fpga_validation_every_steps"].get<int>());
             } catch (...) {
+            }
+            if (fpga_validation_every_steps <= 0) fpga_validation_every_steps = validate_every_steps;
+#if !defined(MIMIR_ENABLE_FPGA_RUNTIME)
+            (void)fpga_validation_enabled;
+#endif
+            if (ctx.asyncMonitor) {
+                if (auto viz = ctx.asyncMonitor->getViz()) {
+                    viz->updateRuntimeValidationEnabled(
+                        validate_every_steps > 0 && validate_items > 0);
+                }
             }
             validate_holdout_frac = std::clamp(validate_holdout_frac, 0.0f, 0.95f);
 
@@ -1330,6 +1830,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 int composed_items = 0;
                 for (size_t di = 0; di < ctx.currentDataset.size(); ++di) {
                     DatasetItem& ditem = ctx.currentDataset[di];
+                    DatasetItemUnloadGuard unload_ditem(ditem);
                     if (!ditem.text_file.empty() && !ditem.text.has_value()) {
                         ditem.loadText();
                     }
@@ -1412,6 +1913,181 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 }
             }
 
+            // Le probe FPGA faisait partie du snapshot de référence, mais il
+            // dépend de l'extension Model/FpgaRuntime optionnelle. Conserver la
+            // boucle d'entraînement identique et compiler le probe seulement
+            // lorsque cette extension est activée dans le cœur courant.
+#if defined(MIMIR_ENABLE_FPGA_RUNTIME)
+            constexpr size_t fpga_validation_rows = 8;
+            constexpr size_t fpga_validation_columns = 64;
+            std::vector<int8_t> fpga_validation_weights;
+            std::unique_ptr<FpgaValidationRunner> fpga_validation_runner;
+            bool fpga_validation_active = false;
+            std::string fpga_validation_log_path;
+
+            if (fpga_validation_enabled && fpga_validation_every_steps > 0 &&
+                !val_indices.empty() && image_c == 3 && ctx.currentModel &&
+                ctx.currentModel->initializeFpgaComputeEngine()) {
+                FpgaRuntime* fpga_runtime = ctx.currentModel->fpgaComputeEngine();
+                if (fpga_runtime &&
+                    (fpga_runtime->capabilities().operations &
+                     Mimir::FpgaProtocol::ResidentMatrixVectorInt8) != 0) {
+                    fpga_validation_weights.resize(
+                        fpga_validation_rows * fpga_validation_columns
+                    );
+                    for (size_t row = 0; row < fpga_validation_rows; ++row) {
+                        for (size_t column = 0; column < fpga_validation_columns; ++column) {
+                            fpga_validation_weights[row * fpga_validation_columns + column] =
+                                static_cast<int8_t>(
+                                    static_cast<int>((row * 13 + column * 5) % 31) - 15
+                                );
+                        }
+                    }
+                    if (fpga_runtime->uploadInt8Matrix(
+                            fpga_validation_weights.data(),
+                            fpga_validation_rows,
+                            fpga_validation_columns)) {
+                        fpga_validation_runner =
+                            std::make_unique<FpgaValidationRunner>(*fpga_runtime);
+                        fpga_validation_active = true;
+                        const std::filesystem::path log_dir = checkpoint_dir.empty()
+                            ? std::filesystem::path(".")
+                            : std::filesystem::path(checkpoint_dir);
+                        fpga_validation_log_path =
+                            (log_dir / "fpga_validation.jsonl").string();
+                        ctx.addLog(
+                            "FPGA validation probe actif: holdout 8x8 INT8, every=" +
+                            std::to_string(fpga_validation_every_steps) + " steps"
+                        );
+                    }
+                }
+            }
+
+            auto collect_fpga_validation = [&](bool wait) {
+                if (!fpga_validation_runner) return;
+                if (wait) fpga_validation_runner->wait();
+                const auto result = fpga_validation_runner->poll();
+                if (!result) return;
+
+                const bool exact = result->success && result->exact;
+                json event;
+                event["type"] = "fpga_validation_probe";
+                event["training_step"] = result->training_step;
+                event["sample"] = result->sample_id;
+                event["input_checksum"] = result->input_checksum;
+                event["transport_ok"] = result->success;
+                event["exact"] = exact;
+                event["outputs"] = result->outputs;
+                if (!fpga_validation_log_path.empty()) {
+                    try {
+                        const std::filesystem::path log_path(fpga_validation_log_path);
+                        std::error_code ec;
+                        std::filesystem::create_directories(log_path.parent_path(), ec);
+                        std::ofstream log_file(log_path, std::ios::app);
+                        if (log_file) log_file << event.dump() << '\n';
+                    } catch (...) {
+                    }
+                }
+
+                ctx.addLog(
+                    std::string("FPGA validation step=") +
+                    std::to_string(result->training_step) +
+                    " sample=" + result->sample_id +
+                    (exact ? " PASS" : " FAIL")
+                );
+                if (!exact) {
+                    fpga_validation_active = false;
+                    ctx.addLog(
+                        "FPGA validation désactivée pour cette session après un résultat non exact"
+                    );
+                }
+            };
+
+            auto submit_fpga_validation = [&](int step) {
+                if (!fpga_validation_active || !fpga_validation_runner ||
+                    fpga_validation_runner->busy() || val_indices.empty()) {
+                    return;
+                }
+
+                const size_t sample_position =
+                    (static_cast<size_t>(step / std::max(1, fpga_validation_every_steps)) - 1) %
+                    val_indices.size();
+                DatasetItem& fpga_item =
+                    ctx.currentDataset[static_cast<size_t>(val_indices[sample_position])];
+                DatasetItemUnloadGuard unload_fpga_item(fpga_item);
+                if (!fpga_item.loadImageRGB(image_w, image_h) ||
+                    !fpga_item.img_loaded ||
+                    fpga_item.img.size() !=
+                        static_cast<size_t>(image_w) * static_cast<size_t>(image_h) * 3) {
+                    return;
+                }
+
+                std::vector<uint8_t> resized(fpga_validation_columns * 3);
+                resizeBicubicRGB_SRGBLinear(
+                    fpga_item.img.data(), image_w, image_h,
+                    resized.data(), 8, 8
+                );
+                FpgaValidationRunner::DatasetInput dataset_input;
+                dataset_input.image_rgb = std::move(resized);
+
+                if ((!fpga_item.text_file.empty() || !fpga_item.text_inline.empty()) &&
+                    !fpga_item.text.has_value()) {
+                    fpga_item.loadText();
+                }
+                if (fpga_item.text.has_value() && ctx.currentTokenizer) {
+                    // Le vocabulaire est compose/hydrate par le chemin dataset
+                    // existant; le probe FPGA ne le modifie pas.
+                    dataset_input.text_token_ids =
+                        ctx.currentTokenizer->tokenize(*fpga_item.text);
+                    dataset_input.tokenizer_vocab_size =
+                        ctx.currentTokenizer->getVocabSize();
+                }
+                if (!fpga_item.audio_file.empty() && !fpga_item.audio_loaded) {
+                    fpga_item.loadAudio();
+                }
+                if (fpga_item.audio_is_pcm_s16le_stereo_48k) {
+                    dataset_input.audio_pcm_s16le_stereo = fpga_item.audio_bytes;
+                }
+                if (!fpga_item.video_file.empty() && !fpga_item.video_loaded) {
+                    fpga_item.loadVideo();
+                }
+                if (fpga_item.video_is_rgb24_first_frame) {
+                    dataset_input.video_rgb = fpga_item.video_bytes;
+                }
+
+                std::vector<float> normalized_input;
+                if (!FpgaValidationRunner::composeDatasetInput(
+                        dataset_input, fpga_validation_columns, normalized_input)) {
+                    return;
+                }
+                std::vector<int32_t> expected(fpga_validation_rows, 0);
+                std::vector<int8_t> input;
+                if (!FpgaValidationRunner::quantizeNormalizedInput(
+                        normalized_input, input)) {
+                    return;
+                }
+                for (size_t column = 0; column < fpga_validation_columns; ++column) {
+                    for (size_t row = 0; row < fpga_validation_rows; ++row) {
+                        expected[row] += static_cast<int32_t>(input[column]) *
+                            static_cast<int32_t>(
+                                fpga_validation_weights[row * fpga_validation_columns + column]
+                            );
+                    }
+                }
+
+                (void)fpga_validation_runner->submit(
+                    static_cast<uint64_t>(step),
+                    std::move(input),
+                    std::move(expected),
+                    fpga_item.image_file
+                );
+            };
+#else
+            bool fpga_validation_active = false;
+            auto collect_fpga_validation = [](bool) {};
+            auto submit_fpga_validation = [](int) {};
+#endif
+
             const int use_n = (int)train_indices.size();
             opt.total_steps = std::max(1, epochs * std::max(1, use_n));
 
@@ -1435,20 +2111,37 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             auto compute_val_recon = [&](const std::vector<float>& pred, const std::vector<float>& target, int recon_n) -> float {
                 if (recon_n <= 0) return 0.0f;
-                double acc = 0.0;
-                if (recon_loss_type == "l1" || recon_loss_type == "mae") {
-                    for (int i = 0; i < recon_n; ++i) {
-                        const double d = (double)pred[(size_t)i] - (double)target[(size_t)i];
-                        acc += std::abs(d);
+                RuntimeLossGrad::PixelLossOptions options;
+                try {
+                    if (ctx.modelConfig.contains("charbonnier_eps")) {
+                        options.charbonnier_eps = std::max(
+                            1e-12f, ctx.modelConfig["charbonnier_eps"].get<float>());
                     }
-                } else {
-                    for (int i = 0; i < recon_n; ++i) {
-                        const double d = (double)pred[(size_t)i] - (double)target[(size_t)i];
-                        acc += d * d;
+                    if (ctx.modelConfig.contains("huber_delta")) {
+                        options.huber_delta = std::max(
+                            1e-6f, ctx.modelConfig["huber_delta"].get<float>());
                     }
+                    if (ctx.modelConfig.contains("smoothl1_delta")) {
+                        options.huber_delta = std::max(
+                            1e-6f, ctx.modelConfig["smoothl1_delta"].get<float>());
+                    }
+                    if (ctx.modelConfig.contains("smoothl1_beta")) {
+                        options.huber_delta = std::max(
+                            1e-6f, ctx.modelConfig["smoothl1_beta"].get<float>());
+                    }
+                    if (ctx.modelConfig.contains("nll_sigma")) {
+                        options.gaussian_nll_sigma = std::max(
+                            1e-6f, ctx.modelConfig["nll_sigma"].get<float>());
+                    }
+                    if (ctx.modelConfig.contains("gaussian_nll_sigma")) {
+                        options.gaussian_nll_sigma = std::max(
+                            1e-6f, ctx.modelConfig["gaussian_nll_sigma"].get<float>());
+                    }
+                } catch (...) {
                 }
-                acc /= (double)std::max(1, recon_n);
-                return (float)acc;
+                return static_cast<float>(RuntimeLossGrad::pixel_loss_and_grad(
+                    pred.data(), target.data(), static_cast<size_t>(recon_n),
+                    recon_loss_type, options).loss);
             };
 
             auto compute_val_kl = [&](const std::vector<float>& pred, int image_dim, int latent_dim) -> float {
@@ -1493,8 +2186,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 int trained_steps_epoch = 0;
 
                 for (int k = 0; k < use_n; ++k) {
+                    refresh_viz_activation();
                     DatasetItem& item = ctx.currentDataset[(size_t)train_indices[(size_t)k]];
                     if (item.image_file.empty()) continue;
+                    DatasetItemUnloadGuard unload_item(item);
 
                     item.loadImageRGB(image_w, image_h);
                     if (!item.img_loaded || item.img.size() != expected_u8) {
@@ -1506,7 +2201,6 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         x[i] = (float)((double)item.img[i] / 127.5 - 1.0);
                     }
 
-                    Model::VAEStepStats st;
                     std::vector<int> ids;
                     std::string prompt;
                     if (text_pipeline_enabled) {
@@ -1522,12 +2216,19 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
                     }
 
-                    if (graph_text_cond) {
-                        poll_viz_live_params();
-                        st = ctx.currentModel->trainStepVAEText(x, ids, opt, step_learning_rate());
-                    } else {
-                        poll_viz_live_params();
-                        st = ctx.currentModel->trainStepVAE(x, opt, step_learning_rate());
+                    poll_viz_live_params();
+                    Model::TrainStepRequest request;
+                    request.float_inputs["__input__"] = &x;
+                    if (graph_text_cond) request.int_inputs["text_ids"] = &ids;
+                    request.optimizer = &opt;
+                    request.learning_rate = optimizer_learning_rate();
+                    const auto step_result = ctx.currentModel->trainStep(request);
+                    if (!step_result) {
+                        throw std::runtime_error("Le modèle '" + model_type + "' ne fournit pas de contrat d'entraînement compatible");
+                    }
+                    const Model::TrainStepResult& st = *step_result;
+
+                    if (!graph_text_cond) {
 
                         // Mode runtime optionnel: apprend la corrélation image↔texte via l'ConditioningEncoder,
                         // sans modifier le chemin de loss/convergence du graphe vae_conv existant.
@@ -1546,7 +2247,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                                 std::vector<float> img_emb;
                                 try {
                                     const std::vector<float>& packed = ctx.currentModel->forwardPassView(x, false);
-                                    int latent_for_pack = std::max(0, st.latent_dim);
+                                    int latent_for_pack = std::max(0, static_cast<int>(train_metric(st, "latent_dim")));
                                     const int image_dim_for_pack = static_cast<int>(expected_u8);
                                     const int packed_n = static_cast<int>(packed.size());
                                     if (latent_for_pack <= 0 && packed_n > image_dim_for_pack + 2 && ((packed_n - image_dim_for_pack) % 2) == 0) {
@@ -1619,16 +2320,21 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     log_step(global_step, st, step_prefix.c_str());
                     monitor_step(epoch + 1, k + 1, use_n, st);
 
-                    // STOP depuis la Viz (bouton dans le panneau Metrics)
+                    // Arrêt sécurisé depuis Htop, Viz ou SIGINT.
                     if (ctx.asyncMonitor && ctx.asyncMonitor->consumeStopTrainingRequested()) {
-                        ctx.addLog("⛔ Stop demandé via Viz. Sauvegarde et arrêt...");
+                        ctx.addLog("⛔ Arrêt sécurisé demandé. Sauvegarde et arrêt...");
                         stop_requested = true;
                         stopped_by_ui = true;
                         break;
                     }
 
                     // Validation: forward-only sur un petit holdout, puis push dans Generated.
-                    if (validate_every_steps > 0 && validate_items > 0 && !val_indices.empty() && (global_step % validate_every_steps) == 0) {
+                    bool validation_runtime_enabled = validate_every_steps > 0 && validate_items > 0;
+                    if (ctx.asyncMonitor) {
+                        ctx.asyncMonitor->updateRuntimeValidationEnabled(validation_runtime_enabled);
+                        validation_runtime_enabled = ctx.asyncMonitor->validationEnabledSnapshot();
+                    }
+                    if (validation_runtime_enabled && validate_every_steps > 0 && validate_items > 0 && !val_indices.empty() && (global_step % validate_every_steps) == 0) {
                         const int image_dim = (int)expected_u8;
                         int latent_dim = 0;
                         try {
@@ -1652,6 +2358,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         bool val_ok = true;
 
                         for (int vi = 0; vi < (int)val_pick.size(); ++vi) {
+                            if (ctx.asyncMonitor && !ctx.asyncMonitor->validationEnabledSnapshot()) {
+                                val_ok = false;
+                                break;
+                            }
                             if (ctx.asyncMonitor && ctx.asyncMonitor->consumeStopTrainingRequested()) {
                                 val_ok = false;
                                 stop_requested = true;
@@ -1661,6 +2371,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                             DatasetItem& vitem = ctx.currentDataset[(size_t)val_pick[(size_t)vi]];
                             if (vitem.image_file.empty()) continue;
+                            DatasetItemUnloadGuard unload_vitem(vitem);
 
                             vitem.loadImageRGB(image_w, image_h);
                             if (!vitem.img_loaded || vitem.img.size() != expected_u8) continue;
@@ -1727,10 +2438,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                         const float final_recon = (done > 0) ? (float)(acc_recon / (double)done) : 0.0f;
                         const float final_kl = (done > 0) ? (float)(acc_kl / (double)done) : 0.0f;
-                        if (ctx.asyncMonitor) ctx.asyncMonitor->updateValidation(false, global_step, done, total, true, val_ok, final_recon, final_kl, 0.0f);
-
                         // Calibration: récompense / punition selon l'évolution de la loss de reconstruction VAE.
-                        if (val_ok && done > 0) apply_val_feedback(final_recon, global_step);
+                        std::string val_feedback = "none";
+                        if (val_ok && done > 0) {
+                            val_feedback = apply_vae_val_feedback(final_recon, final_kl, global_step);
+                        }
+                        if (ctx.asyncMonitor) {
+                            ctx.asyncMonitor->updateValidation(false, global_step, done, total,
+                                                               true, val_ok, final_recon, final_kl,
+                                                               0.0f, val_feedback);
+                        }
 
                         // Backbone readiness: heuristique basée sur validation.
                         if (backbone_ready_enabled && val_ok && done > 0 && !backbone_ready_written) {
@@ -1831,6 +2548,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         }
                     }
 
+                    collect_fpga_validation(false);
+                    if (fpga_validation_active && fpga_validation_every_steps > 0 &&
+                        (global_step % fpga_validation_every_steps) == 0) {
+                        submit_fpga_validation(global_step);
+                    }
+
                     // VIZ: pousser le contexte dataset + blocs uniquement tous les log_every steps
                     // (réduit le coût; la viz reste “stale” entre deux updates, volontairement)
                     if (viz_active && ctx.asyncMonitor && ctx.currentModel && ctx.asyncMonitor->getViz() != nullptr && ((global_step % log_every) == 0)) {
@@ -1905,6 +2628,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                             bf.h = f.h;
                             bf.channels = f.channels;
                             bf.pixels_real = std::move(f.pixels_real);
+                            bf.heatmap_kind = f.heatmap_kind;
+                            bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
                             frames.push_back(std::move(bf));
                         }
@@ -1941,6 +2666,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     break;
                 }
             }
+
+            collect_fpga_validation(true);
 
             if (trained_steps_total == 0) {
                 lua_pushboolean(L, false);
@@ -1987,12 +2714,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             grid = std::clamp(grid, 2, 32);
 
             // Viz taps frequency (best-effort). Default: follow log_every.
-            if (viz_active) {
-                if (viz_taps_every_steps <= 0) viz_taps_every_steps = log_every;
-                viz_taps_every_steps = std::max(1, viz_taps_every_steps);
-            } else {
-                viz_taps_every_steps = 0;
-            }
+            if (viz_taps_every_steps <= 0) viz_taps_every_steps = log_every;
+            viz_taps_every_steps = std::max(1, viz_taps_every_steps);
 
             auto push_viz_taps = [&]() {
                 if (!viz_active) return;
@@ -2008,11 +2731,54 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     bf.h = f.h;
                     bf.channels = f.channels;
                     bf.pixels_real = std::move(f.pixels_real);
+                    bf.heatmap_kind = f.heatmap_kind;
+                    bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
                     frames.push_back(std::move(bf));
                 }
                 // Important UX: même si aucun tap n'est émis, vider les frames précédentes.
                 ctx.asyncMonitor->setLayerBlockImages(frames);
+            };
+
+            auto push_vgg_context_and_output = [&](const DatasetItem& item,
+                                                   const std::vector<float>& features,
+                                                   int dataset_index) {
+                if (!viz_active || !ctx.asyncMonitor || ctx.asyncMonitor->getViz() == nullptr) return;
+
+                // Context: image RGB réellement consommée par ce step.
+                const size_t expected_context_u8 = static_cast<size_t>(image_w) *
+                    static_cast<size_t>(image_h) * static_cast<size_t>(image_c);
+                if (item.img_loaded && item.img.size() == expected_context_u8) {
+                    ctx.asyncMonitor->setDatasetImage(
+                        item.img,
+                        image_w,
+                        image_h,
+                        image_c,
+                        "vgg16_feat/input/dataset/rgb/i=" + std::to_string(dataset_index));
+                }
+
+                // Sortie vgg16_feat: le modèle produit un vecteur perceptuel et non
+                // une image. On le projette en grille carrée 1 canal, normalisée
+                // autour de zéro, pour alimenter Context/compréhension et Sortie.
+                if (features.empty()) return;
+                const int side = std::max(1, static_cast<int>(std::ceil(
+                    std::sqrt(static_cast<double>(features.size())))));
+                std::vector<uint8_t> heatmap(static_cast<size_t>(side * side), 127);
+                float max_abs = 0.0f;
+                for (float value : features) {
+                    if (std::isfinite(value)) max_abs = std::max(max_abs, std::fabs(value));
+                }
+                const float inv = 1.0f / (max_abs + 1e-6f);
+                for (size_t i = 0; i < features.size(); ++i) {
+                    const float value = std::isfinite(features[i]) ? features[i] : 0.0f;
+                    const float normalized = 0.5f + 0.5f * std::tanh(value * inv);
+                    heatmap[i] = static_cast<uint8_t>(std::clamp(
+                        static_cast<int>(std::lround(normalized * 255.0f)), 0, 255));
+                }
+
+                const std::string label = "vgg16_feat/output/perceptual_features";
+                ctx.asyncMonitor->setUnderstandingImage(heatmap, side, side, 1, label);
+                ctx.asyncMonitor->addImage(heatmap, side, side, 1, label);
             };
 
             // Filter usable items
@@ -2074,6 +2840,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             };
 
             bool stopped_by_ui = false;
+            int stopped_epoch = 0;
 
             // Perf stats vgg16_feat -> Viz.
             std::chrono::steady_clock::time_point last_vgg_metrics_ts;
@@ -2090,8 +2857,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 last_vgg_metrics_ts = now;
                 has_last_vgg_metrics_ts = true;
 
-                auto& guard = MemoryGuard::instance();
-                m.memory_mb = guard.getCurrentBytes() / 1024 / 1024;
+                m.memory_mb = _mimir_process_resident_memory_mb();
+                m.allocator_memory_mb =
+                    static_cast<double>(MemoryGuard::instance().getCurrentBytes()) / (1024.0 * 1024.0);
             };
 
             for (int epoch = 0; epoch < epochs; ++epoch) {
@@ -2102,8 +2870,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 bool stop_requested = false;
 
                 for (int k = 0; k < use_n; ++k) {
+                    refresh_viz_activation();
                     DatasetItem& item = ctx.currentDataset[(size_t)indices[(size_t)k]];
                     if (item.image_file.empty()) continue;
+                    DatasetItemUnloadGuard unload_item(item);
 
                     item.loadImageRGB(image_w, image_h);
                     if (!item.img_loaded || item.img.size() != expected_u8) {
@@ -2163,13 +2933,14 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
 
                     poll_viz_live_params();
-                    ctx.currentModel->optimizerStep(opt, step_learning_rate(), nullptr);
+                    ctx.currentModel->optimizerStep(opt, optimizer_learning_rate(), nullptr);
 
                     // Metrics for UI/log
                     global_step += 1;
 
                     // Viz taps (throttled)
                     if (viz_taps_every_steps > 0 && (global_step % viz_taps_every_steps) == 0) {
+                        push_vgg_context_and_output(item, pred, indices[(size_t)k]);
                         push_viz_taps();
                     }
 
@@ -2205,11 +2976,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         ctx.asyncMonitor->updateMetrics(m);
                     }
 
-                    // STOP via Viz
+                    // Arrêt sécurisé demandé depuis une interface de monitoring.
                     if (ctx.asyncMonitor && ctx.asyncMonitor->consumeStopTrainingRequested()) {
-                        ctx.addLog("⛔ Stop demandé via Viz. Sauvegarde et arrêt...");
+                        ctx.addLog("⛔ Arrêt sécurisé demandé. Sauvegarde et arrêt...");
                         stop_requested = true;
                         stopped_by_ui = true;
+                        stopped_epoch = epoch + 1;
                         break;
                     }
                 }
@@ -2235,6 +3007,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             }
 
             if (stopped_by_ui) {
+                std::string save_error;
+                if (!do_checkpoint_save(stopped_epoch, "_stop", &save_error) && !save_error.empty()) {
+                    ctx.addLog("⚠ Save(stop) échoué: " + save_error);
+                }
                 lua_pushboolean(L, false);
                 lua_pushstring(L, "STOP_REQUESTED");
                 return 2;
@@ -2419,6 +3195,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     bf.h = f.h;
                     bf.channels = f.channels;
                     bf.pixels_real = std::move(f.pixels_real);
+                    bf.heatmap_kind = f.heatmap_kind;
+                    bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
                     frames.push_back(std::move(bf));
                 }
@@ -2443,6 +3221,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             if (max_items > 0 && (int)indices.size() > max_items) indices.resize((size_t)max_items);
 
             const bool validation_enabled = (validate_items > 0) && ((validate_every_steps > 0) || (validate_every_epochs > 0));
+            if (ctx.asyncMonitor) {
+                ctx.asyncMonitor->updateRuntimeValidationEnabled(validation_enabled);
+            }
+            auto validation_runtime_enabled = [&]() {
+                return validation_enabled &&
+                    (!ctx.asyncMonitor || ctx.asyncMonitor->validationEnabledSnapshot());
+            };
 
             // Split train/val if requested; default is to validate on train indices (no holdout).
             std::vector<int> train_indices = indices;
@@ -2526,7 +3311,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             auto run_validation = [&](int step, int epoch_1based) -> ValStats {
                 ValStats st;
-                if (!validation_enabled) return st;
+                if (!validation_runtime_enabled()) return st;
                 if (!ctx.currentModel) return st;
                 if (val_indices.empty()) return st;
 
@@ -2546,6 +3331,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 for (int j = 0; j < (int)work.size() && done < want; ++j) {
                     DatasetItem& item = ctx.currentDataset[(size_t)work[(size_t)j]];
                     if (item.image_file.empty() || (!item.text.has_value() && item.text_file.empty() && item.text_inline.empty())) continue;
+                    DatasetItemUnloadGuard unload_item(item);
                     if (!item.loadText() || !item.text.has_value()) continue;
 
                     item.loadImageRGB(image_w, image_h);
@@ -2670,6 +3456,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             };
 
             bool stopped_by_ui = false;
+            int stopped_epoch = 0;
 
             // Perf stats vgg16_tags_multilabel -> Viz.
             std::chrono::steady_clock::time_point last_tags_metrics_ts;
@@ -2686,8 +3473,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 last_tags_metrics_ts = now;
                 has_last_tags_metrics_ts = true;
 
-                auto& guard = MemoryGuard::instance();
-                m.memory_mb = guard.getCurrentBytes() / 1024 / 1024;
+                m.memory_mb = _mimir_process_resident_memory_mb();
+                m.allocator_memory_mb =
+                    static_cast<double>(MemoryGuard::instance().getCurrentBytes()) / (1024.0 * 1024.0);
             };
             bool warned_no_vocab_match = false;
 
@@ -2699,8 +3487,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 bool stop_requested = false;
 
                 for (int k = 0; k < use_n; ++k) {
+                    refresh_viz_activation();
                     DatasetItem& item = ctx.currentDataset[(size_t)train_indices[(size_t)k]];
                     if (item.image_file.empty() || (!item.text.has_value() && item.text_file.empty() && item.text_inline.empty())) continue;
+                    DatasetItemUnloadGuard unload_item(item);
 
                     // Lazy-load text on demand (uses DatasetMemoryManager).
                     if (!item.loadText() || !item.text.has_value()) {
@@ -2785,7 +3575,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                     ctx.currentModel->backwardPass(grad);
                     poll_viz_live_params();
-                    ctx.currentModel->optimizerStep(opt, step_learning_rate(), nullptr);
+                    ctx.currentModel->optimizerStep(opt, optimizer_learning_rate(), nullptr);
                     running_loss_sum += loss;
                     running_loss_count += 1;
 
@@ -2818,7 +3608,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         );
                     }
 
-                    if (validation_enabled && validate_every_steps > 0 && (global_step % validate_every_steps) == 0) {
+                    if (validation_runtime_enabled() && validate_every_steps > 0 && (global_step % validate_every_steps) == 0) {
                         const auto vs = run_validation(global_step, (epoch + 1));
                         if (vs.items > 0) apply_val_feedback(static_cast<float>(vs.loss), global_step);
                     }
@@ -2877,14 +3667,15 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
 
                     if (ctx.asyncMonitor && ctx.asyncMonitor->consumeStopTrainingRequested()) {
-                        ctx.addLog("⛔ Stop demandé via Viz. Sauvegarde et arrêt...");
+                        ctx.addLog("⛔ Arrêt sécurisé demandé. Sauvegarde et arrêt...");
                         stop_requested = true;
                         stopped_by_ui = true;
+                        stopped_epoch = epoch + 1;
                         break;
                     }
                 }
 
-                if (validation_enabled && validate_every_epochs > 0) {
+                if (validation_runtime_enabled() && validate_every_epochs > 0) {
                     const int epoch_1based = epoch + 1;
                     if ((epoch_1based % validate_every_epochs) == 0) {
                         const auto vse = run_validation(global_step, epoch_1based);
@@ -2912,6 +3703,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             }
 
             if (stopped_by_ui) {
+                std::string save_error;
+                if (!do_checkpoint_save(stopped_epoch, "_stop", &save_error) && !save_error.empty()) {
+                    ctx.addLog("⚠ Save(stop) échoué: " + save_error);
+                }
                 lua_pushboolean(L, false);
                 lua_pushstring(L, "STOP_REQUESTED");
                 return 2;
@@ -2966,8 +3761,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 bool stop_requested = false;
 
                 for (int k = 0; k < use_n; ++k) {
+                    refresh_viz_activation();
                     DatasetItem& item = ctx.currentDataset[(size_t)indices[(size_t)k]];
                     if (item.text_file.empty()) continue;
+                    DatasetItemUnloadGuard unload_item(item);
                     if (!item.text.has_value()) item.loadText();
                     if (!item.text.has_value()) continue;
 
@@ -2976,7 +3773,15 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
 
                     poll_viz_live_params();
-                    const Model::VAEStepStats st = ctx.currentModel->trainStepVAEText(empty_x, ids, opt, step_learning_rate());
+                    Model::TrainStepRequest request;
+                    request.int_inputs["text_ids"] = &ids;
+                    request.optimizer = &opt;
+                    request.learning_rate = optimizer_learning_rate();
+                    const auto step_result = ctx.currentModel->trainStep(request);
+                    if (!step_result) {
+                        throw std::runtime_error("Le modèle '" + model_type + "' ne fournit pas de contrat d'entraînement compatible");
+                    }
+                    const Model::TrainStepResult& st = *step_result;
 
                     // Entraînement texte mono-modalité: remplir uniquement le vecteur texte (seq).
                     try {
@@ -2993,7 +3798,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     monitor_step(epoch + 1, k + 1, use_n, st);
 
                     if (ctx.asyncMonitor && ctx.asyncMonitor->consumeStopTrainingRequested()) {
-                        ctx.addLog("⛔ Stop demandé via Viz. Sauvegarde et arrêt...");
+                        ctx.addLog("⛔ Arrêt sécurisé demandé. Sauvegarde et arrêt...");
                         stop_requested = true;
                         stopped_by_ui = true;
                         break;
@@ -3449,6 +4254,13 @@ int LuaScripting::lua_saveCheckpoint(lua_State* L) {
         lua_pop(L, 1);
     }
     
+    // Caller-owned loop state (cursor, RNG, validation feedback) travels with model_config.
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "training_state");
+        if (lua_istable(L, -1)) ctx.currentModel->modelConfig["training_state"] = luaTableToJson(L, -1);
+        lua_pop(L, 1);
+    }
+
     // Save
     std::string error;
     bool success = save_checkpoint(*ctx.currentModel, path, options, &error);
@@ -3542,10 +4354,12 @@ int LuaScripting::lua_loadCheckpoint(lua_State* L) {
         // On resynchronise le contexte Lua pour que l'entraînement utilise bien
         // le tokenizer/encoder du checkpoint (et non un asset précédemment chargé).
         if (options.load_tokenizer && ctx.currentModel) {
-            ctx.currentTokenizer = std::make_shared<Tokenizer>(ctx.currentModel->getTokenizer());
+            ctx.currentTokenizer = ctx.currentModel->getHasTokenizer()
+                ? std::make_shared<Tokenizer>(ctx.currentModel->getTokenizer()) : nullptr;
         }
         if (options.load_encoder && ctx.currentModel) {
-            ctx.currentEncoder = std::make_shared<ConditioningEncoder>(ctx.currentModel->getEncoder());
+            ctx.currentEncoder = ctx.currentModel->getHasEncoder()
+                ? std::make_shared<ConditioningEncoder>(ctx.currentModel->getEncoder()) : nullptr;
         }
 
         ctx.addLog("Checkpoint chargé: " + std::string(path));

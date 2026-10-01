@@ -15,11 +15,11 @@
 --   --optimizer/beta1/beta2/epsilon/weight-decay,
 --   --validate-*, --autosave-every-epochs, --dtype, --override, etc.
 
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
-local Ckpt = dofile("scripts/modules/checkpoint_resume.lua")
+local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
 
 local function opt_num(k, d)
   local v = opts[k]
@@ -49,7 +49,7 @@ local function opt_bool(k, d)
   return d
 end
 
-local BaseTok = dofile("scripts/modules/base_tokenizer.lua")
+local BaseTok = dofile(ROOTWORK.."/scripts/modules/base_tokenizer.lua")
 
 local function assert_ok(ok, err, msg)
   if ok == false then
@@ -134,7 +134,7 @@ cfg.stochastic_latent = opt_bool(
   )
 )
 
--- Training knobs consumed by Model::trainStepVAEText
+-- Training knobs consumed by the Model::trainStep hook
 cfg.align_weight = opt_num("align-weight", opt_num("align_weight", cfg.align_weight or 0.0))
 cfg.kl_beta = opt_num("kl-beta", opt_num("kl_beta", cfg.kl_beta or 0.01))
 cfg.kl_warmup_steps = opt_int("kl-warmup-steps", opt_int("kl-warmup", opt_int("kl_warmup", cfg.kl_warmup_steps or 0)))

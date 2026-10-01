@@ -1,4 +1,6 @@
 #pragma once
+#include "SkipConnectionControl.hpp"
+#include "LiveModelConfig.hpp"
 
 #include <iostream>
 #include <iomanip>
@@ -14,6 +16,8 @@
 #include <filesystem>
 #include <chrono>
 #include <algorithm>
+#include <limits>
+#include <atomic>
 #if defined(_WIN32)
 #include <io.h>
 #ifndef STDOUT_FILENO
@@ -112,6 +116,18 @@ private:
     std::unique_ptr<std::ostream> out_;
 
     bool alt_screen_enabled_ = false;
+    std::atomic<int> viz_action_state_{0};
+    std::atomic<bool> help_visible_{false};
+    std::atomic<bool> validation_enabled_{false};
+    std::atomic<bool> live_overrides_enabled_{false};
+    std::atomic<float> live_lr_{0.0f};
+    std::atomic<int> live_lr_warmup_steps_{0};
+    std::atomic<float> live_kl_beta_{0.0f};
+    std::atomic<int> live_kl_warmup_steps_{0};
+    std::atomic<bool> live_kl_enabled_{false};
+    std::atomic<int> live_selected_parameter_{0};
+    std::atomic<int> live_recon_loss_index_{0};
+    std::atomic<bool> safe_stop_pending_{false};
 
     // Buffer de logs affiché dans l'UI (collecte via redirection stdout/stderr).
     mutable std::mutex log_mutex_;
@@ -191,9 +207,11 @@ private:
         int batch_time_ms;
         float bps;
         size_t memory_mb;
+        double allocator_memory_mb;
         size_t params;
         float mse;
         float kl_divergence;
+        float kl_beta_effective;
         float wasserstein;
         float entropy_diff;
         float moment_mismatch;
@@ -237,7 +255,8 @@ private:
             return;
         }
 
-        file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step" << std::endl;
+        file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,allocator_memory_mb,params,mse,kl_divergence,kl_beta_effective,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step" << std::endl;
+        file << std::defaultfloat << std::setprecision(std::numeric_limits<float>::max_digits10);
 
         for (const auto& record : csv_history) {
             file << record.step << ","
@@ -245,15 +264,17 @@ private:
                  << record.total_epochs << ","
                  << record.batch << ","
                  << record.total_batches << ","
-                 << std::fixed << std::setprecision(6) << record.loss << ","
+                 << record.loss << ","
                  << record.avg_loss << ","
-                 << std::scientific << record.lr << ","
-                 << std::fixed << record.batch_time_ms << ","
+                 << record.lr << ","
+                 << record.batch_time_ms << ","
                  << record.bps << ","
                  << record.memory_mb << ","
+                 << record.allocator_memory_mb << ","
                  << record.params << ","
-                 << std::fixed << std::setprecision(6) << record.mse << ","
+                 << record.mse << ","
                  << record.kl_divergence << ","
+                 << record.kl_beta_effective << ","
                  << record.wasserstein << ","
                  << record.entropy_diff << ","
                  << record.moment_mismatch << ","
@@ -266,10 +287,12 @@ private:
                  << record.opt_step << ","
                  << record.opt_beta1 << ","
                  << record.opt_beta2 << ","
-                 << std::scientific << std::setprecision(8) << record.opt_eps << ","
-                 << std::fixed << std::setprecision(6) << record.opt_weight_decay
-                 << "," << (record.is_val ? std::to_string(record.val_loss) : "")
-                 << "," << (record.is_val ? std::to_string(record.val_mse)  : "")
+                 << record.opt_eps << ","
+                 << record.opt_weight_decay << ",";
+            if (record.is_val) file << record.val_loss;
+            file << ",";
+            if (record.is_val) file << record.val_mse;
+            file
                  << "," << (record.is_val ? std::to_string(record.val_step)  : "") << std::endl;
         }
     }
@@ -301,6 +324,7 @@ private:
         float opt_weight_decay;
         int batch_time_ms;
         size_t memory_used_mb;
+        double allocator_memory_mb;
         size_t memory_freed_mb;
         float batches_per_sec;
         int eta_seconds;
@@ -312,6 +336,13 @@ private:
     } stats;
 
 public:
+    enum class VizActionState {
+        Ready = 0,
+        Opening = 1,
+        Active = 2,
+        Unavailable = 3
+    };
+
     explicit HtopDisplay(int out_fd = STDOUT_FILENO) : display_enabled(true), out_fd_(out_fd)
     {
         out_buf_ = std::make_unique<FdStreamBuf>(out_fd_);
@@ -373,6 +404,51 @@ public:
     void showCursor()
     {
         out() << "\033[?25h" << std::flush;
+    }
+
+    void setVizActionState(VizActionState state)
+    {
+        viz_action_state_.store(static_cast<int>(state), std::memory_order_relaxed);
+    }
+
+    void setRuntimeConfiguration(std::shared_ptr<LiveModelConfig> config) {
+        std::atomic_store(&runtime_config_, std::move(config));
+    }
+    std::shared_ptr<LiveModelConfig> runtime_config_ = std::make_shared<LiveModelConfig>();
+    RuntimeConfigEditor config_editor_;
+    void setSkipConnectionControl(std::shared_ptr<SkipConnectionControl> control) {
+        std::atomic_store(&skip_control_, std::move(control));
+    }
+    std::shared_ptr<SkipConnectionControl> skip_control_ = std::make_shared<SkipConnectionControl>();
+    void setHelpVisible(bool visible)
+    {
+        help_visible_.store(visible, std::memory_order_relaxed);
+    }
+
+    void setLiveControlState(bool validation_enabled,
+                             bool overrides_enabled,
+                             float learning_rate,
+                             int lr_warmup_steps,
+                             float kl_beta,
+                             int kl_warmup_steps,
+                             bool kl_enabled,
+                             int selected_parameter,
+                             int recon_loss_index)
+    {
+        validation_enabled_.store(validation_enabled, std::memory_order_relaxed);
+        live_overrides_enabled_.store(overrides_enabled, std::memory_order_relaxed);
+        live_lr_.store(learning_rate, std::memory_order_relaxed);
+        live_lr_warmup_steps_.store(lr_warmup_steps, std::memory_order_relaxed);
+        live_kl_beta_.store(kl_beta, std::memory_order_relaxed);
+        live_kl_warmup_steps_.store(kl_warmup_steps, std::memory_order_relaxed);
+        live_kl_enabled_.store(kl_enabled, std::memory_order_relaxed);
+        live_selected_parameter_.store(selected_parameter, std::memory_order_relaxed);
+        live_recon_loss_index_.store(recon_loss_index, std::memory_order_relaxed);
+    }
+
+    void setSafeStopPending(bool pending)
+    {
+        safe_stop_pending_.store(pending, std::memory_order_relaxed);
     }
 
     void moveCursor(int row, int col)
@@ -495,8 +571,10 @@ public:
 
     void updateStats(int epoch, int total_epochs, int batch, int total_batches,
                      float loss, float avg_loss, float lr, int batch_time_ms,
-                     size_t memory_mb, size_t memory_freed, float bps, size_t params,
-                     float t, float kl, float wass, float ent, float mom,
+                     size_t memory_mb, double allocator_memory_mb,
+                     size_t memory_freed, float bps, size_t params,
+                     float t, float kl, float kl_beta_effective,
+                     float wass, float ent, float mom,
                      float spat, float temp, float mse,
                      const std::string& recon_loss_type,
                      float grad_norm, float grad_max,
@@ -519,6 +597,7 @@ public:
         stats.learning_rate = lr;
         stats.batch_time_ms = batch_time_ms;
         stats.memory_used_mb = memory_mb;
+        stats.allocator_memory_mb = allocator_memory_mb;
         stats.memory_freed_mb = memory_freed;
         stats.batches_per_sec = bps;
         stats.total_params = params;
@@ -578,9 +657,11 @@ public:
             record.batch_time_ms = batch_time_ms;
             record.bps = bps;
             record.memory_mb = memory_mb;
+            record.allocator_memory_mb = allocator_memory_mb;
             record.params = params;
             record.mse = mse;
             record.kl_divergence = kl;
+            record.kl_beta_effective = kl_beta_effective;
             record.wasserstein = wass;
             record.entropy_diff = ent;
             record.moment_mismatch = mom;
@@ -626,12 +707,72 @@ public:
         std::cerr << "[htop] csv_log_file=" << csv_log_file << std::endl;
     }
 
+    void configKey(char key) {
+        auto config = std::atomic_load(&runtime_config_);
+        auto& editor = config_editor_;
+        if (!editor.editing && (key == 'c' || key == 'C')) editor.toggle();
+        else if (key == '\033') editor.cancel();
+        else if (key == '\r' || key == '\n') editor.enter(*config);
+        else if (key == '\t') editor.move(1, config->snapshot().size());
+        else editor.text(static_cast<unsigned char>(key));
+    }
+    void configMove(int delta) {
+        config_editor_.move(delta, std::atomic_load(&runtime_config_)->snapshot().size());
+    }
+    bool configVisible() const { return config_editor_.visible; }
+
+    void renderConfiguration() {
+        if (width < 32 || height < 10) {
+            resetCursor(); clearLine();
+            out() << clipToWidth("Config: agrandir le terminal (C fermer)", std::max(1, width)) << std::flush;
+            return;
+        }
+        const auto rows = std::atomic_load(&runtime_config_)->snapshot();
+        auto& editor = config_editor_;
+        if (!rows.empty()) editor.selected = std::min(editor.selected, rows.size() - 1);
+        if (editor.editing) for (size_t i = 0; i < rows.size(); ++i)
+            if (rows[i].key == editor.editing_key) editor.selected = i;
+        const int columns = std::max(1, width - 4);
+        const size_t count = static_cast<size_t>(std::max(1, height - 9));
+        const size_t first = (editor.selected / count) * count;
+        auto line = [&](int row, const std::string& text) {
+            moveCursor(row, 1); clearLine();
+            const std::string shown = clipToWidth(text, columns);
+            out() << "| " << shown << std::string(std::max(0, columns - static_cast<int>(shown.size())), ' ') << " |";
+        };
+        line(1, std::string(columns, '='));
+        line(2, "CONFIGURATION DU MODELE  [C] fermer  [Esc] annuler");
+        line(3, "Fleches: choisir / pages  Entree: modifier puis valider");
+        line(4, "DIRECT = modifiable  FIXE = reconstruction / redemarrage requis");
+        int row = 5;
+        for (size_t i = first; i < rows.size() && i < first + count; ++i) {
+            const auto& e = rows[i];
+            const bool selected = i == editor.selected;
+            std::string value = LiveModelConfig::display(e.value);
+            if (e.pending) value += " -> " + LiveModelConfig::display(*e.pending) + " (en attente)";
+            const auto text = std::string(selected ? "> " : "  ") +
+                (e.owner == LiveModelConfig::Owner::ReadOnly ? "FIXE   " : "DIRECT ") + e.key + " = " + value;
+            line(row++, text);
+        }
+        while (row < height - 3) line(row++, "");
+        if (height >= 8) {
+            const std::string selected_note = rows.empty() ? "Aucun modele attache" : rows[editor.selected].note;
+            line(height - 3, editor.message.empty() ? selected_note : editor.message);
+            line(height - 2, editor.editing ? editor.editing_key + " > " + editor.buffer + "_" :
+                "Entree pour modifier. Valeurs appliquees par le thread d'entrainement.");
+            line(height - 1, std::to_string(rows.empty() ? 0 : editor.selected + 1) + "/" + std::to_string(rows.size()));
+            line(height, std::string(columns, '='));
+        }
+        out() << std::flush;
+    }
+
     void render()
     {
         if (!display_enabled)
             return;
 
         getTerminalSize();
+        if (config_editor_.visible) { renderConfiguration(); return; }
 
         // Retourner au début sans effacer l'écran entier (optimisation)
         resetCursor();
@@ -664,6 +805,64 @@ public:
         moveCursor(row++, 1);
         clearLine();
         out() << std::string(std::max(0, width - 2), '_');
+
+        if (help_visible_.load(std::memory_order_relaxed)) {
+            const std::vector<std::string> help = {
+                "HTOP CONTROLS",
+                "H                 Close this help",
+                "C                 Open model configuration (Enter to edit/apply)",
+                "V                 Open Viz",
+                "N                 Toggle validation on/off",
+                "S                 Toggle encoder-decoder skip connections",
+                "Tab / Up / Down   Select LR, warmups, KL beta or recon loss",
+                "Left / Right      Decrease / increase selected value",
+                "- / +             Decrease / increase selected value",
+                "K                 Toggle KL contribution on/off",
+                "R                 Reset live parameters to native values",
+                "Ctrl+C            Request safe stop and save the current training"
+            };
+            for (const std::string& line : help) {
+                if (row >= height) break;
+                moveCursor(row++, 3);
+                clearLine();
+                out() << clipToWidth(line, std::max(0, width - 4));
+            }
+            for (int i = row; i < height; ++i) {
+                moveCursor(i, 1);
+                clearLine();
+            }
+            out() << std::flush;
+            return;
+        }
+
+        moveCursor(row++, 2);
+        clearLine();
+        {
+            const int selected = std::clamp(
+                live_selected_parameter_.load(std::memory_order_relaxed), 0, 4);
+            const char* labels[] = {"LR", "LR-WU", "KL-BETA", "KL-WU", "RECON"};
+            const char* recon_losses[] = {"mse", "mae", "huber", "charbonnier", "gaussian_nll", "bce"};
+            const int recon_index = std::clamp(
+                live_recon_loss_index_.load(std::memory_order_relaxed), 0, 5);
+            std::ostringstream controls;
+            const auto skips = std::atomic_load(&skip_control_);
+            controls << "[S] SKIPS " << (!skips->available.load() ? "N/A" :
+                (skips->enabled.load() ? "ON" : "OFF")) << " | LIVE "
+                     << (live_overrides_enabled_.load(std::memory_order_relaxed) ? "ON" : "NATIVE")
+                     << " | VAL "
+                     << (validation_enabled_.load(std::memory_order_relaxed) ? "ON" : "OFF")
+                     << " | " << labels[selected] << " selected"
+                     << " | lr=" << std::setprecision(6) << std::scientific
+                     << live_lr_.load(std::memory_order_relaxed)
+                     << " lr-wu=" << std::defaultfloat
+                     << live_lr_warmup_steps_.load(std::memory_order_relaxed)
+                     << " kl=" << std::setprecision(5)
+                     << live_kl_beta_.load(std::memory_order_relaxed)
+                     << (live_kl_enabled_.load(std::memory_order_relaxed) ? "" : "(off)")
+                     << " kl-wu=" << live_kl_warmup_steps_.load(std::memory_order_relaxed)
+                     << " recon=" << recon_losses[recon_index];
+            out() << clipToWidth(controls.str(), std::max(0, width - 3));
+        }
 
         // Epoch Progress
         moveCursor(row++, 2);
@@ -771,6 +970,10 @@ public:
 
         moveCursor(row++, 4);
         clearLine();
+        out() << "Allocator: " << colorText(std::to_string(stats.allocator_memory_mb) + " MB", 96);
+
+        moveCursor(row++, 4);
+        clearLine();
         out() << "Freed this batch: " << colorText(std::to_string(stats.memory_freed_mb) + " MB", 92);
 
         moveCursor(row++, 4);
@@ -798,6 +1001,12 @@ public:
             const char* opt_name = "SGD";
             if (stats.opt_type == 1) opt_name = "ADAM";
             else if (stats.opt_type == 2) opt_name = "ADAMW";
+            else if (stats.opt_type == 3) opt_name = "LION";
+            else if (stats.opt_type == 4) opt_name = "ADAFACTOR";
+            else if (stats.opt_type == 5) opt_name = "RADAM";
+            else if (stats.opt_type == 6) opt_name = "NADAM";
+            else if (stats.opt_type == 7) opt_name = "RMSPROP";
+            else if (stats.opt_type == 8) opt_name = "LAMB";
 
             std::stringstream ss;
             ss << "Optimizer: " << opt_name
@@ -863,7 +1072,28 @@ public:
         // Footer
         moveCursor(row++, 2);
         clearLine();
-        out() << colorText("Press Ctrl+C to stop", 90);
+        const auto viz_state = static_cast<VizActionState>(
+            viz_action_state_.load(std::memory_order_relaxed));
+        if (safe_stop_pending_.load(std::memory_order_relaxed)) {
+            out() << colorText("Stopping safely: checkpoint in progress...", 93);
+            out() << std::flush;
+            return;
+        }
+        switch (viz_state) {
+            case VizActionState::Ready:
+                out() << colorText("[V] Open Viz", 96);
+                break;
+            case VizActionState::Opening:
+                out() << colorText("Viz: opening...", 93);
+                break;
+            case VizActionState::Active:
+                out() << colorText("Viz: active", 92);
+                break;
+            case VizActionState::Unavailable:
+                out() << colorText("Viz: unavailable", 91);
+                break;
+        }
+        out() << colorText("  |  [H] Help  [C] Config  |  Ctrl+C: safe stop", 90);
 
         // Effacer les lignes restantes pour éviter les artefacts
         for (int i = row; i < height; ++i)

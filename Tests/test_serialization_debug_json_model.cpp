@@ -80,6 +80,8 @@ int main() {
     TASSERT_TRUE(j["model"]["name"].get<std::string>() == model->getModelName());
     TASSERT_TRUE(j["model"]["default_dtype"].get<std::string>() == "bfloat16");
     TASSERT_TRUE(j["model"]["layer_count"].get<size_t>() == model->getLayers().size());
+    TASSERT_TRUE(!j["model"].contains("image_width"));
+    TASSERT_TRUE(!j["model"].contains("image_height"));
 
     TASSERT_TRUE(j.contains("export_metrics"));
     const auto& metrics = j["export_metrics"];
@@ -95,6 +97,8 @@ int main() {
     TASSERT_TRUE(j["framework_state"].is_object());
     TASSERT_TRUE(j["framework_state"].contains("runtime"));
     TASSERT_TRUE(j["framework_state"].contains("memory"));
+    TASSERT_TRUE(!j["framework_state"]["model"].contains("image_width"));
+    TASSERT_TRUE(!j["framework_state"]["model"].contains("image_height"));
 
     TASSERT_TRUE(j.contains("default_dtype"));
     TASSERT_TRUE(j["default_dtype"].get<std::string>() == "bfloat16");

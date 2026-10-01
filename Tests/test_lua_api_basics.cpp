@@ -2,10 +2,36 @@
 
 #include "scriptings/Lua/luaScripting/LuaScripting.hpp"
 
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 
 int main() {
+    namespace fs = std::filesystem;
+
+    const fs::path rootwork = fs::temp_directory_path() / "mimir lua rootwork";
+    fs::create_directories(rootwork / "modules");
+    fs::create_directories(rootwork / "scripts" / "modules");
+    fs::copy_file(fs::current_path() / "scripts" / "modules" / "mpk.lua",
+                  rootwork / "scripts" / "modules" / "mpk.lua",
+                  fs::copy_options::overwrite_existing);
+    {
+        std::ofstream module(rootwork / "modules" / "dependency.lua");
+        module << "return { value = 'loaded' }\n";
+    }
+#if defined(_WIN32)
+    _putenv_s("ROOTWORK", rootwork.string().c_str());
+#else
+    setenv("ROOTWORK", rootwork.string().c_str(), 1);
+#endif
+
     LuaScripting lua;
+
+    TASSERT_TRUE(lua.executeScript(R"(
+        local dependency = dofile(ROOTWORK.."/modules/dependency.lua")
+        ROOTWORK_MODULE_OK = dependency.value == "loaded"
+    )"));
+    TASSERT_TRUE(lua.getBoolean("ROOTWORK_MODULE_OK"));
 
     const std::string code = R"(
         TEST_OK = false
@@ -19,6 +45,26 @@ int main() {
         if type(Mimir.Architectures.dtypes) ~= "function" then TEST_ERR = "dtypes missing" return end
         if type(Mimir.Model) ~= "table" then TEST_ERR = "Model missing" return end
         if type(Mimir.Model.create) ~= "function" then TEST_ERR = "Model.create missing" return end
+        if type(Mimir.Model.get_config) ~= "function" then TEST_ERR = "Model.get_config missing" return end
+        if type(Mimir.Model.lumen_begin_vae_calibration) ~= "function" then TEST_ERR = "Lumen calibration missing" return end
+        if type(Mimir.Model.lumen_add_vae_calibration_image) ~= "function" then TEST_ERR = "Lumen calibration image missing" return end
+        if type(Mimir.Model.lumen_finish_vae_calibration) ~= "function" then TEST_ERR = "Lumen calibration finish missing" return end
+        if type(Mimir.Model.lumen_train_step) ~= "function" then TEST_ERR = "Lumen train step missing" return end
+        assert(type(Mimir.Viz.backend()) == "string")
+        assert(type(Mimir.Viz.poll_events()) == "table")
+        local scene_ok, scene_err = Mimir.Viz.configure({controls={}})
+        assert(scene_ok == false and type(scene_err) == "string")
+        assert(not pcall(Mimir.Viz.poll_events, -1))
+        assert(not pcall(Mimir.Viz.poll_events, 1001))
+        if type(Mimir.Viz.validation_enabled) ~= "function" then TEST_ERR = "Viz.validation_enabled missing" return end
+        if type(Mimir.Model.lumen_validate_step) ~= "function" then TEST_ERR = "Lumen validation step missing" return end
+        if type(Mimir.Dataset.release) ~= "function" then TEST_ERR = "Dataset.release missing" return end
+
+        local release_ok, release_err = Mimir.Dataset.release(1)
+        if release_ok ~= false or type(release_err) ~= "string" then
+            TEST_ERR = "Dataset.release should reject an unloaded dataset"
+            return
+        end
 
         local archs = Mimir.Architectures.available()
         if type(archs) ~= "table" or #archs < 1 then TEST_ERR = "no architectures" return end
@@ -48,6 +94,22 @@ int main() {
 
         local ok = Mimir.Model.create("basic_mlp", cfg)
         if ok ~= true then TEST_ERR = "Model.create returned false" return end
+        local effective_cfg = Mimir.Model.get_config()
+        if type(effective_cfg) ~= "table" or effective_cfg.type ~= "basic_mlp" then
+            TEST_ERR = "Model.get_config returned an invalid effective config"
+            return
+        end
+
+        local pixels, generation_err = Mimir.Model.lumen_text2img("test", 1, 1, 1.0)
+        if pixels ~= nil or type(generation_err) ~= "string" then
+            TEST_ERR = "Lumen generation should reject a non-Lumen model"
+            return
+        end
+        local calibration_ok, calibration_err = Mimir.Model.lumen_begin_vae_calibration()
+        if calibration_ok ~= false or type(calibration_err) ~= "string" then
+            TEST_ERR = "Lumen calibration should reject a non-Lumen model"
+            return
+        end
 
         TEST_OK = true
     )";
@@ -60,7 +122,7 @@ int main() {
         TEST_PATH_OK = false
         TEST_PATH_ERR = ""
 
-        local MPK = dofile("scripts/modules/mpk.lua")
+        local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
         local pkg = MPK.build({
             name = "path_plugin_test",
             type = "basic_mlp",

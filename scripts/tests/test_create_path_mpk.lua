@@ -1,6 +1,6 @@
 ---@diagnostic disable: undefined-global
 
-local MPK = dofile("scripts/modules/mpk.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
 
 local tmp = os.tmpname() .. ".mpk"
 local pkg = MPK.build({

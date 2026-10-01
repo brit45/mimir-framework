@@ -1,11 +1,11 @@
 ---@meta
----@version 3.1.0
+---@version 3.5.0
 ---@author <bri45> for "Mímir Framework"
----@date 31 juillet 2026 (dernière sync)
+---@date 1 octobre 2026 (dernière sync)
 ---@diagnostic disable: missing-return, unused-local, unused-vararg, duplicate-doc-field, redundant-parameter
 
 --=============================================================================
--- Mímir Framework v3.1 — IDE Stub (EmmyLua)
+-- Mímir Framework v3.5 — IDE Stub (EmmyLua)
 --=============================================================================
 -- Ce fichier est un "stub" destiné aux IDE (LuaLS / EmmyLua / IntelliJ, etc.).
 -- Il documente l'API globale exposée par le binaire `mimir` (bindings C/C++).
@@ -13,9 +13,10 @@
 -- ⚠️  IMPORTANT: Ce fichier est synchronisé avec
 --    src/scriptings/Lua/luaScripting/LuaScripting.cpp
 --    Toute modification de l'API C++ doit être reflétée ici.
---    Dernière synchronisation: 31 juillet 2026
+--    Dernière synchronisation: 1 octobre 2026
 --  • Alias `Mimir.model` (lowercase) + stub explicite `Mimir.model.dtype`
 --  • Operations multi-input complètes (Add, Multiply, Concat, MatMul, Split)
+--  • Configuration live du modèle dans Htop/Viz (`C`, édition avec `Entrée`)
 -- Historique v2.0.0 :
 -- Namespace Mimir
 ---@class Mimir
@@ -74,6 +75,7 @@ Mimir = {}
 ---| "vgg16_feat"
 ---| "vgg19"
 ---| "diffusion"
+---| "lumen_diffusion"
 ---| "gan_latent"
 ---| "cond_diffusion"
 ---| "sd3_5"
@@ -129,10 +131,14 @@ Mimir = {}
 ---@field dtype? DTypeName @Préférence dtype du modèle (si supporté par la runtime)
 ---@field dropout? float @Dropout générique (si supporté par l'architecture)
 ---@field optimizer? string @"sgd"|"adam"|"adamw" (utilisé par `Model.train()`)
----@field beta1? float
----@field beta2? float
----@field epsilon? float
----@field weight_decay? float
+---@field beta1? float @Modifiable en direct si un optimiseur courant est publié; 0 <= valeur < 1
+---@field beta2? float @Modifiable en direct si un optimiseur courant est publié; 0 <= valeur < 1
+---@field epsilon? float @Modifiable en direct si un optimiseur courant est publié; valeur > 0
+---@field weight_decay? float @Modifiable en direct si un optimiseur courant est publié; valeur >= 0
+---@field rmsprop_alpha? float @Modifiable en direct si un optimiseur courant est publié; 0 <= valeur < 1
+---@field grad_clip_norm? float @Clipping global modifiable en direct; 0 désactive le clipping
+---@field clip_norm? float @Alias historique utilisé comme valeur initiale de grad_clip_norm
+---@field use_kv_cache? boolean @Modifiable en direct lorsque la clé existe dans la configuration
 ---@field min_lr? float
 ---@field decay_rate? float
 ---@field decay_steps? int
@@ -155,6 +161,17 @@ Mimir = {}
 ---@field validate_holdout_frac? float @Fraction du dataset allouée au holdout
 ---@field validate_holdout_items? int @Nombre d'items holdout (optionnel, selon script)
 ---@field validate_save_debug? bool @Sauvegarde un checkpoint debug (ex: _val_debug.json) lors des validations
+---@field kl_beta? float @Coefficient KL modifiable en direct pour les modèles VAE
+---@field vae_kl_beta? float @Valeur initiale historique de kl_beta
+---@field kl_warmup_steps? int @Warmup KL modifiable en direct pour les modèles VAE
+---@field recon_loss? string @Loss VAE modifiable en direct: mse, mae/l1, huber, charbonnier, gaussian_nll ou bce
+---@field ssim_weight? float @Poids SSIM modifiable en direct pour les VAE image
+---@field spectral_weight? float @Poids spectral modifiable en direct pour les VAE image
+---@field marker_wass_scale? float @Échelle Wasserstein modifiable en direct pour les VAE image
+---@field marker_temp_scale? float @Échelle temporelle modifiable en direct pour les VAE image
+---@field huber_delta? float @Delta Huber modifiable en direct; valeur > 0
+---@field charbonnier_eps? float @Epsilon Charbonnier modifiable en direct; valeur > 0
+---@field gaussian_nll_sigma? float @Sigma Gaussian NLL modifiable en direct; valeur > 0
 ---@field triple_fault? bool @Active le mécanisme de rollback sur dernier checkpoint "bon"
 ---@field triple_fault_every_steps? int @Intervalle (en steps) de sauvegarde des checkpoints triple-fault
 
@@ -235,8 +252,8 @@ Mimir = {}
 ---@field latent_c? int
 ---@field base_channels? int
 ---@field stochastic_latent? boolean
----@field use_attention? boolean
----@field use_attn? boolean
+---@field resnet? boolean
+---@field attention? boolean
 ---@field enc_norm? string
 ---@field enc_gn_groups? int
 ---@field dec_norm? string
@@ -306,6 +323,29 @@ Mimir = {}
 ---@field image_c? int
 ---@field time_dim? int
 ---@field hidden_dim? int
+
+---@class LumenDiffusionConfig: ModelConfig
+---@field image_w? int
+---@field image_h? int
+---@field image_c? int
+---@field latent_w? int
+---@field latent_h? int
+---@field latent_c? int
+---@field vae_checkpoint? string
+---@field vae_scale? float
+---@field vae_shift? float
+---@field patch_size? int
+---@field hidden_size? int
+---@field depth? int
+---@field mlp_ratio? float
+---@field vocab_size? int
+---@field text_seq_len? int
+---@field text_layers? int
+---@field num_heads? int
+---@field diffusion_steps? int
+---@field beta_start? float
+---@field beta_end? float
+---@field preview_timestep? int
 
 ---@class CondDiffusionConfig: ModelConfig
 ---@field prompt_dim? int
@@ -442,9 +482,12 @@ Mimir = {}
 ---@field opt_beta2? float
 ---@field opt_eps? float
 ---@field opt_weight_decay? float
+---@field recon_loss_type? string @Label effectif de la loss de reconstruction
+---@field optimizer? string|table @Nom ou table {type,step,beta1,beta2,eps,weight_decay}
 
 ---@class HtopCreateConfig
----@field enable_viz? boolean @Active la viz SFML (alias: viz)
+---@field enable_htop? boolean @Active l'interface terminal; défaut true
+---@field enable_viz? boolean @Active le backend Viz compilé (alias: viz)
 ---@field viz? boolean @Alias de enable_viz
 ---@field viz_config? table @Config passée au Visualizer (mêmes clés que config.json/visualization)
 ---@field csv? boolean @Active l'export CSV des métriques côté htop
@@ -476,6 +519,41 @@ Mimir = {}
 ---@field grad_norm? float
 ---@field grad_max? float
 ---@field kl_beta_effective? float
+---@field recon_loss_type? string @Label effectif de la loss de reconstruction
+
+---@class LumenVaeCalibrationStats
+---@field items integer
+---@field values integer
+---@field shift float
+---@field scale float
+
+---@class LumenStepStats
+---@field loss float
+---@field mse float
+---@field kl float
+---@field kl_beta_effective float
+---@field grad_norm float
+---@field grad_max_abs float
+---@field reconstruction_mae float
+---@field reconstruction_mse float
+---@field wasserstein float
+---@field entropy_diff float
+---@field moment_mismatch float
+---@field spatial_coherence float
+---@field temporal_consistency float
+---@field timestep integer
+---@field stop_requested boolean
+---@field learning_rate? float @LR réellement appliqué après contrôle live Viz
+
+---@class LumenStepMonitorOptions
+---@field epoch? integer
+---@field total_epochs? integer
+---@field batch? integer
+---@field total_batches? integer
+---@field step? integer
+---@field completed_steps? integer
+---@field loss_sum_before? float
+---@field lr_warmup_steps? integer
 
 --=============================================================================
 -- Module: Mimir.Model
@@ -506,6 +584,7 @@ Mimir.Model = {}
 ---@overload fun(model_type: "vgg19", config?: VGG19Config): (boolean, string?)
 ---@overload fun(model_type: "vgg16_feat", config?: VGG16FeatConfig): (boolean, string?)
 ---@overload fun(model_type: "diffusion", config?: DiffusionConfig): (boolean, string?)
+---@overload fun(model_type: "lumen_diffusion", config?: LumenDiffusionConfig): (boolean, string?)
 ---@overload fun(model_type: "cond_diffusion", config?: CondDiffusionConfig): (boolean, string?)
 ---@overload fun(model_type: "gan_latent", config?: GanLatentConfig): (boolean, string?)
 ---@overload fun(model_type: "sd3_5", config?: SD35Config): (boolean, string?)
@@ -519,6 +598,12 @@ Mimir.Model = {}
 ---@return boolean ok
 ---@return string? err
 function Mimir.Model.create(model_type, config) end
+
+---Retourner la configuration effective du modèle construit.
+---Elle peut différer de la requête lorsque le modèle s'adapte à un checkpoint externe.
+---@return ModelConfig|table|nil config
+---@return string? err
+function Mimir.Model.get_config() end
 
 ---Créer un modèle vide (hors registre) pour importer une architecture nodale custom.
 ---Utilisé pour les MPK standalone quand le type n'existe pas dans le registre.
@@ -669,6 +754,52 @@ function Mimir.Model.zero_grads() end
 ---@return float[]|nil @Vecteur de tous les gradients
 ---@return string? err
 function Mimir.Model.get_gradients() end
+
+---Commencer une calibration globale des latents du VAE associé à Lumen.
+---@return boolean ok
+---@return string? err
+function Mimir.Model.lumen_begin_vae_calibration() end
+
+---Ajouter une image RGB u8 à la calibration VAE courante.
+---@param image integer[]
+---@return LumenVaeCalibrationStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_add_vae_calibration_image(image) end
+
+---Finaliser et persister la calibration VAE courante.
+---@return LumenVaeCalibrationStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_finish_vae_calibration() end
+
+---Effectuer un step de diffusion Lumen et publier ses métriques vers Htop/Viz.
+---@param image integer[]
+---@param prompt string
+---@param seed integer
+---@param learning_rate float
+---@param optimizer? string @"sgd"|"adam"|"adamw"
+---@param monitor? LumenStepMonitorOptions
+---@return LumenStepStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_train_step(image, prompt, seed, learning_rate, optimizer, monitor) end
+
+---Générer une image avec le modèle Lumen chargé, en mode inférence.
+---@param prompt string
+---@param seed? integer
+---@param steps? integer
+---@param guidance? number
+---@return integer[]|nil pixels @Octets entrelacés HWC ; nil en cas d'erreur.
+---@return integer|string width_or_error
+---@return integer? height
+---@return integer? channels
+function Mimir.Model.lumen_text2img(prompt, seed, steps, guidance) end
+
+---Effectuer une validation Lumen et publier ses previews vers Viz.
+---@param image integer[]
+---@param prompt string
+---@param seed integer
+---@return LumenStepStats|nil stats
+---@return string? err
+function Mimir.Model.lumen_validate_step(image, prompt, seed) end
 
 ---Step optimiseur (si exposé). Le LR peut être transmis.
 ---@param learning_rate number
@@ -1240,8 +1371,10 @@ function Mimir.Tokenizer.extract_keywords(text, top_k) end
 ---@field audio_file? string Chemin du fichier audio
 ---@field video_file? string Chemin du fichier vidéo
 ---@field text? string Contenu texte (si chargé)
+---@field image? integer[] Pixels RGB u8 redimensionnés, si demandés et décodables
 ---@field width? int Largeur de l'image
 ---@field height? int Hauteur de l'image
+---@field channels? int Nombre de canaux de l'image retournée
 ---@field size? int Taille du fichier en bytes
 
 ---@class TextAnalysisResult
@@ -1275,11 +1408,18 @@ Mimir.Dataset = {}
 function Mimir.Dataset.load(dir, target_w, target_h, min_modalities, use_cache, cache_path, max_ram_mb, lazy_loading) end
 
 ---Récupérer un item du dataset par son index (1-based).
----Retourne une table avec les chemins et métadonnées de l'item.
+---Charge les pixels RGB par défaut; passer false pour ne lire que texte et métadonnées.
 ---@param index integer Index de l'item (commence à 1)
+---@param load_image? boolean Charge et retourne le tableau image (défaut: true)
 ---@return DatasetItem|nil item Item du dataset
 ---@return string? err Message d'erreur si échec
-function Mimir.Dataset.get(index) end
+function Mimir.Dataset.get(index, load_image) end
+
+---Libérer les données lazy actuellement chargées pour un item.
+---@param index integer Index de l'item (commence à 1)
+---@return boolean ok
+---@return string? err
+function Mimir.Dataset.release(index) end
 
 ---Préparer les séquences (stockées dans le contexte interne).
 ---La séquence length est utilisée ensuite par Mimir.Model.train().
@@ -1426,6 +1566,7 @@ Mimir.MemoryGuard = {}
 
 ---Définir la limite de mémoire RAM stricte.
 ---Accepte des valeurs en bytes (grands nombres) ou en GB (si <= 1000).
+---Active automatiquement l'éviction LRU avec spill disque.
 ---@param limit number @Limite en bytes ou en GB (si valeur <= 1000)
 ---@return boolean ok @true si succès
 ---
@@ -1567,14 +1708,18 @@ Mimir.Htop = {} --avec configuration optionnelle.
 ---- `Mimir.Htop.create({ ... })` : options avancées
 ---
 ---Notes:
----- Si `enable_viz=true`, le CSV htop est désactivé par défaut (sauf si `csv=true` ou `csv_path` fourni).
+---- L'export CSV est unique: Viz le porte lorsqu'elle est active, Htop sinon.
+---- `csv` active/désactive cet export commun; `csv_path`/`csv_file` choisit son chemin.
+---- `C` ouvre le panneau de configuration du modèle courant; `Entrée` édite puis valide.
+---- Les changements sont consommés par le thread d'entraînement à une frontière de calcul sûre.
 ---
 ---@param config? boolean|HtopCreateConfig
 ---@return boolean ok
 ---@return string? err
 function Mimir.Htop.create(config) end
 
----Activer/désactiver l'affichage htop.
+---Arrêter le monitor si `enabled=false`.
+---Avec `enabled=true`, la fonction confirme seulement l'état; utilisez `create()` pour démarrer.
 ---@param enabled boolean
 ---@return boolean ok
 ---@return string? err
@@ -1588,7 +1733,7 @@ function Mimir.Htop.enable(enabled) end
 ---@return string? err
 function Mimir.Htop.update(metrics, ...) end
 
----Forcer un render (si supporté).
+---Compatibilité: le rendu est automatique, cette fonction est un no-op qui retourne true.
 ---@return boolean ok
 ---@return string? err
 function Mimir.Htop.render() end
@@ -1599,20 +1744,45 @@ function Mimir.Htop.render() end
 function Mimir.Htop.clear() end
 
 --=============================================================================
--- Module: Mimir.Viz (SFML Visualizer)
+-- Module: Mimir.Viz (SFML / QT / GTK / WEB)
 --=============================================================================
 
 ---@class MimirVizAPI
 Mimir.Viz = {}
 
----Créer la fenêtre visualiseur SFML avec titre et dimensions optionnels.
+---Créer la fenêtre visualiseur avec titre et dimensions optionnels.
 ---Argument réel: table de configuration (passée à AsyncMonitor.start()).
+---`C` ouvre le panneau de configuration du modèle courant; `Entrée` édite puis valide.
 ---@param config? table @Ex: {visualization={enabled=true, window_title="..."}}
 ---@return boolean ok
 ---@return string? err
 function Mimir.Viz.create(config) end
 
----Initialiser le visualiseur (ouvre la fenêtre SFML).
+---Backend compilé, y compris avant create().
+---@return string backend @SFML, QT, GTK, WEB ou NONE
+function Mimir.Viz.backend() end
+
+---Modifier la scène sur le thread Viz ; seuls les champs fournis changent.
+---panels: {id=0..6,x?,y?,w?,h?,title?,visible?}[]
+---controls: {id=string,label?,x?,y?,w?,h?}[] (boutons, liste remplacée)
+---help: texte d'aide du script. events: activer clavier/texte/pointeur.
+---image_size: taille des aperçus Generated en pixels (32..1024, défaut 200).
+---@param scene table
+---@return boolean ok
+---@return string? err
+function Mimir.Viz.configure(scene) end
+
+---Retirer les événements de la file (256 entrées max, anciennes supprimées).
+---Types: configured, click (id,x,y), close, resize (width,height).
+---Avec events=true: key (code,control,shift,alt), text (unicode),
+---pointer_move/down/up (x,y,button pour down/up). Coordonnées fenêtre en pixels.
+---Les callbacks Lua sont à exécuter par le script, jamais sur le thread Viz.
+---@param timeout_ms? integer @0..1000, défaut 0
+---@return table[] events
+function Mimir.Viz.poll_events(timeout_ms) end
+
+
+---Vérifier que le visualiseur est créé et que sa fenêtre est ouverte.
 ---@return boolean ok
 ---@return string? err
 function Mimir.Viz.initialize() end
@@ -1621,11 +1791,11 @@ function Mimir.Viz.initialize() end
 ---@return boolean open
 function Mimir.Viz.is_open() end
 
----Traiter les événements fenêtre (fermeture, clavier, souris).
+---Compatibilité: les événements sont traités automatiquement par AsyncMonitor; no-op.
 ---@return boolean ok
 function Mimir.Viz.process_events() end
 
----Mettre à jour et afficher le rendu de la fenêtre.
+---Compatibilité: le rendu est mis à jour automatiquement par AsyncMonitor; no-op.
 ---@return boolean ok
 function Mimir.Viz.update() end
 
@@ -1657,6 +1827,7 @@ function Mimir.Viz.update_metrics(metrics) end
 ---@field recon? float @Métrique principale (ex: recon/img_mse)
 ---@field kl? float @Métrique secondaire (ex: kl/eps_mse)
 ---@field align? float @Métrique optionnelle (ex: align/margin)
+---@field enabled? boolean @Modifie l'état de validation live avant de publier les métriques
 
 ---Mettre à jour l'état/progression de validation affichée (sans écraser les métriques train).
 ---@param state VizValidationState|table
@@ -1664,8 +1835,12 @@ function Mimir.Viz.update_metrics(metrics) end
 ---@return string? err
 function Mimir.Viz.set_validation(state) end
 
----Ajouter un point à l'historique de loss (pour graphe).
+---@return boolean enabled
+function Mimir.Viz.validation_enabled() end
+
+---Compatibilité: l'historique est alimenté par update_metrics; no-op retournant true.
 ---@param loss number @Valeur de loss
+---@return boolean ok
 function Mimir.Viz.add_loss_point(loss) end
 
 ---Clear viz.
@@ -1673,7 +1848,8 @@ function Mimir.Viz.add_loss_point(loss) end
 ---@return string? err
 function Mimir.Viz.clear() end
 
----Activer/désactiver la viz (NO-OP si non compilée).
+---Arrêter le monitor si `enabled=false`.
+---Avec `enabled=true`, la fonction confirme seulement l'état; utilisez `create()` pour démarrer.
 ---@param enabled boolean
 ---@return boolean ok
 ---@return string? err
@@ -1747,6 +1923,7 @@ Mimir.Serialization = {}
 ---@field debug_max_values? integer @Nombre max de valeurs debug (legacy, défaut: 100)
 ---@field include_git_info? boolean @Inclure info git (défaut: true)
 ---@field include_gradients? boolean @[DebugJson v1.3] Inclure gradients (défaut: false)
+---@field training_state? table @État de la boucle (curseur, RNG, feedback), restauré dans Model.get_config().training_state.
 ---@field include_optimizer_state? boolean @[DebugJson v1.3] Inclure optimizer state (défaut: false)
 ---@field max_values_per_tensor? integer @[DebugJson v1.3] Nb valeurs par tensor (défaut: 20)
 ---@field include_activations? boolean @[DebugJson v1.3] Inclure activations (défaut: false)
@@ -1869,6 +2046,103 @@ function write_json(path, obj) end
 ---Print (redirigé) — peut être surchargé par le runtime.
 ---@param ... any
 function print(...) end
+
+--=============================================================================
+-- Modules Lua (`dofile(ROOTWORK.."/scripts/modules/...")`)
+--=============================================================================
+-- Ces types décrivent des helpers écrits en Lua. Ils ne sont pas membres de
+-- `Mimir` et leur chargement reste explicite.
+
+---@class MimirScriptArgs
+---@field override? string[]
+---@field [string] string|boolean|string[]
+
+---@class MimirArgsModule
+---@field parse fun(argv?:string[]):MimirScriptArgs, string[]
+---@field apply_overrides fun(cfg?:table, opts?:MimirScriptArgs):table
+---@field apply_validation_config fun(cfg?:table, opts?:MimirScriptArgs, defaults?:table):table
+---@field has fun(opts:MimirScriptArgs, key:string):boolean
+---@field get_str fun(opts:MimirScriptArgs, key:string, default?:string):string?
+---@field get_num fun(opts:MimirScriptArgs, key:string, default?:number):number?
+---@field get_int fun(opts:MimirScriptArgs, key:string, default?:integer):integer?
+---@field get_bool fun(opts:MimirScriptArgs, key:string, default?:boolean):boolean?
+---@field opt_str fun(key:string, default?:string):string?
+---@field opt_num fun(key:string, default?:number):number?
+---@field opt_int fun(key:string, default?:integer):integer?
+---@field opt_bool fun(key:string, default?:boolean):boolean?
+
+---@class MimirFSModule
+---@field is_windows fun():boolean
+---@field sep fun():string
+---@field quote fun(path:string):string
+---@field normalize fun(path:string):string
+---@field join fun(...:string):string
+---@field dirname fun(path:string):string?
+---@field file_exists fun(path:string):boolean
+---@field is_dir fun(path:string):boolean
+---@field exists fun(path:string):boolean
+---@field mkdir_p fun(path:string):boolean
+---@field list_dir fun(path:string):string[]
+
+---@class MimirCheckpointResumeModule
+---@field file_exists fun(path:string):boolean
+---@field find_latest_epoch_dir fun(base:string):string?
+---@field resolve_dir fun(base:string):string?
+
+---@class MimirBaseTokenizerOptions
+---@field path? string
+---@field require? boolean
+---@field max_vocab? integer
+
+---@class MimirBaseTokenizerModule
+---@field default_path fun():string
+---@field load_base fun(opts?:MimirBaseTokenizerOptions):boolean, string?
+---@field vocab_size fun():integer
+---@field save_current_as_base fun(path?:string):boolean, string?
+
+---@class MimirCausalTokenizerOptions
+---@field corpus string
+---@field vocab_size integer
+---@field padding_idx? integer
+---@field seq_len? integer
+---@field path? string
+---@field bpe_merges? integer
+
+---@class MimirCausalTokenizerInfo
+---@field generated boolean
+---@field replaced_loaded_tokenizer? boolean
+---@field reason? string
+---@field path? string
+---@field vocab_size integer
+---@field max_vocab integer
+
+---@class MimirCausalTokenizerModule
+---@field ensure fun(options:MimirCausalTokenizerOptions):TokenIds, MimirCausalTokenizerInfo
+
+---@class MimirHelpModule
+---@field should_show_help fun(argv?:string[]):boolean
+---@field find_script_from_stack fun(start_level?:integer, max_level?:integer):string?
+---@field print_help fun(params?:table)
+---@field auto_exit_help fun(params?:table)
+
+---@class MimirMPKModule
+---@field build fun(spec:table):table
+---@field compile fun(source_path:string, output_path:string):boolean?, string?
+---@field read fun(path:string):table?, string?
+---@field write fun(path:string, pkg:table, opts?:table):boolean?, string?
+---@field verify_checksum fun(pkg:table):boolean, string?
+---@field decode_payload fun(pkg:table):table?, string?
+---@field to_registry_full_config fun(pkg:table):table?, string?
+---@field model_structure_template fun(kind?:string):table
+---@field encode_pseudocode fun(value:table):string
+---@field decode_pseudocode fun(source:string):table
+
+---@class MimirMPKLayersModule
+---@field available_layer_types fun():string[]
+---@field infer_layer_type fun(layer_name:string):string
+---@field canonical_layer_type fun(raw_type:string, params?:table):string?, string?
+---@field predict_params_count fun(layer_type:string, params?:table, context?:table):integer, string
+---@field normalize_graph_in_place fun(model_structure:table, opts?:table):boolean, string?
 
 --=============================================================================
 -- Pipeline API (optionnel)

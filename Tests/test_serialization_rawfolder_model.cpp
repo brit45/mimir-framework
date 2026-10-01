@@ -100,6 +100,25 @@ int main() {
         modelA->setEncoder(enc);
         modelA->setHasEncoder(true);
 
+        if (std::string(c.expected_tag) == "F32") {
+            Optimizer optimizer;
+            optimizer.type = OptimizerType::ADAFACTOR;
+            optimizer.step = 17;
+            optimizer.adafactor_clip_threshold = 1.25f;
+            optimizer.adafactor_decay_rate = -0.7f;
+            optimizer.adafactor_eps2 = 2e-3f;
+            optimizer.adafactor_beta1 = 0.8f;
+            optimizer.adafactor_scale_parameter = false;
+            optimizer.adafactor_relative_step = true;
+            size_t moment_count = 0;
+            for (const auto& layer : modelA->getLayers()) moment_count += layer.getWeightsSize();
+            optimizer.m.assign(moment_count, 0.1f);
+            optimizer.v.assign(moment_count, 0.3f);
+            optimizer.m[1] = 0.2f;
+            optimizer.v[1] = 0.4f;
+            modelA->setSerializedOptimizer(std::move(optimizer));
+        }
+
         const std::filesystem::path dir = tmp / (std::string("mimir_test_rawfolder_") + c.expected_tag);
         std::filesystem::remove_all(dir, ec);
 
@@ -107,9 +126,16 @@ int main() {
         sopts.format = CheckpointFormat::RawFolder;
         sopts.save_tokenizer = true;
         sopts.save_encoder = true;
+        sopts.save_optimizer = std::string(c.expected_tag) == "F32";
 
         std::string err;
         TASSERT_TRUE(save_checkpoint(*modelA, dir.string(), sopts, &err));
+
+        {
+            const json architecture = read_json_file(dir / "model" / "architecture.json");
+            TASSERT_TRUE(!architecture.contains("image_width"));
+            TASSERT_TRUE(!architecture.contains("image_height"));
+        }
 
         // Metadata JSON should advertise expected dtype on at least one weights tensor.
         {
@@ -138,6 +164,7 @@ int main() {
         lopts.strict_mode = true;
         lopts.load_tokenizer = true;
         lopts.load_encoder = true;
+        lopts.load_optimizer = std::string(c.expected_tag) == "F32";
 
         TASSERT_TRUE(load_checkpoint(*modelB, dir.string(), lopts, &err));
 
@@ -148,6 +175,20 @@ int main() {
         TASSERT_TRUE(modelB->modelConfig.contains("type"));
         TASSERT_TRUE(modelB->getEncoder().dim == modelA->getEncoder().dim);
         TASSERT_TRUE(!modelB->getEncoder().token_embeddings.empty());
+
+        if (std::string(c.expected_tag) == "F32") {
+            const Optimizer* optimizer = modelB->getSerializedOptimizer();
+            TASSERT_TRUE(optimizer != nullptr);
+            TASSERT_TRUE(optimizer->type == OptimizerType::ADAFACTOR);
+            TASSERT_TRUE(optimizer->step == 17);
+            TASSERT_NEAR(optimizer->adafactor_clip_threshold, 1.25f, 1e-6f);
+            TASSERT_NEAR(optimizer->adafactor_decay_rate, -0.7f, 1e-6f);
+            TASSERT_NEAR(optimizer->adafactor_eps2, 2e-3f, 1e-8f);
+            TASSERT_NEAR(optimizer->adafactor_beta1, 0.8f, 1e-6f);
+            TASSERT_TRUE(!optimizer->adafactor_scale_parameter);
+            TASSERT_TRUE(optimizer->adafactor_relative_step);
+            TASSERT_TRUE(optimizer->m.size() == modelA->getSerializedOptimizer()->m.size() && optimizer->v.size() == modelA->getSerializedOptimizer()->v.size());
+        }
 
         // Weights should match (within dtype quantization error if any).
         TASSERT_TRUE(compare_model_weights(*modelA, *modelB, c.eps) == 0);

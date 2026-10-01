@@ -30,6 +30,10 @@ public:
         Mimir::TypedTensor& output
     ) override;
 
+    bool mergeBranches(const std::vector<float>& left,
+                       const std::vector<float>& right,
+                       std::vector<float>& output, const Layer& layer) override;
+
     bool forwardLayer(
         const std::vector<const std::vector<float>*>& inputs,
         std::vector<std::vector<float>>& outputs,
@@ -37,8 +41,15 @@ public:
         bool training
     ) override;
 
+    bool forwardLayerWithContext(
+        const std::vector<const std::vector<float>*>& inputs,
+        std::vector<std::vector<float>>& outputs, const Layer& layer, bool training,
+        const RuntimeForwardContext& context = {}) override;
+
     bool supportsForwardLayerType(LayerType type) const override;
     bool supportsBackwardLayerType(LayerType type) const override;
+    RuntimeCapabilityLevel queryForwardCapability(LayerType type) const override;
+    RuntimeCapabilityLevel queryBackwardCapability(LayerType type) const override;
 
     bool backwardLayer(
         const std::vector<const std::vector<float>*>& inputs,

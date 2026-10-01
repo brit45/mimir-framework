@@ -369,7 +369,7 @@ Les scripts d’entraînement peuvent écrire checkpoints, historique CSV, logs 
 Exemple de parsing :
 
 ```lua
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
 
 local epochs = Args.get_int(opts, "epochs", 1)

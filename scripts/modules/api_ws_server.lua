@@ -1,4 +1,4 @@
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- scripts/api_ws_server.lua
@@ -11,7 +11,7 @@ Help.auto_exit_help()
 local Args
 local opts = {}
 do
-  local ok_args, mod_or_err = pcall(dofile, "scripts/modules/args.lua")
+  local ok_args, mod_or_err = pcall(dofile, ROOTWORK.."/scripts/modules/args.lua")
   if ok_args and type(mod_or_err) == "table" and type(mod_or_err.parse) == "function" then
     Args = mod_or_err
     opts = Args.parse(arg) or {}
@@ -767,7 +767,7 @@ local function api_handle(method, path, headers, body)
       return nil
     end
 
-    -- API réelle (src/LuaScripting.cpp): set_hardware(enable: bool)
+    -- API réelle (src/scriptings/Lua/luaScripting/LuaScripting.cpp): set_hardware(enable: bool)
     -- Compat REST: accepte aussi backend="cpu"|"auto" (map en bool), mais ne choisit pas OpenCL/Vulkan spécifiquement.
     local enable = (type(json_body) == "table") and parse_bool(json_body.enable) or nil
     if enable == nil then enable = parse_bool(query.enable) end

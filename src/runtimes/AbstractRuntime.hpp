@@ -10,6 +10,46 @@
 
 struct Layer;
 
+struct RuntimeForwardContext {
+    bool skip_connections_enabled = true;
+    std::vector<uint8_t>* output_mask = nullptr;
+    bool stochastic_latent = true;
+};
+
+// State captured by a training forward, independent of backend selection.
+struct RuntimeBackwardContext {
+    bool skip_connections_enabled = true;
+    const std::vector<float>* output = nullptr;
+    const std::vector<uint8_t>* output_mask = nullptr;
+};
+
+enum class RuntimeKind : uint8_t {
+    Unknown = 0,
+    CPU,
+    Vulkan,
+    OpenCL,
+    CUDA,
+    ROCm,
+    FPGA,
+};
+
+enum class RuntimeCapabilityLevel : uint8_t {
+    Unsupported = 0,
+    HostFallback,
+    Native,
+    NativeOptimized,
+};
+
+struct RuntimeCapability {
+    RuntimeCapabilityLevel forward = RuntimeCapabilityLevel::Unsupported;
+    RuntimeCapabilityLevel backward = RuntimeCapabilityLevel::Unsupported;
+};
+
+inline bool runtimeCapabilityIsNative(const RuntimeCapabilityLevel level) {
+    return level == RuntimeCapabilityLevel::Native ||
+           level == RuntimeCapabilityLevel::NativeOptimized;
+}
+
 struct RuntimeConfig {
     // Nom du backend (ex: "CUDA", "ROCM", "VULKAN", "OPENCL").
     std::string backend;
@@ -94,6 +134,20 @@ public:
         bool training
     ) = 0;
 
+    // Complete layer semantics, shared by direct and planned dispatch.
+    virtual bool forwardLayerWithContext(
+        const std::vector<const std::vector<float>*>& inputs,
+        std::vector<std::vector<float>>& outputs, const Layer& layer, bool training,
+        const RuntimeForwardContext& context = {});
+
+    // Legacy branch merges have an explicit runtime entry point as well.
+    virtual bool mergeBranches(const std::vector<float>& left,
+                               const std::vector<float>& right,
+                               std::vector<float>& output, const Layer& layer) {
+        (void)left; (void)right; (void)output; (void)layer;
+        return false;
+    }
+
     // API backward générique. Retourne false si non supporté par ce runtime.
     // Convention:
     // - grad_outputs[0] = gradient en sortie du layer
@@ -107,10 +161,32 @@ public:
         bool training
     );
 
+    virtual bool backwardLayerWithContext(
+        const std::vector<const std::vector<float>*>& inputs,
+        const std::vector<const std::vector<float>*>& grad_outputs,
+        std::vector<std::vector<float>>& grad_inputs,
+        Layer& layer, bool training, const RuntimeBackwardContext& context);
+
     // Vote de support (sans calcul): indique si ce runtime prend en charge
     // la famille d'ops d'un LayerType donné.
     virtual bool supportsForwardLayerType(LayerType type) const;
     virtual bool supportsBackwardLayerType(LayerType type) const;
+
+    virtual RuntimeCapabilityLevel queryForwardCapability(LayerType type) const;
+    virtual RuntimeCapabilityLevel queryBackwardCapability(LayerType type) const;
+    virtual RuntimeCapabilityLevel queryForwardOperationCapability(
+        const Layer& layer,
+        const std::vector<const std::vector<float>*>& inputs,
+        bool training) const;
+    virtual RuntimeCapabilityLevel queryBackwardOperationCapability(
+        const Layer& layer,
+        const std::vector<const std::vector<float>*>& inputs,
+        const std::vector<const std::vector<float>*>& grad_outputs,
+        bool training) const;
+    RuntimeCapability queryCapability(LayerType type) const {
+        return {queryForwardCapability(type), queryBackwardCapability(type)};
+    }
+    virtual bool supportsKernelFusion(LayerType producer, LayerType consumer) const;
 
     // Routeur central: interroge les runtimes par ordre de priorité fourni.
     // Sélectionne le premier runtime initialisé qui supporte l'op.
@@ -135,5 +211,9 @@ public:
     );
 
 protected:
+    RuntimeCapabilityLevel queryConfiguredForwardOperationCapability(
+        const Layer& layer,
+        const std::vector<const std::vector<float>*>& inputs,
+        bool elementwise_requires_linear_flag) const;
     RuntimeConfig config_{};
 };

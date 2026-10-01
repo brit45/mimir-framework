@@ -29,9 +29,9 @@
 
 ---@diagnostic disable: need-check-nil, inject-field
 
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function logx(msg)
   local l = rawget(_G, "log")
@@ -71,6 +71,13 @@ end
 
 local function opt_int(k, d)
   return math.floor(opt_num(k, d))
+end
+
+local function first_defined(values, keys)
+  for _, key in ipairs(keys) do
+    if values[key] ~= nil then return values[key] end
+  end
+  return nil
 end
 
 local function clamp(x, a, b)
@@ -335,7 +342,7 @@ local function infer_cfg_from_checkpoint(ckpt_dir)
 
   -- Chemin rapide : model_config est stocké directement dans architecture.json
   -- depuis le patch VAEConv 2026-06. Contient TOUS les flags architecturaux
-  -- (use_attention, decoder_upsample, use_skip_connections, use_encoder_prior,
+  -- (resnet, attention, decoder_upsample, use_skip_connections, use_encoder_prior,
   -- resnet_max_tokens, etc.) en plus des dimensions image/latent.
   local mc = arch.model_config or arch.modelConfig
   if type(mc) == "table" and (tonumber(mc.image_w) or 0) > 0 then
@@ -351,7 +358,8 @@ local function infer_cfg_from_checkpoint(ckpt_dir)
       latent_w             = mci("latent_w"),
       latent_c             = mci("latent_c"),
       base_channels        = mci("base_channels"),
-      use_attention        = mc.use_attention,
+      resnet               = first_defined(mc, {"resnet", "use_resnet", "use_attention"}),
+      attention            = first_defined(mc, {"attention", "use_attn"}),
       resnet_max_tokens    = mc.resnet_max_tokens,
       use_skip_connections = mc.use_skip_connections,
       use_encoder_prior    = mc.use_encoder_prior,
@@ -471,7 +479,8 @@ local function infer_cfg_from_debug_json(debug_json_path)
     latent_w = latent_w,
     latent_c = latent_c,
     base_channels = base_channels,
-    use_attention = mc.use_attention,
+    resnet = first_defined(mc, {"resnet", "use_resnet", "use_attention"}),
+    attention = first_defined(mc, {"attention", "use_attn"}),
     resnet_max_tokens = mc.resnet_max_tokens,
     use_skip_connections = mc.use_skip_connections,
     use_encoder_prior = mc.use_encoder_prior,
@@ -604,7 +613,8 @@ local function infer_cfg_from_safetensors(st_path)
     latent_w = latent_w,
     latent_c = latent_c,
     base_channels = base_channels,
-    use_attention = mc.use_attention,
+    resnet = first_defined(mc, {"resnet", "use_resnet", "use_attention"}),
+    attention = first_defined(mc, {"attention", "use_attn"}),
     resnet_max_tokens = mc.resnet_max_tokens,
     use_skip_connections = mc.use_skip_connections,
     use_encoder_prior = mc.use_encoder_prior,
@@ -806,7 +816,7 @@ if inferred then
     "image_w", "image_h", "image_c",
     "latent_h", "latent_w", "latent_c", "base_channels",
     -- flags architecturaux (depuis model_config, patch 2026-06)
-    "use_attention", "resnet_max_tokens",
+    "resnet", "attention", "resnet_max_tokens",
     "use_skip_connections", "use_encoder_prior", "decoder_upsample",
   }
   for _, k in ipairs(cfg_fields) do
@@ -829,11 +839,11 @@ if opts["latent-c"] then cfg.latent_c = opt_int("latent-c", cfg.latent_c) end
 if opts["base-channels"] then cfg.base_channels = opt_int("base-channels", cfg.base_channels) end
 cfg.latent_dim = cfg.latent_h * cfg.latent_w * cfg.latent_c
 
-logx(string.format("[test_vae_conv_generate] cfg image=%dx%dx%d latent=%dx%dx%d base=%d use_attn=%s skip=%s enc_prior=%s upsample=%s",
+logx(string.format("[test_vae_conv_generate] cfg image=%dx%dx%d latent=%dx%dx%d base=%d attention=%s skip=%s enc_prior=%s upsample=%s",
   cfg.image_w, cfg.image_h, cfg.image_c,
   cfg.latent_h, cfg.latent_w, cfg.latent_c,
   cfg.base_channels,
-  tostring(cfg.use_attention),
+  tostring(cfg.attention),
   tostring(cfg["use_skip_connections"]),
   tostring(cfg["use_encoder_prior"]),
   tostring(cfg.decoder_upsample)))

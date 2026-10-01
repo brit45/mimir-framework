@@ -5,9 +5,11 @@
 -- Usage:
 --   ./bin/mimir --lua scripts/tools/load_mpk.lua -- --in exports/model.mpk --create
 
-local Args = dofile("scripts/modules/args.lua")
-local MPK = dofile("scripts/modules/mpk.lua")
-local MPKLayers = dofile("scripts/modules/mpk_layers.lua")
+dofile(ROOTWORK.."/scripts/modules/mpk_help.lua").show("load_mpk")
+
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
+local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")
 
 local function log(...)
   local out = {}
@@ -22,27 +24,6 @@ local function die(msg)
   os.exit(1)
 end
 
-local function print_usage()
-  log("Usage:")
-  log("  mimir --lua scripts/tools/load_mpk.lua -- --in <file.mpk> [--create]")
-  log("")
-  log("Options:")
-  log("  --in <path.mpk>      MPK file path (required)")
-  log("  --create             Create model via Mimir.Model.create_from_config")
-  log("  --no-create          Only inspect/decode MPK")
-  log("  --show-config        Print decoded base config JSON")
-  log("  --apply-graph        Apply model_structure.graph nodes dynamically (push_layer + set_layer_io)")
-  log("  --replace-layers     Clear existing model layers before graph apply (default: true)")
-  log("  --no-replace-layers  Append graph layers without clearing")
-  log("  --allocate           Allocate graph parameters after apply (default: true)")
-  log("  --no-allocate        Keep the reconstructed graph unallocated")
-  log("  --init <method>      Initialize new graph weights (default: xavier; none disables)")
-  log("  --seed <integer>     Initialization seed (default: 0)")
-  log("  --allow-non-registry If registry creation fails, fallback to create_empty + graph import (default: true)")
-  log("  --no-allow-non-registry Disable fallback mode")
-  log("  --verify-only        Validate checksum/header and exit")
-  log("  --help               Show this help")
-end
 
 local function is_table(v)
   return type(v) == "table"
@@ -106,10 +87,6 @@ local function apply_graph(decoded, replace_layers)
 end
 
 local opts = Args.parse(arg) or {}
-if Args.has(opts, "help") then
-  print_usage()
-  return
-end
 
 local in_path = Args.get_str(opts, "in", "")
 if in_path == "" then

@@ -125,76 +125,12 @@ namespace Autograd {
         return grad;
     }
     
-    // Gradient de LayerNorm
-    inline std::vector<float> layernorm_backward(const std::vector<float>& grad_output,
-                                                  const std::vector<float>& input,
-                                                  const std::vector<float>& normalized) {
-        if (grad_output.size() != input.size() || normalized.size() != input.size()) {
-            throw std::invalid_argument("Autograd::layernorm_backward: size mismatch");
-        }
-        size_t n = input.size();
-        if (n == 0) {
-            return {};
-        }
-        
-        // Calculer mean et std du forward pass
-        float mean = 0.0f;
-        #pragma omp simd reduction(+:mean)
-        for (size_t i = 0; i < n; ++i) mean += input[i];
-        mean /= n;
-        
-        float var = 0.0f;
-        #pragma omp simd reduction(+:var)
-        for (size_t i = 0; i < n; ++i) {
-            float diff = input[i] - mean;
-            var += diff * diff;
-        }
-        var /= n;
-        float std = std::sqrt(var + 1e-5f);
-        
-        // Gradient
-        std::vector<float> grad_input(n);
-        float grad_var = 0.0f;
-        float grad_mean = 0.0f;
-        
-        #pragma omp simd reduction(+:grad_var)
-        for (size_t i = 0; i < n; ++i) {
-            grad_var += grad_output[i] * (input[i] - mean);
-        }
-        grad_var *= -0.5f / (std * std * std);
-        
-        #pragma omp simd reduction(+:grad_mean)
-        for (size_t i = 0; i < n; ++i) {
-            grad_mean += grad_output[i] * (-1.0f / std);
-            grad_mean += grad_var * (-2.0f * (input[i] - mean) / n);
-        }
-        
-        #pragma omp simd
-        for (size_t i = 0; i < n; ++i) {
-            grad_input[i] = grad_output[i] / std;
-            grad_input[i] += grad_var * (2.0f * (input[i] - mean) / n);
-            grad_input[i] += grad_mean / n;
-        }
-        
-        return grad_input;
-    }
-    
-    // Gradient de GELU
-    inline float gelu_backward(float x, float grad_output) {
-        const float sqrt_2_pi = 0.7978845608f;
-        const float coeff = 0.044715f;
-        
-        float x_cubed = x * x * x;
-        float tanh_arg = sqrt_2_pi * (x + coeff * x_cubed);
-        float tanh_val = std::tanh(tanh_arg);
-        
-        float sech_sq = 1.0f - tanh_val * tanh_val;
-        float dtanh = sqrt_2_pi * (1.0f + 3.0f * coeff * x * x) * sech_sq;
-        
-        float dgelu = 0.5f * (1.0f + tanh_val) + 0.5f * x * dtanh;
-        
-        return grad_output * dgelu;
-    }
+    // Compatibility entry points. Layer derivatives are dispatched to runtimes;
+    // configure RuntimeRouter (normally through Model) before using these helpers.
+    std::vector<float> layernorm_backward(const std::vector<float>& grad_output,
+                                         const std::vector<float>& input,
+                                         const std::vector<float>& normalized);
+    float gelu_backward(float x, float grad_output);
 
     inline float sigmoid(float x) {
         if (x >= 0.0f) {
@@ -216,8 +152,5 @@ namespace Autograd {
         return true;
     }
     
-    // Gradient de Residual Connection: grad passe tel quel
-    inline std::vector<float> residual_backward(const std::vector<float>& grad_output) {
-        return grad_output; // Le gradient se propage directement
-    }
+    std::vector<float> residual_backward(const std::vector<float>& grad_output);
 }

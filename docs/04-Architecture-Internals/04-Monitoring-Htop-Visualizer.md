@@ -8,7 +8,6 @@ Comprendre le fonctionnement interne exact des composants runtime.
 >
 > Connaître les bases C++ et la structure du dépôt.
 
-
 Cette page documente la stack “monitoring” côté C++.
 
 ## Sur cette page
@@ -19,7 +18,7 @@ Cette page documente la stack “monitoring” côté C++.
 - [HtopDisplay (UI terminal)](#htopdisplay-ui-terminal)
 - [Visualizer (SFML, optionnel)](#visualizer-sfml-optionnel)
 - [AsyncMonitor](#asyncmonitor)
-- [Où c’est piloté depuis Lua ?](#où-cest-piloté-depuis-lua)
+- [Pilotage depuis Lua](#pilotage-depuis-lua)
 - [Étapes suivantes](#étapes-suivantes)
 
 ## Source de vérité (C++)
@@ -127,7 +126,9 @@ La logique est best-effort (`maybeLoadArchitecture()`), pensée pour améliorer 
 
 Note importante:
 
-- Quand `Visualizer` est actif, `AsyncMonitor::start()` **désactive** le CSV côté htop (`htop_->setCsvEnabled(!enable_viz)`) pour limiter les écritures concurrentes.
+- `AsyncMonitor::configureMetricsCsv()` maintient un export unique : Viz est
+  prioritaire lorsqu'elle est active, et htop sert de repli lorsqu'il tourne
+  seul. Le chemin et l'état d'activation sont communs aux deux interfaces.
 
 ## `AsyncMonitor`
 
@@ -159,7 +160,7 @@ Note importante:
 - Les images peuvent être volumineuses: garder des copies “pending” a un coût.
 - Les métriques sont “dernier état connu”: pas d’historique côté `AsyncMonitor` (hormis ce que visualizer/htop accumulent).
 
-## Où c’est piloté depuis Lua ?
+## Pilotage depuis Lua
 
 La mise en place/activation du monitoring est exposée côté Lua via `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (voir la doc API: `docs/03-API-Reference/15-Viz-Htop.md`).
 

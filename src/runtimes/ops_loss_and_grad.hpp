@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <string>
 #include <vector>
 
 namespace RuntimeLossGrad {
@@ -14,7 +16,30 @@ struct LossWithGrad {
     std::vector<float> grad;
 };
 
+struct PixelLossOptions {
+    float huber_delta = 1.0f;
+    float charbonnier_eps = 1e-3f;
+    float gaussian_nll_sigma = 1.0f;
+};
+
 float sigmoid_scalar(float x);
+
+std::string canonical_pixel_loss_name(std::string name);
+
+LossWithGrad pixel_loss_and_grad(
+    const float* pred,
+    const float* target,
+    size_t count,
+    const std::string& loss_type,
+    const PixelLossOptions& options = {}
+);
+
+LossWithGrad pixel_loss_and_grad(
+    const std::vector<float>& pred,
+    const std::vector<float>& target,
+    const std::string& loss_type,
+    const PixelLossOptions& options = {}
+);
 
 GlobalSSIM ssim_global_hwc(
     const std::vector<float>& pred,

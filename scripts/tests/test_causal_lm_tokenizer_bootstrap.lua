@@ -1,4 +1,4 @@
-local Bootstrap = dofile("scripts/modules/causal_lm_tokenizer.lua")
+local Bootstrap = dofile(ROOTWORK.."/scripts/modules/causal_lm_tokenizer.lua")
 local path = "/tmp/mimir_causal_lm_tokenizer_bootstrap.json"
 os.remove(path)
 

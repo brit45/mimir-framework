@@ -6,6 +6,7 @@
 
 #include "Layers.hpp"
 #include "runtimes/LayerOps.hpp"
+#include "runtimes/NativeBackward.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -100,6 +101,72 @@ bool VulkanRuntime::supportsForwardLayerType(const LayerType type) const {
     }
 }
 
+RuntimeCapabilityLevel VulkanRuntime::queryForwardCapability(const LayerType type) const {
+#ifndef ENABLE_VULKAN
+    return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::HostFallback
+                                          : RuntimeCapabilityLevel::Unsupported;
+#else
+    switch (type) {
+        case LayerType::Linear:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::Conv2d:
+        case LayerType::ConvTranspose2d:
+        case LayerType::Add:
+        case LayerType::Multiply:
+        case LayerType::ReLU:
+        case LayerType::SiLU:
+        case LayerType::GELU:
+        case LayerType::Sigmoid:
+        case LayerType::Tanh:
+            return RuntimeCapabilityLevel::NativeOptimized;
+        case LayerType::Subtract:
+        case LayerType::Divide:
+        case LayerType::LeakyReLU:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+            return RuntimeCapabilityLevel::Native;
+        default:
+            return RuntimeCapabilityLevel::Unsupported;
+    }
+#endif
+}
+
+bool VulkanRuntime::supportsBackwardLayerType(const LayerType type) const {
+#ifdef ENABLE_VULKAN
+    return !config_.disabled && NativeBackward::supports(type);
+#else
+    (void)type;
+    return false;
+#endif
+}
+
+RuntimeCapabilityLevel VulkanRuntime::queryBackwardCapability(const LayerType type) const {
+    return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::Native : RuntimeCapabilityLevel::Unsupported;
+}
+
+RuntimeCapabilityLevel VulkanRuntime::queryBackwardOperationCapability(
+    const Layer& layer, const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs, bool training) const {
+    if (config_.disabled || !config_.linear_enabled || inputs.empty() || !inputs[0] ||
+        grad_outputs.size()!=1 || !grad_outputs[0]) return RuntimeCapabilityLevel::Unsupported;
+    if (!runtimeCapabilityIsNative(queryConfiguredForwardOperationCapability(layer,inputs,true)))
+        return RuntimeCapabilityLevel::Unsupported;
+    (void)training;
+    return queryBackwardCapability(layer.type_enum);
+}
+
+RuntimeCapabilityLevel VulkanRuntime::queryForwardOperationCapability(
+    const Layer& layer,
+    const std::vector<const std::vector<float>*>& inputs,
+    bool training
+) const {
+    (void)training;
+    return queryConfiguredForwardOperationCapability(layer, inputs, false);
+}
+
 bool VulkanRuntime::linearForward(
     const float* input,
     const float* weights,
@@ -115,6 +182,35 @@ bool VulkanRuntime::linearForward(
 #else
     if (!isInitialized() || !impl_) return false;
     return impl_->engine.linearForward(input, weights, bias_or_null, output, batch, in_f, out_f);
+#endif
+}
+
+bool VulkanRuntime::unaryChainForwardResident(
+    const float* input,
+    float* output,
+    int elements,
+    const std::vector<LayerType>& operations
+) {
+#ifndef ENABLE_VULKAN
+    (void)input; (void)output; (void)elements; (void)operations;
+    return false;
+#else
+    if (!isInitialized() || !impl_ || !input || !output || elements <= 0 || operations.empty()) {
+        return false;
+    }
+    std::vector<int> op_codes;
+    op_codes.reserve(operations.size());
+    for (const LayerType type : operations) {
+        switch (type) {
+            case LayerType::ReLU: op_codes.push_back(0); break;
+            case LayerType::SiLU: op_codes.push_back(1); break;
+            case LayerType::GELU: op_codes.push_back(2); break;
+            case LayerType::Sigmoid: op_codes.push_back(3); break;
+            case LayerType::Tanh: op_codes.push_back(4); break;
+            default: return false;
+        }
+    }
+    return impl_->engine.unaryChainForwardResident(input, output, elements, op_codes);
 #endif
 }
 
@@ -353,8 +449,8 @@ bool VulkanRuntime::forwardLayer(
             if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op)) return false;
 
             outputs.resize(1);
-            RuntimeLayerOps::binaryForwardHost(A, B, outputs[0], op);
-            return true;
+            outputs[0].resize(A.size());
+            return impl_->engine.binaryForward(A.data(),B.data(),outputs[0].data(),static_cast<int>(A.size()),op);
         }
         case LayerType::ReLU: {
             if (inputs.empty() || !inputs[0]) return false;
@@ -416,11 +512,24 @@ bool VulkanRuntime::forwardLayer(
             if (!RuntimeLayerOps::resolveUnaryOp(layer.type_enum, layer, op, alpha)) return false;
 
             outputs.resize(1);
-            RuntimeLayerOps::unaryForwardHost(A, outputs[0], op, alpha);
-            return true;
+            outputs[0].resize(A.size());
+            return impl_->engine.binaryForward(A.data(),A.data(),outputs[0].data(),static_cast<int>(A.size()),10+op,alpha);
         }
         default:
             return false;
     }
+#endif
+}
+
+bool VulkanRuntime::backwardLayer(
+    const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,
+    std::vector<std::vector<float>>& grad_inputs, Layer& layer, bool training) {
+#ifdef ENABLE_VULKAN
+    if (!isInitialized() || !runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training))) return false;
+    return NativeBackward::execute(impl_->engine,inputs,grad_outputs,grad_inputs,layer);
+#else
+    (void)inputs; (void)grad_outputs; (void)grad_inputs; (void)layer; (void)training;
+    return false;
 #endif
 }

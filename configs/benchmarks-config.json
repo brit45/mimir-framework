@@ -1,13 +1,13 @@
 {
-  "$schema": "./configs/conf.schema.json",
+  "$schema": "conf.schema.json",
   "description": "Lance les benchmarks Mimir dans l'ordre recommandé et dans des processus isolés.",
 
   "_doc": {
-    "usage": "./bin/mimir --conf benchmarks-config.json [--run <suite>]",
+    "usage": "./bin/mimir --conf configs/benchmarks-config.json [--run <suite>]",
     "suites": {
-      "all": "Tous les benchmarks, du contrôle API au stress test (par défaut).",
+      "all": "Tous les benchmarks, du contrôle API au stress test.",
       "smoke": "Contrôles rapides de l'API, du spill mémoire et de NMS.",
-      "core": "Benchmarks spécialisés et globaux, sans stress test.",
+      "core": "Benchmarks spécialisés et globaux, sans stress test (par défaut).",
       "stress": "Stress test uniquement."
     },
     "ordre": [
@@ -22,7 +22,7 @@
       "Les données utilisées sont synthétiques; aucun dataset n'est lu.",
       "La suite complète peut consommer plusieurs gigaoctets de RAM.",
       "MIMIR_BIN peut désigner un autre exécutable Mimir.",
-      "La section env est documentaire et n'exporte pas les variables."
+      "La section env est appliquée par Mimir et héritée par les processus enfants."
     ]
   },
 
@@ -46,7 +46,7 @@
     "scripts": [
       {
         "script": "scripts/benchmarks/run_suite.lua",
-        "args": ["--suite", "all", "--keep-going"]
+        "args": ["--suite", "core", "--keep-going"]
       }
     ]
   },

@@ -126,7 +126,7 @@ C'est le flux moderne via `scripts/modules/pipeline.lua`.
 Pattern simple :
 
 ```lua
-local P = dofile("scripts/modules/pipeline.lua")
+local P = dofile(ROOTWORK.."/scripts/modules/pipeline.lua")
 
 -- Créer un pipeline générique basé sur le registre.
 local pipe, err = P.FromRegistry("my_new_model")
@@ -201,7 +201,7 @@ Exemple de sortie réelle (commande complète) :
 ```text
 ./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a -l vae_conv -p --layers --stats
 ╔════════════════════════════════════════╗
-║       Mímir Framework v3.1.0           ║
+║       Mímir Framework v3.5.0           ║
 ║     Deep Learning Architectures        ║
 ╚════════════════════════════════════════╝
 
@@ -309,8 +309,8 @@ Test 4: Structure legacy désactivée... ✅ Structure legacy désactivée (conf
 | stochastic_latent    | false            | boolean |
 | text_cond            | false            | boolean |
 | text_d_model         | 256              | number  |
-| use_attention        | true             | boolean |
-| use_attn             | false            | boolean |
+| resnet               | true             | boolean |
+| attention            | false            | boolean |
 | use_encoder_prior    | false            | boolean |
 | use_skip_connections | false            | boolean |
 | vocab_size           | 32000            | number  |

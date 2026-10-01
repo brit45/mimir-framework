@@ -134,8 +134,8 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     // Le cœur reste convolutionnel (Conv2d / ConvTranspose2d / SiLU / Add /
     // UpsampleNearest / Reparameterize). On peut en plus activer des blocs
     // ResNet et SelfAttention spatiale (H*W tokens, embed_dim=channels).
-    const bool use_resnet       = cfg.use_attention;
-    const bool use_attn         = cfg.use_attn;
+    const bool use_resnet       = cfg.resnet;
+    const bool attention         = cfg.attention;
     const bool use_skip_conn    = cfg.use_skip_connections;
     const bool use_enc_prior    = cfg.use_encoder_prior;
     // Normalisation configurable. Le décodeur reprend la normalisation encodeur
@@ -145,6 +145,10 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     const std::string dec_norm_str = cfg.dec_norm.empty() ? enc_norm_str : cfg.dec_norm;
     const int dec_gn_groups_val    = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
+    if (dec_upsample != "conv_transpose" && dec_upsample != "nearest_conv" &&
+        dec_upsample != "bilinear_conv" && dec_upsample != "pixel_shuffle") {
+        throw std::runtime_error("VAEConvModel: unsupported decoder_upsample '" + dec_upsample + "'");
+    }
     const int resnet_max_tok       = cfg.resnet_max_tokens;  // 0 = no gate
     const int attn_max_tok         = cfg.attn_max_tokens;    // 0 = no gate
     int attn_heads                 = std::max(1, cfg.attn_heads);
@@ -156,7 +160,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     };
 
     auto attn_gate = [&](int h, int w) -> bool {
-        if (!use_attn) return false;
+        if (!attention) return false;
         if (attn_max_tok <= 0) return true;
         return (h * w) <= attn_max_tok;
     };
@@ -174,7 +178,11 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         ++downsamples;
     }
     if (down_h != LH || down_w != LW) {
-        throw std::runtime_error("VAEConvModel: cannot reach latent_h/latent_w with /2 downsamples");
+        throw std::runtime_error(
+            "VAEConvModel: cannot reach latent " + std::to_string(LW) + "x" + std::to_string(LH) +
+            " from image " + std::to_string(W) + "x" + std::to_string(H) +
+            " with identical /2 downsamples (ratios width=" + std::to_string(W / LW) +
+            ", height=" + std::to_string(H / LH) + ")");
     }
 
     const int image_dim = W * H * C;
@@ -209,8 +217,8 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["decoder_upsample"] = dec_upsample;
     model.modelConfig["use_skip_connections"] = use_skip_conn;
     model.modelConfig["use_encoder_prior"] = use_enc_prior;
-    model.modelConfig["use_attention"] = use_resnet;
-    model.modelConfig["use_attn"] = use_attn;
+    model.modelConfig["resnet"] = use_resnet;
+    model.modelConfig["attention"] = attention;
     model.modelConfig["attn_heads"] = attn_heads;
     model.modelConfig["attn_max_tokens"] = attn_max_tok;
     model.modelConfig["resnet_max_tokens"] = resnet_max_tok;
@@ -265,10 +273,11 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
                           const std::string& out,
                           int channels,
                           int in_h,
-                          int in_w) {
+                          int in_w,
+                          const std::string& layer_type) {
         const int out_h = std::max(1, in_h * 2);
         const int out_w = std::max(1, in_w * 2);
-        model.push(name, "UpsampleNearest", 0);
+        model.push(name, layer_type, 0);
         if (auto* U = model.getLayerByName(name)) {
             U->inputs = {in};
             U->output = out;
@@ -279,6 +288,30 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
             U->output_width = out_w;
             U->out_h = out_h;
             U->out_w = out_w;
+            U->scale_h = 2.0f;
+            U->scale_w = 2.0f;
+        }
+        return out;
+    };
+
+    auto pixel_shuffle2x = [&](const std::string& name,
+                               const std::string& in,
+                               const std::string& out,
+                               int out_channels,
+                               int in_h,
+                               int in_w) {
+        model.push(name, "PixelShuffle", 0);
+        if (auto* U = model.getLayerByName(name)) {
+            U->inputs = {in};
+            U->output = out;
+            U->in_channels = out_channels * 4;
+            U->out_channels = out_channels;
+            U->input_height = in_h;
+            U->input_width = in_w;
+            U->output_height = in_h * 2;
+            U->output_width = in_w * 2;
+            U->out_h = in_h * 2;
+            U->out_w = in_w * 2;
             U->scale_h = 2.0f;
             U->scale_w = 2.0f;
         }
@@ -611,11 +644,18 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         const std::string b = "vae_conv/dec/up" + std::to_string(i + 1);
         const int in_h = dy_h;
         const int in_w = dy_w;
-        if (dec_upsample == "nearest_conv") {
-            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+        if (dec_upsample == "nearest_conv" || dec_upsample == "bilinear_conv") {
+            const std::string layer_type = dec_upsample == "nearest_conv"
+                ? "UpsampleNearest" : "UpsampleBilinear";
+            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w, layer_type);
             dy_h = in_h * 2;
             dy_w = in_w * 2;
             y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c, dy_h, dy_w, 3, 1, 1, true);
+        } else if (dec_upsample == "pixel_shuffle") {
+            y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c * 4, in_h, in_w, 3, 1, 1, false);
+            y = pixel_shuffle2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+            dy_h = in_h * 2;
+            dy_w = in_w * 2;
         } else {
             y = deconv2d(b + "/up", y, b + "/up_y", dy_c, dy_c, in_h, in_w, 4, 2, 1, true);
             dy_h = in_h * 2;
@@ -625,6 +665,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         if (use_skip_conn && i < static_cast<int>(enc_skips.size())) {
             model.push(b + "/skip_cat", "Concat", 0);
             if (auto* L = model.getLayerByName(b + "/skip_cat")) {
+                L->skip_input_index = 1;
                 L->inputs      = {y, enc_skips[static_cast<size_t>(i)]};
                 L->output      = b + "/sc";
                 L->concat_axis = 0;
@@ -661,7 +702,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         P->permute_dims = {1, 2, 0};
     }
 
-    // Projections multi-modales optionnelles pour trainStepVAEText.
+    // Projections multi-modales optionnelles pour trainStep.
     if (text_cond) {
         model.push("vae_conv/txt/tok_emb", "Embedding",
                    static_cast<size_t>(vocab_size) * static_cast<size_t>(text_d_model));
@@ -718,6 +759,29 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     }
 }
 
+std::optional<Model::TrainStepResult> VAEConvModel::trainStep(const TrainStepRequest& request) {
+    if (!request.optimizer) {
+        return std::nullopt;
+    }
+
+    const std::vector<float>* input = nullptr;
+    if (const auto it = request.float_inputs.find("__input__"); it != request.float_inputs.end() && it->second) {
+        input = it->second;
+    } else if (const auto it = request.float_inputs.find("image"); it != request.float_inputs.end() && it->second) {
+        input = it->second;
+    }
+    if (!input) return std::nullopt;
+
+    if (const auto it = request.int_inputs.find("text_ids"); it != request.int_inputs.end() && it->second) {
+        return vae_training_.trainText(*this, *input, *it->second, request.target,
+                           *request.optimizer, request.learning_rate,
+                           request.mode, request.grad_scale);
+    }
+        return vae_training_.trainImage(*this, *input, request.target,
+                        *request.optimizer, request.learning_rate,
+                        request.mode, request.grad_scale);
+}
+
 void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
 
     model.getMutableLayers().clear();
@@ -745,7 +809,11 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         ++downsamples;
     }
     if (down_h != LH || down_w != LW) {
-        throw std::runtime_error("VAEConvModel(decode): cannot reach latent_h/latent_w with /2 downsamples");
+        throw std::runtime_error(
+            "VAEConvModel(decode): cannot reach latent " + std::to_string(LW) + "x" + std::to_string(LH) +
+            " from image " + std::to_string(W) + "x" + std::to_string(H) +
+            " with identical /2 downsamples (ratios width=" + std::to_string(W / LW) +
+            ", height=" + std::to_string(H / LH) + ")");
     }
 
     const int image_dim = W * H * C;
@@ -756,6 +824,10 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         cfg.dec_norm.empty() ? (cfg.enc_norm.empty() ? "none" : cfg.enc_norm) : cfg.dec_norm;
     const int dec_gn_groups_val = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
     const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
+    if (dec_upsample != "conv_transpose" && dec_upsample != "nearest_conv" &&
+        dec_upsample != "bilinear_conv" && dec_upsample != "pixel_shuffle") {
+        throw std::runtime_error("VAEConvModel(decode): unsupported decoder_upsample '" + dec_upsample + "'");
+    }
 
     model.modelConfig["task"] = "vae_conv_decoder";
     model.modelConfig["image_w"] = W;
@@ -822,10 +894,11 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
                           const std::string& out,
                           int channels,
                           int in_h,
-                          int in_w) {
+                          int in_w,
+                          const std::string& layer_type) {
         const int out_h = std::max(1, in_h * 2);
         const int out_w = std::max(1, in_w * 2);
-        model.push(name, "UpsampleNearest", 0);
+        model.push(name, layer_type, 0);
         if (auto* U = model.getLayerByName(name)) {
             U->inputs = {in};
             U->output = out;
@@ -836,6 +909,30 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
             U->output_width = out_w;
             U->out_h = out_h;
             U->out_w = out_w;
+            U->scale_h = 2.0f;
+            U->scale_w = 2.0f;
+        }
+        return out;
+    };
+
+    auto pixel_shuffle2x = [&](const std::string& name,
+                               const std::string& in,
+                               const std::string& out,
+                               int out_channels,
+                               int in_h,
+                               int in_w) {
+        model.push(name, "PixelShuffle", 0);
+        if (auto* U = model.getLayerByName(name)) {
+            U->inputs = {in};
+            U->output = out;
+            U->in_channels = out_channels * 4;
+            U->out_channels = out_channels;
+            U->input_height = in_h;
+            U->input_width = in_w;
+            U->output_height = in_h * 2;
+            U->output_width = in_w * 2;
+            U->out_h = in_h * 2;
+            U->out_w = in_w * 2;
             U->scale_h = 2.0f;
             U->scale_w = 2.0f;
         }
@@ -886,9 +983,9 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     };
 
     // Options blocs optionnels
-    const bool use_resnet_dec  = cfg.use_attention;
+    const bool use_resnet_dec  = cfg.resnet;
     const int resnet_max_dec   = cfg.resnet_max_tokens;
-    const bool use_attn_dec    = cfg.use_attn;
+    const bool use_attn_dec    = cfg.attention;
     const int attn_max_dec     = cfg.attn_max_tokens;
     int attn_heads_dec         = std::max(1, cfg.attn_heads);
     // Skip connections : si le checkpoint a été entraîné avec use_skip_connections=true,
@@ -898,9 +995,9 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     // C'est bien meilleur que bypasser skip_proj entièrement.
     const bool use_skip_dec = cfg.use_skip_connections;
     // Stocker dans modelConfig pour permettre de reconstruire une architecture identique.
-    model.modelConfig["use_attention"] = use_resnet_dec;
+    model.modelConfig["resnet"] = use_resnet_dec;
     model.modelConfig["resnet_max_tokens"] = resnet_max_dec;
-    model.modelConfig["use_attn"] = use_attn_dec;
+    model.modelConfig["attention"] = use_attn_dec;
     model.modelConfig["attn_heads"] = attn_heads_dec;
     model.modelConfig["attn_max_tokens"] = attn_max_dec;
     model.modelConfig["use_skip_connections"] = use_skip_dec;
@@ -1036,11 +1133,18 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         const std::string b = "vae_conv/dec/up" + std::to_string(i + 1);
         const int in_h = dy_h;
         const int in_w = dy_w;
-        if (dec_upsample == "nearest_conv") {
-            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+        if (dec_upsample == "nearest_conv" || dec_upsample == "bilinear_conv") {
+            const std::string layer_type = dec_upsample == "nearest_conv"
+                ? "UpsampleNearest" : "UpsampleBilinear";
+            y = upsample2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w, layer_type);
             dy_h = in_h * 2;
             dy_w = in_w * 2;
             y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c, dy_h, dy_w, 3, 1, 1, true);
+        } else if (dec_upsample == "pixel_shuffle") {
+            y = conv2d(b + "/conv", y, b + "/c", dy_c, dy_c * 4, in_h, in_w, 3, 1, 1, false);
+            y = pixel_shuffle2x(b + "/up", y, b + "/up_y", dy_c, in_h, in_w);
+            dy_h = in_h * 2;
+            dy_w = in_w * 2;
         } else {
             y = deconv2d(b + "/up", y, b + "/up_y", dy_c, dy_c, in_h, in_w, 4, 2, 1, true);
             dy_h = in_h * 2;
@@ -1065,6 +1169,7 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
             }
             model.push(b + "/skip_cat", "Concat", 0);
             if (auto* L = model.getLayerByName(b + "/skip_cat")) {
+                L->skip_input_index = 1;
                 L->inputs      = {y, zero_name + "_out"};
                 L->output      = b + "/sc";
                 L->concat_axis = 0;

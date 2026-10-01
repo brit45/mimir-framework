@@ -1,23 +1,10 @@
 #include "runtimes/cpu/CpuRuntime.hpp"
 
 #include "SIMD_Ops.hpp"
+#include "runtimes/LayerOps.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
 
 #include <cstddef>
-
-namespace {
-inline bool is_cpu_conv_layer_type(const LayerType type) {
-    switch (type) {
-        case LayerType::Conv2d:
-        case LayerType::ConvTranspose2d:
-        case LayerType::Conv1d:
-        case LayerType::DepthwiseConv2d:
-            return true;
-        default:
-            return false;
-    }
-}
-}
 
 bool CpuRuntime::initialize(const RuntimeConfig& cfg) {
     // CPU est toujours disponible; on conserve cfg pour homogénéité.
@@ -113,64 +100,34 @@ bool CpuRuntime::forwardLayer(
     return RuntimeLayerDispatch::cpu_forward_layer(inputs, outputs, layer, training);
 }
 
+bool CpuRuntime::forwardLayerWithContext(
+    const std::vector<const std::vector<float>*>& inputs,
+    std::vector<std::vector<float>>& outputs, const Layer& layer, bool training,
+    const RuntimeForwardContext& context) {
+    if (context.output_mask && (layer.type_enum == LayerType::Dropout ||
+        layer.type_enum == LayerType::Dropout2d || layer.type_enum == LayerType::AlphaDropout)) {
+        context.output_mask->clear();
+        return initialized_ && RuntimeLayerDispatch::cpu_forward_layer(inputs,outputs,layer,training,context.output_mask);
+    }
+    return AbstractRuntime::forwardLayerWithContext(inputs,outputs,layer,training,context);
+}
+
 bool CpuRuntime::supportsForwardLayerType(const LayerType type) const {
-    switch (type) {
-        case LayerType::UNKNOWN:
-            return false;
-        default:
-            break;
-    }
-
-    switch (RuntimeLayerDispatch::cpu_supports_forward_layer_type(type)) {
-        case false:
-            return false;
-        case true:
-            break;
-    }
-
-    switch (config_.conv_enabled) {
-        case true:
-            return true;
-        case false:
-            switch (is_cpu_conv_layer_type(type)) {
-                case true:
-                    return false;
-                case false:
-                    return true;
-            }
-    }
-
-    return false;
+    return RuntimeLayerDispatch::cpu_supports_forward_layer_type(type);
 }
 
 bool CpuRuntime::supportsBackwardLayerType(const LayerType type) const {
-    switch (type) {
-        case LayerType::UNKNOWN:
-            return false;
-        default:
-            break;
-    }
+    return RuntimeLayerDispatch::cpu_supports_backward_layer_type(type);
+}
 
-    switch (RuntimeLayerDispatch::cpu_supports_backward_layer_type(type)) {
-        case false:
-            return false;
-        case true:
-            break;
-    }
+RuntimeCapabilityLevel CpuRuntime::queryForwardCapability(const LayerType type) const {
+    return supportsForwardLayerType(type) ? RuntimeCapabilityLevel::Native
+                                          : RuntimeCapabilityLevel::Unsupported;
+}
 
-    switch (config_.conv_enabled) {
-        case true:
-            return true;
-        case false:
-            switch (is_cpu_conv_layer_type(type)) {
-                case true:
-                    return false;
-                case false:
-                    return true;
-            }
-    }
-
-    return false;
+RuntimeCapabilityLevel CpuRuntime::queryBackwardCapability(const LayerType type) const {
+    return supportsBackwardLayerType(type) ? RuntimeCapabilityLevel::Native
+                                           : RuntimeCapabilityLevel::Unsupported;
 }
 
 bool CpuRuntime::backwardLayer(
@@ -183,4 +140,12 @@ bool CpuRuntime::backwardLayer(
     if (!initialized_) return false;
     if (!supportsBackwardLayerType(layer.type_enum)) return false;
     return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);
+}
+
+bool CpuRuntime::mergeBranches(const std::vector<float>& left,
+                               const std::vector<float>& right,
+                               std::vector<float>& output, const Layer& layer) {
+    if (!initialized_) return false;
+    RuntimeLayerOps::branchMerge(left, right, output, layer.merge_op, true);
+    return true;
 }

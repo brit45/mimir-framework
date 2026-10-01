@@ -240,8 +240,8 @@ Sortie : `[logits(seq*vocab) || mu(latent_dim) || logvar(latent_dim) || img_proj
   "image_w": 64, "image_h": 64, "image_c": 3,
   "latent_h": 16, "latent_w": 16, "latent_c": 256,
   "base_channels": 64, "stochastic_latent": false,
-  "use_attention": true, "resnet_max_tokens": 0,
-  "use_attn": false, "attn_heads": 4, "attn_max_tokens": 0,
+  "resnet": true, "resnet_max_tokens": 0,
+  "attention": false, "attn_heads": 4, "attn_max_tokens": 0,
   "enc_norm": "groupnorm", "enc_gn_groups": 32,
   "dec_norm": "groupnorm", "dec_gn_groups": 32,
   "decoder_upsample": "conv_transpose",
@@ -262,11 +262,12 @@ Si `text_cond=true`, la sortie ajoute `img_proj[proj_dim] || txt_proj[proj_dim]`
 
 Points importants :
 
-- `use_attention` est un nom historique qui active les **ResBlocks** ;
-- `use_attn` active réellement la SelfAttention spatiale ;
+- `resnet` active les **ResBlocks** ;
+- `attention` active la SelfAttention spatiale ;
 - `attn_max_tokens=0` signifie aucune limite et peut être très coûteux ;
 - `use_encoder_prior=true` ajoute un biais latent global apprenable à `z`, sans modifier la zone `mu` de la sortie ;
 - `stochastic_latent=false` donne `z=mu`, alors que `true` active la réparamétrisation pendant l’entraînement ;
+- `decoder_upsample` accepte `nearest_conv`, `bilinear_conv`, `pixel_shuffle` et l'ancien mode `conv_transpose` ;
 - les ratios `image_h/latent_h` et `image_w/latent_w` doivent être identiques et être une puissance de deux.
 
 Guide détaillé : [VAEConv : architecture, configuration et entraînement](../02-User-Guide/14-VAEConv.md).

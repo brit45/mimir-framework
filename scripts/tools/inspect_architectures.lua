@@ -15,11 +15,16 @@
 --   --ops                   Inventorie les layer types / ops observés dans les graphes du framework
 --   --runtime               Affiche les capacités runtime exposées au Lua API
 --   -d, --dtypes            Liste les dtypes pris en charge par le framework
+--   --optimizers            Liste les algorithmes d'optimisation disponibles
+--   --recon-losses          Liste les fonctions de reconstruction disponibles
 --   --json                  Export JSON complet du registre (toutes archs + params)
 --   -h, --help              Affiche cette aide
 
 -- Les rapports doivent rester propres et sans préfixes runtime.
 -- On écrit donc directement sur stdout au lieu d'utiliser le logger Mimir.
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("inspect_architectures")
+
 local function log(...)
   local out = {}
   for i = 1, select("#", ...) do
@@ -28,8 +33,8 @@ local function log(...)
   io.stdout:write(table.concat(out, " ") .. "\n")
 end
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 -- ---------------------------------------------------------------------------
 -- Couleurs ANSI (désactivées si NO_COLOR ou sortie non-TTY)
@@ -208,6 +213,8 @@ local function parse_flags(argv)
     ops        = Args.has(opts_long, "ops"),
     ops_compact= Args.has(opts_long, "ops-compact") or Args.has(opts_long, "compact"),
     runtime    = Args.has(opts_long, "runtime"),
+    optimizers = Args.has(opts_long, "optimizers"),
+    recon_losses = Args.has(opts_long, "recon-losses"),
     json_out   = Args.has(opts_long, "json"),
     arch       = Args.get_str(opts_long, "list", nil),
     export_path= Args.get_str(opts_long, "export", nil),
@@ -235,22 +242,7 @@ local function parse_flags(argv)
 end
 
 local function print_usage()
-  log(colorize("Usage: ", C.bold) .. "mimir --lua scripts/tools/inspect_architectures.lua -- [options]")
-  log("")
-  log(colorize("Options:", C.bold, C.cyan))
-  log("  " .. colorize("-a, --show-archs", C.green) .. "        Liste les architectures disponibles (+ dtypes)")
-  log("  " .. colorize("-l, --list <arch>", C.green) .. "       Sélectionne une architecture par son nom")
-  log("  " .. colorize("-e, --export <path>", C.green) .. "     Exporte l'architecture sélectionnée")
-  log("    " .. colorize("formats", C.bold) .. ": .json -> debugJSON, / -> rawFolder, .safetensors -> safetensors")
-  log("  " .. colorize("-p, --params", C.green) .. "            Affiche les paramètres de l'archi sélectionnée")
-  log("  " .. colorize("    --layers", C.green) .. "            Affiche les layers de l'archi sélectionnée")
-  log("  " .. colorize("    --stats", C.green) .. "             Affiche les statistiques théoriques (params par layer)")
-  log("  " .. colorize("    --ops", C.green) .. "               Inventorie les layer types / ops présents dans les graphes")
-  log("  " .. colorize("    --ops-compact", C.green) .. "       Vue compacte de --ops, regroupée par famille")
-  log("  " .. colorize("    --runtime", C.green) .. "           Affiche les capacités runtime exposées au Lua API")
-  log("  " .. colorize("-d, --dtypes", C.green) .. "            Liste les dtypes pris en charge par le framework")
-  log("  " .. colorize("    --json", C.green) .. "              Export JSON complet du registre")
-  log("  " .. colorize("-h, --help", C.green) .. "              Affiche cette aide")
+  ToolHelp.print("inspect_architectures")
 end
 
 local function bool_text(v)
@@ -421,6 +413,56 @@ local function list_dtypes()
   }
   log(make_table(columns, rows))
   return dtypes
+end
+
+local OPTIMIZERS = {
+  { name = "sgd", description = "Stochastic Gradient Descent" },
+  { name = "adam", description = "Adaptive Moment Estimation" },
+  { name = "adamw", description = "Adam avec décroissance des poids découplée" },
+  { name = "lion", description = "Momentum signé avec décroissance découplée" },
+  { name = "adafactor", description = "Second moment adaptatif, clipping RMS et pas relatif" },
+  { name = "radam", description = "Adam avec variance rectifiée" },
+  { name = "nadam", description = "Adam avec momentum de Nesterov" },
+  { name = "rmsprop", description = "Moyenne mobile du carré des gradients" },
+  { name = "lamb", description = "Adam avec trust ratio par couche" },
+}
+
+local RECON_LOSSES = {
+  { name = "mse", aliases = {"l2"}, parameter = "-", description = "Erreur quadratique moyenne" },
+  { name = "mae", aliases = {"l1"}, parameter = "-", description = "Erreur absolue moyenne" },
+  { name = "huber", aliases = {"smooth_l1", "smoothl1"}, parameter = "huber_delta", description = "Perte quadratique puis linéaire" },
+  { name = "charbonnier", aliases = {}, parameter = "charbonnier_eps", description = "Approximation différentiable de L1" },
+  { name = "gaussian_nll", aliases = {"nll_gaussian", "gaussian-nll"}, parameter = "gaussian_nll_sigma", description = "Log-vraisemblance négative gaussienne" },
+  { name = "bce", aliases = {}, parameter = "-", description = "Entropie croisée binaire" },
+}
+
+local function list_optimizers()
+  log("\n" .. colorize("* Algorithmes d'optimisation disponibles :", C.bold, C.blue))
+  log(make_table({
+    { key = "name", title = "Optimiseur", align = "left", color = C.cyan, max = 16 },
+    { key = "description", title = "Description", align = "left", max = 64 },
+  }, OPTIMIZERS))
+  return OPTIMIZERS
+end
+
+local function list_recon_losses()
+  log("\n" .. colorize("* Recon-loss disponibles :", C.bold, C.blue))
+  local rows = {}
+  for _, loss in ipairs(RECON_LOSSES) do
+    rows[#rows + 1] = {
+      name = loss.name,
+      aliases = #loss.aliases > 0 and table.concat(loss.aliases, ", ") or "-",
+      parameter = loss.parameter,
+      description = loss.description,
+    }
+  end
+  log(make_table({
+    { key = "name", title = "Recon-loss", align = "left", color = C.cyan, max = 20 },
+    { key = "aliases", title = "Alias acceptés", align = "left", color = C.yellow, max = 32 },
+    { key = "parameter", title = "Paramètre", align = "left", color = C.green, max = 24 },
+    { key = "description", title = "Description", align = "left", max = 64 },
+  }, rows))
+  return RECON_LOSSES
 end
 
 local function show_params(arch)
@@ -1128,6 +1170,8 @@ local function export_json()
   end
   io.write(to_json({
     registry = registry,
+    optimizers = OPTIMIZERS,
+    recon_losses = RECON_LOSSES,
     runtime = collect_runtime_info(),
     ops = ops_summary,
     ops_compact = ops_compact,
@@ -1151,7 +1195,8 @@ if opts.json_out then
 end
 
 -- Aucun flag utile : on affiche l'aide.
-if not opts.show_archs and not opts.arch and not opts.dtypes and not opts.ops and not opts.runtime and not opts.export_path then
+if not opts.show_archs and not opts.arch and not opts.dtypes and not opts.optimizers
+  and not opts.recon_losses and not opts.ops and not opts.runtime and not opts.export_path then
   print_usage()
   return
 end
@@ -1159,8 +1204,18 @@ end
 if opts.show_archs then
   list_archs()
   list_dtypes()
+  list_optimizers()
+  list_recon_losses()
 elseif opts.dtypes then
   list_dtypes()
+end
+
+if opts.optimizers and not opts.show_archs then
+  list_optimizers()
+end
+
+if opts.recon_losses and not opts.show_archs then
+  list_recon_losses()
 end
 
 if opts.runtime then

@@ -4,10 +4,12 @@
 -- Builds a full model architecture package by asking questions and assembling
 -- a node graph (layers + links) that can later be applied dynamically.
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
-local MPK = dofile("scripts/modules/mpk.lua")
-local MPKLayers = dofile("scripts/modules/mpk_layers.lua")
+dofile(ROOTWORK.."/scripts/modules/mpk_help.lua").show("mpk_node_wizard")
+
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
+local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")
 
 local function log(...)
   local out = {}
@@ -200,23 +202,8 @@ local function gather_nodes(base_config)
   return nodes, links
 end
 
-local function print_usage()
-  log("Usage:")
-  log("  ./bin/mimir --lua scripts/tools/mpk_node_wizard.lua -- [options]")
-  log("")
-  log("Options:")
-  log("  --out <file.mpk>      chemin de sortie (sinon prompt interactif)")
-  log("  (sortie)              toujours ecrite en pseudocode MPK style Visu")
-  log("  --compile [file]       produit aussi un .mpk.bin v4 opaque")
-  log("  --list-layer-types     affiche les types acceptés puis quitte")
-  log("  --help                aide")
-end
 
 local opts = Args.parse(arg) or {}
-if Args.has(opts, "help") then
-  print_usage()
-  return
-end
 if Args.has(opts, "list-layer-types") then
   log(table.concat(MPKLayers.available_layer_types(), "\n"))
   return

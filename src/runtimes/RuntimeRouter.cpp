@@ -38,31 +38,18 @@ void RuntimeRouter::composeRoutes() const {
     backward_routes_.assign(type_count, {});
 
     for (AbstractRuntime* rt : runtime_priority_) {
-        switch (rt == nullptr) {
-            case true:
-                continue;
-            case false:
-                break;
-        }
+        if (!rt || !rt->isInitialized()) continue;
 
         for (size_t i = 0; i < type_count; ++i) {
             const LayerType type = static_cast<LayerType>(i);
 
-            switch (rt->supportsForwardLayerType(type)) {
-                case true:
-                    forward_vote_[i] = 1;
-                    forward_routes_[i].push_back(rt);
-                    break;
-                case false:
-                    break;
+            if (runtimeCapabilityIsNative(rt->queryForwardCapability(type))) {
+                forward_vote_[i] = 1;
+                forward_routes_[i].push_back(rt);
             }
-            switch (rt->supportsBackwardLayerType(type)) {
-                case true:
-                    backward_vote_[i] = 1;
-                    backward_routes_[i].push_back(rt);
-                    break;
-                case false:
-                    break;
+            if (runtimeCapabilityIsNative(rt->queryBackwardCapability(type))) {
+                backward_vote_[i] = 1;
+                backward_routes_[i].push_back(rt);
             }
         }
     }
@@ -75,8 +62,19 @@ void RuntimeRouter::setRuntimes(
     AbstractRuntime* opencl,
     AbstractRuntime* cpu
 ) {
+    setRuntimes(rocm, cuda, vulkan, opencl, nullptr, cpu);
+}
+
+void RuntimeRouter::setRuntimes(
+    AbstractRuntime* rocm,
+    AbstractRuntime* cuda,
+    AbstractRuntime* vulkan,
+    AbstractRuntime* opencl,
+    AbstractRuntime* fpga,
+    AbstractRuntime* cpu
+) {
     runtime_priority_.clear();
-    runtime_priority_.reserve(5);
+    runtime_priority_.reserve(6);
 
     switch (rocm != nullptr) {
         case true: runtime_priority_.push_back(rocm); break;
@@ -94,6 +92,10 @@ void RuntimeRouter::setRuntimes(
         case true: runtime_priority_.push_back(opencl); break;
         case false: break;
     }
+    switch (fpga != nullptr) {
+        case true: runtime_priority_.push_back(fpga); break;
+        case false: break;
+    }
     switch (cpu != nullptr) {
         case true: runtime_priority_.push_back(cpu); break;
         case false: break;
@@ -104,6 +106,36 @@ void RuntimeRouter::setRuntimes(
     backward_layer_routes_.clear();
 
     composeRoutes();
+}
+
+AbstractRuntime* RuntimeRouter::selectForwardRuntimeForLayer(
+    const Layer& layer, const bool allow_host_fallback) const {
+    ensureActivatedAndComposed();
+    AbstractRuntime* fallback = nullptr;
+    for (AbstractRuntime* runtime : runtime_priority_) {
+        if (!runtime || !runtime->isInitialized()) continue;
+        const RuntimeCapabilityLevel capability = runtime->queryForwardCapability(layer.type_enum);
+        if (runtimeCapabilityIsNative(capability)) return runtime;
+        if (allow_host_fallback && !fallback && capability == RuntimeCapabilityLevel::HostFallback) {
+            fallback = runtime;
+        }
+    }
+    return fallback;
+}
+
+AbstractRuntime* RuntimeRouter::selectBackwardRuntimeForLayer(
+    const Layer& layer, const bool allow_host_fallback) const {
+    ensureActivatedAndComposed();
+    AbstractRuntime* fallback = nullptr;
+    for (AbstractRuntime* runtime : runtime_priority_) {
+        if (!runtime || !runtime->isInitialized()) continue;
+        const RuntimeCapabilityLevel capability = runtime->queryBackwardCapability(layer.type_enum);
+        if (runtimeCapabilityIsNative(capability)) return runtime;
+        if (allow_host_fallback && !fallback && capability == RuntimeCapabilityLevel::HostFallback) {
+            fallback = runtime;
+        }
+    }
+    return fallback;
 }
 
 void RuntimeRouter::setActivators(
@@ -118,6 +150,9 @@ void RuntimeRouter::setActivators(
     activate_vulkan_ = std::move(vulkan);
     activate_opencl_ = std::move(opencl);
     activate_cpu_ = std::move(cpu);
+    runtimes_activated_ = false;
+    forward_layer_routes_.clear();
+    backward_layer_routes_.clear();
 }
 
 void RuntimeRouter::activateAvailableRuntimes() const {
@@ -147,6 +182,7 @@ void RuntimeRouter::ensureActivatedAndComposed() const {
     if (!runtimes_activated_) {
         activateAvailableRuntimes();
         runtimes_activated_ = true;
+        composeRoutes();
     }
     switch (forward_vote_.empty() || backward_vote_.empty()) {
         case true:
@@ -167,7 +203,7 @@ std::vector<AbstractRuntime*> RuntimeRouter::buildForwardRouteForLayer(const Lay
     for (AbstractRuntime* rt : base_route) {
         if (!rt) continue;
         if (!rt->isInitialized()) continue;
-        if (!rt->supportsForwardLayerType(layer.type_enum)) continue;
+        if (!runtimeCapabilityIsNative(rt->queryForwardCapability(layer.type_enum))) continue;
         route.push_back(rt);
     }
     return route;
@@ -183,7 +219,7 @@ std::vector<AbstractRuntime*> RuntimeRouter::buildBackwardRouteForLayer(const La
     for (AbstractRuntime* rt : base_route) {
         if (!rt) continue;
         if (!rt->isInitialized()) continue;
-        if (!rt->supportsBackwardLayerType(layer.type_enum)) continue;
+        if (!runtimeCapabilityIsNative(rt->queryBackwardCapability(layer.type_enum))) continue;
         route.push_back(rt);
     }
     return route;
@@ -227,8 +263,19 @@ bool RuntimeRouter::dispatchForwardLayer(
     std::vector<std::vector<float>>& outputs,
     const Layer& layer,
     bool training,
-    AbstractRuntime** selected_runtime
+    AbstractRuntime** selected_runtime,
+    const RuntimeForwardContext& context
 ) const {
+    const int skip = layer.skipInputIndex();
+    if (!context.skip_connections_enabled && skip >= 0 &&
+        static_cast<size_t>(skip) < inputs.size() && inputs[skip]) {
+        auto gated_inputs = inputs;
+        std::vector<float> zeros(inputs[skip]->size(), 0.0f);
+        gated_inputs[skip] = &zeros;
+        auto gated_context = context;
+        gated_context.skip_connections_enabled = true;
+        return dispatchForwardLayer(gated_inputs, outputs, layer, training, selected_runtime, gated_context);
+    }
     ensureActivatedAndComposed();
 
     if (selected_runtime) *selected_runtime = nullptr;
@@ -246,13 +293,18 @@ bool RuntimeRouter::dispatchForwardLayer(
     size_t i = 0;
     while (i < route.size()) {
         AbstractRuntime* rt = route[i];
-        if (!rt || !rt->isInitialized() || !rt->supportsForwardLayerType(layer.type_enum)) {
+        if (!rt || !rt->isInitialized()) {
             route.erase(route.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (!runtimeCapabilityIsNative(
+                rt->queryForwardOperationCapability(layer, inputs, training))) {
+            ++i;
             continue;
         }
 
         std::vector<std::vector<float>> local_outputs;
-        if (rt->forwardLayer(inputs, local_outputs, layer, training) &&
+        if (rt->forwardLayerWithContext(inputs, local_outputs, layer, training, context) &&
             !local_outputs.empty() &&
             tensorsAreFinite(local_outputs)) {
             outputs = std::move(local_outputs);
@@ -267,39 +319,124 @@ bool RuntimeRouter::dispatchForwardLayer(
     return false;
 }
 
+bool RuntimeRouter::dispatchForwardLayerPlanned(
+    AbstractRuntime* preferred,
+    const std::vector<const std::vector<float>*>& inputs,
+    std::vector<std::vector<float>>& outputs,
+    const Layer& layer,
+    const bool training,
+    AbstractRuntime** selected_runtime,
+    const RuntimeForwardContext& context
+) const {
+    const int skip = layer.skipInputIndex();
+    if (!context.skip_connections_enabled && skip >= 0 &&
+        static_cast<size_t>(skip) < inputs.size() && inputs[skip]) {
+        auto gated_inputs = inputs;
+        std::vector<float> zeros(inputs[skip]->size(), 0.0f);
+        gated_inputs[skip] = &zeros;
+        auto gated_context = context;
+        gated_context.skip_connections_enabled = true;
+        return dispatchForwardLayerPlanned(preferred, gated_inputs, outputs, layer, training, selected_runtime, gated_context);
+    }
+    ensureActivatedAndComposed();
+    if (selected_runtime) *selected_runtime = nullptr;
+    outputs.clear();
+
+    auto route_it = forward_layer_routes_.find(&layer);
+    if (route_it == forward_layer_routes_.end()) {
+        route_it = forward_layer_routes_.emplace(
+            &layer, buildForwardRouteForLayer(layer)).first;
+    }
+    std::vector<AbstractRuntime*>& route = route_it->second;
+
+    auto is_eligible = [&](AbstractRuntime* runtime) {
+        return runtime && runtime->isInitialized() &&
+            runtimeCapabilityIsNative(runtime->queryForwardOperationCapability(
+                layer, inputs, training));
+    };
+    auto execute = [&](AbstractRuntime* runtime) -> bool {
+        std::vector<std::vector<float>> local;
+        if (!runtime->forwardLayerWithContext(inputs, local, layer, training, context) ||
+            local.empty() || !tensorsAreFinite(local)) return false;
+        outputs = std::move(local);
+        if (selected_runtime) *selected_runtime = runtime;
+        return true;
+    };
+
+    auto preferred_it = std::find(route.begin(), route.end(), preferred);
+    if (preferred_it != route.end()) {
+        if (is_eligible(preferred)) {
+            if (execute(preferred)) return true;
+            route.erase(preferred_it);
+        }
+    }
+
+    size_t index = 0;
+    while (index < route.size()) {
+        AbstractRuntime* runtime = route[index];
+        if (!runtime || !runtime->isInitialized()) {
+            route.erase(route.begin() + static_cast<std::ptrdiff_t>(index));
+            continue;
+        }
+        if (!is_eligible(runtime)) {
+            ++index;
+            continue;
+        }
+        if (execute(runtime)) return true;
+        route.erase(route.begin() + static_cast<std::ptrdiff_t>(index));
+    }
+    return false;
+}
+
 bool RuntimeRouter::dispatchBackwardLayer(
     const std::vector<const std::vector<float>*>& inputs,
     const std::vector<const std::vector<float>*>& grad_outputs,
     std::vector<std::vector<float>>& grad_inputs,
     Layer& layer,
     bool training,
-    AbstractRuntime** selected_runtime
+    AbstractRuntime** selected_runtime,
+    const RuntimeBackwardContext& context
 ) const {
+    const int skip = layer.skipInputIndex();
+    if (!context.skip_connections_enabled && skip >= 0 &&
+        static_cast<size_t>(skip) < inputs.size() && inputs[skip]) {
+        auto gated_inputs = inputs;
+        std::vector<float> zeros(inputs[skip]->size(), 0.0f);
+        gated_inputs[skip] = &zeros;
+        auto gated_context = context;
+        gated_context.skip_connections_enabled = true;
+        const bool ok = dispatchBackwardLayer(gated_inputs, grad_outputs,
+            grad_inputs, layer, training, selected_runtime, gated_context);
+        if (ok && static_cast<size_t>(skip) < grad_inputs.size())
+            std::fill(grad_inputs[skip].begin(), grad_inputs[skip].end(), 0.0f);
+        return ok;
+    }
     ensureActivatedAndComposed();
 
     if (selected_runtime) *selected_runtime = nullptr;
     grad_inputs.clear();
 
-    auto it = backward_layer_routes_.find(&layer);
-    if (it == backward_layer_routes_.end()) {
-        auto inserted = backward_layer_routes_.emplace(&layer, buildBackwardRouteForLayer(layer));
-        it = inserted.first;
-    }
-
-    std::vector<AbstractRuntime*>& route = it->second;
+    // Temporary/rewritten layers can reuse an address. Backward capability is
+    // cheap to resolve and must describe this operation, not a previous layer.
+    std::vector<AbstractRuntime*> route = buildBackwardRouteForLayer(layer);
     if (route.empty()) return false;
 
     size_t i = 0;
     while (i < route.size()) {
         AbstractRuntime* rt = route[i];
-        if (!rt || !rt->isInitialized() || !rt->supportsBackwardLayerType(layer.type_enum)) {
+        if (!rt || !rt->isInitialized()) {
             route.erase(route.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (!runtimeCapabilityIsNative(rt->queryBackwardOperationCapability(
+                layer, inputs, grad_outputs, training))) {
+            ++i;
             continue;
         }
 
         std::vector<std::vector<float>> local_grad_inputs;
-        if (rt->backwardLayer(inputs, grad_outputs, local_grad_inputs, layer, training) &&
-            !local_grad_inputs.empty() &&
+        if (rt->backwardLayerWithContext(inputs, grad_outputs, local_grad_inputs, layer, training, context) &&
+            (layer.type_enum == LayerType::Constant || !local_grad_inputs.empty()) &&
             tensorsAreFinite(local_grad_inputs)) {
             grad_inputs = std::move(local_grad_inputs);
             if (selected_runtime) *selected_runtime = rt;
@@ -310,5 +447,20 @@ bool RuntimeRouter::dispatchBackwardLayer(
         route.erase(route.begin() + static_cast<std::ptrdiff_t>(i));
     }
 
+    return false;
+}
+
+bool RuntimeRouter::dispatchBranchMerge(const std::vector<float>& left,
+                                        const std::vector<float>& right,
+                                        std::vector<float>& output, const Layer& layer) const {
+    ensureActivatedAndComposed();
+    for (auto* runtime : runtime_priority_) {
+        if (!runtime || !runtime->isInitialized()) continue;
+        std::vector<float> candidate;
+        if (runtime->mergeBranches(left, right, candidate, layer)) {
+            output = std::move(candidate);
+            return true;
+        }
+    }
     return false;
 }

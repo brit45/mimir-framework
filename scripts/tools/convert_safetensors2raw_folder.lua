@@ -11,8 +11,11 @@
 
 ---@diagnostic disable: undefined-field, need-check-nil, param-type-mismatch
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("convert_safetensors2raw_folder")
+
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function die(msg)
     io.stderr:write("[convert] " .. tostring(msg) .. "\n")

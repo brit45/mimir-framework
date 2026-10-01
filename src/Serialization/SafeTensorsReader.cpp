@@ -1,5 +1,6 @@
 #include "SafeTensorsReader.hpp"
 #include "../Model.hpp"
+#include "CheckpointState.hpp"
 #include "../Encoder.hpp"
 #include "HardwareOpt.hpp"
 #include <fstream>
@@ -20,9 +21,10 @@ SafeTensorsReader::~SafeTensorsReader() {
 bool SafeTensorsReader::load(
     Model& model,
     const std::string& path,
-    const LoadOptions& options,
+    const LoadOptions& requested_options,
     std::string* error
 ) {
+    auto options = requested_options;
     try {
         const uint16_t endian_probe = 1;
         if (*reinterpret_cast<const uint8_t*>(&endian_probe) != 1) {
@@ -46,6 +48,18 @@ bool SafeTensorsReader::load(
             return false;
         }
         
+        if (header.contains("__metadata__") && header["__metadata__"].contains("components")) {
+            const auto components = json::parse(header["__metadata__"]["components"].get<std::string>());
+            if (!components.value("encoder", true) && options.load_encoder) {
+                options.load_encoder = false;
+                model.setHasEncoder(false);
+            }
+            if (!components.value("tokenizer", true) && options.load_tokenizer) {
+                options.load_tokenizer = false;
+                model.setHasTokenizer(false);
+            }
+        }
+
         // Apply tensors to model
         return apply_tensors_to_model(model, tensors, path, data_offset, options, error);
         
@@ -492,6 +506,14 @@ bool SafeTensorsReader::apply_tensors_to_model(
                     try {
                         std::string s(reinterpret_cast<const char*>(buf.data()), buf.size());
                         json arch = json::parse(s);
+                        if (!options.metadata_only && arch.contains("layers")) {
+                            for (const auto& entry : arch["layers"]) {
+                                if (entry.contains("skip_input_index")) {
+                                    if (auto* layer = model.getLayerByName(entry.value("name", "")))
+                                        layer->skip_input_index = entry["skip_input_index"].get<int>();
+                                }
+                            }
+                        }
                         if (options.apply_model_name && arch.contains("model_name")) {
                             model.setModelName(arch["model_name"].get<std::string>());
                         }
@@ -535,6 +557,10 @@ bool SafeTensorsReader::apply_tensors_to_model(
                     return false;
                 }
             }
+        }
+
+        if (options.metadata_only) {
+            return true;
         }
         
         // Load layer weight blocks
@@ -660,6 +686,7 @@ bool SafeTensorsReader::apply_tensors_to_model(
                         std::string s(reinterpret_cast<const char*>(buf.data()), buf.size());
                         json j = json::parse(s);
                         model.getMutableTokenizer().from_json(j);
+                        model.setHasTokenizer(true);
                     } catch (...) {
                         // Ignore invalid tokenizer JSON for backward compatibility
                     }
@@ -772,6 +799,7 @@ bool SafeTensorsReader::apply_tensors_to_model(
 
         // Load optimizer (json + state vectors) if requested
         if (options.load_optimizer) {
+            json optimizer_meta = json::object();
             // Parse optimizer/json
             auto itj = tensor_map.find("optimizer/json");
             if (itj != tensor_map.end()) {
@@ -785,20 +813,8 @@ bool SafeTensorsReader::apply_tensors_to_model(
                     try {
                         std::string s(reinterpret_cast<const char*>(buf.data()), buf.size());
                         json j = json::parse(s);
-                        Optimizer opt;
-                        opt.type = static_cast<OptimizerType>(j.value("type", static_cast<int>(opt.type)));
-                        opt.step = static_cast<size_t>(j.value("step", 0));
-                        opt.beta1 = j.value("beta1", opt.beta1);
-                        opt.beta2 = j.value("beta2", opt.beta2);
-                        opt.eps = j.value("eps", opt.eps);
-                        opt.weight_decay = j.value("weight_decay", opt.weight_decay);
-                        opt.decay_strategy = static_cast<LRDecayStrategy>(j.value("decay_strategy", static_cast<int>(opt.decay_strategy)));
-                        opt.initial_lr = j.value("initial_lr", opt.initial_lr);
-                        opt.min_lr = j.value("min_lr", opt.min_lr);
-                        opt.decay_rate = j.value("decay_rate", opt.decay_rate);
-                        opt.decay_steps = j.value("decay_steps", opt.decay_steps);
-                        opt.total_steps = j.value("total_steps", opt.total_steps);
-                        opt.warmup_steps = j.value("warmup_steps", opt.warmup_steps);
+                        Optimizer opt = optimizer_from_metadata(j);
+                        optimizer_meta = j;
                         model.setSerializedOptimizer(opt);
                     } catch (...) {
                         // Invalid optimizer JSON
@@ -874,6 +890,7 @@ bool SafeTensorsReader::apply_tensors_to_model(
 
             if (!load_opt_vec("optimizer/m", optp->m)) return false;
             if (!load_opt_vec("optimizer/v", optp->v)) return false;
+            validate_optimizer_state(model, *optp, optimizer_meta);
         }
         
         return true;

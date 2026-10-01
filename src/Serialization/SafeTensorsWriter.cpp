@@ -1,5 +1,6 @@
 #include "SafeTensorsWriter.hpp"
 #include "../Model.hpp"
+#include "CheckpointState.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
 #include "HardwareOpt.hpp"
@@ -21,9 +22,10 @@ SafeTensorsWriter::~SafeTensorsWriter() {
 bool SafeTensorsWriter::save(
     Model& model,
     const std::string& path,
-    const SaveOptions& options,
+    const SaveOptions& requested_options,
     std::string* error
 ) {
+    const auto options = effective_save_options(model, requested_options);
     try {
         const uint16_t endian_probe = 1;
         if (*reinterpret_cast<const uint8_t*>(&endian_probe) != 1) {
@@ -64,6 +66,8 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
 
     // Reset owned buffers for this save call
     owned_buffers_.clear();
+    owned_f32_buffers_.clear();
+    optimizer_metadata_ = json::object();
     owned_u16_buffers_.clear();
     owned_f64_buffers_.clear();
 
@@ -143,6 +147,7 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
             layer_obj["params_count"] = layer.params_count;
             layer_obj["trainable_parameter"] = layer.trainable_parameter;
             layer_obj["inputs"] = layer.inputs;
+            if (layer.skip_input_index >= 0) layer_obj["skip_input_index"] = layer.skip_input_index;
             layer_obj["output"] = layer.output;
             // Common shape fields
             layer_obj["in_features"] = layer.in_features;
@@ -232,43 +237,32 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
 
     // Add optimizer state (if requested and available)
     if (options.save_optimizer) {
-        if (const Optimizer* opt = model.getSerializedOptimizer()) {
-            // JSON meta
-            {
-                json j;
-                j["type"] = static_cast<int>(opt->type);
-                j["step"] = opt->step;
-                j["lr_current"] = opt->getCurrentLR();
-                j["beta1"] = opt->beta1;
-                j["beta2"] = opt->beta2;
-                j["eps"] = opt->eps;
-                j["weight_decay"] = opt->weight_decay;
-                j["decay_strategy"] = static_cast<int>(opt->decay_strategy);
-                j["initial_lr"] = opt->initial_lr;
-                j["min_lr"] = opt->min_lr;
-                j["decay_rate"] = opt->decay_rate;
-                j["decay_steps"] = opt->decay_steps;
-                j["total_steps"] = opt->total_steps;
-                j["warmup_steps"] = opt->warmup_steps;
-
-                std::string s = j.dump();
-                owned_buffers_.push_back(std::vector<uint8_t>(s.begin(), s.end()));
+        if (const Optimizer* live = model.getSerializedOptimizer()) {
+            auto snapshot = model.optimizerSnapshot(*live);
+            optimizer_metadata_ = optimizer_metadata(snapshot);
+            auto add_state = [&](const std::string& name, std::vector<float>& values) {
+                if (values.empty()) return;
+                owned_f32_buffers_.push_back(std::move(values));
+                const auto& data = owned_f32_buffers_.back();
                 TensorData td;
-                td.name = "optimizer/json";
-                td.dtype = DType::Uint8;
-                td.shape = {owned_buffers_.back().size()};
-                td.byte_size = owned_buffers_.back().size();
-                td.data_ptr = owned_buffers_.back().data();
+                td.name = name;
+                td.dtype = DType::Float32; // Optimizer arithmetic is F32, even for F16/BF16 weights.
+                td.shape = {data.size()};
+                td.byte_size = data.size() * sizeof(float);
+                td.data_ptr = data.data();
                 tensors.push_back(td);
-            }
-
-            // State vectors
-            if (!opt->m.empty()) {
-                push_float_tensor("optimizer/m", {opt->m.size()}, opt->m.data(), opt->m.size());
-            }
-            if (!opt->v.empty()) {
-                push_float_tensor("optimizer/v", {opt->v.size()}, opt->v.data(), opt->v.size());
-            }
+            };
+            add_state("optimizer/m", snapshot.m);
+            add_state("optimizer/v", snapshot.v);
+            const std::string metadata = optimizer_metadata_.dump();
+            owned_buffers_.emplace_back(metadata.begin(), metadata.end());
+            TensorData td;
+            td.name = "optimizer/json";
+            td.dtype = DType::Uint8;
+            td.shape = {owned_buffers_.back().size()};
+            td.byte_size = owned_buffers_.back().size();
+            td.data_ptr = owned_buffers_.back().data();
+            tensors.push_back(td);
         }
     }
 
@@ -311,7 +305,8 @@ json SafeTensorsWriter::build_header(
     // Add metadata
     json metadata;
     metadata["format"] = "safetensors";
-    metadata["format_version"] = "0.3.0";
+    metadata["format_version"] = "0.4.0";
+    metadata["components"] = checkpoint_components(options).dump();
     metadata["mimir_version"] = get_mimir_version();
     
     if (options.include_git_info) {

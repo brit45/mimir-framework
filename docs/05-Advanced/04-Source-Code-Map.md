@@ -81,7 +81,7 @@ Points à connaître :
   - `forwardPass(const std::vector<float>&, training)`
   - `forwardPass(const std::vector<int>&, training)` (chemin tokens : `Embedding` lit dans l’IntTensorStore)
   - `forwardPassNamed(float_inputs, int_inputs, training)` (multi-input)
-- **Optimiseur** : `optimizerStep(Optimizer&, learning_rate)` gère SGD/Adam/AdamW, avec protections (epsilon non-fini -> fallback), warmup/decay, et *grad clipping optionnel* via `modelConfig` (`grad_clip_norm` / `clip_norm`).
+- **Optimiseur** : `optimizerStep(Optimizer&, learning_rate)` gère SGD, Adam, AdamW, Lion, Adafactor, RAdam, NAdam, RMSprop et LAMB, avec protections (epsilon non-fini -> fallback), warmup/decay, et *grad clipping optionnel* via `modelConfig` (`grad_clip_norm` / `clip_norm`).
 - **Accélération compute** (en inférence, opt-in) :
   - certaines ops (ex: `Linear`) peuvent être dispatchées vers Vulkan/OpenCL si activé via variables d’environnement (voir plus bas).
 

@@ -80,7 +80,7 @@ Le runtime borne `logvar` dans `[-20, 20]` pour éviter les exponentielles non f
 
 Si `stochastic_latent=false`, ou pendant un forward d’inférence, `z=mu`. Ce mode est utile pour produire un encodage reproductible, mais il transforme le chemin de reconstruction en autoencodeur déterministe. Si une KL non nulle est utilisée pendant l’entraînement, le script officiel active par défaut le mode stochastique pour les nouveaux runs.
 
-La KL utilisée par `trainStepVAE` est :
+La KL utilisée par le contrat `VAEConvModel::trainStep` est :
 
 \[
 \mathrm{KL}(q(z|x)\,\|\,\mathcal{N}(0,I))
@@ -102,7 +102,7 @@ Cette couche est une `Constant` marquée `trainable_parameter=true`. Elle :
 
 - ne possède aucune entrée ;
 - reçoit le gradient produit par les features du décodeur ;
-- est mise à jour par SGD, Adam ou AdamW comme les autres blocs de poids ;
+- est mise à jour par l'optimiseur sélectionné comme les autres blocs de poids ;
 - est sérialisée dans le checkpoint.
 
 Les autres couches `Constant` restent fixes par défaut. Cette distinction évite notamment d’entraîner les tenseurs zéro utilisés par le décodeur autonome pour remplacer des skips absents.
@@ -144,12 +144,12 @@ Un latent peut être spatialement plus petit tout en contenant davantage de scal
 | `latent_w`, `latent_h`, `latent_c` | `16`, `16`, `256` | Forme CHW du latent. |
 | `base_channels` | `64` | Nombre de canaux dans le corps encodeur/décodeur. |
 | `stochastic_latent` | `false` | Bruit de réparamétrisation pendant l’entraînement. |
-| `use_attention` | `true` | Nom historique : active les ResBlocks, pas la SelfAttention. |
-| `use_attn` | `false` | Active la SelfAttention spatiale. |
+| `resnet` | `true` | Active les blocs résiduels. |
+| `attention` | `false` | Active la SelfAttention spatiale. |
 | `resnet_max_tokens` | `0` | Limite `H×W` des ResBlocks ; `0` signifie sans limite. |
 | `attn_max_tokens` | `0` | Limite `H×W` de l’attention ; `0` signifie sans limite. |
 | `enc_norm`, `dec_norm` | `groupnorm` | `none`, `groupnorm`/`gn`, `layernorm`/`ln`. |
-| `decoder_upsample` | `conv_transpose` | `conv_transpose` ou `nearest_conv`. |
+| `decoder_upsample` | `conv_transpose` | `conv_transpose`, `nearest_conv`, `bilinear_conv` ou `pixel_shuffle`. |
 | `use_skip_connections` | `false` | Skips encodeur-décodeur par concaténation puis Conv 1×1. |
 | `use_encoder_prior` | `false` | Ajoute le biais latent global appris. |
 | `text_cond` | `false` | Ajoute la branche texte et les deux projections. |
@@ -171,8 +171,8 @@ cfg.latent_h = 16
 cfg.latent_c = 32
 cfg.base_channels = 32
 cfg.stochastic_latent = true
-cfg.use_attention = true   -- ResBlocks, nom historique
-cfg.use_attn = false
+cfg.resnet = true
+cfg.attention = false
 cfg.use_encoder_prior = true
 
 assert(Mimir.Model.create("vae_conv", cfg))
@@ -232,6 +232,7 @@ OMP_NUM_THREADS=8 ./bin/mimir \
   --image-w 64 --image-h 64 \
   --latent-w 16 --latent-h 16 --latent-c 16 \
   --base-channels 32 \
+  --decoder-upsample bilinear_conv \
   --epochs 2 --lr 3e-5 \
   --stochastic-latent true \
   --encoder-prior true \
@@ -280,7 +281,7 @@ ctest --test-dir build --output-on-failure \
 | Symptôme | Vérification |
 | --- | --- |
 | Erreur « cannot reach latent » | Les deux ratios image/latent doivent être la même puissance de deux. |
-| OOM avec attention | Réduire `attn_max_tokens`, `latent_h/w`, `base_channels` ou désactiver `use_attn`. |
+| OOM avec attention | Réduire `attn_max_tokens`, `latent_h/w`, `base_channels` ou désactiver `attention`. |
 | KL instable | Vérifier `stochastic_latent`, `kl_beta`, le warmup KL et les bornes `logvar`. |
 | Checkpoint incompatible | Comparer dimensions, normes, skips, prior, ResBlocks, attention et upsampling. |
 | Prior inchangé | Vérifier que le checkpoint contient `vae_conv/z_prior_bias` et que le layer porte `trainable_parameter=true`. |

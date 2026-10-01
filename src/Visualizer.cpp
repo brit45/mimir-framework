@@ -1,4 +1,5 @@
 #include "Visualizer.hpp"
+#include "Model.hpp"
 #include <iostream>
 #include <fstream>
 #include <cmath>
@@ -8,12 +9,14 @@
 #include <chrono>
 #include <unordered_map>
 #include <cctype>
+#include <filesystem>
+#include <limits>
 
 static const char* kVizUISettingsFile = "viz_ui_settings.json";
 
 namespace {
-static inline sf::FloatRect make_rect(float x, float y, float w, float h) {
-    return sf::FloatRect(sf::Vector2f(x, y), sf::Vector2f(w, h));
+static inline vizgfx::FloatRect make_rect(float x, float y, float w, float h) {
+    return vizgfx::FloatRect(vizgfx::Vector2f(x, y), vizgfx::Vector2f(w, h));
 }
 
 struct ParsedVizLabel {
@@ -548,23 +551,116 @@ static ParsedVizLabel parse_viz_label(const std::string& label_raw) {
     return out;
 }
 
-static sf::Color color_for_tag(const std::string& tag) {
-    if (tag == "DS") return sf::Color(120, 180, 220);
-    if (tag == "PRE") return sf::Color(140, 200, 220);
-    if (tag == "OUT") return sf::Color(220, 160, 120);
-    if (tag == "VAL") return sf::Color(160, 220, 160);
-    if (tag == "ACT") return sf::Color(160, 160, 220);
-    if (tag == "N") return sf::Color(120, 205, 175);
-    if (tag == "AT") return sf::Color(185, 145, 230);
-    if (tag == "UP") return sf::Color(235, 170, 105);
-    if (tag == "LAT") return sf::Color(230, 125, 165);
-    if (tag == "RES") return sf::Color(205, 190, 120);
-    if (tag == "L") return sf::Color(180, 180, 200);
-    if (tag == "T") return sf::Color(180, 170, 140);
-    return sf::Color(140, 140, 150);
+static std::string lowercase_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
 }
 
-static void position_sprite_centered_in_box(sf::Sprite& sprite, float x, float y, float box_size) {
+static std::string canonical_recon_loss_name(const std::string& raw_name) {
+    const std::string name = lowercase_ascii(raw_name);
+    if (name.empty() || name == "mse") return "mse";
+    if (name == "mae") return "l1";
+    if (name == "smoothl1") return "huber";
+    if (name == "nll_gaussian") return "gaussian_nll";
+    return name;
+}
+
+static int recon_loss_index(const std::string& raw_name) {
+    const std::string name = canonical_recon_loss_name(raw_name);
+    if (name == "l1" || name == "mae") return 1;
+    if (name == "huber" || name == "smooth_l1" || name == "smoothl1") return 2;
+    if (name == "charbonnier") return 3;
+    if (name == "gaussian_nll" || name == "nll_gaussian") return 4;
+    if (name == "bce") return 5;
+    return 0;
+}
+
+static const char* recon_loss_name(int index) {
+    static constexpr const char* names[] = {
+        "mse", "mae", "huber", "charbonnier", "gaussian_nll", "bce"
+    };
+    return names[std::clamp(index, 0, 5)];
+}
+
+static float normalized_recon_loss(float value, const std::string& raw_name) {
+    const std::string name = canonical_recon_loss_name(raw_name);
+    if (name == "mse") return value * 0.25f;
+    if (name == "l1" || name == "charbonnier") return value * 0.5f;
+    return value;
+}
+
+static std::string display_tip_tag(const ParsedVizLabel& parsed) {
+    if (parsed.tag == "VIZ") return "?";
+
+    const std::string source = lowercase_ascii(
+        parsed.path + " " + parsed.layer_path + " " + parsed.layer_type + " " +
+        parsed.extra + " " + parsed.headline);
+    const auto contains = [&](const char* token) {
+        return source.find(token) != std::string::npos;
+    };
+
+    if (parsed.tag == "DS" || contains("dataset")) return "DS";
+    if (parsed.tag == "OUT" || contains("/output") || contains("output/") ||
+        contains("sortie") || contains("diffusion_out") ||
+        contains("recon_to_hwc") || contains("out_to_hwc")) {
+        return "ST";
+    }
+    if (contains("/txt/") || contains("/txt_") || contains("text") ||
+        contains("token") || contains("tok_emb") || contains("prompt")) {
+        return "TX";
+    }
+    if (contains("skip")) return "SK";
+    if (parsed.layer_type == "Concat" || contains("concat")) return "CC";
+    if (parsed.tag == "ACT" || contains("relu") || contains("gelu") ||
+        contains("silu") || contains("sigmoid") || contains("softmax") ||
+        contains("softplus") || contains("mish") || contains("hardswish")) {
+        return "AC";
+    }
+    if (parsed.tag == "N" || is_norm_type_name(parsed.layer_type) ||
+        contains("/norm") || contains("groupnorm") || contains("layernorm") ||
+        contains("batchnorm") || contains("instancenorm") || contains("rmsnorm")) {
+        return "NM";
+    }
+    return "L";
+}
+
+static std::string format_tip_display_label(const ParsedVizLabel& parsed) {
+    const std::string path = !parsed.layer_path.empty()
+        ? parsed.layer_path
+        : (!parsed.path.empty() ? parsed.path : parsed.short_text);
+    std::string label = parsed.extra;
+    if (label.empty() && parsed.short_text != path) label = parsed.short_text;
+
+    std::string text = "[" + display_tip_tag(parsed) + "] " + path;
+    if (!label.empty() && label != path) text += " + " + label;
+    return text;
+}
+
+static vizgfx::Color color_for_tag(const std::string& tag) {
+    if (tag == "DS") return vizgfx::Color(120, 180, 220);
+    if (tag == "TX") return vizgfx::Color(190, 165, 235);
+    if (tag == "AC") return vizgfx::Color(160, 160, 220);
+    if (tag == "NM") return vizgfx::Color(120, 205, 175);
+    if (tag == "SK") return vizgfx::Color(235, 185, 105);
+    if (tag == "CC") return vizgfx::Color(205, 190, 120);
+    if (tag == "ST") return vizgfx::Color(105, 205, 145);
+    if (tag == "PRE") return vizgfx::Color(140, 200, 220);
+    if (tag == "OUT") return vizgfx::Color(220, 160, 120);
+    if (tag == "VAL") return vizgfx::Color(160, 220, 160);
+    if (tag == "ACT") return vizgfx::Color(160, 160, 220);
+    if (tag == "N") return vizgfx::Color(120, 205, 175);
+    if (tag == "AT") return vizgfx::Color(185, 145, 230);
+    if (tag == "UP") return vizgfx::Color(235, 170, 105);
+    if (tag == "LAT") return vizgfx::Color(230, 125, 165);
+    if (tag == "RES") return vizgfx::Color(205, 190, 120);
+    if (tag == "L") return vizgfx::Color(180, 180, 200);
+    if (tag == "T") return vizgfx::Color(180, 170, 140);
+    return vizgfx::Color(140, 140, 150);
+}
+
+static void position_sprite_centered_in_box(vizgfx::Sprite& sprite, float x, float y, float box_size) {
     // sprite est déjà mis à l'échelle par createImageTexture().
     const auto lb = sprite.getLocalBounds();
     const auto sc = sprite.getScale();
@@ -576,7 +672,7 @@ static void position_sprite_centered_in_box(sf::Sprite& sprite, float x, float y
     const float px = x + ox - lb.position.x * sc.x;
     const float py = y + oy - lb.position.y * sc.y;
     // Snap pixel pour éviter les artefacts d'alignement/sub-pixel dans les grilles.
-    sprite.setPosition(sf::Vector2f(std::round(px), std::round(py)));
+    sprite.setPosition(vizgfx::Vector2f(std::round(px), std::round(py)));
 }
 
 static bool is_layer_block_preview_smoothing_candidate(const ParsedVizLabel& p, int channels) {
@@ -753,6 +849,7 @@ Visualizer::Visualizer(const json& config)
     , current_timestep(0.0f)
     , current_batch_time_ms(0)
     , current_memory_mb(0)
+    , current_allocator_memory_mb(0)
     , current_bps(0.0f)
     , current_params(0)
     , current_grad_norm(0.0f)
@@ -807,12 +904,16 @@ void Visualizer::setLossLogFile(const std::string& filepath) {
     std::cerr << "[viz] loss_log_file=" << loss_log_file << std::endl;
 }
 
+void Visualizer::setLossLogEnabled(bool enabled) {
+    loss_log_enabled_ = enabled;
+}
+
 Visualizer::~Visualizer() {
     shutdown();
 }
 
 void Visualizer::shutdown() {
-    if (pending_loss_log_flush_ && !loss_log_file.empty()) {
+    if (loss_log_enabled_ && pending_loss_log_flush_ && !loss_log_file.empty()) {
         saveLossHistory(loss_log_file);
         pending_loss_log_flush_ = false;
     }
@@ -830,11 +931,10 @@ bool Visualizer::initialize() {
     }
 
     try {
-        window = std::make_unique<sf::RenderWindow>(
-            sf::VideoMode(sf::Vector2u(static_cast<unsigned>(window_width), static_cast<unsigned>(window_height))),
+        window = createVizWindow(
+            vizgfx::Vector2u(static_cast<unsigned>(window_width), static_cast<unsigned>(window_height)),
             window_title,
-            sf::Style::Titlebar | sf::Style::Close
-        );
+            static_cast<unsigned>(fps_limit));
         // Certains environnements laissent le contexte inactif au démarrage si la
         // fenêtre n'a pas encore reçu d'interaction: forcer l'activation.
         window->setActive(true);
@@ -842,33 +942,44 @@ bool Visualizer::initialize() {
         // Logo du programme + splash au lancement (best-effort)
         logo_loaded_ = false;
         try {
-            sf::Image logo_img;
+            vizgfx::Image logo_img;
             if (logo_img.loadFromFile("logo.png")) {
                 const auto sz = logo_img.getSize();
                 if (sz.x > 0 && sz.y > 0) {
                     // Certains WM ignorent les icônes trop grandes ou atypiques.
                     // On force une taille standard (64x64) via downscale nearest-neighbor.
                     const unsigned target = 64;
-                    sf::Image icon_img;
-                    icon_img.resize(sf::Vector2u(target, target));
+                    vizgfx::Image icon_img;
+                    icon_img.resize(vizgfx::Vector2u(target, target));
                     for (unsigned yy = 0; yy < target; ++yy) {
                         for (unsigned xx = 0; xx < target; ++xx) {
                             const unsigned sx = (sz.x > 0) ? (xx * sz.x) / target : 0;
                             const unsigned sy = (sz.y > 0) ? (yy * sz.y) / target : 0;
-                            icon_img.setPixel(sf::Vector2u(static_cast<unsigned int>(xx), static_cast<unsigned int>(yy)), logo_img.getPixel(sf::Vector2u(static_cast<unsigned int>(sx), static_cast<unsigned int>(sy))));
+                            icon_img.setPixel(vizgfx::Vector2u(static_cast<unsigned int>(xx), static_cast<unsigned int>(yy)), logo_img.getPixel(vizgfx::Vector2u(static_cast<unsigned int>(sx), static_cast<unsigned int>(sy))));
                         }
                     }
                     window->setIcon(icon_img);
                 }
                 if (logo_texture_.loadFromImage(logo_img)) {
                     logo_sprite_.setTexture(logo_texture_, true);
-                    logo_sprite_.setColor(sf::Color(255, 255, 255, 220));
+                    logo_sprite_.setColor(vizgfx::Color(255, 255, 255, 220));
                     logo_loaded_ = true;
                     logo_clock_.restart();
                 }
             }
         } catch (...) {
             logo_loaded_ = false;
+        }
+
+        validation_reward_icon_loaded_ =
+            validation_reward_texture_.loadFromFile("assets/viz/validation-reward.png");
+        if (validation_reward_icon_loaded_) {
+            validation_reward_sprite_.setTexture(validation_reward_texture_, true);
+        }
+        validation_penalty_icon_loaded_ =
+            validation_penalty_texture_.loadFromFile("assets/viz/validation-penalty.png");
+        if (validation_penalty_icon_loaded_) {
+            validation_penalty_sprite_.setTexture(validation_penalty_texture_, true);
         }
 
         window->setFramerateLimit(fps_limit);
@@ -889,19 +1000,23 @@ bool Visualizer::initialize() {
             "/usr/share/fonts/truetype/google-fonts/OpenSans/OpenSans-Regular.ttf",
 
             // Fallbacks fréquents
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "/usr/share/fonts/opentype/urw-base35/NimbusSans-Regular.otf",
         };
         for (const auto& path : font_candidates) {
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(path, ec)) continue;
             if (font.openFromFile(path)) {
                 font_loaded = true;
                 break;
             }
         }
 
-        std::cerr << "✓ Fenêtre de visualisation SFML initialisée (" 
+        std::cerr << "✓ Visualisation " << vizBackendName() << " initialisée ("
                   << window_width << "x" << window_height << ")" << std::endl;
 
         // Initialiser et tenter de restaurer le dernier layout sauvegardé.
@@ -946,7 +1061,7 @@ bool Visualizer::initialize() {
 
                             ww = std::max(640, ww);
                             hh = std::max(480, hh);
-                            window->setSize(sf::Vector2u(static_cast<unsigned>(ww), static_cast<unsigned>(hh)));
+                            window->setSize(vizgfx::Vector2u(static_cast<unsigned>(ww), static_cast<unsigned>(hh)));
                             window_width = ww;
                             window_height = hh;
                             syncUIView();
@@ -965,7 +1080,7 @@ bool Visualizer::initialize() {
         }
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Erreur lors de l'initialisation SFML: " << e.what() << std::endl;
+        std::cerr << "Erreur lors de l'initialisation Viz " << vizBackendName() << ": " << e.what() << std::endl;
         return false;
     }
 }
@@ -1031,6 +1146,7 @@ bool Visualizer::applyUILayout(const json& layout) {
             return true;
         }
 
+        bool output_panel_loaded = false;
         for (const auto& jp : layout["panels"]) {
             if (!jp.is_object()) continue;
             if (!jp.contains("id")) continue;
@@ -1038,6 +1154,7 @@ bool Visualizer::applyUILayout(const json& layout) {
             if (raw_id < 0 || raw_id >= static_cast<int>(PanelId::Count)) continue;
             const size_t idx = static_cast<size_t>(raw_id);
             auto& p = panels_[idx];
+            if (raw_id == static_cast<int>(PanelId::Output)) output_panel_loaded = true;
 
             if (jp.contains("title") && jp["title"].is_string()) p.title = jp["title"].get<std::string>();
             if (jp.contains("x")) p.pos.x = jp["x"].get<float>();
@@ -1046,6 +1163,17 @@ bool Visualizer::applyUILayout(const json& layout) {
             if (jp.contains("h")) p.size.y = std::max(kPanelMinH, jp["h"].get<float>());
             if (jp.contains("visible")) p.visible = jp["visible"].get<bool>();
             if (jp.contains("allow_drag")) p.allow_drag = jp["allow_drag"].get<bool>();
+        }
+
+        if (!output_panel_loaded) {
+            auto& context = panels_[static_cast<size_t>(PanelId::Context)];
+            auto& output = panels_[static_cast<size_t>(PanelId::Output)];
+            const float gap = 20.0f;
+            const float output_width = std::clamp(context.size.x * 0.30f, kPanelMinW, 320.0f);
+            context.size.x = std::max(kPanelMinW, context.size.x - output_width - gap);
+            output.pos = vizgfx::Vector2f(context.pos.x + context.size.x + gap, context.pos.y);
+            output.size = vizgfx::Vector2f(output_width, context.size.y);
+            output.visible = true;
         }
 
         // Visibilité liée aux toggles (reste la source de vérité)
@@ -1149,7 +1277,7 @@ void Visualizer::loadUILayoutFromSlot(int slot) {
 
                 ww = std::max(640, ww);
                 hh = std::max(480, hh);
-                window->setSize(sf::Vector2u(static_cast<unsigned>(ww), static_cast<unsigned>(hh)));
+                window->setSize(vizgfx::Vector2u(static_cast<unsigned>(ww), static_cast<unsigned>(hh)));
                 window_width = ww;
                 window_height = hh;
                 syncUIView();
@@ -1175,7 +1303,7 @@ void Visualizer::syncUIView() {
     // On la force explicitement pour éviter toute déformation au resize.
     const float ww = static_cast<float>(std::max(1, window_width));
     const float hh = static_cast<float>(std::max(1, window_height));
-    sf::View v(make_rect(0.f, 0.f, ww, hh));
+    vizgfx::View v(make_rect(0.f, 0.f, ww, hh));
     v.setViewport(make_rect(0.f, 0.f, 1.f, 1.f));
     window->setView(v);
 }
@@ -1189,35 +1317,36 @@ bool Visualizer::isPanelVisible(PanelId id) const {
 }
 
 namespace {
-sf::Color with_alpha(sf::Color c, uint8_t a) {
+vizgfx::Color with_alpha(vizgfx::Color c, uint8_t a) {
     c.a = a;
     return c;
 }
 } // namespace
 
-sf::Color Visualizer::panelAccent(PanelId id) const {
+vizgfx::Color Visualizer::panelAccent(PanelId id) const {
     switch (id) {
-        case PanelId::Context: return sf::Color(70, 130, 200, 255);
-        case PanelId::Blocks: return sf::Color(160, 110, 210, 255);
-        case PanelId::Generated: return sf::Color(70, 170, 170, 255);
-        case PanelId::Training: return sf::Color(90, 180, 100, 255);
-        case PanelId::Metrics: return sf::Color(210, 150, 70, 255);
-        case PanelId::Graph: return sf::Color(200, 90, 90, 255);
-        default: return sf::Color(140, 140, 150, 255);
+        case PanelId::Context: return vizgfx::Color(70, 130, 200, 255);
+        case PanelId::Blocks: return vizgfx::Color(160, 110, 210, 255);
+        case PanelId::Generated: return vizgfx::Color(70, 170, 170, 255);
+        case PanelId::Training: return vizgfx::Color(90, 180, 100, 255);
+        case PanelId::Metrics: return vizgfx::Color(210, 150, 70, 255);
+        case PanelId::Graph: return vizgfx::Color(200, 90, 90, 255);
+        case PanelId::Output: return vizgfx::Color(72, 190, 130, 255);
+        default: return vizgfx::Color(140, 140, 150, 255);
     }
 }
 
-sf::FloatRect Visualizer::panelRect(PanelId id) const {
+vizgfx::FloatRect Visualizer::panelRect(PanelId id) const {
     const auto& p = panels_[static_cast<size_t>(id)];
     return make_rect(p.pos.x, p.pos.y, p.size.x, p.size.y);
 }
 
-sf::FloatRect Visualizer::panelTitleRect(PanelId id) const {
+vizgfx::FloatRect Visualizer::panelTitleRect(PanelId id) const {
     const auto& p = panels_[static_cast<size_t>(id)];
     return make_rect(p.pos.x, p.pos.y, p.size.x, std::min(kPanelTitleH, p.size.y));
 }
 
-sf::FloatRect Visualizer::panelContentRect(PanelId id) const {
+vizgfx::FloatRect Visualizer::panelContentRect(PanelId id) const {
     const auto& p = panels_[static_cast<size_t>(id)];
     const float top = p.pos.y + std::min(kPanelTitleH, p.size.y);
     const float inner_w = std::max(0.f, p.size.x - 2.f * kPanelPad);
@@ -1225,7 +1354,51 @@ sf::FloatRect Visualizer::panelContentRect(PanelId id) const {
     return make_rect(p.pos.x + kPanelPad, top + kPanelPad, inner_w, inner_h);
 }
 
-sf::FloatRect Visualizer::panelResizeHandleRect(PanelId id) const {
+void Visualizer::setPanelContentHeight(PanelId id, float content_height) {
+    if (id == PanelId::Blocks) return;
+    const size_t index = static_cast<size_t>(id);
+    const float viewport_height = panelContentRect(id).size.y;
+    panel_scroll_max_[index] = std::max(0.0f, content_height - viewport_height);
+    panel_scroll_y_[index] = std::clamp(
+        panel_scroll_y_[index], 0.0f, panel_scroll_max_[index]);
+}
+
+void Visualizer::drawPanelScrollbar(PanelId id) {
+    if (!window || id == PanelId::Blocks || !isPanelVisible(id)) return;
+    const size_t index = static_cast<size_t>(id);
+    panel_scroll_track_rects_[index] = make_rect(0.f, 0.f, 0.f, 0.f);
+    panel_scroll_thumb_rects_[index] = make_rect(0.f, 0.f, 0.f, 0.f);
+    const float scroll_max = panel_scroll_max_[index];
+    if (scroll_max <= 0.0f) return;
+
+    const auto area = panelContentRect(id);
+    const float track_w = 10.0f;
+    const float tx = area.position.x + std::max(0.0f, area.size.x - track_w - 2.0f);
+    const float ty = area.position.y;
+    const float th = std::max(0.0f, area.size.y);
+    const float content_height = th + scroll_max;
+    const float visible_ratio = content_height > 1.0f
+        ? std::clamp(th / content_height, 0.05f, 1.0f) : 1.0f;
+    const float thumb_h = std::max(24.0f, th * visible_ratio);
+    const float travel = std::max(1.0f, th - thumb_h);
+    const float ratio = std::clamp(panel_scroll_y_[index] / scroll_max, 0.0f, 1.0f);
+    const float thumb_y = ty + ratio * travel;
+
+    panel_scroll_track_rects_[index] = make_rect(tx, ty, track_w, th);
+    panel_scroll_thumb_rects_[index] = make_rect(tx, thumb_y, track_w, thumb_h);
+
+    vizgfx::RectangleShape track(vizgfx::Vector2f(track_w, th));
+    track.setPosition(vizgfx::Vector2f(tx, ty));
+    track.setFillColor(vizgfx::Color(35, 35, 42, 220));
+    window->draw(track);
+
+    vizgfx::RectangleShape thumb(vizgfx::Vector2f(track_w, thumb_h));
+    thumb.setPosition(vizgfx::Vector2f(tx, thumb_y));
+    thumb.setFillColor(with_alpha(panelAccent(id), 230));
+    window->draw(thumb);
+}
+
+vizgfx::FloatRect Visualizer::panelResizeHandleRect(PanelId id) const {
     const auto& p = panels_[static_cast<size_t>(id)];
     const float w = std::max(0.f, p.size.x);
     const float h = std::max(0.f, p.size.y);
@@ -1233,7 +1406,7 @@ sf::FloatRect Visualizer::panelResizeHandleRect(PanelId id) const {
     return make_rect(p.pos.x + w - hs, p.pos.y + h - hs, hs, hs);
 }
 
-sf::FloatRect Visualizer::panelCloseButtonRect(PanelId id) const {
+vizgfx::FloatRect Visualizer::panelCloseButtonRect(PanelId id) const {
     const auto tr = panelTitleRect(id);
     const float s = std::max(10.f, std::min(18.f, tr.size.y - 4.f));
     const float x = tr.position.x + tr.size.x - s - 4.f;
@@ -1241,10 +1414,10 @@ sf::FloatRect Visualizer::panelCloseButtonRect(PanelId id) const {
     return make_rect(x, y, s, s);
 }
 
-std::optional<Visualizer::PanelId> Visualizer::hitTestPanelTitle(const sf::Vector2f& mouse) const {
+std::optional<Visualizer::PanelId> Visualizer::hitTestPanelTitle(const vizgfx::Vector2f& mouse) const {
     // Hit-test du haut vers le bas: si des panneaux se chevauchent,
     // le dernier dessiné (graph/metrics) peut être prioritaire.
-    const PanelId order[] = { PanelId::Graph, PanelId::Metrics, PanelId::Training, PanelId::Generated, PanelId::Blocks, PanelId::Context };
+    const PanelId order[] = { PanelId::Graph, PanelId::Metrics, PanelId::Training, PanelId::Output, PanelId::Generated, PanelId::Blocks, PanelId::Context };
     for (PanelId id : order) {
         if (!isPanelVisible(id)) continue;
         const auto& p = panels_[static_cast<size_t>(id)];
@@ -1254,8 +1427,8 @@ std::optional<Visualizer::PanelId> Visualizer::hitTestPanelTitle(const sf::Vecto
     return std::nullopt;
 }
 
-std::optional<Visualizer::PanelId> Visualizer::hitTestPanelResizeHandle(const sf::Vector2f& mouse) const {
-    const PanelId order[] = { PanelId::Graph, PanelId::Metrics, PanelId::Training, PanelId::Generated, PanelId::Blocks, PanelId::Context };
+std::optional<Visualizer::PanelId> Visualizer::hitTestPanelResizeHandle(const vizgfx::Vector2f& mouse) const {
+    const PanelId order[] = { PanelId::Graph, PanelId::Metrics, PanelId::Training, PanelId::Output, PanelId::Generated, PanelId::Blocks, PanelId::Context };
     for (PanelId id : order) {
         if (!isPanelVisible(id)) continue;
         const auto& p = panels_[static_cast<size_t>(id)];
@@ -1265,8 +1438,8 @@ std::optional<Visualizer::PanelId> Visualizer::hitTestPanelResizeHandle(const sf
     return std::nullopt;
 }
 
-std::optional<Visualizer::PanelId> Visualizer::hitTestPanelCloseButton(const sf::Vector2f& mouse) const {
-    const PanelId order[] = { PanelId::Graph, PanelId::Metrics, PanelId::Training, PanelId::Generated, PanelId::Blocks, PanelId::Context };
+std::optional<Visualizer::PanelId> Visualizer::hitTestPanelCloseButton(const vizgfx::Vector2f& mouse) const {
+    const PanelId order[] = { PanelId::Graph, PanelId::Metrics, PanelId::Training, PanelId::Output, PanelId::Generated, PanelId::Blocks, PanelId::Context };
     for (PanelId id : order) {
         if (!isPanelVisible(id)) continue;
         if (panelCloseButtonRect(id).contains(mouse)) return id;
@@ -1277,11 +1450,11 @@ std::optional<Visualizer::PanelId> Visualizer::hitTestPanelCloseButton(const sf:
 void Visualizer::initCursorsIfNeeded() {
     if (cursors_loaded_) return;
     // Best-effort: certains backends peuvent refuser certains curseurs.
-    cursor_arrow_ = sf::Cursor::createFromSystem(sf::Cursor::Type::Arrow);
-    cursor_hand_ = sf::Cursor::createFromSystem(sf::Cursor::Type::Hand);
-    cursor_cross_ = sf::Cursor::createFromSystem(sf::Cursor::Type::Cross);
+    cursor_arrow_ = vizgfx::Cursor::createFromSystem(vizgfx::Cursor::Type::Arrow);
+    cursor_hand_ = vizgfx::Cursor::createFromSystem(vizgfx::Cursor::Type::Hand);
+    cursor_cross_ = vizgfx::Cursor::createFromSystem(vizgfx::Cursor::Type::Cross);
     // Diagonal resize (NW-SE) pour handle bottom-right.
-    cursor_resize_ = sf::Cursor::createFromSystem(sf::Cursor::Type::SizeTopLeftBottomRight);
+    cursor_resize_ = vizgfx::Cursor::createFromSystem(vizgfx::Cursor::Type::SizeTopLeftBottomRight);
 
     cursor_ok_arrow_ = cursor_arrow_.has_value();
     cursor_ok_hand_ = cursor_hand_.has_value();
@@ -1295,14 +1468,14 @@ void Visualizer::setCursor(CursorKind kind) {
     if (cursor_kind_ == kind) return;
     initCursorsIfNeeded();
 
-    const sf::Cursor* c = nullptr;
+    const vizgfx::Cursor* c = nullptr;
     if (kind == CursorKind::Hand && cursor_ok_hand_ && cursor_hand_.has_value()) c = &(*cursor_hand_);
     else if (kind == CursorKind::Cross && cursor_ok_cross_ && cursor_cross_.has_value()) c = &(*cursor_cross_);
     else if (kind == CursorKind::Resize && cursor_ok_resize_ && cursor_resize_.has_value()) c = &(*cursor_resize_);
     else if (cursor_ok_arrow_ && cursor_arrow_.has_value()) c = &(*cursor_arrow_);
 
     if (c) {
-        window->setMouseCursor(*c);
+        window->setMouseCursor(*c, static_cast<int>(kind));
     }
     cursor_kind_ = kind;
 }
@@ -1333,16 +1506,19 @@ void Visualizer::initDefaultPanelsIfNeeded() {
     const float right_x = margin + left_w + margin;
     const float right_safe_w = std::max(320.f, std::min(right_w, win_w - right_x - margin));
 
-    panels_[static_cast<size_t>(PanelId::Context)] = Panel{ sf::Vector2f(margin, margin), sf::Vector2f(left_w, 280.f), "Context", true, true };
-    panels_[static_cast<size_t>(PanelId::Blocks)] = Panel{ sf::Vector2f(margin, margin + 300.f), sf::Vector2f(left_w, 320.f), "Blocks / Layers", true, true };
-    panels_[static_cast<size_t>(PanelId::Generated)] = Panel{ sf::Vector2f(margin, margin + 640.f), sf::Vector2f(left_w, 280.f), "Generated", true, true };
+    const float output_w = std::clamp(left_w * 0.30f, kPanelMinW, 320.f);
+    const float context_w = std::max(kPanelMinW, left_w - output_w - margin);
+    panels_[static_cast<size_t>(PanelId::Context)] = Panel{ vizgfx::Vector2f(margin, margin), vizgfx::Vector2f(context_w, 280.f), "Context", true, true };
+    panels_[static_cast<size_t>(PanelId::Blocks)] = Panel{ vizgfx::Vector2f(margin, margin + 300.f), vizgfx::Vector2f(left_w, 320.f), "Blocks / Layers", true, true };
+    panels_[static_cast<size_t>(PanelId::Generated)] = Panel{ vizgfx::Vector2f(margin, margin + 640.f), vizgfx::Vector2f(left_w, 280.f), "Generated", true, true };
+    panels_[static_cast<size_t>(PanelId::Output)] = Panel{ vizgfx::Vector2f(margin + context_w + margin, margin), vizgfx::Vector2f(output_w, 280.f), "Sortie", true, true };
 
-    panels_[static_cast<size_t>(PanelId::Training)] = Panel{ sf::Vector2f(right_x, margin), sf::Vector2f(right_safe_w, 70.f), "Training", true, true };
-    panels_[static_cast<size_t>(PanelId::Graph)] = Panel{ sf::Vector2f(right_x, std::max(margin + 80.f, win_h - 240.f - margin)), sf::Vector2f(right_safe_w, 240.f), "Loss", true, true };
+    panels_[static_cast<size_t>(PanelId::Training)] = Panel{ vizgfx::Vector2f(right_x, margin), vizgfx::Vector2f(right_safe_w, 70.f), "Training", true, true };
+    panels_[static_cast<size_t>(PanelId::Graph)] = Panel{ vizgfx::Vector2f(right_x, std::max(margin + 80.f, win_h - 240.f - margin)), vizgfx::Vector2f(right_safe_w, 240.f), "Loss", true, true };
     {
         const float metrics_y = margin + 90.f;
         const float metrics_h = std::max(220.f, win_h - metrics_y - panels_[static_cast<size_t>(PanelId::Graph)].size.y - margin);
-        panels_[static_cast<size_t>(PanelId::Metrics)] = Panel{ sf::Vector2f(right_x, metrics_y), sf::Vector2f(right_safe_w, metrics_h), "Metrics", true, true };
+        panels_[static_cast<size_t>(PanelId::Metrics)] = Panel{ vizgfx::Vector2f(right_x, metrics_y), vizgfx::Vector2f(right_safe_w, metrics_h), "Metrics", true, true };
     }
 
     clampPanelsToWindow();
@@ -1354,17 +1530,17 @@ void Visualizer::drawPanelChrome(PanelId id) {
     const auto& p = panels_[static_cast<size_t>(id)];
     if (p.size.x <= 1.f || p.size.y <= 1.f) return;
 
-    const sf::Color accent = panelAccent(id);
+    const vizgfx::Color accent = panelAccent(id);
 
-    sf::RectangleShape bg(p.size);
+    vizgfx::RectangleShape bg(p.size);
     bg.setPosition(p.pos);
-    bg.setFillColor(sf::Color(18, 18, 22, 170));
+    bg.setFillColor(vizgfx::Color(18, 18, 22, 170));
     bg.setOutlineColor(with_alpha(accent, 180));
     bg.setOutlineThickness(2);
     window->draw(bg);
 
     const float th = std::min(kPanelTitleH, p.size.y);
-    sf::RectangleShape title(sf::Vector2f(p.size.x, th));
+    vizgfx::RectangleShape title(vizgfx::Vector2f(p.size.x, th));
     title.setPosition(p.pos);
     title.setFillColor(with_alpha(accent, 120));
     window->draw(title);
@@ -1376,12 +1552,12 @@ void Visualizer::drawPanelChrome(PanelId id) {
     }
 
     if (font_loaded && !p.title.empty()) {
-        sf::Text t(font);
+        vizgfx::Text t(font);
         t.setFont(font);
         t.setCharacterSize(14);
-        t.setFillColor(sf::Color(235, 235, 240));
-        t.setPosition(sf::Vector2f(p.pos.x + 8.f, p.pos.y + 2.f));
-        t.setString(sf::String::fromUtf8(p.title.begin(), p.title.end()));
+        t.setFillColor(vizgfx::Color(235, 235, 240));
+        t.setPosition(vizgfx::Vector2f(p.pos.x + 8.f, p.pos.y + 2.f));
+        t.setString(vizgfx::String::fromUtf8(p.title.begin(), p.title.end()));
         window->draw(t);
 
         // Badge de mode de rendu pour Blocks/Layers (heatmap vs réel).
@@ -1389,25 +1565,25 @@ void Visualizer::drawPanelChrome(PanelId id) {
             const bool real_mode = !heatmap_mode_;
             const std::string badge = real_mode ? "REEL" : "HEATMAP";
 
-            const sf::Color badge_fill = real_mode
-                ? sf::Color(46, 122, 86, 220)
-                : sf::Color(126, 78, 42, 220);
-            const sf::Color badge_outline = real_mode
-                ? sf::Color(126, 220, 170, 235)
-                : sf::Color(234, 182, 120, 235);
+            const vizgfx::Color badge_fill = real_mode
+                ? vizgfx::Color(46, 122, 86, 220)
+                : vizgfx::Color(126, 78, 42, 220);
+            const vizgfx::Color badge_outline = real_mode
+                ? vizgfx::Color(126, 220, 170, 235)
+                : vizgfx::Color(234, 182, 120, 235);
 
             const bool smooth_on = smooth_layer_block_previews_;
             const std::string smooth_badge = smooth_on ? "LISSAGE ON" : "LISSAGE OFF";
-            const sf::Color smooth_fill = smooth_on
-                ? sf::Color(54, 104, 152, 220)
-                : sf::Color(92, 92, 102, 220);
-            const sf::Color smooth_outline = smooth_on
-                ? sf::Color(140, 206, 255, 235)
-                : sf::Color(156, 156, 170, 235);
+            const vizgfx::Color smooth_fill = smooth_on
+                ? vizgfx::Color(54, 104, 152, 220)
+                : vizgfx::Color(92, 92, 102, 220);
+            const vizgfx::Color smooth_outline = smooth_on
+                ? vizgfx::Color(140, 206, 255, 235)
+                : vizgfx::Color(156, 156, 170, 235);
 
             const std::string pal_badge = std::string("PAL ") + heatmap_palette_name(static_cast<int>(heatmap_palette_));
-            const sf::Color pal_fill = sf::Color(72, 78, 110, 220);
-            const sf::Color pal_outline = sf::Color(160, 172, 238, 235);
+            const vizgfx::Color pal_fill = vizgfx::Color(72, 78, 110, 220);
+            const vizgfx::Color pal_outline = vizgfx::Color(160, 172, 238, 235);
 
             const float badge_h = std::max(14.f, th - 8.f);
             const float mode_w = (badge == "HEATMAP") ? 84.f : 58.f;
@@ -1428,70 +1604,70 @@ void Visualizer::drawPanelChrome(PanelId id) {
             const float norm_x = act_x + filt_act_w + gap;
             const float tips_x = norm_x + filt_norm_w + gap;
 
-            sf::RectangleShape b(sf::Vector2f(mode_w, badge_h));
-            b.setPosition(sf::Vector2f(mode_x, badge_y));
+            vizgfx::RectangleShape b(vizgfx::Vector2f(mode_w, badge_h));
+            b.setPosition(vizgfx::Vector2f(mode_x, badge_y));
             b.setFillColor(badge_fill);
             b.setOutlineColor(badge_outline);
             b.setOutlineThickness(1.f);
             window->draw(b);
 
-            sf::Text bt(font);
+            vizgfx::Text bt(font);
             bt.setFont(font);
             bt.setCharacterSize(12);
-            bt.setFillColor(sf::Color(245, 245, 248));
-            bt.setPosition(sf::Vector2f(mode_x + 7.f, badge_y - 1.f));
-            bt.setString(sf::String::fromUtf8(badge.begin(), badge.end()));
+            bt.setFillColor(vizgfx::Color(245, 245, 248));
+            bt.setPosition(vizgfx::Vector2f(mode_x + 7.f, badge_y - 1.f));
+            bt.setString(vizgfx::String::fromUtf8(badge.begin(), badge.end()));
             window->draw(bt);
 
-            sf::RectangleShape sb(sf::Vector2f(smooth_w, badge_h));
-            sb.setPosition(sf::Vector2f(smooth_x, badge_y));
+            vizgfx::RectangleShape sb(vizgfx::Vector2f(smooth_w, badge_h));
+            sb.setPosition(vizgfx::Vector2f(smooth_x, badge_y));
             sb.setFillColor(smooth_fill);
             sb.setOutlineColor(smooth_outline);
             sb.setOutlineThickness(1.f);
             window->draw(sb);
 
-            sf::Text st(font);
+            vizgfx::Text st(font);
             st.setFont(font);
             st.setCharacterSize(12);
-            st.setFillColor(sf::Color(245, 245, 248));
-            st.setPosition(sf::Vector2f(smooth_x + 6.f, badge_y - 1.f));
-            st.setString(sf::String::fromUtf8(smooth_badge.begin(), smooth_badge.end()));
+            st.setFillColor(vizgfx::Color(245, 245, 248));
+            st.setPosition(vizgfx::Vector2f(smooth_x + 6.f, badge_y - 1.f));
+            st.setString(vizgfx::String::fromUtf8(smooth_badge.begin(), smooth_badge.end()));
             window->draw(st);
 
-            sf::RectangleShape pb(sf::Vector2f(pal_w, badge_h));
-            pb.setPosition(sf::Vector2f(pal_x, badge_y));
+            vizgfx::RectangleShape pb(vizgfx::Vector2f(pal_w, badge_h));
+            pb.setPosition(vizgfx::Vector2f(pal_x, badge_y));
             pb.setFillColor(pal_fill);
             pb.setOutlineColor(pal_outline);
             pb.setOutlineThickness(1.f);
             window->draw(pb);
 
-            sf::Text pt(font);
+            vizgfx::Text pt(font);
             pt.setFont(font);
             pt.setCharacterSize(12);
-            pt.setFillColor(sf::Color(245, 245, 248));
-            pt.setPosition(sf::Vector2f(pal_x + 6.f, badge_y - 1.f));
-            pt.setString(sf::String::fromUtf8(pal_badge.begin(), pal_badge.end()));
+            pt.setFillColor(vizgfx::Color(245, 245, 248));
+            pt.setPosition(vizgfx::Vector2f(pal_x + 6.f, badge_y - 1.f));
+            pt.setString(vizgfx::String::fromUtf8(pal_badge.begin(), pal_badge.end()));
             window->draw(pt);
 
             auto draw_filter_badge = [&](float x, float w, const std::string& label, bool hidden,
-                                         std::optional<sf::FloatRect>& out_rect) {
-                const sf::Color fill = hidden ? sf::Color(145, 84, 84, 220)
-                                              : sf::Color(70, 116, 86, 220);
-                const sf::Color outline = hidden ? sf::Color(240, 154, 154, 235)
-                                                 : sf::Color(154, 226, 186, 235);
-                sf::RectangleShape fb(sf::Vector2f(w, badge_h));
-                fb.setPosition(sf::Vector2f(x, badge_y));
+                                         std::optional<vizgfx::FloatRect>& out_rect) {
+                const vizgfx::Color fill = hidden ? vizgfx::Color(145, 84, 84, 220)
+                                              : vizgfx::Color(70, 116, 86, 220);
+                const vizgfx::Color outline = hidden ? vizgfx::Color(240, 154, 154, 235)
+                                                 : vizgfx::Color(154, 226, 186, 235);
+                vizgfx::RectangleShape fb(vizgfx::Vector2f(w, badge_h));
+                fb.setPosition(vizgfx::Vector2f(x, badge_y));
                 fb.setFillColor(fill);
                 fb.setOutlineColor(outline);
                 fb.setOutlineThickness(1.f);
                 window->draw(fb);
 
-                sf::Text ft(font);
+                vizgfx::Text ft(font);
                 ft.setFont(font);
                 ft.setCharacterSize(12);
-                ft.setFillColor(sf::Color(245, 245, 248));
-                ft.setPosition(sf::Vector2f(x + 6.f, badge_y - 1.f));
-                ft.setString(sf::String::fromUtf8(label.begin(), label.end()));
+                ft.setFillColor(vizgfx::Color(245, 245, 248));
+                ft.setPosition(vizgfx::Vector2f(x + 6.f, badge_y - 1.f));
+                ft.setString(vizgfx::String::fromUtf8(label.begin(), label.end()));
                 window->draw(ft);
 
                 out_rect = make_rect(x, badge_y, w, badge_h);
@@ -1507,15 +1683,15 @@ void Visualizer::drawPanelChrome(PanelId id) {
                               last_blocks_hide_norm_box_);
 
             {
-                const sf::Color tips_fill = blocks_tips_limit_editing_
-                    ? sf::Color(76, 98, 146, 220)
-                    : sf::Color(74, 74, 92, 220);
-                const sf::Color tips_outline = blocks_tips_limit_editing_
-                    ? sf::Color(166, 208, 255, 235)
-                    : sf::Color(168, 168, 188, 235);
+                const vizgfx::Color tips_fill = blocks_tips_limit_editing_
+                    ? vizgfx::Color(76, 98, 146, 220)
+                    : vizgfx::Color(74, 74, 92, 220);
+                const vizgfx::Color tips_outline = blocks_tips_limit_editing_
+                    ? vizgfx::Color(166, 208, 255, 235)
+                    : vizgfx::Color(168, 168, 188, 235);
 
-                sf::RectangleShape tb(sf::Vector2f(tips_w, badge_h));
-                tb.setPosition(sf::Vector2f(tips_x, badge_y));
+                vizgfx::RectangleShape tb(vizgfx::Vector2f(tips_w, badge_h));
+                tb.setPosition(vizgfx::Vector2f(tips_x, badge_y));
                 tb.setFillColor(tips_fill);
                 tb.setOutlineColor(tips_outline);
                 tb.setOutlineThickness(1.f);
@@ -1533,12 +1709,12 @@ void Visualizer::drawPanelChrome(PanelId id) {
 
                 const std::string tips_badge = "TIPS " + tips_value;
 
-                sf::Text tt(font);
+                vizgfx::Text tt(font);
                 tt.setFont(font);
                 tt.setCharacterSize(12);
-                tt.setFillColor(sf::Color(245, 245, 248));
-                tt.setPosition(sf::Vector2f(tips_x + 6.f, badge_y - 1.f));
-                tt.setString(sf::String::fromUtf8(tips_badge.begin(), tips_badge.end()));
+                tt.setFillColor(vizgfx::Color(245, 245, 248));
+                tt.setPosition(vizgfx::Vector2f(tips_x + 6.f, badge_y - 1.f));
+                tt.setString(vizgfx::String::fromUtf8(tips_badge.begin(), tips_badge.end()));
                 window->draw(tt);
 
                 last_blocks_tips_limit_box_ = make_rect(tips_x, badge_y, tips_w, badge_h);
@@ -1549,36 +1725,195 @@ void Visualizer::drawPanelChrome(PanelId id) {
     // Poignée de redimensionnement (bas-droite)
     {
         const auto r = panelResizeHandleRect(id);
-        sf::RectangleShape h(sf::Vector2f(r.size.x, r.size.y));
-        h.setPosition(sf::Vector2f(r.position.x, r.position.y));
-        h.setFillColor(sf::Color(80, 80, 95, 210));
+        vizgfx::RectangleShape h(vizgfx::Vector2f(r.size.x, r.size.y));
+        h.setPosition(vizgfx::Vector2f(r.position.x, r.position.y));
+        h.setFillColor(vizgfx::Color(80, 80, 95, 210));
         window->draw(h);
     }
 
     // Bouton close [X]
     {
         const auto r = panelCloseButtonRect(id);
-        sf::RectangleShape b(sf::Vector2f(r.size.x, r.size.y));
-        b.setPosition(sf::Vector2f(r.position.x, r.position.y));
-        b.setFillColor(sf::Color(90, 40, 40, 220));
-        b.setOutlineColor(sf::Color(180, 80, 80, 230));
+        vizgfx::RectangleShape b(vizgfx::Vector2f(r.size.x, r.size.y));
+        b.setPosition(vizgfx::Vector2f(r.position.x, r.position.y));
+        b.setFillColor(vizgfx::Color(90, 40, 40, 220));
+        b.setOutlineColor(vizgfx::Color(180, 80, 80, 230));
         b.setOutlineThickness(1);
         window->draw(b);
 
         if (font_loaded) {
-            sf::Text t(font);
+            vizgfx::Text t(font);
             t.setFont(font);
             t.setCharacterSize(14);
-            t.setFillColor(sf::Color(245, 240, 240));
-            t.setPosition(sf::Vector2f(r.position.x + 4.f, r.position.y - 2.f));
+            t.setFillColor(vizgfx::Color(245, 240, 240));
+            t.setPosition(vizgfx::Vector2f(r.position.x + 4.f, r.position.y - 2.f));
             t.setString("X");
             window->draw(t);
         }
     }
 }
 
+// Lua-facing mailbox: no Lua VM or graphics objects cross thread boundaries.
+void Visualizer::configureScript(const json& config) {
+    if (!config.is_object()) throw std::invalid_argument("Viz.configure expects an object");
+    for (const char* field : {"panels", "controls"}) {
+        if (!config.contains(field)) continue;
+        if (!config[field].is_array() || config[field].size() > 64)
+            throw std::invalid_argument(std::string(field) + " must be an array (max 64)");
+        std::unordered_set<std::string> ids;
+        for (const auto& item : config[field]) {
+            if (!item.is_object()) throw std::invalid_argument("scene item must be an object");
+            for (const char* key : {"x", "y", "w", "h"}) {
+                if (item.contains(key) && (!item[key].is_number() ||
+                    !std::isfinite(item[key].get<double>()) || std::abs(item[key].get<double>()) > 16384))
+                    throw std::invalid_argument("invalid scene geometry");
+            }
+            for (const char* key : {"w", "h"})
+                if (item.contains(key) && item[key].get<float>() <= 0)
+                    throw std::invalid_argument("scene size must be positive");
+            if (std::string(field) == "panels") {
+                if (!item.contains("id") || !item["id"].is_number() ||
+                    !std::isfinite(item["id"].get<double>()) ||
+                    item["id"].get<double>() != std::floor(item["id"].get<double>()) ||
+                    item["id"].get<double>() < 0 || item["id"].get<double>() >= 7)
+                    throw std::invalid_argument("panel id must be 0..6");
+                if (item.contains("visible") && !item["visible"].is_boolean())
+                    throw std::invalid_argument("visible must be boolean");
+            } else {
+                if (!item.contains("id") || !item["id"].is_string() || item["id"].get<std::string>().empty() ||
+                    !ids.insert(item["id"].get<std::string>()).second)
+                    throw std::invalid_argument("control ids must be unique nonempty strings");
+            }
+            if (item.contains("title") && !item["title"].is_string()) throw std::invalid_argument("title must be string");
+            if (item.contains("label") && !item["label"].is_string()) throw std::invalid_argument("label must be string");
+        }
+    }
+    if (config.contains("image_size") && (!config["image_size"].is_number() ||
+        !std::isfinite(config["image_size"].get<double>()) ||
+        config["image_size"].get<double>() != std::floor(config["image_size"].get<double>()) ||
+        config["image_size"].get<double>() < 32 || config["image_size"].get<double>() > 1024))
+        throw std::invalid_argument("image_size must be 32..1024 pixels");
+    if (config.contains("events") && !config["events"].is_boolean()) throw std::invalid_argument("events must be boolean");
+    if (config.contains("help") && !config["help"].is_string()) throw std::invalid_argument("help must be string");
+    std::lock_guard<std::mutex> lock(script_mutex_);
+    if (!script_pending_) script_pending_ = json::object();
+    json next = config;
+    if (next.contains("panels") && script_pending_->contains("panels")) {
+        json merged = (*script_pending_)["panels"];
+        for (const auto& patch : next["panels"]) {
+            bool found = false;
+            for (auto& panel : merged) if (panel["id"] == patch["id"]) {
+                panel.update(patch); found = true; break;
+            }
+            if (!found) merged.push_back(patch);
+        }
+        next["panels"] = std::move(merged);
+    }
+    script_pending_->update(next);
+}
+
+json Visualizer::pollScriptEvents() {
+    std::lock_guard<std::mutex> lock(script_mutex_);
+    json result = json::array();
+    result.swap(script_events_);
+    return result;
+}
+
+void Visualizer::emitScriptEvent(const json& event) {
+    std::lock_guard<std::mutex> lock(script_mutex_);
+    if (script_events_.size() >= 256) script_events_.erase(script_events_.begin());
+    script_events_.push_back(event);
+}
+
+void Visualizer::applyScriptScene() {
+    std::optional<json> pending;
+    {
+        std::lock_guard<std::mutex> lock(script_mutex_);
+        pending.swap(script_pending_);
+    }
+    if (!pending) return;
+    initDefaultPanelsIfNeeded();
+    script_scene_.update(*pending);
+    if (pending->contains("panels")) for (const auto& item : (*pending)["panels"]) {
+        auto& p = panels_[item["id"].get<size_t>()];
+        p.pos = {item.value("x", p.pos.x), item.value("y", p.pos.y)};
+        p.size = {item.value("w", p.size.x), item.value("h", p.size.y)};
+        p.visible = item.value("visible", p.visible);
+        p.title = item.value("title", p.title);
+    }
+    show_generated_images = panels_[2].visible;
+    show_training_progress = panels_[3].visible;
+    show_loss_graph = panels_[5].visible;
+    emitScriptEvent({{"type", "configured"}, {"width", window_width}, {"height", window_height}});
+}
+
+void Visualizer::renderScriptControls() {
+    if (!font_loaded || !script_scene_.contains("controls")) return;
+    for (const auto& c : script_scene_["controls"]) {
+        const float x = c.value("x", 12.f), y = c.value("y", 12.f);
+        vizgfx::RectangleShape box({c.value("w", 150.f), c.value("h", 36.f)});
+        box.setPosition({x, y});
+        box.setFillColor(vizgfx::Color(37, 65, 83));
+        box.setOutlineColor(vizgfx::Color(80, 180, 200));
+        box.setOutlineThickness(1.f);
+        window->draw(box);
+        vizgfx::Text t(font);
+        t.setCharacterSize(14);
+        t.setPosition({x + 10.f, y + 8.f});
+        const auto label = c.value("label", c["id"].get<std::string>());
+        t.setString(vizgfx::String::fromUtf8(label.begin(), label.end()));
+        t.setFillColor(vizgfx::Color(235, 245, 250));
+        window->draw(t);
+    }
+}
+
+void Visualizer::renderConfigurationOverlay() {
+    config_row_rects_.clear();
+    if (!font_loaded) return;
+    const auto rows = std::atomic_load(&runtime_config_)->snapshot();
+    auto& editor = config_editor_;
+    if (!rows.empty()) editor.selected = std::min(editor.selected, rows.size() - 1);
+        if (editor.editing) for (size_t i = 0; i < rows.size(); ++i)
+            if (rows[i].key == editor.editing_key) editor.selected = i;
+    const float left = 20.f, top = 20.f;
+    const float width = std::max(100.f, static_cast<float>(window_width) - 40.f);
+    const float height = std::max(180.f, static_cast<float>(window_height) - 40.f);
+    auto box = [&](float x, float y, float w, float h, vizgfx::Color color) {
+        vizgfx::RectangleShape shape({w, h}); shape.setPosition({x,y}); shape.setFillColor(color); window->draw(shape);
+    };
+    auto text = [&](float x, float y, const std::string& value, vizgfx::Color color) {
+        vizgfx::Text label(font); label.setCharacterSize(14); label.setPosition({x,y}); label.setFillColor(color);
+        const size_t limit = static_cast<size_t>(std::max(1.f, (width - 32.f) / 8.5f));
+        const auto clipped = value.size() > limit ? value.substr(0, limit > 3 ? limit - 3 : 0) + "..." : value;
+        label.setString(vizgfx::String::fromUtf8(clipped.begin(), clipped.end())); window->draw(label);
+    };
+    const vizgfx::Color white(230,240,246), muted(150,163,178), accent(100,215,210);
+    box(0, 0, static_cast<float>(window_width), static_cast<float>(window_height), vizgfx::Color(0,0,0,185));
+    box(left, top, width, height, vizgfx::Color(22,29,39,255));
+    text(left+12, top+10, "CONFIGURATION DU MODELE    [C] Fermer   [Esc] Annuler", accent);
+    text(left+12, top+34, "Fleches / molette : choisir. Entree ou clic : modifier. Entree : valider.", muted);
+    text(left+12, top+58, "DIRECT : modifiable maintenant. FIXE : reconstruction / redemarrage requis.", muted);
+    const size_t count = static_cast<size_t>(std::max(1.f, (height - 166.f)/26.f));
+    const size_t first = (editor.selected/count)*count;
+    float y = top + 86.f;
+    for (size_t i = first; i < rows.size() && i < first + count; ++i, y += 26.f) {
+        const auto& e = rows[i];
+        if (i == editor.selected) box(left+8, y-2, width-16, 25, vizgfx::Color(42,65,84));
+        std::string value = LiveModelConfig::display(e.value);
+        if (e.pending) value += " -> " + LiveModelConfig::display(*e.pending) + " (en attente)";
+        text(left+14,y,(e.owner == LiveModelConfig::Owner::ReadOnly ? "FIXE   " : "DIRECT ") + e.key + " = " + value,
+             e.owner == LiveModelConfig::Owner::ReadOnly ? muted : white);
+        config_row_rects_.push_back({make_rect(left+8,y-2,width-16,25), i});
+    }
+    text(left+12,top+height-76,editor.message.empty() ? (rows.empty() ? "Aucun modele attache" : rows[editor.selected].note) : editor.message, accent);
+    text(left+12,top+height-50,editor.editing ? editor.editing_key + " > " + editor.buffer + "_" : "Applique au prochain point sur du calcul.",white);
+    text(left+12,top+height-26,std::to_string(rows.empty() ? 0 : editor.selected+1) + "/" + std::to_string(rows.size()),muted);
+}
+
 void Visualizer::processEvents() {
     if (!window) return;
+
+    applyScriptScene();
 
     // Garantir que les coordonnées UI (pixels) sont actives avant tout hit-test.
     syncUIView();
@@ -1589,13 +1924,15 @@ void Visualizer::processEvents() {
         live_kl_beta_.store(std::clamp(live_ui_kl_beta_, 0.0f, 1.0f), std::memory_order_relaxed);
         live_kl_warmup_steps_.store(std::max(0, live_ui_kl_warmup_steps_), std::memory_order_relaxed);
         live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
+        live_recon_loss_index_.store(
+            std::clamp(live_ui_recon_loss_index_, 0, 5), std::memory_order_relaxed);
         if (bump_version) {
             live_params_version_.fetch_add(1, std::memory_order_relaxed);
         }
     };
 
-    auto apply_live_slider_from_mouse = [&](LiveDragTarget target, const sf::Vector2f& mouse) {
-        auto apply_t_on_track = [&](const std::optional<sf::FloatRect>& track, auto fn) {
+    auto apply_live_slider_from_mouse = [&](LiveDragTarget target, const vizgfx::Vector2f& mouse) {
+        auto apply_t_on_track = [&](const std::optional<vizgfx::FloatRect>& track, auto fn) {
             if (!track.has_value()) return;
             const float denom = std::max(1.0f, track->size.x);
             const float t = clamp01((mouse.x - track->position.x) / denom);
@@ -1680,41 +2017,121 @@ void Visualizer::processEvents() {
         }
     };
 
-    while (const std::optional<sf::Event> event_opt = window->pollEvent()) {
-        const sf::Event& event = *event_opt;
+    while (const std::optional<vizgfx::Event> event_opt = window->pollEvent()) {
+        const vizgfx::Event& event = *event_opt;
 
-        if (event.is<sf::Event::Closed>()) {
+        if (event.is<vizgfx::Event::Closed>()) {
+            emitScriptEvent({{"type", "close"}});
             window->close();
             continue;
         }
 
-        if (const auto* resized = event.getIf<sf::Event::Resized>()) {
+        if (const auto* resized = event.getIf<vizgfx::Event::Resized>()) {
+            emitScriptEvent({{"type", "resize"}, {"width", resized->size.x}, {"height", resized->size.y}});
             window_width = static_cast<int>(resized->size.x);
             window_height = static_cast<int>(resized->size.y);
             syncUIView();
             continue;
         }
 
-        if (const auto* mb = event.getIf<sf::Event::MouseButtonPressed>()) {
+        if (const auto* key = event.getIf<vizgfx::Event::KeyPressed>()) {
+            if (!config_editor_.editing && live_input_target_ == LiveInputTarget::None &&
+                !blocks_tips_limit_editing_ && key->code == vizgfx::Keyboard::Key::C && !key->control) {
+                config_editor_.toggle();
+                continue;
+            }
+        }
+        if (config_editor_.visible) {
+            auto config = std::atomic_load(&runtime_config_);
+            const auto count = config->snapshot().size();
+            if (const auto* key = event.getIf<vizgfx::Event::KeyPressed>()) {
+                if (key->code == vizgfx::Keyboard::Key::Escape) config_editor_.cancel();
+                else if (key->code == vizgfx::Keyboard::Key::Enter) config_editor_.enter(*config);
+                else if (key->code == vizgfx::Keyboard::Key::Up) config_editor_.move(-1, count);
+                else if (key->code == vizgfx::Keyboard::Key::Down || key->code == vizgfx::Keyboard::Key::Tab) config_editor_.move(1, count);
+                else if (key->code == vizgfx::Keyboard::Key::Left) config_editor_.move(-10, count);
+                else if (key->code == vizgfx::Keyboard::Key::Right) config_editor_.move(10, count);
+            } else if (const auto* text = event.getIf<vizgfx::Event::TextEntered>()) {
+                config_editor_.text(static_cast<uint32_t>(text->unicode));
+            } else if (const auto* wheel = event.getIf<vizgfx::Event::MouseWheelScrolled>()) {
+                config_editor_.move(wheel->delta > 0 ? -3 : 3, count);
+            } else if (const auto* click = event.getIf<vizgfx::Event::MouseButtonPressed>()) {
+                if (click->button == vizgfx::Mouse::Button::Left) {
+                    const vizgfx::Vector2f mouse(static_cast<float>(click->position.x), static_cast<float>(click->position.y));
+                    for (const auto& row : config_row_rects_) if (row.first.contains(mouse)) {
+                        config_editor_.editing = false;
+                        config_editor_.selected = row.second;
+                        config_editor_.enter(*config);
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (script_scene_.value("events", false)) {
+            if (const auto* key = event.getIf<vizgfx::Event::KeyPressed>())
+                emitScriptEvent({{"type", "key"}, {"code", static_cast<int>(key->code)},
+                    {"control", key->control}, {"shift", key->shift}, {"alt", key->alt}});
+            if (const auto* text = event.getIf<vizgfx::Event::TextEntered>())
+                emitScriptEvent({{"type", "text"}, {"unicode", static_cast<uint32_t>(text->unicode)}});
+            if (const auto* move = event.getIf<vizgfx::Event::MouseMoved>())
+                emitScriptEvent({{"type", "pointer_move"}, {"x", move->position.x}, {"y", move->position.y}});
+            if (const auto* button = event.getIf<vizgfx::Event::MouseButtonPressed>())
+                emitScriptEvent({{"type", "pointer_down"}, {"x", button->position.x}, {"y", button->position.y}, {"button", static_cast<int>(button->button)}});
+            if (const auto* button = event.getIf<vizgfx::Event::MouseButtonReleased>())
+                emitScriptEvent({{"type", "pointer_up"}, {"x", button->position.x}, {"y", button->position.y}, {"button", static_cast<int>(button->button)}});
+        }
+        if (const auto* mb = event.getIf<vizgfx::Event::MouseButtonPressed>()) {
             initDefaultPanelsIfNeeded();
             syncUIView();
-            const sf::Vector2f mouse = window->mapPixelToCoords(mb->position);
+            const vizgfx::Vector2f mouse = window->mapPixelToCoords(mb->position);
 
-            if (mb->button == sf::Mouse::Button::Left) {
-                if (last_stop_button_rect_.has_value() && last_stop_button_rect_->contains(mouse)) {
+            if (!show_help_overlay_ && !zoom_active_ && mb->button == vizgfx::Mouse::Button::Left && script_scene_.contains("controls")) {
+                bool handled = false;
+                for (const auto& c : script_scene_["controls"]) {
+                    if (make_rect(c.value("x", 12.f), c.value("y", 12.f), c.value("w", 150.f), c.value("h", 36.f)).contains(mouse)) {
+                        emitScriptEvent({{"type", "click"}, {"id", c["id"]}, {"x", mouse.x}, {"y", mouse.y}});
+                        handled = true;
+                        break;
+                    }
+                }
+                if (handled) continue;
+            }
+            if (mb->button == vizgfx::Mouse::Button::Left) {
+                const bool metrics_content_hit = isPanelVisible(PanelId::Metrics) &&
+                    panelContentRect(PanelId::Metrics).contains(mouse);
+                if (metrics_content_hit && last_stop_button_rect_.has_value() && last_stop_button_rect_->contains(mouse)) {
                     requestStopTraining();
                     continue;
                 }
+                if (metrics_content_hit && last_skip_button_rect_ && last_skip_button_rect_->contains(mouse)) {
+                    std::atomic_load(&skip_control_)->toggle();
+                    continue;
+                }
+                if (metrics_content_hit && last_validation_button_rect_.has_value() && last_validation_button_rect_->contains(mouse)) {
+                    const bool enabled = !validation_enabled_.load(std::memory_order_relaxed);
+                    validation_enabled_.store(enabled, std::memory_order_relaxed);
+                    validation_control_version_.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
 
-                if (last_live_overrides_box_.has_value() && last_live_overrides_box_->contains(mouse)) {
+                if (metrics_content_hit && last_live_overrides_box_.has_value() && last_live_overrides_box_->contains(mouse)) {
                     const bool next = !live_overrides_enabled_.load(std::memory_order_relaxed);
                     live_overrides_enabled_.store(next, std::memory_order_relaxed);
                     publish_live_params(true);
                     continue;
                 }
 
-                if (last_live_kl_enable_box_.has_value() && last_live_kl_enable_box_->contains(mouse)) {
+                if (metrics_content_hit && last_live_kl_enable_box_.has_value() && last_live_kl_enable_box_->contains(mouse)) {
                     live_ui_kl_enabled_ = !live_ui_kl_enabled_;
+                    live_overrides_enabled_.store(true, std::memory_order_relaxed);
+                    publish_live_params(true);
+                    continue;
+                }
+
+                if (metrics_content_hit && last_live_recon_loss_box_.has_value() && last_live_recon_loss_box_->contains(mouse)) {
+                    live_ui_recon_loss_index_ = (live_ui_recon_loss_index_ + 1) % 6;
                     live_overrides_enabled_.store(true, std::memory_order_relaxed);
                     publish_live_params(true);
                     continue;
@@ -1726,26 +2143,26 @@ void Visualizer::processEvents() {
                     live_input_error_until_ms_ = 0;
                 };
 
-                if (last_live_lr_value_box_.has_value() && last_live_lr_value_box_->contains(mouse)) {
+                if (metrics_content_hit && last_live_lr_value_box_.has_value() && last_live_lr_value_box_->contains(mouse)) {
                     begin_live_text_edit(LiveInputTarget::LR, format_decimal(live_ui_lr_, 10));
                     continue;
                 }
-                if (last_live_lrwu_value_box_.has_value() && last_live_lrwu_value_box_->contains(mouse)) {
+                if (metrics_content_hit && last_live_lrwu_value_box_.has_value() && last_live_lrwu_value_box_->contains(mouse)) {
                     begin_live_text_edit(LiveInputTarget::LRWarmup, std::to_string(live_ui_lr_warmup_steps_));
                     continue;
                 }
-                if (last_live_klb_value_box_.has_value() && last_live_klb_value_box_->contains(mouse)) {
+                if (metrics_content_hit && last_live_klb_value_box_.has_value() && last_live_klb_value_box_->contains(mouse)) {
                     begin_live_text_edit(LiveInputTarget::KLBeta, format_decimal(live_ui_kl_beta_, 8));
                     continue;
                 }
-                if (last_live_klwu_value_box_.has_value() && last_live_klwu_value_box_->contains(mouse)) {
+                if (metrics_content_hit && last_live_klwu_value_box_.has_value() && last_live_klwu_value_box_->contains(mouse)) {
                     begin_live_text_edit(LiveInputTarget::KLWarmup, std::to_string(live_ui_kl_warmup_steps_));
                     continue;
                 }
 
                 auto begin_live_drag_if_hit = [&](LiveDragTarget target,
-                                                  const std::optional<sf::FloatRect>& track,
-                                                  const std::optional<sf::FloatRect>& thumb) -> bool {
+                                                  const std::optional<vizgfx::FloatRect>& track,
+                                                  const std::optional<vizgfx::FloatRect>& thumb) -> bool {
                     if ((thumb.has_value() && thumb->contains(mouse)) || (track.has_value() && track->contains(mouse))) {
                         live_dragging_ = target;
                         live_overrides_enabled_.store(true, std::memory_order_relaxed);
@@ -1756,10 +2173,10 @@ void Visualizer::processEvents() {
                     return false;
                 };
 
-                if (begin_live_drag_if_hit(LiveDragTarget::LR, last_live_lr_track_, last_live_lr_thumb_)) continue;
-                if (begin_live_drag_if_hit(LiveDragTarget::LRWarmup, last_live_lrwu_track_, last_live_lrwu_thumb_)) continue;
-                if (begin_live_drag_if_hit(LiveDragTarget::KLBeta, last_live_klb_track_, last_live_klb_thumb_)) continue;
-                if (begin_live_drag_if_hit(LiveDragTarget::KLWarmup, last_live_klwu_track_, last_live_klwu_thumb_)) continue;
+                if (metrics_content_hit && begin_live_drag_if_hit(LiveDragTarget::LR, last_live_lr_track_, last_live_lr_thumb_)) continue;
+                if (metrics_content_hit && begin_live_drag_if_hit(LiveDragTarget::LRWarmup, last_live_lrwu_track_, last_live_lrwu_thumb_)) continue;
+                if (metrics_content_hit && begin_live_drag_if_hit(LiveDragTarget::KLBeta, last_live_klb_track_, last_live_klb_thumb_)) continue;
+                if (metrics_content_hit && begin_live_drag_if_hit(LiveDragTarget::KLWarmup, last_live_klwu_track_, last_live_klwu_thumb_)) continue;
 
                 if (last_blocks_hide_act_box_.has_value() && last_blocks_hide_act_box_->contains(mouse)) {
                     hide_activation_blocks = !hide_activation_blocks;
@@ -1784,7 +2201,8 @@ void Visualizer::processEvents() {
 
                 // Sélection directe par clic sur les vignettes de tips (panel Blocks).
                 bool selected_tip = false;
-                if (!last_block_rects_.empty()) {
+                if (isPanelVisible(PanelId::Blocks) &&
+                    panelContentRect(PanelId::Blocks).contains(mouse) && !last_block_rects_.empty()) {
                     for (int i = static_cast<int>(last_block_rects_.size()) - 1; i >= 0; --i) {
                         const auto& r = last_block_rects_[static_cast<size_t>(i)];
                         if (r.size.x <= 0.f || r.size.y <= 0.f) continue;
@@ -1800,7 +2218,9 @@ void Visualizer::processEvents() {
 
                 // Sélection directe des images générées au clic.
                 bool selected_generated = false;
-                if (!last_generated_rects_.empty() && last_generated_rects_.size() == last_generated_indices_.size()) {
+                if (isPanelVisible(PanelId::Generated) &&
+                    panelContentRect(PanelId::Generated).contains(mouse) &&
+                    !last_generated_rects_.empty() && last_generated_rects_.size() == last_generated_indices_.size()) {
                     for (int i = static_cast<int>(last_generated_rects_.size()) - 1; i >= 0; --i) {
                         const auto& r = last_generated_rects_[static_cast<size_t>(i)];
                         if (r.size.x <= 0.f || r.size.y <= 0.f) continue;
@@ -1823,6 +2243,31 @@ void Visualizer::processEvents() {
                     saveUILayoutToLast();
                     continue;
                 }
+
+                bool panel_scroll_hit = false;
+                for (size_t index = 0; index < static_cast<size_t>(PanelId::Count); ++index) {
+                    const PanelId id = static_cast<PanelId>(index);
+                    if (id == PanelId::Blocks || !isPanelVisible(id)) continue;
+                    const auto& thumb = panel_scroll_thumb_rects_[index];
+                    const auto& track = panel_scroll_track_rects_[index];
+                    if (thumb.contains(mouse)) {
+                        dragging_panel_scrollbar_ = true;
+                        scrolled_panel_ = id;
+                        panel_scroll_drag_grab_y_ = mouse.y - thumb.position.y;
+                        panel_scroll_hit = true;
+                        break;
+                    }
+                    if (track.contains(mouse)) {
+                        const float thumb_h = std::max(1.0f, thumb.size.y);
+                        const float ratio = clamp01(
+                            (mouse.y - track.position.y - thumb_h * 0.5f) /
+                            std::max(1.0f, track.size.y - thumb_h));
+                        panel_scroll_y_[index] = ratio * panel_scroll_max_[index];
+                        panel_scroll_hit = true;
+                        break;
+                    }
+                }
+                if (panel_scroll_hit) continue;
 
                 if (isPanelVisible(PanelId::Blocks) && last_blocks_scroll_thumb_rect_.contains(mouse)) {
                     dragging_blocks_scrollbar_ = true;
@@ -1850,7 +2295,7 @@ void Visualizer::processEvents() {
                     dragging_panel_ = true;
                     dragged_panel_ = *drag_hit;
                     const auto& p = panels_[static_cast<size_t>(dragged_panel_)];
-                    drag_grab_offset_ = sf::Vector2f(mouse.x - p.pos.x, mouse.y - p.pos.y);
+                    drag_grab_offset_ = vizgfx::Vector2f(mouse.x - p.pos.x, mouse.y - p.pos.y);
                     setCursor(CursorKind::Hand);
                     continue;
                 }
@@ -1858,12 +2303,12 @@ void Visualizer::processEvents() {
             continue;
         }
 
-        if (const auto* mm = event.getIf<sf::Event::MouseMoved>()) {
-            const sf::Vector2f mouse = window->mapPixelToCoords(mm->position);
+        if (const auto* mm = event.getIf<vizgfx::Event::MouseMoved>()) {
+            const vizgfx::Vector2f mouse = window->mapPixelToCoords(mm->position);
 
             if (dragging_panel_) {
                 auto& p = panels_[static_cast<size_t>(dragged_panel_)];
-                p.pos = sf::Vector2f(mouse.x - drag_grab_offset_.x, mouse.y - drag_grab_offset_.y);
+                p.pos = vizgfx::Vector2f(mouse.x - drag_grab_offset_.x, mouse.y - drag_grab_offset_.y);
                 clampPanelsToWindow();
             }
 
@@ -1884,6 +2329,16 @@ void Visualizer::processEvents() {
                 blocks_scroll_y_ = t * std::max(0.0f, blocks_scroll_max_);
             }
 
+            if (dragging_panel_scrollbar_ && isPanelVisible(scrolled_panel_)) {
+                const size_t index = static_cast<size_t>(scrolled_panel_);
+                const auto& track = panel_scroll_track_rects_[index];
+                const auto& thumb = panel_scroll_thumb_rects_[index];
+                const float travel = std::max(1.0f, track.size.y - thumb.size.y);
+                const float ratio = clamp01(
+                    (mouse.y - track.position.y - panel_scroll_drag_grab_y_) / travel);
+                panel_scroll_y_[index] = ratio * panel_scroll_max_[index];
+            }
+
             if (live_dragging_ != LiveDragTarget::None) {
                 apply_live_slider_from_mouse(live_dragging_, mouse);
                 publish_live_params(true);
@@ -1891,13 +2346,24 @@ void Visualizer::processEvents() {
 
             if (dragging_panel_) {
                 setCursor(CursorKind::Hand);
-            } else if (resizing_panel_ || dragging_blocks_scrollbar_) {
+            } else if (resizing_panel_ || dragging_blocks_scrollbar_ || dragging_panel_scrollbar_) {
                 setCursor(CursorKind::Resize);
             } else {
                 bool is_hand = false;
                 if (isPanelVisible(PanelId::Blocks) &&
                     (last_blocks_scroll_thumb_rect_.contains(mouse) || last_blocks_scroll_track_rect_.contains(mouse))) {
                     is_hand = true;
+                }
+                if (!is_hand) {
+                    for (size_t index = 0; index < static_cast<size_t>(PanelId::Count); ++index) {
+                        const PanelId id = static_cast<PanelId>(index);
+                        if (id == PanelId::Blocks || !isPanelVisible(id)) continue;
+                        if (panel_scroll_thumb_rects_[index].contains(mouse) ||
+                            panel_scroll_track_rects_[index].contains(mouse)) {
+                            is_hand = true;
+                            break;
+                        }
+                    }
                 }
                 if (!is_hand && (hitTestPanelResizeHandle(mouse).has_value() || hitTestPanelTitle(mouse).has_value())) {
                     is_hand = true;
@@ -1907,20 +2373,21 @@ void Visualizer::processEvents() {
             continue;
         }
 
-        if (const auto* mb_rel = event.getIf<sf::Event::MouseButtonReleased>()) {
-            if (mb_rel->button == sf::Mouse::Button::Left) {
-                if (dragging_panel_ || resizing_panel_ || dragging_blocks_scrollbar_) {
+        if (const auto* mb_rel = event.getIf<vizgfx::Event::MouseButtonReleased>()) {
+            if (mb_rel->button == vizgfx::Mouse::Button::Left) {
+                if (dragging_panel_ || resizing_panel_ || dragging_blocks_scrollbar_ || dragging_panel_scrollbar_) {
                     saveUILayoutToLast();
                 }
                 dragging_panel_ = false;
                 resizing_panel_ = false;
                 dragging_blocks_scrollbar_ = false;
+                dragging_panel_scrollbar_ = false;
                 live_dragging_ = LiveDragTarget::None;
             }
             continue;
         }
 
-        if (const auto* txt = event.getIf<sf::Event::TextEntered>()) {
+        if (const auto* txt = event.getIf<vizgfx::Event::TextEntered>()) {
             const uint32_t cp = static_cast<uint32_t>(txt->unicode);
 
             if (blocks_tips_limit_editing_) {
@@ -1942,30 +2409,60 @@ void Visualizer::processEvents() {
             }
         }
 
-        if (const auto* wheel = event.getIf<sf::Event::MouseWheelScrolled>()) {
-            if (zoom_active_ || dragging_panel_ || resizing_panel_) continue;
+        if (const auto* wheel = event.getIf<vizgfx::Event::MouseWheelScrolled>()) {
+            if (zoom_active_) {
+                zoom_info_scroll_ = std::clamp(zoom_info_scroll_ - wheel->delta * 32.0f, 0.0f, zoom_info_scroll_max_);
+                continue;
+            }
+            if (dragging_panel_ || resizing_panel_) continue;
             initDefaultPanelsIfNeeded();
             syncUIView();
-            const sf::Vector2f mouse = window->mapPixelToCoords(wheel->position);
+            const vizgfx::Vector2f mouse = window->mapPixelToCoords(wheel->position);
+            bool consumed_scroll = false;
+            if (isPanelVisible(PanelId::Metrics) &&
+                panelContentRect(PanelId::Metrics).contains(mouse)) {
+                for (size_t i = 0; i < dataset_text_section_rects_.size(); ++i) {
+                    if (!dataset_text_section_rects_[i].contains(mouse)) continue;
+                    const float previous = dataset_text_scroll_y_[i];
+                    dataset_text_scroll_y_[i] = std::clamp(
+                        previous - wheel->delta * kDatasetTextScrollSpeed,
+                        0.0f, dataset_text_scroll_max_[i]);
+                    consumed_scroll = std::abs(dataset_text_scroll_y_[i] - previous) > 0.01f;
+                    break;
+                }
+            }
             if (isPanelVisible(PanelId::Blocks)) {
                 const auto content = panelContentRect(PanelId::Blocks);
                 if (content.contains(mouse)) {
                     blocks_scroll_y_ -= wheel->delta * kBlocksScrollSpeed;
                     blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
+                    consumed_scroll = true;
+                }
+            }
+            if (!consumed_scroll) {
+                const PanelId order[] = {PanelId::Metrics, PanelId::Training,
+                    PanelId::Output, PanelId::Generated, PanelId::Context};
+                for (PanelId id : order) {
+                    if (!isPanelVisible(id) || !panelContentRect(id).contains(mouse)) continue;
+                    const size_t index = static_cast<size_t>(id);
+                    panel_scroll_y_[index] -= wheel->delta * kPanelScrollSpeed;
+                    panel_scroll_y_[index] = std::clamp(
+                        panel_scroll_y_[index], 0.0f, panel_scroll_max_[index]);
+                    break;
                 }
             }
             continue;
         }
 
-        if (const auto* key = event.getIf<sf::Event::KeyPressed>()) {
-            const sf::Keyboard::Key code = key->code;
+        if (const auto* key = event.getIf<vizgfx::Event::KeyPressed>()) {
+            const vizgfx::Keyboard::Key code = key->code;
             const bool ctrl = key->control;
             const bool shift = key->shift;
 
             if (blocks_tips_limit_editing_) {
-                if (code == sf::Keyboard::Key::Enter) {
+                if (code == vizgfx::Keyboard::Key::Enter) {
                     commit_blocks_tips_limit();
-                } else if (code == sf::Keyboard::Key::Escape) {
+                } else if (code == vizgfx::Keyboard::Key::Escape) {
                     blocks_tips_limit_editing_ = false;
                     blocks_tips_limit_input_.clear();
                 }
@@ -1973,9 +2470,9 @@ void Visualizer::processEvents() {
             }
 
             if (live_input_target_ != LiveInputTarget::None) {
-                if (code == sf::Keyboard::Key::Enter) {
+                if (code == vizgfx::Keyboard::Key::Enter) {
                     commit_live_input();
-                } else if (code == sf::Keyboard::Key::Escape) {
+                } else if (code == vizgfx::Keyboard::Key::Escape) {
                     live_input_target_ = LiveInputTarget::None;
                     live_input_buffer_.clear();
                     live_input_error_until_ms_ = 0;
@@ -1983,49 +2480,35 @@ void Visualizer::processEvents() {
                 continue;
             }
 
-            if (code == sf::Keyboard::Key::H) show_help_overlay_ = !show_help_overlay_;
-            if (code == sf::Keyboard::Key::G) {
+            if (code == vizgfx::Keyboard::Key::H) show_help_overlay_ = !show_help_overlay_;
+            if (code == vizgfx::Keyboard::Key::E) snapshot_requested_ = true;
+            if (code == vizgfx::Keyboard::Key::G) {
                 show_loss_graph = !show_loss_graph;
                 panels_[static_cast<size_t>(PanelId::Graph)].visible = show_loss_graph;
             }
-            if (code == sf::Keyboard::Key::P) show_prompt_text_ = !show_prompt_text_;
-            if (code == sf::Keyboard::Key::A) {
+            if (code == vizgfx::Keyboard::Key::O) {
+                auto& output_panel = panels_[static_cast<size_t>(PanelId::Output)];
+                output_panel.visible = !output_panel.visible;
+                saveUILayoutToLast();
+            }
+            if (code == vizgfx::Keyboard::Key::P) show_prompt_text_ = !show_prompt_text_;
+            if (code == vizgfx::Keyboard::Key::A) {
                 smooth_layer_block_previews_ = !smooth_layer_block_previews_;
                 rebuildAllTextures();
             }
-            if (code == sf::Keyboard::Key::M) {
+            if (code == vizgfx::Keyboard::Key::M) {
                 heatmap_mode_ = !heatmap_mode_;
-                for (auto& img : layer_block_images) {
-                    if (!img.pixels_alt.empty()) {
-                        std::swap(img.pixels, img.pixels_alt);
-                        std::swap(img.channels, img.channels_alt);
-                    }
-                    if (heatmap_mode_ && img.channels == 1) {
-                        img.pixels_alt = img.pixels;
-                        img.channels_alt = 1;
-                        img.pixels = colorize_gray_heatmap_rgb(img.pixels_alt, static_cast<int>(heatmap_palette_));
-                        img.channels = 3;
-                    }
-                }
-                rebuildLayerBlockTextures();
+                setLayerBlockImages(last_block_frames_);
             }
-            if (code == sf::Keyboard::Key::K) {
+            if (code == vizgfx::Keyboard::Key::K) {
                 const int pid = (static_cast<int>(heatmap_palette_) + 1) % 4;
                 heatmap_palette_ = static_cast<Visualizer::HeatmapPalette>(pid);
-                if (heatmap_mode_) {
-                    for (auto& img : layer_block_images) {
-                        if (img.channels_alt == 1 && !img.pixels_alt.empty()) {
-                            img.pixels = colorize_gray_heatmap_rgb(img.pixels_alt, static_cast<int>(heatmap_palette_));
-                            img.channels = 3;
-                        }
-                    }
-                }
-                rebuildLayerBlockTextures();
+                setLayerBlockImages(last_block_frames_);
                 saveUILayoutToLast();
             }
-            if (code == sf::Keyboard::Key::Z || code == sf::Keyboard::Key::Enter) zoom_active_ = !zoom_active_;
-            if (code == sf::Keyboard::Key::Escape) zoom_active_ = false;
-            if (code == sf::Keyboard::Key::R) {
+            if (code == vizgfx::Keyboard::Key::Z || code == vizgfx::Keyboard::Key::Enter) zoom_active_ = !zoom_active_;
+            if (code == vizgfx::Keyboard::Key::Escape) zoom_active_ = false;
+            if (code == vizgfx::Keyboard::Key::R) {
                 requestResync();
                 rebuildAllTextures();
                 architecture_loaded = false;
@@ -2033,55 +2516,63 @@ void Visualizer::processEvents() {
                 arch_tensor_outputs.clear();
                 arch_tensor_sinks.clear();
             }
-            if (code == sf::Keyboard::Key::Tab) {
+            if (code == vizgfx::Keyboard::Key::Tab) {
                 if (focus_target_ == FocusTarget::Dataset) focus_target_ = FocusTarget::Projection;
                 else if (focus_target_ == FocusTarget::Projection) focus_target_ = FocusTarget::Understanding;
                 else if (focus_target_ == FocusTarget::Understanding) focus_target_ = FocusTarget::LayerBlock;
                 else if (focus_target_ == FocusTarget::LayerBlock) focus_target_ = FocusTarget::Generated;
+                else if (focus_target_ == FocusTarget::Generated) focus_target_ = FocusTarget::Output;
+                else if (focus_target_ == FocusTarget::Output) focus_target_ = FocusTarget::Training;
+                else if (focus_target_ == FocusTarget::Training) focus_target_ = FocusTarget::Metrics;
+                else if (focus_target_ == FocusTarget::Metrics) focus_target_ = FocusTarget::Graph;
                 else focus_target_ = FocusTarget::Dataset;
             }
-            if (code == sf::Keyboard::Key::F1) focus_target_ = FocusTarget::Dataset;
-            if (code == sf::Keyboard::Key::F2) focus_target_ = FocusTarget::Projection;
-            if (code == sf::Keyboard::Key::F3) focus_target_ = FocusTarget::Understanding;
-            if (code == sf::Keyboard::Key::F4) focus_target_ = FocusTarget::LayerBlock;
-            if (code == sf::Keyboard::Key::F5) focus_target_ = FocusTarget::Generated;
+            if (code == vizgfx::Keyboard::Key::F1) focus_target_ = FocusTarget::Dataset;
+            if (code == vizgfx::Keyboard::Key::F2) focus_target_ = FocusTarget::Projection;
+            if (code == vizgfx::Keyboard::Key::F3) focus_target_ = FocusTarget::Understanding;
+            if (code == vizgfx::Keyboard::Key::F4) focus_target_ = FocusTarget::LayerBlock;
+            if (code == vizgfx::Keyboard::Key::F5) focus_target_ = FocusTarget::Generated;
+            if (code == vizgfx::Keyboard::Key::F6) focus_target_ = FocusTarget::Output;
+            if (code == vizgfx::Keyboard::Key::F7) focus_target_ = FocusTarget::Training;
+            if (code == vizgfx::Keyboard::Key::F8) focus_target_ = FocusTarget::Metrics;
+            if (code == vizgfx::Keyboard::Key::F9) focus_target_ = FocusTarget::Graph;
 
-            if (ctrl && (code == sf::Keyboard::Key::Left || code == sf::Keyboard::Key::Right ||
-                         code == sf::Keyboard::Key::Up || code == sf::Keyboard::Key::Down)) {
+            if (ctrl && (code == vizgfx::Keyboard::Key::Left || code == vizgfx::Keyboard::Key::Right ||
+                         code == vizgfx::Keyboard::Key::Up || code == vizgfx::Keyboard::Key::Down)) {
                 const int step = shift ? 128 : 64;
                 const auto sz = window->getSize();
                 int ww = static_cast<int>(sz.x);
                 int hh = static_cast<int>(sz.y);
-                if (code == sf::Keyboard::Key::Left) ww -= step;
-                if (code == sf::Keyboard::Key::Right) ww += step;
-                if (code == sf::Keyboard::Key::Up) hh -= step;
-                if (code == sf::Keyboard::Key::Down) hh += step;
+                if (code == vizgfx::Keyboard::Key::Left) ww -= step;
+                if (code == vizgfx::Keyboard::Key::Right) ww += step;
+                if (code == vizgfx::Keyboard::Key::Up) hh -= step;
+                if (code == vizgfx::Keyboard::Key::Down) hh += step;
                 ww = std::max(640, ww);
                 hh = std::max(480, hh);
-                window->setSize(sf::Vector2u(static_cast<unsigned>(ww), static_cast<unsigned>(hh)));
+                window->setSize(vizgfx::Vector2u(static_cast<unsigned>(ww), static_cast<unsigned>(hh)));
                 window_width = ww;
                 window_height = hh;
                 syncUIView();
             } else {
                 if (focus_target_ == FocusTarget::LayerBlock &&
-                    (code == sf::Keyboard::Key::Left || code == sf::Keyboard::Key::Right)) {
+                    (code == vizgfx::Keyboard::Key::Left || code == vizgfx::Keyboard::Key::Right)) {
                     const int n = static_cast<int>(layer_block_images.size());
                     if (n > 0) {
-                        if (code == sf::Keyboard::Key::Left) focus_block_index_ = (focus_block_index_ - 1 + n) % n;
-                        if (code == sf::Keyboard::Key::Right) focus_block_index_ = (focus_block_index_ + 1) % n;
+                        if (code == vizgfx::Keyboard::Key::Left) focus_block_index_ = (focus_block_index_ - 1 + n) % n;
+                        if (code == vizgfx::Keyboard::Key::Right) focus_block_index_ = (focus_block_index_ + 1) % n;
                     }
                 } else if (focus_target_ == FocusTarget::Generated &&
-                           (code == sf::Keyboard::Key::Left || code == sf::Keyboard::Key::Right)) {
+                           (code == vizgfx::Keyboard::Key::Left || code == vizgfx::Keyboard::Key::Right)) {
                     const int n = static_cast<int>(generated_images.size());
                     if (n > 0) {
                         focus_generated_index_ = std::clamp(focus_generated_index_, 0, n - 1);
-                        if (code == sf::Keyboard::Key::Left) focus_generated_index_ = (focus_generated_index_ - 1 + n) % n;
-                        if (code == sf::Keyboard::Key::Right) focus_generated_index_ = (focus_generated_index_ + 1) % n;
+                        if (code == vizgfx::Keyboard::Key::Left) focus_generated_index_ = (focus_generated_index_ - 1 + n) % n;
+                        if (code == vizgfx::Keyboard::Key::Right) focus_generated_index_ = (focus_generated_index_ + 1) % n;
                     }
                 }
             }
 
-            if (code == sf::Keyboard::Key::S) {
+            if (code == vizgfx::Keyboard::Key::S) {
                 save_chord_armed_ = true;
                 save_chord_consumed_ = false;
                 save_chord_armed_ms_ = static_cast<uint64_t>(
@@ -2090,18 +2581,18 @@ void Visualizer::processEvents() {
                         .count());
             }
 
-            auto key_to_digit = [](sf::Keyboard::Key k) -> int {
-                if (k >= sf::Keyboard::Key::Num0 && k <= sf::Keyboard::Key::Num9) {
-                    return static_cast<int>(k) - static_cast<int>(sf::Keyboard::Key::Num0);
+            auto key_to_digit = [](vizgfx::Keyboard::Key k) -> int {
+                if (k >= vizgfx::Keyboard::Key::Num0 && k <= vizgfx::Keyboard::Key::Num9) {
+                    return static_cast<int>(k) - static_cast<int>(vizgfx::Keyboard::Key::Num0);
                 }
-                if (k >= sf::Keyboard::Key::Numpad0 && k <= sf::Keyboard::Key::Numpad9) {
-                    return static_cast<int>(k) - static_cast<int>(sf::Keyboard::Key::Numpad0);
+                if (k >= vizgfx::Keyboard::Key::Numpad0 && k <= vizgfx::Keyboard::Key::Numpad9) {
+                    return static_cast<int>(k) - static_cast<int>(vizgfx::Keyboard::Key::Numpad0);
                 }
                 return -1;
             };
             const int digit = key_to_digit(code);
             if (digit >= 0) {
-                const bool s_down = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S);
+                const bool s_down = window->isKeyPressed(vizgfx::Keyboard::Key::S);
                 const uint64_t now_ms = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch())
@@ -2118,8 +2609,8 @@ void Visualizer::processEvents() {
             continue;
         }
 
-        if (const auto* key_rel = event.getIf<sf::Event::KeyReleased>()) {
-            if (key_rel->code == sf::Keyboard::Key::S) {
+        if (const auto* key_rel = event.getIf<vizgfx::Event::KeyReleased>()) {
+            if (key_rel->code == vizgfx::Keyboard::Key::S) {
                 if (save_chord_armed_ && !save_chord_consumed_) {
                     initDefaultPanelsIfNeeded();
                     saveUILayoutToLast();
@@ -2148,6 +2639,26 @@ bool Visualizer::consumeStopTrainingRequested() {
     return stop_training_requested_.exchange(false, std::memory_order_relaxed);
 }
 
+void Visualizer::updateRuntimeValidationEnabled(bool enabled) {
+    // Dès que l'utilisateur a cliqué, ne jamais écraser son choix avec l'état natif.
+    if (validation_control_version_.load(std::memory_order_relaxed) == 0) {
+        validation_enabled_.store(enabled, std::memory_order_relaxed);
+    }
+}
+
+void Visualizer::applyValidationControl(bool enabled) {
+    validation_enabled_.store(enabled, std::memory_order_relaxed);
+    validation_control_version_.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool Visualizer::validationEnabledSnapshot() const {
+    return validation_enabled_.load(std::memory_order_relaxed);
+}
+
+uint64_t Visualizer::validationControlVersion() const {
+    return validation_control_version_.load(std::memory_order_relaxed);
+}
+
 uint64_t Visualizer::liveTrainParamsVersion() const {
     return live_params_version_.load(std::memory_order_relaxed);
 }
@@ -2160,20 +2671,46 @@ Visualizer::LiveTrainParams Visualizer::liveTrainParamsSnapshot() const {
     p.kl_beta = live_kl_beta_.load(std::memory_order_relaxed);
     p.kl_warmup_steps = live_kl_warmup_steps_.load(std::memory_order_relaxed);
     p.kl_enabled = live_kl_enabled_.load(std::memory_order_relaxed);
+    p.recon_loss = recon_loss_name(live_recon_loss_index_.load(std::memory_order_relaxed));
     p.version = live_params_version_.load(std::memory_order_relaxed);
     return p;
+}
+
+void Visualizer::applyLiveTrainParams(const LiveTrainParams& params) {
+    live_overrides_enabled_.store(params.overrides_enabled, std::memory_order_relaxed);
+    live_lr_.store(std::max(0.0f, params.lr), std::memory_order_relaxed);
+    live_lr_warmup_steps_.store(std::max(0, params.lr_warmup_steps), std::memory_order_relaxed);
+    live_kl_beta_.store(std::max(0.0f, params.kl_beta), std::memory_order_relaxed);
+    live_kl_warmup_steps_.store(std::max(0, params.kl_warmup_steps), std::memory_order_relaxed);
+    live_kl_enabled_.store(params.kl_enabled, std::memory_order_relaxed);
+    live_recon_loss_index_.store(recon_loss_index(params.recon_loss), std::memory_order_relaxed);
+    external_live_params_version_.fetch_add(1, std::memory_order_relaxed);
+    live_params_version_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Visualizer::updateRuntimeTrainParams(float lr, int lr_warmup_steps,
+                                          float kl_beta, int kl_warmup_steps,
+                                          const std::string& recon_loss) {
+    if (std::isfinite(lr)) runtime_lr_.store(std::max(0.0f, lr), std::memory_order_relaxed);
+    runtime_lr_warmup_steps_.store(std::max(0, lr_warmup_steps), std::memory_order_relaxed);
+    if (std::isfinite(kl_beta)) runtime_kl_beta_.store(std::max(0.0f, kl_beta), std::memory_order_relaxed);
+    runtime_kl_warmup_steps_.store(std::max(0, kl_warmup_steps), std::memory_order_relaxed);
+    runtime_recon_loss_index_.store(recon_loss_index(recon_loss), std::memory_order_relaxed);
+}
+
+void Visualizer::showValidationFeedback(ValidationFeedbackIcon icon) {
+    validation_feedback_icon_.store(static_cast<int>(icon), std::memory_order_relaxed);
 }
 
 void Visualizer::update() {
     if (!enabled) return;
     if (!window || !window->isOpen()) return;
 
-    // Robustesse: garantir que le contexte GL est actif dans le thread Viz avant
-    // toute reconstruction de texture ou tout rendu de frame.
+    // Active la cible du backend dans le thread Viz. L'adaptateur SFML active
+    // son contexte GL ; le moteur CPU des autres backends est toujours actif.
     window->setActive(true);
 
-    // Premier frame: re-synchroniser toutes les textures maintenant que le contexte
-    // SFML est garanti valide (évite un premier rendu sans textures visibles).
+    // Premier frame: re-synchroniser les textures une fois la cible créée.
     if (!first_texture_sync_done_) {
         rebuildAllTextures();
         first_texture_sync_done_ = true;
@@ -2238,28 +2775,66 @@ void Visualizer::update() {
 
     maybeLoadArchitecture();
 
-    window->clear(sf::Color(30, 30, 35)); // Fond sombre
+    window->clear(vizgfx::Color(30, 30, 35)); // Fond sombre
 
     renderBackground();
 
-    drawPanelChrome(PanelId::Context);
-    renderContextImages();
+    if (isPanelVisible(PanelId::Context)) {
+        drawPanelChrome(PanelId::Context);
+        renderContextImages();
+        drawPanelScrollbar(PanelId::Context);
+    } else {
+        last_dataset_rect_.reset();
+        last_projection_rect_.reset();
+        last_understanding_rect_.reset();
+    }
 
-    drawPanelChrome(PanelId::Blocks);
-    renderLayerBlocks();
+    if (isPanelVisible(PanelId::Output)) {
+        drawPanelChrome(PanelId::Output);
+        renderOutputImage();
+        drawPanelScrollbar(PanelId::Output);
+    } else {
+        last_output_rect_.reset();
+    }
+
+    if (isPanelVisible(PanelId::Blocks)) {
+        drawPanelChrome(PanelId::Blocks);
+        renderLayerBlocks();
+    } else {
+        last_block_rects_.clear();
+        last_blocks_scroll_track_rect_ = make_rect(0.f, 0.f, 0.f, 0.f);
+        last_blocks_scroll_thumb_rect_ = make_rect(0.f, 0.f, 0.f, 0.f);
+    }
 
     if (show_generated_images) {
         drawPanelChrome(PanelId::Generated);
         renderGeneratedImages();
+        drawPanelScrollbar(PanelId::Generated);
     }
 
     if (show_training_progress) {
         drawPanelChrome(PanelId::Training);
         renderTrainingProgress();
+        drawPanelScrollbar(PanelId::Training);
     }
 
-    drawPanelChrome(PanelId::Metrics);
-    renderMetrics();
+    if (isPanelVisible(PanelId::Metrics)) {
+        drawPanelChrome(PanelId::Metrics);
+        renderMetrics();
+        drawPanelScrollbar(PanelId::Metrics);
+    } else {
+        last_stop_button_rect_.reset();
+        last_live_overrides_box_.reset();
+        last_live_kl_enable_box_.reset();
+        last_live_lr_track_.reset();
+        last_live_lr_thumb_.reset();
+        last_live_lrwu_track_.reset();
+        last_live_lrwu_thumb_.reset();
+        last_live_klb_track_.reset();
+        last_live_klb_thumb_.reset();
+        last_live_klwu_track_.reset();
+        last_live_klwu_thumb_.reset();
+    }
 
     if (show_loss_graph) {
         drawPanelChrome(PanelId::Graph);
@@ -2268,6 +2843,8 @@ void Visualizer::update() {
 
     renderFocusOutline();
 
+    renderScriptControls();
+
     if (zoom_active_) {
         renderZoomOverlay();
     }
@@ -2275,7 +2852,121 @@ void Visualizer::update() {
         renderHelpOverlay();
     }
 
+    if (config_editor_.visible) renderConfigurationOverlay();
+
     window->display();
+
+    if (snapshot_requested_) {
+        saveSnapshotPng();
+        snapshot_requested_ = false;
+    }
+}
+
+bool Visualizer::saveSnapshotPng() {
+    if (!window || !window->isOpen()) return false;
+    try {
+        const vizgfx::Vector2u base_size = window->getSize();
+        const vizgfx::Image base_image = window->captureImage();
+
+        struct TipRef { const ImageData* image; std::string label; };
+        std::vector<TipRef> tips;
+        tips.reserve(layer_block_images.size() + 2);
+        for (size_t i = 0; i < layer_block_images.size(); ++i) {
+            tips.push_back(TipRef{&layer_block_images[i],
+                i < layer_block_labels.size() ? layer_block_labels[i] : std::string("tip")});
+        }
+        if (has_projection_thumb_ && !projection_thumb_.pixels.empty())
+            tips.push_back(TipRef{&projection_thumb_, projection_label});
+        if (has_output_thumb_ && !output_thumb_.pixels.empty())
+            tips.push_back(TipRef{&output_thumb_, output_thumb_label_});
+
+        constexpr unsigned thumb = 120;
+        constexpr unsigned cell_w = 140;
+        constexpr unsigned cell_h = 158;
+        constexpr unsigned margin = 16;
+        constexpr unsigned header_h = 42;
+        const unsigned sheet_width = std::max(base_size.x, 640u);
+        const unsigned columns = std::max(1u, (sheet_width - 2 * margin) / cell_w);
+        const unsigned rows = std::max(1u, static_cast<unsigned>(
+            (tips.size() + columns - 1) / columns));
+        const unsigned sheet_height = header_h + rows * cell_h + margin;
+
+        vizgfx::RenderTexture sheet(vizgfx::Vector2u(sheet_width, sheet_height));
+        sheet.clear(vizgfx::Color(24, 24, 30));
+        if (font_loaded) {
+            vizgfx::Text title(font, "Toutes les tips", 18);
+            title.setPosition(vizgfx::Vector2f(static_cast<float>(margin), 8.0f));
+            title.setFillColor(vizgfx::Color(240, 240, 245));
+            sheet.draw(title);
+        }
+
+        for (size_t i = 0; i < tips.size(); ++i) {
+            const unsigned column = static_cast<unsigned>(i) % columns;
+            const unsigned row = static_cast<unsigned>(i) / columns;
+            const float x = static_cast<float>(margin + column * cell_w);
+            const float y = static_cast<float>(header_h + row * cell_h);
+
+            vizgfx::RectangleShape frame(vizgfx::Vector2f(static_cast<float>(thumb + 4),
+                                                   static_cast<float>(thumb + 4)));
+            frame.setPosition(vizgfx::Vector2f(x - 2.0f, y - 2.0f));
+            frame.setFillColor(vizgfx::Color::Transparent);
+            frame.setOutlineColor(vizgfx::Color(150, 150, 175));
+            frame.setOutlineThickness(1.0f);
+            sheet.draw(frame);
+
+            vizgfx::Sprite sprite(tips[i].image->texture);
+            sprite.setScale(tips[i].image->sprite.getScale());
+            position_sprite_centered_in_box(sprite, x, y, static_cast<float>(thumb));
+            sheet.draw(sprite);
+
+            if (font_loaded) {
+                const ParsedVizLabel parsed = parse_viz_label(tips[i].label);
+                std::string label = clamp_text_end(format_tip_display_label(parsed), 20);
+                vizgfx::Text text(font, vizgfx::String::fromUtf8(label.begin(), label.end()), 12);
+                text.setPosition(vizgfx::Vector2f(x + 2.0f, y + thumb + 5.0f));
+                text.setFillColor(vizgfx::Color(235, 235, 240));
+                sheet.draw(text);
+            }
+        }
+        sheet.display();
+
+        const vizgfx::Image sheet_image = sheet.getTexture().copyToImage();
+        vizgfx::Image snapshot(vizgfx::Vector2u(sheet_width, base_size.y + sheet_height),
+                           vizgfx::Color(24, 24, 30));
+        if (!snapshot.copy(base_image, vizgfx::Vector2u(0, 0)) ||
+            !snapshot.copy(sheet_image, vizgfx::Vector2u(0, base_size.y))) {
+            std::cerr << "[Viz] Echec assemblage du snapshot PNG" << std::endl;
+            return false;
+        }
+
+        const auto now = std::chrono::system_clock::now();
+        const auto now_time = std::chrono::system_clock::to_time_t(now);
+        const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count() % 1000;
+        std::tm local_time{};
+#ifdef _WIN32
+        localtime_s(&local_time, &now_time);
+#else
+        localtime_r(&now_time, &local_time);
+#endif
+        std::ostringstream filename;
+        filename << "viz_snapshot_" << std::put_time(&local_time, "%Y%m%d_%H%M%S")
+                 << '_' << std::setw(3) << std::setfill('0') << millis << ".png";
+        const std::filesystem::path directory("snapshots");
+        std::error_code ec;
+        std::filesystem::create_directories(directory, ec);
+        const std::filesystem::path path = directory / filename.str();
+        if (ec || !snapshot.saveToFile(path)) {
+            std::cerr << "[Viz] Echec snapshot PNG: " << path.string() << std::endl;
+            return false;
+        }
+        last_snapshot_path_ = path.string();
+        std::cout << "[Viz] Snapshot PNG: " << last_snapshot_path_ << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[Viz] Echec snapshot PNG: " << e.what() << std::endl;
+        return false;
+    }
 }
 
 void Visualizer::renderFocusOutline() {
@@ -2287,11 +2978,20 @@ void Visualizer::renderFocusOutline() {
         if (!isPanelVisible(PanelId::Blocks)) return;
     } else if (focus_target_ == FocusTarget::Generated) {
         if (!isPanelVisible(PanelId::Generated)) return;
+    } else if (focus_target_ == FocusTarget::Output) {
+        if (!isPanelVisible(PanelId::Output)) return;
+    } else if (focus_target_ == FocusTarget::Training) {
+        if (!isPanelVisible(PanelId::Training)) return;
+    } else if (focus_target_ == FocusTarget::Metrics) {
+        if (!isPanelVisible(PanelId::Metrics)) return;
+    } else if (focus_target_ == FocusTarget::Graph) {
+        if (!isPanelVisible(PanelId::Graph)) return;
     } else {
         if (!isPanelVisible(PanelId::Context)) return;
     }
 
-    std::optional<sf::FloatRect> r;
+    std::optional<vizgfx::FloatRect> r;
+    bool focus_whole_panel = false;
     if (focus_target_ == FocusTarget::Dataset) {
         r = last_dataset_rect_;
     } else if (focus_target_ == FocusTarget::Projection) {
@@ -2318,64 +3018,77 @@ void Visualizer::renderFocusOutline() {
                 r = last_generated_rects_.front();
             }
         }
+    } else if (focus_target_ == FocusTarget::Output) {
+        r = last_output_rect_;
+    } else if (focus_target_ == FocusTarget::Training) {
+        r = panelRect(PanelId::Training);
+        focus_whole_panel = true;
+    } else if (focus_target_ == FocusTarget::Metrics) {
+        r = panelRect(PanelId::Metrics);
+        focus_whole_panel = true;
+    } else if (focus_target_ == FocusTarget::Graph) {
+        r = panelRect(PanelId::Graph);
+        focus_whole_panel = true;
     }
 
     if (!r.has_value()) return;
     if (r->size.x <= 0.f || r->size.y <= 0.f) return;
 
     // Accent selon la zone focusée
-    sf::Color col = sf::Color(245, 245, 250, 230);
+    vizgfx::Color col = vizgfx::Color(245, 245, 250, 230);
     if (focus_target_ == FocusTarget::LayerBlock) {
         col = with_alpha(panelAccent(PanelId::Blocks), 235);
     } else if (focus_target_ == FocusTarget::Generated) {
         col = with_alpha(panelAccent(PanelId::Generated), 235);
+    } else if (focus_target_ == FocusTarget::Output) {
+        col = with_alpha(panelAccent(PanelId::Output), 235);
+    } else if (focus_target_ == FocusTarget::Training) {
+        col = with_alpha(panelAccent(PanelId::Training), 235);
+    } else if (focus_target_ == FocusTarget::Metrics) {
+        col = with_alpha(panelAccent(PanelId::Metrics), 235);
+    } else if (focus_target_ == FocusTarget::Graph) {
+        col = with_alpha(panelAccent(PanelId::Graph), 235);
     } else {
         col = with_alpha(panelAccent(PanelId::Context), 235);
     }
 
-    // PS (user): quand on scrolle dans Blocks/Layers, ne pas laisser l'outline visible
-    // si l'élément focus sort de la zone réellement visible.
-    if (focus_target_ == FocusTarget::LayerBlock) {
-        const auto area = panelContentRect(PanelId::Blocks);
-        const float ww = static_cast<float>(std::max(1, window_width));
-        const float hh = static_cast<float>(std::max(1, window_height));
+    PanelId focus_panel = PanelId::Context;
+    if (focus_target_ == FocusTarget::LayerBlock) focus_panel = PanelId::Blocks;
+    else if (focus_target_ == FocusTarget::Generated) focus_panel = PanelId::Generated;
+    else if (focus_target_ == FocusTarget::Output) focus_panel = PanelId::Output;
+    else if (focus_target_ == FocusTarget::Training) focus_panel = PanelId::Training;
+    else if (focus_target_ == FocusTarget::Metrics) focus_panel = PanelId::Metrics;
+    else if (focus_target_ == FocusTarget::Graph) focus_panel = PanelId::Graph;
 
-        const float left = std::clamp(area.position.x, 0.0f, ww);
-        const float top = std::clamp(area.position.y, 0.0f, hh);
-        const float right = std::clamp(area.position.x + area.size.x, 0.0f, ww);
-        const float bottom = std::clamp(area.position.y + area.size.y, 0.0f, hh);
-        const float w = std::max(0.0f, right - left);
-        const float h = std::max(0.0f, bottom - top);
-        if (w <= 0.0f || h <= 0.0f) return;
-
-        const sf::FloatRect clip = make_rect(left, top, w, h);
-        if (!clip.findIntersection(*r).has_value()) {
-            // Hors zone visible => désactiver l'overline.
-            return;
-        }
-
-        const sf::View old_view = window->getView();
-        sf::View v(make_rect(left, top, w, h));
-        v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
-        window->setView(v);
-
-        sf::RectangleShape outline(sf::Vector2f(r->size.x, r->size.y));
-        outline.setPosition(sf::Vector2f(r->position.x, r->position.y));
-        outline.setFillColor(sf::Color::Transparent);
+    if (focus_whole_panel) {
+        vizgfx::RectangleShape outline(vizgfx::Vector2f(r->size.x, r->size.y));
+        outline.setPosition(r->position);
+        outline.setFillColor(vizgfx::Color::Transparent);
         outline.setOutlineColor(col);
         outline.setOutlineThickness(3);
         window->draw(outline);
-
-        window->setView(old_view);
         return;
     }
+    const auto area = panelContentRect(focus_panel);
+    const vizgfx::FloatRect clip = make_rect(
+        area.position.x, area.position.y, area.size.x, area.size.y);
+    if (!clip.findIntersection(*r).has_value()) return;
 
-    sf::RectangleShape outline(sf::Vector2f(r->size.x, r->size.y));
-    outline.setPosition(sf::Vector2f(r->position.x, r->position.y));
-    outline.setFillColor(sf::Color::Transparent);
+    const vizgfx::View old_view = window->getView();
+    const float ww = static_cast<float>(std::max(1, window_width));
+    const float hh = static_cast<float>(std::max(1, window_height));
+    vizgfx::View view(clip);
+    view.setViewport(make_rect(
+        area.position.x / ww, area.position.y / hh,
+        area.size.x / ww, area.size.y / hh));
+    window->setView(view);
+    vizgfx::RectangleShape outline(vizgfx::Vector2f(r->size.x, r->size.y));
+    outline.setPosition(vizgfx::Vector2f(r->position.x, r->position.y));
+    outline.setFillColor(vizgfx::Color::Transparent);
     outline.setOutlineColor(col);
     outline.setOutlineThickness(3);
     window->draw(outline);
+    window->setView(old_view);
 }
 
 void Visualizer::rebuildAllTextures() {
@@ -2391,7 +3104,10 @@ void Visualizer::rebuildAllTextures() {
     if (has_projection_thumb_) rebuild_one(projection_thumb_);
     if (has_understanding_image) rebuild_one(understanding_image);
     for (auto& img : generated_images) rebuild_one(img);
-    if (has_output_thumb_) rebuild_one(output_thumb_);
+    if (has_output_thumb_) {
+        rebuild_one(output_image_);
+        rebuild_one(output_thumb_);
+    }
     for (size_t i = 0; i < layer_block_images.size(); ++i) {
         const std::string label = (i < layer_block_labels.size()) ? layer_block_labels[i] : std::string();
         createLayerBlockTexture(layer_block_images[i], label);
@@ -2401,52 +3117,104 @@ void Visualizer::rebuildAllTextures() {
 void Visualizer::renderHelpOverlay() {
     if (!window) return;
 
-    sf::RectangleShape bg(sf::Vector2f(static_cast<float>(window_width), static_cast<float>(window_height)));
-    bg.setPosition(sf::Vector2f(0, 0));
-    bg.setFillColor(sf::Color(0, 0, 0, 160));
+    vizgfx::RectangleShape bg(vizgfx::Vector2f(static_cast<float>(window_width), static_cast<float>(window_height)));
+    bg.setPosition(vizgfx::Vector2f(0, 0));
+    bg.setFillColor(vizgfx::Color(0, 0, 0, 160));
     window->draw(bg);
 
     if (!font_loaded) return;
-    const int x = 24;
-    int y = 24;
-    const int lh = 18;
-    auto line = [&](const std::string& s) {
-        sf::Text t(font);
-        t.setFont(font);
-        t.setCharacterSize(14);
-        t.setFillColor(sf::Color(235, 235, 240));
-        t.setPosition(sf::Vector2f(static_cast<float>(x), static_cast<float>(y)));
-        t.setString(sf::String::fromUtf8(s.begin(), s.end()));
+    const float scale = std::min(1.f, std::min(window_width / 1040.f, window_height / 640.f));
+    auto text = [&](float x, float y, unsigned size, const std::string& value, vizgfx::Color color) {
+        vizgfx::Text t(font);
+        t.setCharacterSize(std::max(9u, static_cast<unsigned>(size * scale)));
+        t.setFillColor(color);
+        t.setPosition({x * scale, y * scale});
+        t.setString(vizgfx::String::fromUtf8(value.begin(), value.end()));
         window->draw(t);
-        y += lh;
     };
-
-    line("Aide (clavier)");
-    line("H : afficher/masquer cette aide");
-    line("Z ou Entrée : grossir / réduire l'image sélectionnée");
-    line("Tab / F1-F5 : sélectionner (dataset / projection / understanding / blocks / generated)");
-    line("←/→ : naviguer dans les blocks (si focus=blocks)");
-    line("G : afficher/masquer le graph");
-    line("A : activer/masquer le lissage des previews de blocks");
-    line("M : basculer heatmap color\u00e9e / niveaux de gris naturels (Blocks/Layers)");
-    line("K : changer la palette heatmap (CLASSIC/TURBO/INFERNO/VIRIDIS)");
-    line("P : afficher/masquer le texte du prompt");
-    line("R : actualiser (rebuild textures + reload architecture)");
-    line("S : sauvegarder la structure UI (layout last)");
-    line("S+0..9 : sauvegarder la structure UI dans un slot");
-    line("0..9 : charger/appliquer un slot UI");
-    line("Ctrl+←/→ : réduire/agrandir la fenêtre (X)");
-    line("Ctrl+↑/↓ : réduire/agrandir la fenêtre (Y)");
-    line("Esc : fermer le zoom");
-    line("Souris (layout)");
-    line("Glisser-déposer sur le titre d'un panneau pour le déplacer");
-    line("Glisser la poignée en bas-droite pour redimensionner un panneau");
-    line("Cliquer sur [X] dans l'entête pour fermer un panneau");
-    line("Blocks: cliquer sur \"TIPS ...\" pour saisir une limite d'items visibles (Enter=valider, vide=ALL)");
+    const vizgfx::Color white(235, 242, 250), muted(175, 190, 208), accent(90, 210, 220);
+    vizgfx::RectangleShape card({1000.f * scale, 600.f * scale});
+    card.setPosition({20.f * scale, 20.f * scale});
+    card.setFillColor(vizgfx::Color(22, 30, 43, 248));
+    card.setOutlineThickness(1.f); card.setOutlineColor(vizgfx::Color(65, 95, 120));
+    window->draw(card);
+    text(44, 36, 28, "MÍMIR  /  Guide de la Viz", white);
+    text(44, 79, 16, std::string("BACKEND  ") + vizBackendName() + "    •    H : fermer l'aide", accent);
+    text(44, 108, 13, std::string(vizBackendName()) == "SFML"
+        ? "Fenêtre native SFML • rendu OpenGL"
+        : "Scène commune • rendu logiciel Cairo • hôte " + std::string(vizBackendName()), muted);
+    auto section = [&](float x, float y, const std::string& title, const std::vector<std::string>& lines) {
+        text(x, y, 18, title, accent);
+        y += 34;
+        for (const auto& line : lines) { text(x, y, 14, line, white); y += 26; }
+    };
+    section(44, 154, "NAVIGATION & IMAGES", {
+        "Tab   Parcourir les cibles de focus",
+        "F1–F3   Dataset / Projection / Understanding",
+        "F4–F6   Blocks / Generated / Sortie",
+        "F7–F9   Training / Metrics / Loss",
+        "C   Configuration du modele (Entree : valider)",
+        "Z / Entrée   Agrandir la sélection",
+        "Esc   Fermer le zoom • ← / →   Blocks",
+        "G   Graphique • P   Prompt",
+        "A   Lissage • M   Heatmap • K   Palette"});
+    section(545, 154, "ORGANISER & EXPORTER", {
+        "Glisser un titre   Déplacer le panneau",
+        "Poignée inférieure droite   Redimensionner",
+        "[X]   Fermer un panneau",
+        "S   Mémoriser la disposition",
+        "S + 0–9   Sauver • 0–9   Charger un slot",
+        "Ctrl + flèches   Taille de fenêtre",
+        "R   Actualiser textures et architecture",
+        "E   Capturer la scène en PNG"});
+    text(44, 440, 18, "SCRIPT LUA", accent);
+    text(44, 474, 14, "Viz.configure : panneaux et boutons • Viz.poll_events : événements du script", white);
+    text(44, 503, 13, script_scene_.value("help", std::string("Les contrôles du script apparaissent au-dessus des panneaux.")), muted);
+    text(44, 568, 12, "Blocks : cliquer sur TIPS pour limiter les éléments affichés. Entrée valide, vide = ALL.", muted);
 }
 
 void Visualizer::renderZoomOverlay() {
     if (!window) return;
+
+    std::optional<PanelId> zoomed_panel;
+    if (focus_target_ == FocusTarget::Training) zoomed_panel = PanelId::Training;
+    else if (focus_target_ == FocusTarget::Metrics) zoomed_panel = PanelId::Metrics;
+    else if (focus_target_ == FocusTarget::Graph) zoomed_panel = PanelId::Graph;
+
+    if (zoomed_panel.has_value()) {
+        vizgfx::RectangleShape overlay(vizgfx::Vector2f(
+            static_cast<float>(window_width), static_cast<float>(window_height)));
+        overlay.setPosition(vizgfx::Vector2f(0.0f, 0.0f));
+        overlay.setFillColor(vizgfx::Color(0, 0, 0, 220));
+        window->draw(overlay);
+
+        const size_t panel_index = static_cast<size_t>(*zoomed_panel);
+        const Panel saved_panel = panels_[panel_index];
+        const float saved_scroll_y = panel_scroll_y_[panel_index];
+        const float saved_scroll_max = panel_scroll_max_[panel_index];
+        const vizgfx::FloatRect saved_scroll_track = panel_scroll_track_rects_[panel_index];
+        const vizgfx::FloatRect saved_scroll_thumb = panel_scroll_thumb_rects_[panel_index];
+        const float pad = 28.0f;
+        auto& panel = panels_[panel_index];
+        panel.pos = vizgfx::Vector2f(pad, pad);
+        panel.size = vizgfx::Vector2f(
+            std::max(kPanelMinW, static_cast<float>(window_width) - 2.0f * pad),
+            std::max(kPanelMinH, static_cast<float>(window_height) - 2.0f * pad));
+        panel.visible = true;
+
+        drawPanelChrome(*zoomed_panel);
+        if (*zoomed_panel == PanelId::Training) renderTrainingProgress();
+        else if (*zoomed_panel == PanelId::Metrics) renderMetrics();
+        else renderLossGraph();
+        drawPanelScrollbar(*zoomed_panel);
+
+        panels_[panel_index] = saved_panel;
+    panel_scroll_y_[panel_index] = saved_scroll_y;
+    panel_scroll_max_[panel_index] = saved_scroll_max;
+    panel_scroll_track_rects_[panel_index] = saved_scroll_track;
+    panel_scroll_thumb_rects_[panel_index] = saved_scroll_thumb;
+        return;
+    }
 
     const ImageData* img = nullptr;
     std::string label;
@@ -2471,48 +3239,241 @@ void Visualizer::renderZoomOverlay() {
         const int idx = (n > 0) ? std::clamp(focus_generated_index_, 0, n - 1) : 0;
         img = &generated_images[static_cast<size_t>(idx)];
         label = img->prompt.empty() ? std::string("generated") : (std::string("generated | ") + img->prompt);
+    } else if (focus_target_ == FocusTarget::Output && has_output_thumb_) {
+        img = &output_image_;
+        label = output_thumb_label_.empty() ? std::string("sortie") : output_thumb_label_;
     }
 
     if (!img) return;
     const auto ts = img->texture.getSize();
     if (ts.x == 0 || ts.y == 0) return;
 
-    if (!label.empty()) {
-        label += " (" + std::to_string(img->w) + "x" + std::to_string(img->h) + "x" + std::to_string(img->channels) + ")";
+    const BlockFrame* selected_frame = nullptr;
+    for (const auto& frame : last_block_frames_) if (frame.label == label) {
+        selected_frame = &frame;
+        break;
     }
 
-    sf::RectangleShape bg(sf::Vector2f(static_cast<float>(window_width), static_cast<float>(window_height)));
-    bg.setPosition(sf::Vector2f(0, 0));
-    bg.setFillColor(sf::Color(0, 0, 0, 200));
+    const ParsedVizLabel parsed = parse_viz_label(label);
+    const std::string display_tag = display_tip_tag(parsed);
+    const vizgfx::Color accent = color_for_tag(display_tag);
+
+    uint8_t pixel_min = 0;
+    uint8_t pixel_max = 0;
+    double pixel_mean = 0.0;
+    double pixel_stddev = 0.0;
+    double nonzero_ratio = 0.0;
+    if (!img->pixels.empty()) {
+        const size_t stride = std::max<size_t>(1, img->pixels.size() / 200000ULL);
+        uint8_t min_value = 255;
+        uint8_t max_value = 0;
+        size_t sample_count = 0;
+        size_t nonzero_count = 0;
+        double sum = 0.0;
+        double sum_squared = 0.0;
+        for (size_t index = 0; index < img->pixels.size(); index += stride) {
+            const uint8_t value = img->pixels[index];
+            min_value = std::min(min_value, value);
+            max_value = std::max(max_value, value);
+            sum += static_cast<double>(value);
+            sum_squared += static_cast<double>(value) * static_cast<double>(value);
+            if (value != 0) ++nonzero_count;
+            ++sample_count;
+        }
+        if (sample_count > 0) {
+            pixel_min = min_value;
+            pixel_max = max_value;
+            pixel_mean = sum / static_cast<double>(sample_count);
+            const double variance = std::max(
+                0.0, sum_squared / static_cast<double>(sample_count) - pixel_mean * pixel_mean);
+            pixel_stddev = std::sqrt(variance);
+            nonzero_ratio = 100.0 * static_cast<double>(nonzero_count) /
+                static_cast<double>(sample_count);
+        }
+    }
+
+    vizgfx::RectangleShape bg(vizgfx::Vector2f(static_cast<float>(window_width), static_cast<float>(window_height)));
+    bg.setPosition(vizgfx::Vector2f(0, 0));
+    bg.setFillColor(vizgfx::Color(8, 9, 12, 238));
     window->draw(bg);
 
     const float pad = 28.0f;
-    const float box_w = static_cast<float>(window_width) - 2.0f * pad;
-    const float box_h = static_cast<float>(window_height) - 2.0f * pad - 28.0f;
-    const float box = std::min(box_w, box_h);
+    const float gap = 22.0f;
+    const float sidebar_w = std::clamp(
+        static_cast<float>(window_width) * 0.40f, 360.0f, 520.0f);
+    const float image_area_w = std::max(
+        120.0f, static_cast<float>(window_width) - 2.0f * pad - gap - sidebar_w);
+    const float image_area_h = std::max(
+        120.0f, static_cast<float>(window_height) - 2.0f * pad);
+    const float box = std::min(image_area_w, image_area_h);
 
-    sf::Sprite spr(img->texture);
+    vizgfx::Sprite spr(img->texture);
     const float sx = box / std::max(1.0f, static_cast<float>(ts.x));
     const float sy = box / std::max(1.0f, static_cast<float>(ts.y));
     const float sc = std::min(sx, sy);
-    spr.setScale(sf::Vector2f(sc, sc));
+    spr.setScale(vizgfx::Vector2f(sc, sc));
 
     const float dw = static_cast<float>(ts.x) * sc;
     const float dh = static_cast<float>(ts.y) * sc;
-    spr.setPosition(sf::Vector2f((static_cast<float>(window_width) - dw) * 0.5f,
-                                 (static_cast<float>(window_height) - dh) * 0.5f));
+    const float image_x = pad + (image_area_w - dw) * 0.5f;
+    const float image_y = pad + (image_area_h - dh) * 0.5f;
+
+    vizgfx::RectangleShape image_frame(vizgfx::Vector2f(dw + 8.0f, dh + 8.0f));
+    image_frame.setPosition(vizgfx::Vector2f(image_x - 4.0f, image_y - 4.0f));
+    image_frame.setFillColor(vizgfx::Color(15, 16, 20, 255));
+    image_frame.setOutlineColor(with_alpha(accent, 230));
+    image_frame.setOutlineThickness(2.0f);
+    window->draw(image_frame);
+
+    spr.setPosition(vizgfx::Vector2f(image_x, image_y));
     window->draw(spr);
 
-    if (font_loaded && !label.empty()) {
-        sf::Text t(font);
-        t.setFont(font);
-        t.setCharacterSize(14);
-        t.setFillColor(sf::Color(235, 235, 240));
-        t.setPosition(sf::Vector2f(pad, pad));
-        const std::string s = clamp_text_end(label, 120);
-        t.setString(sf::String::fromUtf8(s.begin(), s.end()));
-        window->draw(t);
+    const float sidebar_x = pad + image_area_w + gap;
+    const float sidebar_h = image_area_h;
+    vizgfx::RectangleShape sidebar(vizgfx::Vector2f(sidebar_w, sidebar_h));
+    sidebar.setPosition(vizgfx::Vector2f(sidebar_x, pad));
+    sidebar.setFillColor(vizgfx::Color(20, 22, 28, 250));
+    sidebar.setOutlineColor(with_alpha(accent, 190));
+    sidebar.setOutlineThickness(2.0f);
+    window->draw(sidebar);
+
+    vizgfx::RectangleShape accent_bar(vizgfx::Vector2f(6.0f, sidebar_h));
+    accent_bar.setPosition(vizgfx::Vector2f(sidebar_x, pad));
+    accent_bar.setFillColor(accent);
+    window->draw(accent_bar);
+
+    if (!font_loaded) return;
+
+    const float text_x = sidebar_x + 20.0f;
+    const float text_w = std::max(120.0f, sidebar_w - 40.0f);
+    const float key_column_w = std::clamp(text_w * 0.30f, 104.0f, 132.0f);
+    const size_t max_chars = static_cast<size_t>(std::max(12.0f, text_w / 7.2f));
+    float text_y = pad + 16.0f - zoom_info_scroll_;
+    auto visible_row = [&](float height) { return text_y >= pad + 8.0f && text_y + height < pad + sidebar_h - 8.0f; };
+
+    auto draw_text = [&](const std::string& value, unsigned size, vizgfx::Color color, bool bold = false) {
+        vizgfx::Text text(font);
+        text.setCharacterSize(size);
+        text.setFillColor(color);
+        if (bold) text.setStyle(vizgfx::Text::Bold);
+        text.setPosition(vizgfx::Vector2f(text_x, text_y));
+        const std::string shown = clamp_text_end(value, max_chars);
+        text.setString(vizgfx::String::fromUtf8(shown.begin(), shown.end()));
+        if (visible_row(static_cast<float>(size) + 5.0f)) window->draw(text);
+        text_y += static_cast<float>(size) + 5.0f;
+    };
+
+    auto draw_section = [&](const std::string& title) {
+        text_y += 4.0f;
+        vizgfx::RectangleShape rule(vizgfx::Vector2f(text_w, 1.0f));
+        rule.setPosition(vizgfx::Vector2f(text_x, text_y));
+        rule.setFillColor(with_alpha(accent, 120));
+        if (visible_row(1.0f)) window->draw(rule);
+        text_y += 5.0f;
+        draw_text(title, 12, with_alpha(accent, 255), true);
+    };
+
+    auto draw_value = [&](const std::string& key, const std::string& value) {
+        vizgfx::Text key_text(font);
+        key_text.setCharacterSize(11);
+        key_text.setStyle(vizgfx::Text::Bold);
+        key_text.setFillColor(with_alpha(accent, 210));
+        key_text.setPosition(vizgfx::Vector2f(text_x, text_y));
+        key_text.setString(vizgfx::String::fromUtf8(key.begin(), key.end()));
+        if (visible_row(20.0f)) window->draw(key_text);
+
+        vizgfx::Text value_text(font);
+        value_text.setCharacterSize(12);
+        value_text.setFillColor(vizgfx::Color(220, 224, 232));
+        value_text.setPosition(vizgfx::Vector2f(text_x + key_column_w, text_y - 1.0f));
+        const size_t key_chars = static_cast<size_t>(key_column_w / 7.2f);
+        const size_t value_chars = max_chars > key_chars ? max_chars - key_chars : max_chars;
+        const std::string shown = clamp_text_end(value, value_chars);
+        value_text.setString(vizgfx::String::fromUtf8(shown.begin(), shown.end()));
+        if (visible_row(20.0f)) window->draw(value_text);
+        text_y += 20.0f;
+    };
+
+    draw_text("[" + display_tag + "]  TIP INSPECTOR", 18, accent, true);
+    draw_text(parsed.path.empty() ? std::string("tip") : parsed.path,
+              14, vizgfx::Color(245, 245, 248), true);
+    if (!parsed.extra.empty()) {
+        draw_text(parsed.extra, 12, vizgfx::Color(164, 174, 190));
     }
+
+    draw_section("INFO");
+    draw_value("type", parsed.layer_type.empty() ? parsed.headline : parsed.layer_type);
+    draw_value("model", parsed.model.empty() ? std::string("visualizer") : parsed.model);
+    draw_value("source", display_tag == "?" ? std::string("synthetic") : std::string("model"));
+
+    if (selected_frame && !selected_frame->tensor_info.empty()) {
+        draw_section("STATISTIQUES DU TENSEUR");
+        std::istringstream info(selected_frame->tensor_info);
+        for (std::string line; std::getline(info, line);)
+            draw_text(line, 11, vizgfx::Color(220,224,232));
+    }
+    draw_section("STATISTIQUES DES PIXELS AFFICHES");
+    draw_value("shape", std::to_string(img->w) + " x " + std::to_string(img->h) +
+        " x " + std::to_string(img->channels));
+    draw_value("bytes", std::to_string(img->pixels.size()));
+    draw_value("range", std::to_string(pixel_min) + " .. " + std::to_string(pixel_max));
+    draw_value("mean / sd", format_decimal(pixel_mean, 4) + " / " +
+        format_decimal(pixel_stddev, 4));
+    draw_value("non-zero", format_decimal(nonzero_ratio, 3) + "%");
+
+    if (heatmap_mode_ && selected_frame) {
+        draw_section("LEGENDE HEATMAP");
+        if (selected_frame->heatmap_kind == 1) {
+            draw_text("Bleu: negatif | gris: zero | rouge: positif", 11, vizgfx::Color(220, 224, 232));
+            draw_text("Moyenne des canaux; luminosite = energie", 11, vizgfx::Color(220, 224, 232));
+            draw_text("Sombre: faible | clair: forte (normalisee)", 11, vizgfx::Color(220, 224, 232));
+            const vizgfx::Color colors[] = {vizgfx::Color(70,120,210), vizgfx::Color(175,175,175), vizgfx::Color(220,65,65)};
+            for (int i = 0; i < 3; ++i) {
+                vizgfx::RectangleShape swatch(vizgfx::Vector2f(text_w / 3, 12));
+                swatch.setPosition(vizgfx::Vector2f(text_x + i * text_w / 3, text_y));
+                swatch.setFillColor(colors[i]);
+                if (visible_row(16)) window->draw(swatch);
+            }
+            text_y += 18;
+        } else if (selected_frame->channels == 1) {
+            draw_text(std::string("Palette: ") + heatmap_palette_name(static_cast<int>(heatmap_palette_)), 11, vizgfx::Color(220,224,232));
+            std::vector<uint8_t> levels(256);
+            for (int i = 0; i < 256; ++i) levels[i] = static_cast<uint8_t>(i);
+            const auto colors = colorize_gray_heatmap_rgb(levels, static_cast<int>(heatmap_palette_));
+            for (int i = 0; i < 256; ++i) {
+                vizgfx::RectangleShape swatch(vizgfx::Vector2f(text_w / 256 + 1, 12));
+                swatch.setPosition(vizgfx::Vector2f(text_x + i * text_w / 256, text_y));
+                swatch.setFillColor(vizgfx::Color(colors[i*3], colors[i*3+1], colors[i*3+2]));
+                if (visible_row(16)) window->draw(swatch);
+            }
+            text_y += 18;
+            draw_text("0: faible <--- intensite affichee ---> 255: forte", 11, vizgfx::Color(220,224,232));
+        } else {
+            draw_text("Image RGB: couleurs des canaux, sans palette", 11, vizgfx::Color(220,224,232));
+        }
+    }
+    draw_section("TRAINING (GLOBAL ACTUEL)");
+    draw_value("epoch", std::to_string(current_epoch) + " / " +
+        std::to_string(std::max(1, current_total_epochs)));
+    draw_value("batch", std::to_string(current_batch) + " / " +
+        std::to_string(std::max(1, current_total_batches)));
+    draw_value("loss / avg", format_decimal(current_loss, 8) + " / " +
+        format_decimal(current_avg_loss, 8));
+    const std::string recon_name = canonical_recon_loss_name(current_recon_loss_type);
+    draw_value(recon_name, format_decimal(current_mse, 8));
+    draw_value("recon norm", format_decimal(
+        normalized_recon_loss(current_mse, current_recon_loss_type), 8));
+    draw_value("lr", format_decimal(current_lr, 10));
+    draw_value("time / grad", format_decimal(current_timestep, 6) + " / " +
+        format_decimal(current_grad_norm, 6));
+    draw_value("perf", std::to_string(current_batch_time_ms) + " ms / " +
+        std::to_string(current_memory_mb) + " MB RSS / " +
+        std::to_string(current_allocator_memory_mb) + " MB allocator");
+    draw_value("optimiseur", optimizerTypeName(static_cast<OptimizerType>(current_opt_type)));
+    draw_value("optim step", std::to_string(current_opt_step));
+    draw_text("Molette: defiler les informations", 11, vizgfx::Color(164,174,190));
+    zoom_info_scroll_max_ = std::max(0.0f, text_y + zoom_info_scroll_ - (pad + sidebar_h) + 16.0f);
+    zoom_info_scroll_ = std::min(zoom_info_scroll_, zoom_info_scroll_max_);
 }
 
 void Visualizer::maybeLoadArchitecture() {
@@ -2626,7 +3587,15 @@ void Visualizer::addGeneratedImage(const std::vector<uint8_t>& image, int w, int
 
     generated_images.push_back(std::move(img_data));
 
-    // Conserver une vignette "Sortie" (120px) pour l'afficher aussi dans Blocks/Layers.
+    output_image_.pixels = image;
+    output_image_.prompt = prompt;
+    output_image_.w = iw;
+    output_image_.h = ih;
+    output_image_.channels = ic;
+    output_image_.display_size = 200;
+    createImageTexture(output_image_, iw, ih, ic, 200);
+
+    // Conserver une vignette 120px pour Blocks/Layers.
     output_thumb_.pixels = image;
     output_thumb_.prompt = prompt;
     output_thumb_.w = iw;
@@ -2661,11 +3630,14 @@ void Visualizer::setDatasetImage(const std::vector<uint8_t>& pixels, int w, int 
 
 void Visualizer::setDatasetText(const std::string& raw_text, const std::string& tags, const std::string& tokenized, const std::string& encoded) {
     if (!enabled) return;
+    const bool changed = dataset_text_raw != raw_text || dataset_text_tags != tags ||
+                         dataset_text_tokens != tokenized || dataset_text_encoded != encoded;
     dataset_text_raw = raw_text;
     dataset_text_tags = tags;
     dataset_text_tokens = tokenized;
     dataset_text_encoded = encoded;
     has_dataset_text = (!dataset_text_raw.empty() || !dataset_text_tags.empty() || !dataset_text_tokens.empty() || !dataset_text_encoded.empty());
+    if (changed) dataset_text_scroll_y_.fill(0.0f);
 }
 
 void Visualizer::setProjectionImage(const std::vector<uint8_t>& pixels, int w, int h, int channels, const std::string& label) {
@@ -2711,12 +3683,56 @@ void Visualizer::setUnderstandingImage(const std::vector<uint8_t>& pixels, int w
 
 void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
     if (!enabled) return;
+    if (&frames != &last_block_frames_) last_block_frames_ = frames;
 
     layer_block_images.clear();
     layer_block_labels.clear();
     has_layer_blocks = false;
 
     if (frames.empty()) return;
+
+    // L'entraînement publie généralement la sortie du modèle comme viz tap et non
+    // via addGeneratedImage(). Promouvoir le dernier tap [ST] image-compatible
+    // vers le panneau Sortie, sans utiliser les vecteurs de packing finaux.
+    for (auto it = frames.rbegin(); it != frames.rend(); ++it) {
+        const BlockFrame& frame = *it;
+        if (frame.w <= 0 || frame.h <= 0 || frame.pixels.empty()) continue;
+        const ParsedVizLabel parsed = parse_viz_label(frame.label);
+        if (display_tip_tag(parsed) != "ST") continue;
+
+        const std::string source = lowercase_ascii(
+            parsed.path + " " + parsed.layer_path + " " + parsed.extra);
+        if (source.find("out_concat") != std::string::npos ||
+            source.find("out_pack") != std::string::npos ||
+            source.find("/vec") != std::string::npos) {
+            continue;
+        }
+
+        const std::vector<uint8_t>& output_pixels = frame.pixels_real.empty()
+            ? frame.pixels : frame.pixels_real;
+        const int channels = infer_channels_from_buffer_size(
+            output_pixels, frame.w, frame.h, frame.channels);
+        if (channels != 1 && channels != 3 && channels != 4) continue;
+
+        output_image_.pixels = output_pixels;
+        output_image_.prompt = frame.label;
+        output_image_.w = frame.w;
+        output_image_.h = frame.h;
+        output_image_.channels = channels;
+        output_image_.display_size = 200;
+        createImageTexture(output_image_, frame.w, frame.h, channels, 200);
+
+        output_thumb_.pixels = output_pixels;
+        output_thumb_.prompt = frame.label;
+        output_thumb_.w = frame.w;
+        output_thumb_.h = frame.h;
+        output_thumb_.channels = channels;
+        output_thumb_.display_size = 120;
+        createImageTexture(output_thumb_, frame.w, frame.h, channels, 120);
+        has_output_thumb_ = true;
+        output_thumb_label_ = frame.label;
+        break;
+    }
 
     layer_block_images.reserve(frames.size());
     layer_block_labels.reserve(frames.size());
@@ -2808,7 +3824,7 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
 
             // En mode heatmap, éviter l'aspect noir/blanc sur les tips 1 canal:
             // on colorise en RGB tout en conservant la version brute pour debug.
-            if (img.channels == 1) {
+            if (heatmap_mode_ && img.channels == 1) {
                 img.pixels_alt = img.pixels;
                 img.channels_alt = 1;
                 img.pixels = colorize_gray_heatmap_rgb(img.pixels, static_cast<int>(heatmap_palette_));
@@ -2816,6 +3832,15 @@ void Visualizer::setLayerBlockImages(const std::vector<BlockFrame>& frames) {
             }
         }
 
+        // Même les tenseurs scalaires utilisent un buffer RGB en mode réel.
+        // Répéter un canal ne prétend pas inventer une couleur absente du tenseur.
+        if (!heatmap_mode_ && img.channels == 1) {
+            std::vector<uint8_t> rgb(img.pixels.size() * 3);
+            for (size_t i = 0; i < img.pixels.size(); ++i)
+                rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = img.pixels[i];
+            img.pixels = std::move(rgb);
+            img.channels = 3;
+        }
         createLayerBlockTexture(img, f.label);
         layer_block_images.push_back(std::move(img));
         layer_block_labels.push_back(f.label);
@@ -2857,7 +3882,8 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
                               float kl, float wass, float ent, float mom, float spat, float temp,
                               float timestep,
                               int total_epochs, int total_batches, float avg_loss,
-                              int batch_time_ms, size_t memory_mb, float bps, size_t params,
+                              int batch_time_ms, size_t memory_mb,
+                              double allocator_memory_mb, float bps, size_t params,
                               float grad_norm, float grad_max,
                               int opt_type, int opt_step,
                               float opt_beta1, float opt_beta2,
@@ -2868,7 +3894,8 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
                               bool val_in_progress,
                               int val_done,
                               int val_total,
-                              float kl_beta_effective) {
+                              float kl_beta_effective,
+                              const std::string& val_feedback) {
     current_epoch = epoch;
     current_total_epochs = total_epochs;
     current_batch = batch;
@@ -2887,6 +3914,7 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     current_timestep = timestep;
     current_batch_time_ms = batch_time_ms;
     current_memory_mb = memory_mb;
+    current_allocator_memory_mb = allocator_memory_mb;
     current_bps = bps;
     current_params = params;
     current_grad_norm = grad_norm;
@@ -2910,6 +3938,7 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     current_val_recon = val_recon;
     current_val_kl = val_kl;
     current_val_align = val_align;
+    current_val_feedback = val_feedback;
 
     if (!has_loss_stats_) {
         has_loss_stats_ = true;
@@ -2933,9 +3962,11 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     record.batch_time_ms = batch_time_ms;
     record.bps = bps;
     record.memory_mb = memory_mb;
+    record.allocator_memory_mb = allocator_memory_mb;
     record.params = params;
     record.mse = mse;
     record.kl_divergence = kl;
+    record.kl_beta_effective = kl_beta_effective;
     record.wasserstein = wass;
     record.entropy_diff = ent;
     record.moment_mismatch = mom;
@@ -2950,19 +3981,26 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
     record.opt_beta2 = opt_beta2;
     record.opt_eps = opt_eps;
     record.opt_weight_decay = opt_weight_decay;
-    // Métriques de validation : renseignées uniquement quand val_ok=true.
+    // Métriques de validation : renseignées à la fin de chaque validation.
     // val_recon = loss primaire (img-space MSE pour DDPM, recon loss pour VAE).
     // val_kl    = second indicateur (eps-space MSE pour DDPM, KL pour VAE).
-    record.is_val      = val_ok;
-    record.val_loss    = val_ok ? val_recon : 0.f;
-    record.val_mse     = val_ok ? val_kl    : 0.f;
-    record.val_step_id = val_ok ? val_step  : -1;
+    // val_* reste affiché après la validation. Ne sérialiser toutefois qu'une
+    // seule ligne par step de validation, pas une copie à chaque tick train.
+    const bool new_validation = val_has && !val_in_progress && val_step >= 0 &&
+                                val_step != last_recorded_validation_step_;
+    record.is_val      = new_validation;
+    record.val_loss    = new_validation ? val_recon : 0.f;
+    record.val_mse     = new_validation ? val_kl    : 0.f;
+    record.val_step_id = new_validation ? val_step  : -1;
+    record.val_feedback = new_validation ? val_feedback : std::string();
+    if (new_validation) last_recorded_validation_step_ = val_step;
     full_loss_history.push_back(record);
     
     // Flush CSV throttle: eviter une ecriture disque a chaque metric tick.
     pending_loss_log_flush_ = true;
     const uint64_t now_ms = steady_now_ms();
-    if (!loss_log_file.empty() && (last_loss_log_flush_ms_ == 0 || (now_ms - last_loss_log_flush_ms_) >= 1000)) {
+    if (loss_log_enabled_ && !loss_log_file.empty() &&
+        (last_loss_log_flush_ms_ == 0 || (now_ms - last_loss_log_flush_ms_) >= 1000)) {
         saveLossHistory(loss_log_file);
         last_loss_log_flush_ms_ = now_ms;
         pending_loss_log_flush_ = false;
@@ -2982,6 +4020,7 @@ void Visualizer::addLossPoint(float loss) {
 void Visualizer::clearImages() {
     generated_images.clear();
     has_output_thumb_ = false;
+    output_image_.pixels.clear();
     output_thumb_.pixels.clear();
     output_thumb_label_.clear();
 }
@@ -2998,17 +4037,17 @@ bool Visualizer::isEnabled() const {
 
 void Visualizer::renderBackground() {
     // Grille de fond subtile
-    sf::RectangleShape line(sf::Vector2f(1, window_height));
-    line.setFillColor(sf::Color(40, 40, 45, 100));
+    vizgfx::RectangleShape line(vizgfx::Vector2f(1, window_height));
+    line.setFillColor(vizgfx::Color(40, 40, 45, 100));
     
     for (int x = 0; x < window_width; x += 50) {
-        line.setPosition(sf::Vector2f(x, 0));
+        line.setPosition(vizgfx::Vector2f(x, 0));
         window->draw(line);
     }
 
-    line.setSize(sf::Vector2f(window_width, 1));
+    line.setSize(vizgfx::Vector2f(window_width, 1));
     for (int y = 0; y < window_height; y += 50) {
-        line.setPosition(sf::Vector2f(0, y));
+        line.setPosition(vizgfx::Vector2f(0, y));
         window->draw(line);
     }
 
@@ -3024,9 +4063,9 @@ void Visualizer::renderBackground() {
                 320.0f
             );
             const float scale = desired / std::max(iw, ih);
-            logo_sprite_.setScale(sf::Vector2f(scale, scale));
-            logo_sprite_.setOrigin(sf::Vector2f(lb.position.x + iw * 0.5f, lb.position.y + ih * 0.5f));
-            logo_sprite_.setPosition(sf::Vector2f(window_width * 0.5f, window_height * 0.5f));
+            logo_sprite_.setScale(vizgfx::Vector2f(scale, scale));
+            logo_sprite_.setOrigin(vizgfx::Vector2f(lb.position.x + iw * 0.5f, lb.position.y + ih * 0.5f));
+            logo_sprite_.setPosition(vizgfx::Vector2f(window_width * 0.5f, window_height * 0.5f));
             window->draw(logo_sprite_);
         }
     }
@@ -3038,14 +4077,22 @@ void Visualizer::renderContextImages() {
     const int margin = 16;
     const auto area = panelContentRect(PanelId::Context);
     const int start_x = static_cast<int>(area.position.x);
-    const int start_y = static_cast<int>(area.position.y);
     const int label_h = 20;
+    const int item_count = static_cast<int>(has_dataset_image) +
+        static_cast<int>(has_projection_image) + static_cast<int>(has_understanding_image);
+    const int cols = std::max(1, static_cast<int>(
+        (area.size.x + margin) / (img_display_size + margin)));
+    const int rows = item_count > 0 ? (item_count + cols - 1) / cols : 0;
+    setPanelContentHeight(PanelId::Context,
+        static_cast<float>(rows * (img_display_size + label_h + margin)));
+    const int start_y = static_cast<int>(area.position.y -
+        panel_scroll_y_[static_cast<size_t>(PanelId::Context)]);
 
     // Clip au contenu du panneau (overflow: clip)
-    const sf::View old_view = window->getView();
+    const vizgfx::View old_view = window->getView();
     struct ViewGuard {
-        sf::RenderWindow* w;
-        sf::View v;
+        VizWindow* w;
+        vizgfx::View v;
         ~ViewGuard() {
             if (w) w->setView(v);
         }
@@ -3062,43 +4109,43 @@ void Visualizer::renderContextImages() {
         const float h = std::max(0.0f, bottom - top);
 
         if (w > 0.0f && h > 0.0f) {
-            sf::View v(make_rect(left, top, w, h));
+            vizgfx::View v(make_rect(left, top, w, h));
             v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
             window->setView(v);
         }
     }
 
-    auto toSfUtf8 = [](const std::string& s) -> sf::String {
-        return sf::String::fromUtf8(s.begin(), s.end());
+    auto toSfUtf8 = [](const std::string& s) -> vizgfx::String {
+        return vizgfx::String::fromUtf8(s.begin(), s.end());
     };
 
-    auto drawPanel = [&](int x, int y, ImageData& img, const std::string& label_text, sf::Color outline) -> sf::FloatRect {
+    auto drawPanel = [&](int x, int y, ImageData& img, const std::string& label_text, vizgfx::Color outline) -> vizgfx::FloatRect {
         // Cadre
-        sf::RectangleShape frame(sf::Vector2f(img_display_size + 4, img_display_size + 4));
-        frame.setPosition(sf::Vector2f(x - 2, y - 2));
-        frame.setFillColor(sf::Color::Transparent);
+        vizgfx::RectangleShape frame(vizgfx::Vector2f(img_display_size + 4, img_display_size + 4));
+        frame.setPosition(vizgfx::Vector2f(x - 2, y - 2));
+        frame.setFillColor(vizgfx::Color::Transparent);
         frame.setOutlineColor(outline);
         frame.setOutlineThickness(2);
         window->draw(frame);
 
-        const sf::FloatRect frame_rect = make_rect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(img_display_size + 4), static_cast<float>(img_display_size + 4));
+        const vizgfx::FloatRect frame_rect = make_rect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(img_display_size + 4), static_cast<float>(img_display_size + 4));
 
         // Image
         position_sprite_centered_in_box(img.sprite, static_cast<float>(x), static_cast<float>(y), static_cast<float>(img_display_size));
         window->draw(img.sprite);
 
         // Label bar
-        sf::RectangleShape label(sf::Vector2f(img_display_size, label_h));
-        label.setPosition(sf::Vector2f(static_cast<float>(x), static_cast<float>(y + img_display_size + 5)));
-        label.setFillColor(sf::Color(50, 50, 60, 200));
+        vizgfx::RectangleShape label(vizgfx::Vector2f(img_display_size, label_h));
+        label.setPosition(vizgfx::Vector2f(static_cast<float>(x), static_cast<float>(y + img_display_size + 5)));
+        label.setFillColor(vizgfx::Color(50, 50, 60, 200));
         window->draw(label);
 
         if (font_loaded) {
-            sf::Text t(font);
+            vizgfx::Text t(font);
             t.setFont(font);
             t.setCharacterSize(14);
-            t.setFillColor(sf::Color(230, 230, 235));
-            t.setPosition(sf::Vector2f(static_cast<float>(x + 6), static_cast<float>(y + img_display_size + 3)));
+            t.setFillColor(vizgfx::Color(230, 230, 235));
+            t.setPosition(vizgfx::Vector2f(static_cast<float>(x + 6), static_cast<float>(y + img_display_size + 3)));
             t.setString(toSfUtf8(label_text));
             window->draw(t);
         }
@@ -3140,44 +4187,95 @@ void Visualizer::renderContextImages() {
         }
     };
 
-    auto fits_row = [&]() {
-        return (y + img_display_size + label_h) <= static_cast<int>(area.position.y + area.size.y);
-    };
-
-    if (!fits_row()) return;
-
     if (has_dataset_image) {
         auto p = parse_viz_label(dataset_label.empty() ? std::string("dataset") : dataset_label);
         apply_arch_hint(p);
-        std::string text = "[" + p.tag + "] ";
-        if (!p.model.empty()) text += p.model + " ";
-        text += p.short_text;
-        if (!p.extra.empty()) text += " " + p.extra;
-        last_dataset_rect_ = drawPanel(x, y, dataset_image, clamp_text_end(text, 44), color_for_tag(p.tag));
+        p.tag = "DS";
+        const std::string display_tag = display_tip_tag(p);
+        last_dataset_rect_ = drawPanel(
+            x, y, dataset_image, clamp_text_end(format_tip_display_label(p), 44),
+            color_for_tag(display_tag));
         advance();
-        if (!fits_row()) return;
     }
     if (has_projection_image) {
         auto p = parse_viz_label(projection_label.empty() ? std::string("projection") : projection_label);
         apply_arch_hint(p);
-        std::string text = "[" + p.tag + "] ";
-        if (!p.model.empty()) text += p.model + " ";
-        text += p.short_text;
-        if (!p.extra.empty()) text += " " + p.extra;
-        last_projection_rect_ = drawPanel(x, y, projection_image, clamp_text_end(text, 44), color_for_tag(p.tag));
+        const std::string display_tag = display_tip_tag(p);
+        last_projection_rect_ = drawPanel(
+            x, y, projection_image, clamp_text_end(format_tip_display_label(p), 44),
+            color_for_tag(display_tag));
         advance();
-        if (!fits_row()) return;
     }
     if (has_understanding_image) {
         auto p = parse_viz_label(understanding_label.empty() ? std::string("understanding") : understanding_label);
         apply_arch_hint(p);
-        std::string text = "[" + p.tag + "] ";
-        if (!p.model.empty()) text += p.model + " ";
-        text += p.short_text;
-        if (!p.extra.empty()) text += " " + p.extra;
-        last_understanding_rect_ = drawPanel(x, y, understanding_image, clamp_text_end(text, 44), color_for_tag(p.tag));
+        const std::string display_tag = display_tip_tag(p);
+        last_understanding_rect_ = drawPanel(
+            x, y, understanding_image, clamp_text_end(format_tip_display_label(p), 44),
+            color_for_tag(display_tag));
     }
 
+}
+
+void Visualizer::renderOutputImage() {
+    const auto area = panelContentRect(PanelId::Output);
+    const int image_size = 200;
+    const int label_height = 20;
+    const int margin = 16;
+    const float content_height = has_output_thumb_
+        ? static_cast<float>(image_size + label_height + margin) : 0.0f;
+    setPanelContentHeight(PanelId::Output, content_height);
+    if (!has_output_thumb_ || output_thumb_.pixels.empty()) return;
+
+    const float x = area.position.x;
+    const float y = area.position.y - panel_scroll_y_[static_cast<size_t>(PanelId::Output)];
+    const vizgfx::View old_view = window->getView();
+    {
+        const float window_w = static_cast<float>(std::max(1, window_width));
+        const float window_h = static_cast<float>(std::max(1, window_height));
+        const float left = std::clamp(area.position.x, 0.0f, window_w);
+        const float top = std::clamp(area.position.y, 0.0f, window_h);
+        const float right = std::clamp(area.position.x + area.size.x, 0.0f, window_w);
+        const float bottom = std::clamp(area.position.y + area.size.y, 0.0f, window_h);
+        const float width = std::max(0.0f, right - left);
+        const float height = std::max(0.0f, bottom - top);
+        if (width > 0.0f && height > 0.0f) {
+            vizgfx::View view(make_rect(left, top, width, height));
+            view.setViewport(make_rect(
+                left / window_w, top / window_h, width / window_w, height / window_h));
+            window->setView(view);
+        }
+    }
+
+    vizgfx::RectangleShape frame(vizgfx::Vector2f(image_size + 4.0f, image_size + 4.0f));
+    frame.setPosition(vizgfx::Vector2f(x - 2.0f, y - 2.0f));
+    frame.setFillColor(vizgfx::Color::Transparent);
+    frame.setOutlineColor(panelAccent(PanelId::Output));
+    frame.setOutlineThickness(2.0f);
+    window->draw(frame);
+    last_output_rect_ = make_rect(x - 2.0f, y - 2.0f, image_size + 4.0f, image_size + 4.0f);
+
+    position_sprite_centered_in_box(output_image_.sprite, x, y, static_cast<float>(image_size));
+    window->draw(output_image_.sprite);
+
+    vizgfx::RectangleShape label(vizgfx::Vector2f(static_cast<float>(image_size), static_cast<float>(label_height)));
+    label.setPosition(vizgfx::Vector2f(x, y + image_size + 5.0f));
+    label.setFillColor(vizgfx::Color(50, 50, 60, 200));
+    window->draw(label);
+
+    if (font_loaded) {
+        const ParsedVizLabel parsed = parse_viz_label(
+            output_thumb_label_.empty() ? std::string("mimir/output") : output_thumb_label_);
+        const std::string text = clamp_text_end(format_tip_display_label(parsed), 28);
+        vizgfx::Text title(font);
+        title.setCharacterSize(14);
+        title.setFillColor(vizgfx::Color(230, 230, 235));
+        title.setPosition(vizgfx::Vector2f(x + 6.0f, y + image_size + 3.0f));
+        title.setString(vizgfx::String::fromUtf8(text.begin(), text.end()));
+        window->draw(title);
+    }
+
+    window->setView(old_view);
 }
 
 void Visualizer::renderLayerBlocks() {
@@ -3206,7 +4304,7 @@ void Visualizer::renderLayerBlocks() {
     last_block_rects_.assign(static_cast<size_t>(std::max(0, blocks_count)), make_rect(0.f, 0.f, 0.f, 0.f));
 
     // Clip au contenu du panneau (évite de dessiner en dehors de la zone visible pendant le scroll)
-    const sf::View old_view = window->getView();
+    const vizgfx::View old_view = window->getView();
     {
         const float ww = static_cast<float>(std::max(1, window_width));
         const float hh = static_cast<float>(std::max(1, window_height));
@@ -3220,7 +4318,7 @@ void Visualizer::renderLayerBlocks() {
         const float h = std::max(0.0f, bottom - top);
 
         if (w > 0.0f && h > 0.0f) {
-            sf::View v(make_rect(left, top, w, h));
+            vizgfx::View v(make_rect(left, top, w, h));
             v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
             window->setView(v);
         }
@@ -3265,23 +4363,23 @@ void Visualizer::renderLayerBlocks() {
         return s.rfind(prefix, 0) == 0;
     };
 
-    auto section_color = [&](const std::string& section) -> sf::Color {
-        if (section == "Inputs") return sf::Color(110, 145, 205, 210);
-        if (section == "Text / Cond") return sf::Color(122, 188, 142, 210);
-        if (section == "UNet") return sf::Color(104, 164, 216, 210);
-        if (section == "VAE") return sf::Color(214, 126, 166, 210);
-        if (section == "Diffusion") return sf::Color(146, 136, 222, 210);
-        if (section == "Reconstruction") return sf::Color(226, 162, 106, 210);
-        if (section == "ConditioningEncoder") return sf::Color(96, 168, 214, 210);
-        if (section == "Down Blocks") return sf::Color(88, 176, 198, 210);
-        if (section == "Bottleneck") return sf::Color(160, 118, 220, 210);
-        if (section == "Backbone") return sf::Color(132, 132, 218, 210);
-        if (section == "Up Blocks") return sf::Color(232, 170, 102, 210);
-        if (section == "Latent") return sf::Color(214, 106, 172, 210);
-        if (section == "Decoder") return sf::Color(233, 152, 92, 210);
-        if (section == "Heads") return sf::Color(206, 196, 110, 210);
-        if (section == "Outputs") return sf::Color(188, 188, 120, 210);
-        return sf::Color(100, 100, 112, 210);
+    auto section_color = [&](const std::string& section) -> vizgfx::Color {
+        if (section == "Inputs") return vizgfx::Color(110, 145, 205, 210);
+        if (section == "Text / Cond") return vizgfx::Color(122, 188, 142, 210);
+        if (section == "UNet") return vizgfx::Color(104, 164, 216, 210);
+        if (section == "VAE") return vizgfx::Color(214, 126, 166, 210);
+        if (section == "Diffusion") return vizgfx::Color(146, 136, 222, 210);
+        if (section == "Reconstruction") return vizgfx::Color(226, 162, 106, 210);
+        if (section == "ConditioningEncoder") return vizgfx::Color(96, 168, 214, 210);
+        if (section == "Down Blocks") return vizgfx::Color(88, 176, 198, 210);
+        if (section == "Bottleneck") return vizgfx::Color(160, 118, 220, 210);
+        if (section == "Backbone") return vizgfx::Color(132, 132, 218, 210);
+        if (section == "Up Blocks") return vizgfx::Color(232, 170, 102, 210);
+        if (section == "Latent") return vizgfx::Color(214, 106, 172, 210);
+        if (section == "Decoder") return vizgfx::Color(233, 152, 92, 210);
+        if (section == "Heads") return vizgfx::Color(206, 196, 110, 210);
+        if (section == "Outputs") return vizgfx::Color(188, 188, 120, 210);
+        return vizgfx::Color(100, 100, 112, 210);
     };
 
     auto section_for = [&](const ParsedVizLabel& p, bool is_extra) -> std::string {
@@ -3598,7 +4696,7 @@ void Visualizer::renderLayerBlocks() {
 
     if (entries.empty()) return;
 
-    std::vector<sf::Vector2f> entry_positions;
+    std::vector<vizgfx::Vector2f> entry_positions;
     entry_positions.reserve(entries.size());
 
     int layout_col = 0;
@@ -3648,26 +4746,26 @@ void Visualizer::renderLayerBlocks() {
             if ((y + section_h + section_gap) < static_cast<int>(area.position.y)) continue;
 
             const float bar_w = std::max(80.0f, area.size.x - 12.0f);
-            sf::RectangleShape bar(sf::Vector2f(bar_w, static_cast<float>(section_h)));
-            bar.setPosition(sf::Vector2f(static_cast<float>(start_x), static_cast<float>(y)));
-            bar.setFillColor(sf::Color(28, 30, 38, 220));
+            vizgfx::RectangleShape bar(vizgfx::Vector2f(bar_w, static_cast<float>(section_h)));
+            bar.setPosition(vizgfx::Vector2f(static_cast<float>(start_x), static_cast<float>(y)));
+            bar.setFillColor(vizgfx::Color(28, 30, 38, 220));
             bar.setOutlineColor(section_color(entry.section));
             bar.setOutlineThickness(1.0f);
             window->draw(bar);
 
-            sf::RectangleShape accent(sf::Vector2f(8.0f, static_cast<float>(section_h)));
-            accent.setPosition(sf::Vector2f(static_cast<float>(start_x), static_cast<float>(y)));
+            vizgfx::RectangleShape accent(vizgfx::Vector2f(8.0f, static_cast<float>(section_h)));
+            accent.setPosition(vizgfx::Vector2f(static_cast<float>(start_x), static_cast<float>(y)));
             accent.setFillColor(section_color(entry.section));
             window->draw(accent);
 
             if (font_loaded) {
-                sf::Text t(font);
+                vizgfx::Text t(font);
                 t.setFont(font);
                 t.setCharacterSize(13);
-                t.setStyle(sf::Text::Bold);
-                t.setFillColor(sf::Color(236, 236, 240));
-                t.setPosition(sf::Vector2f(static_cast<float>(start_x + 14), static_cast<float>(y + 2)));
-                t.setString(sf::String::fromUtf8(entry.section.begin(), entry.section.end()));
+                t.setStyle(vizgfx::Text::Bold);
+                t.setFillColor(vizgfx::Color(236, 236, 240));
+                t.setPosition(vizgfx::Vector2f(static_cast<float>(start_x + 14), static_cast<float>(y + 2)));
+                t.setString(vizgfx::String::fromUtf8(entry.section.begin(), entry.section.end()));
                 window->draw(t);
             }
             continue;
@@ -3679,12 +4777,19 @@ void Visualizer::renderLayerBlocks() {
         if ((y - cell_h) > static_cast<int>(area.position.y + area.size.y)) continue;
         if ((y + 2 * cell_h) < static_cast<int>(area.position.y)) continue;
 
-        const std::string use_tag = entry.is_extra ? entry.tag_override : entry.parsed.tag;
+        ParsedVizLabel display_parsed = entry.parsed;
+        if (entry.is_extra) {
+            // Projection/Sortie ajoutées ici sont des tips de présentation créés
+            // par le Visualizer, pas des nœuds provenant du graphe du modèle.
+            display_parsed.tag = "VIZ";
+            if (display_parsed.extra.empty()) display_parsed.extra = entry.text_override;
+        }
+        const std::string use_tag = display_tip_tag(display_parsed);
 
         // Frame
-        sf::RectangleShape frame(sf::Vector2f(thumb + 4, thumb + 4));
-        frame.setPosition(sf::Vector2f(static_cast<float>(x - 2), static_cast<float>(y - 2)));
-        frame.setFillColor(sf::Color::Transparent);
+        vizgfx::RectangleShape frame(vizgfx::Vector2f(thumb + 4, thumb + 4));
+        frame.setPosition(vizgfx::Vector2f(static_cast<float>(x - 2), static_cast<float>(y - 2)));
+        frame.setFillColor(vizgfx::Color::Transparent);
         frame.setOutlineColor(color_for_tag(use_tag));
         frame.setOutlineThickness(1);
         window->draw(frame);
@@ -3703,28 +4808,21 @@ void Visualizer::renderLayerBlocks() {
         position_sprite_centered_in_box(entry.img->sprite, static_cast<float>(x), static_cast<float>(y), static_cast<float>(thumb));
         window->draw(entry.img->sprite);
 
-        sf::RectangleShape label(sf::Vector2f(static_cast<float>(thumb), static_cast<float>(label_h)));
-        label.setPosition(sf::Vector2f(static_cast<float>(x), static_cast<float>(y + thumb + 3)));
-        label.setFillColor(sf::Color(50, 50, 60, 200));
+        vizgfx::RectangleShape label(vizgfx::Vector2f(static_cast<float>(thumb), static_cast<float>(label_h)));
+        label.setPosition(vizgfx::Vector2f(static_cast<float>(x), static_cast<float>(y + thumb + 3)));
+        label.setFillColor(vizgfx::Color(50, 50, 60, 200));
         window->draw(label);
 
         if (font_loaded) {
-            sf::Text t(font);
+            vizgfx::Text t(font);
             t.setFont(font);
             t.setCharacterSize(12);
-            t.setFillColor(sf::Color(230, 230, 235));
-            t.setPosition(sf::Vector2f(static_cast<float>(x + 4), static_cast<float>(y + thumb + 1)));
+            t.setFillColor(vizgfx::Color(230, 230, 235));
+            t.setPosition(vizgfx::Vector2f(static_cast<float>(x + 4), static_cast<float>(y + thumb + 1)));
 
-            std::string text;
-            if (entry.is_extra) {
-                text = entry.text_override;
-            } else if (entry.parsed.tag != "ACT") {
-                text = "[" + entry.parsed.tag + "] " + entry.parsed.short_text;
-            } else {
-                text = entry.parsed.short_text;
-            }
+            std::string text = format_tip_display_label(display_parsed);
             text = clamp_text_end(text, 18);
-            t.setString(sf::String::fromUtf8(text.begin(), text.end()));
+            t.setString(vizgfx::String::fromUtf8(text.begin(), text.end()));
             window->draw(t);
         }
     }
@@ -3752,36 +4850,43 @@ void Visualizer::renderLayerBlocks() {
         const float thumb_y = ty + t * denom;
         last_blocks_scroll_thumb_rect_ = make_rect(tx, thumb_y, track_w, thumb_h);
 
-        sf::RectangleShape track(sf::Vector2f(track_w, th));
-        track.setPosition(sf::Vector2f(tx, ty));
-        track.setFillColor(sf::Color(35, 35, 42, 200));
+        vizgfx::RectangleShape track(vizgfx::Vector2f(track_w, th));
+        track.setPosition(vizgfx::Vector2f(tx, ty));
+        track.setFillColor(vizgfx::Color(35, 35, 42, 200));
         window->draw(track);
 
-        sf::RectangleShape thumb(sf::Vector2f(track_w, thumb_h));
-        thumb.setPosition(sf::Vector2f(tx, thumb_y));
-        thumb.setFillColor(sf::Color(90, 90, 110, 220));
+        vizgfx::RectangleShape thumb(vizgfx::Vector2f(track_w, thumb_h));
+        thumb.setPosition(vizgfx::Vector2f(tx, thumb_y));
+        thumb.setFillColor(vizgfx::Color(90, 90, 110, 220));
         window->draw(thumb);
     }
 }
 
 void Visualizer::renderGeneratedImages() {
-    if (generated_images.empty()) return;
+    if (generated_images.empty()) {
+        setPanelContentHeight(PanelId::Generated, 0.0f);
+        last_generated_rects_.clear();
+        last_generated_indices_.clear();
+        return;
+    }
 
     const auto area = panelContentRect(PanelId::Generated);
 
-    const int img_display_size = 200; // Taille d'affichage
+    const int img_display_size = script_scene_.value("image_size", 200);
     const int margin = 20;
     const int start_x = static_cast<int>(area.position.x);
-    const int start_y = static_cast<int>(area.position.y);
+    const int start_y = static_cast<int>(area.position.y -
+        panel_scroll_y_[static_cast<size_t>(PanelId::Generated)]);
 
     const int cell_w = img_display_size + margin;
     const int cell_h = img_display_size + margin + 26;
     const int cols = std::max(1, static_cast<int>(area.size.x) / std::max(1, cell_w));
-    const int rows = std::max(1, static_cast<int>(area.size.y) / std::max(1, cell_h));
-    const int max_items = std::max(1, cols * rows);
-
-    const size_t n = std::min(generated_images.size(), static_cast<size_t>(max_items));
-    const size_t start_idx = (generated_images.size() > n) ? (generated_images.size() - n) : 0;
+    const size_t n = generated_images.size();
+    const size_t start_idx = 0;
+    const int content_rows = std::max(1, static_cast<int>(
+        (n + static_cast<size_t>(cols) - 1) / static_cast<size_t>(cols)));
+    setPanelContentHeight(PanelId::Generated,
+        static_cast<float>(content_rows * cell_h));
 
     last_generated_rects_.clear();
     last_generated_indices_.clear();
@@ -3789,7 +4894,7 @@ void Visualizer::renderGeneratedImages() {
     last_generated_indices_.reserve(n);
 
     // Clip au contenu du panneau (overflow: clip)
-    const sf::View old_view = window->getView();
+    const vizgfx::View old_view = window->getView();
     {
         const float ww = static_cast<float>(std::max(1, window_width));
         const float hh = static_cast<float>(std::max(1, window_height));
@@ -3802,7 +4907,7 @@ void Visualizer::renderGeneratedImages() {
         const float h = std::max(0.0f, bottom - top);
 
         if (w > 0.0f && h > 0.0f) {
-            sf::View v(make_rect(left, top, w, h));
+            vizgfx::View v(make_rect(left, top, w, h));
             v.setViewport(make_rect(left / ww, top / hh, w / ww, h / hh));
             window->setView(v);
         }
@@ -3818,25 +4923,39 @@ void Visualizer::renderGeneratedImages() {
         int y = start_y + row * cell_h;
 
         // Cadre
-        sf::RectangleShape frame(sf::Vector2f(img_display_size + 4, img_display_size + 4));
-        frame.setPosition(sf::Vector2f(x - 2, y - 2));
-        frame.setFillColor(sf::Color::Transparent);
-        frame.setOutlineColor(sf::Color(100, 150, 200));
+        vizgfx::RectangleShape frame(vizgfx::Vector2f(img_display_size + 4, img_display_size + 4));
+        frame.setPosition(vizgfx::Vector2f(x - 2, y - 2));
+        frame.setFillColor(vizgfx::Color::Transparent);
+        frame.setOutlineColor(vizgfx::Color(100, 150, 200));
         frame.setOutlineThickness(2);
         window->draw(frame);
 
         last_generated_rects_.push_back(make_rect(static_cast<float>(x - 2), static_cast<float>(y - 2), static_cast<float>(img_display_size + 4), static_cast<float>(img_display_size + 4)));
         last_generated_indices_.push_back(static_cast<int>(start_idx + i));
 
-        // Image
+        // Fit to the script-selected preview size (texture sizes may differ).
+        const auto bounds = img.sprite.getLocalBounds();
+        if (bounds.size.x > 0.f && bounds.size.y > 0.f) {
+            const float scale = std::min(img_display_size / bounds.size.x, img_display_size / bounds.size.y);
+            img.sprite.setScale({scale, scale});
+        }
         position_sprite_centered_in_box(img.sprite, static_cast<float>(x), static_cast<float>(y), static_cast<float>(img_display_size));
         window->draw(img.sprite);
 
-        // Titre (simulé avec rectangle - nécessite police pour texte)
-        sf::RectangleShape label(sf::Vector2f(img_display_size, 20));
-        label.setPosition(sf::Vector2f(x, y + img_display_size + 5));
-        label.setFillColor(sf::Color(50, 50, 60, 200));
+        // Caption remains readable beneath each source/result preview.
+        vizgfx::RectangleShape label(vizgfx::Vector2f(img_display_size, 20));
+        label.setPosition(vizgfx::Vector2f(x, y + img_display_size + 5));
+        label.setFillColor(vizgfx::Color(50, 50, 60, 200));
         window->draw(label);
+        if (font_loaded) {
+            vizgfx::Text caption(font);
+            caption.setCharacterSize(12);
+            caption.setFillColor(vizgfx::Color(230, 240, 248));
+            caption.setPosition({static_cast<float>(x + 4), static_cast<float>(y + img_display_size + 7)});
+            const std::string value = clamp_text_end(img.prompt, std::max(8, img_display_size / 8));
+            caption.setString(vizgfx::String::fromUtf8(value.begin(), value.end()));
+            window->draw(caption);
+        }
     }
 
     window->setView(old_view);
@@ -3844,6 +4963,7 @@ void Visualizer::renderGeneratedImages() {
 
 void Visualizer::renderTrainingProgress() {
     const auto area = panelContentRect(PanelId::Training);
+    setPanelContentHeight(PanelId::Training, 52.0f);
     const int bar_x = static_cast<int>(area.position.x);
     const int bar_width = std::max(10, static_cast<int>(area.size.x));
     const int global_h = std::clamp(static_cast<int>(area.size.y * 0.34f), 14, 24);
@@ -3880,7 +5000,7 @@ void Visualizer::renderTrainingProgress() {
     progress_epoch_display_ = smooth_to(progress_epoch_display_, global_target, 0.24f);
     progress_batch_display_ = smooth_to(progress_batch_display_, batch_target, 0.30f);
 
-    const auto batch_speed_color = [&](int batch_ms) -> sf::Color {
+    const auto batch_speed_color = [&](int batch_ms) -> vizgfx::Color {
         // 0 = rapide (vert), 1 = lent (rouge)
         const float lo = 20.0f;
         const float hi = 2000.0f;
@@ -3893,38 +5013,38 @@ void Visualizer::renderTrainingProgress() {
             return static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(a + (b - a) * t)), 0, 255));
         };
 
-        return sf::Color(mix(fast_r, slow_r), mix(fast_g, slow_g), mix(fast_b, slow_b), 245);
+        return vizgfx::Color(mix(fast_r, slow_r), mix(fast_g, slow_g), mix(fast_b, slow_b), 245);
     };
 
     // Barre globale (epochs)
-    sf::RectangleShape progress_bg(sf::Vector2f(static_cast<float>(bar_width), static_cast<float>(global_h)));
-    progress_bg.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(global_y)));
-    progress_bg.setFillColor(sf::Color(50, 50, 60, 230));
-    progress_bg.setOutlineColor(sf::Color(88, 88, 102, 235));
+    vizgfx::RectangleShape progress_bg(vizgfx::Vector2f(static_cast<float>(bar_width), static_cast<float>(global_h)));
+    progress_bg.setPosition(vizgfx::Vector2f(static_cast<float>(bar_x), static_cast<float>(global_y)));
+    progress_bg.setFillColor(vizgfx::Color(50, 50, 60, 230));
+    progress_bg.setOutlineColor(vizgfx::Color(88, 88, 102, 235));
     progress_bg.setOutlineThickness(1.5f);
     window->draw(progress_bg);
 
     const float epoch_w = static_cast<float>(bar_width) * progress_epoch_display_;
     if (epoch_w > 0.0f) {
-        sf::RectangleShape progress_bar(sf::Vector2f(epoch_w, static_cast<float>(global_h)));
-        progress_bar.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(global_y)));
-        progress_bar.setFillColor(sf::Color(96, 184, 112, 240));
+        vizgfx::RectangleShape progress_bar(vizgfx::Vector2f(epoch_w, static_cast<float>(global_h)));
+        progress_bar.setPosition(vizgfx::Vector2f(static_cast<float>(bar_x), static_cast<float>(global_y)));
+        progress_bar.setFillColor(vizgfx::Color(96, 184, 112, 240));
         window->draw(progress_bar);
     }
 
     // Barre batch (courant) sous la barre globale.
-    sf::RectangleShape batch_bg(sf::Vector2f(static_cast<float>(bar_width), static_cast<float>(batch_h)));
-    batch_bg.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(batch_y)));
-    batch_bg.setFillColor(sf::Color(42, 42, 52, 230));
-    batch_bg.setOutlineColor(sf::Color(78, 78, 94, 220));
+    vizgfx::RectangleShape batch_bg(vizgfx::Vector2f(static_cast<float>(bar_width), static_cast<float>(batch_h)));
+    batch_bg.setPosition(vizgfx::Vector2f(static_cast<float>(bar_x), static_cast<float>(batch_y)));
+    batch_bg.setFillColor(vizgfx::Color(42, 42, 52, 230));
+    batch_bg.setOutlineColor(vizgfx::Color(78, 78, 94, 220));
     batch_bg.setOutlineThickness(1.0f);
     window->draw(batch_bg);
 
     if (has_batch_info) {
         const float batch_w = static_cast<float>(bar_width) * progress_batch_display_;
         if (batch_w > 0.0f) {
-            sf::RectangleShape batch_fg(sf::Vector2f(batch_w, static_cast<float>(batch_h)));
-            batch_fg.setPosition(sf::Vector2f(static_cast<float>(bar_x), static_cast<float>(batch_y)));
+            vizgfx::RectangleShape batch_fg(vizgfx::Vector2f(batch_w, static_cast<float>(batch_h)));
+            batch_fg.setPosition(vizgfx::Vector2f(static_cast<float>(bar_x), static_cast<float>(batch_y)));
             batch_fg.setFillColor(batch_speed_color(current_batch_time_ms));
             window->draw(batch_fg);
         }
@@ -3936,9 +5056,9 @@ void Visualizer::renderTrainingProgress() {
         const float phase = static_cast<float>((t % 1600ULL) / 1600.0);
         const float seg_w = std::max(24.0f, static_cast<float>(bar_width) * 0.18f);
         const float x = static_cast<float>(bar_x) + (static_cast<float>(bar_width) + seg_w) * phase - seg_w;
-        sf::RectangleShape ind(sf::Vector2f(seg_w, static_cast<float>(global_h)));
-        ind.setPosition(sf::Vector2f(x, static_cast<float>(global_y)));
-        ind.setFillColor(sf::Color(110, 165, 215, 120));
+        vizgfx::RectangleShape ind(vizgfx::Vector2f(seg_w, static_cast<float>(global_h)));
+        ind.setPosition(vizgfx::Vector2f(x, static_cast<float>(global_y)));
+        ind.setFillColor(vizgfx::Color(110, 165, 215, 120));
         window->draw(ind);
     }
 
@@ -3952,15 +5072,15 @@ void Visualizer::renderTrainingProgress() {
             txt_global = "Initialisation";
         }
 
-        sf::Text tg(font);
+        vizgfx::Text tg(font);
         tg.setFont(font);
         tg.setCharacterSize(12);
-        tg.setFillColor(sf::Color(235, 235, 240));
-        tg.setString(sf::String::fromUtf8(txt_global.begin(), txt_global.end()));
+        tg.setFillColor(vizgfx::Color(235, 235, 240));
+        tg.setString(vizgfx::String::fromUtf8(txt_global.begin(), txt_global.end()));
         const auto bg = tg.getLocalBounds();
         const float txg = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bg.size.x) * 0.5f - bg.position.x;
         const float tyg = static_cast<float>(global_y) + (static_cast<float>(global_h) - bg.size.y) * 0.5f - bg.position.y - 1.0f;
-        tg.setPosition(sf::Vector2f(std::round(txg), std::round(tyg)));
+        tg.setPosition(vizgfx::Vector2f(std::round(txg), std::round(tyg)));
         window->draw(tg);
 
         std::string txt_batch;
@@ -3970,15 +5090,15 @@ void Visualizer::renderTrainingProgress() {
         } else {
             txt_batch = "batch --";
         }
-        sf::Text tb(font);
+        vizgfx::Text tb(font);
         tb.setFont(font);
         tb.setCharacterSize(11);
-        tb.setFillColor(sf::Color(220, 228, 210));
-        tb.setString(sf::String::fromUtf8(txt_batch.begin(), txt_batch.end()));
+        tb.setFillColor(vizgfx::Color(220, 228, 210));
+        tb.setString(vizgfx::String::fromUtf8(txt_batch.begin(), txt_batch.end()));
         const auto bb = tb.getLocalBounds();
         const float txb = static_cast<float>(bar_x) + (static_cast<float>(bar_width) - bb.size.x) * 0.5f - bb.position.x;
         const float tyb = static_cast<float>(batch_y) + (static_cast<float>(batch_h) - bb.size.y) * 0.5f - bb.position.y - 1.0f;
-        tb.setPosition(sf::Vector2f(std::round(txb), std::round(tyb)));
+        tb.setPosition(vizgfx::Vector2f(std::round(txb), std::round(tyb)));
         window->draw(tb);
     }
 }
@@ -3996,10 +5116,10 @@ void Visualizer::renderLossGraph() {
     const int graph_height = std::max(120, static_cast<int>(area.size.y));
 
     // Fond du graphique
-    sf::RectangleShape graph_bg(sf::Vector2f(static_cast<float>(graph_width), static_cast<float>(graph_height)));
-    graph_bg.setPosition(sf::Vector2f(static_cast<float>(graph_x), static_cast<float>(graph_y)));
-    graph_bg.setFillColor(sf::Color(20, 20, 25, 220));
-    graph_bg.setOutlineColor(sf::Color(100, 100, 120));
+    vizgfx::RectangleShape graph_bg(vizgfx::Vector2f(static_cast<float>(graph_width), static_cast<float>(graph_height)));
+    graph_bg.setPosition(vizgfx::Vector2f(static_cast<float>(graph_x), static_cast<float>(graph_y)));
+    graph_bg.setFillColor(vizgfx::Color(20, 20, 25, 220));
+    graph_bg.setOutlineColor(vizgfx::Color(100, 100, 120));
     graph_bg.setOutlineThickness(2);
     window->draw(graph_bg);
 
@@ -4033,9 +5153,9 @@ void Visualizer::renderLossGraph() {
         const float t = (ticks <= 1) ? 0.f : (static_cast<float>(i) / static_cast<float>(ticks - 1));
         const float y = plot_y + (1.f - t) * plot_h;
 
-        sf::RectangleShape grid(sf::Vector2f(plot_w, 1.f));
-        grid.setPosition(sf::Vector2f(plot_x, y));
-        grid.setFillColor(sf::Color(70, 70, 80, (i == 0 || i == ticks - 1) ? 120 : 70));
+        vizgfx::RectangleShape grid(vizgfx::Vector2f(plot_w, 1.f));
+        grid.setPosition(vizgfx::Vector2f(plot_x, y));
+        grid.setFillColor(vizgfx::Color(70, 70, 80, (i == 0 || i == ticks - 1) ? 120 : 70));
         window->draw(grid);
 
         if (font_loaded) {
@@ -4043,12 +5163,12 @@ void Visualizer::renderLossGraph() {
             std::ostringstream ss;
             ss << std::fixed << std::setprecision(4) << v;
             const std::string label = ss.str();
-            sf::Text txt(font);
+            vizgfx::Text txt(font);
             txt.setFont(font);
             txt.setCharacterSize(12);
-            txt.setFillColor(sf::Color(220, 220, 228));
-            txt.setPosition(sf::Vector2f(static_cast<float>(graph_x) + 6.f, y - 8.f));
-            txt.setString(sf::String::fromUtf8(label.begin(), label.end()));
+            txt.setFillColor(vizgfx::Color(220, 220, 228));
+            txt.setPosition(vizgfx::Vector2f(static_cast<float>(graph_x) + 6.f, y - 8.f));
+            txt.setString(vizgfx::String::fromUtf8(label.begin(), label.end()));
             window->draw(txt);
         }
     }
@@ -4066,7 +5186,7 @@ void Visualizer::renderLossGraph() {
         return loss_history[idx];
     };
 
-    sf::VertexArray line(sf::PrimitiveType::LineStrip, n_draw);
+    vizgfx::VertexArray line(vizgfx::PrimitiveType::LineStrip, n_draw);
     for (size_t i = 0; i < n_draw; ++i) {
         const size_t idx = (n_draw <= 1) ? 0 : (i * (n_total - 1)) / (n_draw - 1);
         const float loss = loss_at(idx);
@@ -4074,7 +5194,7 @@ void Visualizer::renderLossGraph() {
         const float normalized = (loss - min_loss) / range;
         const float y = plot_y + (1.f - std::clamp(normalized, 0.f, 1.f)) * plot_h;
 
-        line[i].position = sf::Vector2f(x, y);
+        line[i].position = vizgfx::Vector2f(x, y);
         line[i].color = getLossColor(loss);
     }
     window->draw(line);
@@ -4084,12 +5204,12 @@ void Visualizer::renderLossGraph() {
         const size_t start_step = 0;
         const size_t end_step = (n_total > 0) ? (n_total - 1) : 0;
         auto drawSmall = [&](float x, float y, const std::string& s) {
-            sf::Text t(font);
+            vizgfx::Text t(font);
             t.setFont(font);
             t.setCharacterSize(12);
-            t.setFillColor(sf::Color(220, 220, 228));
-            t.setPosition(sf::Vector2f(x, y));
-            t.setString(sf::String::fromUtf8(s.begin(), s.end()));
+            t.setFillColor(vizgfx::Color(220, 220, 228));
+            t.setPosition(vizgfx::Vector2f(x, y));
+            t.setString(vizgfx::String::fromUtf8(s.begin(), s.end()));
             window->draw(t);
         };
 
@@ -4111,11 +5231,32 @@ void Visualizer::renderMetrics() {
     const auto area = panelContentRect(PanelId::Metrics);
     const int panel_w = std::max(120, static_cast<int>(area.size.x));
     int metrics_x = static_cast<int>(area.position.x);
-    int metrics_y = static_cast<int>(area.position.y);
+    int metrics_y = static_cast<int>(area.position.y -
+        panel_scroll_y_[static_cast<size_t>(PanelId::Metrics)]);
     int line_height = 25;
+
+    const vizgfx::View old_view = window->getView();
+    {
+        const float ww = static_cast<float>(std::max(1, window_width));
+        const float hh = static_cast<float>(std::max(1, window_height));
+        const float left = std::clamp(area.position.x, 0.0f, ww);
+        const float top = std::clamp(area.position.y, 0.0f, hh);
+        const float right = std::clamp(area.position.x + area.size.x, 0.0f, ww);
+        const float bottom = std::clamp(area.position.y + area.size.y, 0.0f, hh);
+        const float width = std::max(0.0f, right - left);
+        const float height = std::max(0.0f, bottom - top);
+        if (width > 0.0f && height > 0.0f) {
+            vizgfx::View view(make_rect(left, top, width, height));
+            view.setViewport(make_rect(left / ww, top / hh, width / ww, height / hh));
+            window->setView(view);
+        }
+    }
+    float metrics_content_height = 4.0f * static_cast<float>(line_height) + 20.0f;
 
     // Bouton stop: hitbox recalculée à chaque frame.
     last_stop_button_rect_.reset();
+    last_validation_button_rect_.reset();
+    last_skip_button_rect_.reset();
 
     // Live tuning controls: hitboxes recalculées à chaque frame.
     last_live_lr_track_.reset();
@@ -4130,28 +5271,30 @@ void Visualizer::renderMetrics() {
     last_live_lrwu_value_box_.reset();
     last_live_klb_value_box_.reset();
     last_live_klwu_value_box_.reset();
+    last_live_recon_loss_box_.reset();
     last_live_kl_enable_box_.reset();
     last_live_overrides_box_.reset();
+    for (auto& rect : dataset_text_section_rects_) rect = make_rect(0.f, 0.f, 0.f, 0.f);
 
-    auto drawMetricBox = [&](int y_offset, sf::Color color) {
-        sf::RectangleShape box(sf::Vector2f(static_cast<float>(panel_w), 20));
-        box.setPosition(sf::Vector2f(metrics_x, metrics_y + y_offset));
+    auto drawMetricBox = [&](int y_offset, vizgfx::Color color) {
+        vizgfx::RectangleShape box(vizgfx::Vector2f(static_cast<float>(panel_w), 20));
+        box.setPosition(vizgfx::Vector2f(metrics_x, metrics_y + y_offset));
         box.setFillColor(color);
         window->draw(box);
     };
 
     // Epoch (bleu)
-    drawMetricBox(0, sf::Color(50, 100, 180, 200));
+    drawMetricBox(0, vizgfx::Color(50, 100, 180, 200));
 
     // Batch (vert)
-    drawMetricBox(line_height, sf::Color(50, 150, 80, 200));
+    drawMetricBox(line_height, vizgfx::Color(50, 150, 80, 200));
 
     // Loss (orange/rouge selon valeur)
-    sf::Color loss_color = current_loss > 100.0f ? sf::Color(200, 80, 50, 200) : sf::Color(180, 140, 50, 200);
+    vizgfx::Color loss_color = current_loss > 100.0f ? vizgfx::Color(200, 80, 50, 200) : vizgfx::Color(180, 140, 50, 200);
     drawMetricBox(line_height * 2, loss_color);
 
     // Learning rate (violet)
-    drawMetricBox(line_height * 3, sf::Color(140, 80, 180, 200));
+    drawMetricBox(line_height * 3, vizgfx::Color(140, 80, 180, 200));
 
     // Bouton STOP (rouge) — dans le panneau Metrics (layer metrics)
     {
@@ -4163,22 +5306,71 @@ void Visualizer::renderMetrics() {
 
         const bool stop_requested = stop_training_requested_.load(std::memory_order_relaxed);
 
-        sf::RectangleShape b(sf::Vector2f((float)btn_w, (float)btn_h));
-        b.setPosition(sf::Vector2f((float)btn_x, (float)btn_y));
-        b.setFillColor(stop_requested ? sf::Color(180, 55, 55, 235) : sf::Color(140, 40, 40, 230));
-        b.setOutlineColor(stop_requested ? sf::Color(245, 150, 150, 245) : sf::Color(210, 90, 90, 240));
+        vizgfx::RectangleShape b(vizgfx::Vector2f((float)btn_w, (float)btn_h));
+        b.setPosition(vizgfx::Vector2f((float)btn_x, (float)btn_y));
+        b.setFillColor(stop_requested ? vizgfx::Color(180, 55, 55, 235) : vizgfx::Color(140, 40, 40, 230));
+        b.setOutlineColor(stop_requested ? vizgfx::Color(245, 150, 150, 245) : vizgfx::Color(210, 90, 90, 240));
         b.setOutlineThickness(1);
         window->draw(b);
 
         last_stop_button_rect_ = make_rect((float)btn_x, (float)btn_y, (float)btn_w, (float)btn_h);
 
         if (font_loaded) {
-            sf::Text t(font);
+            vizgfx::Text t(font);
             t.setFont(font);
             t.setCharacterSize(13);
-            t.setFillColor(sf::Color(245, 240, 240));
-            t.setPosition(sf::Vector2f((float)btn_x + 8.f, (float)btn_y + 1.f));
+            t.setFillColor(vizgfx::Color(245, 240, 240));
+            t.setPosition(vizgfx::Vector2f((float)btn_x + 8.f, (float)btn_y + 1.f));
             t.setString(stop_requested ? "STOP demandé" : "STOP training");
+            window->draw(t);
+        }
+    }
+
+    // Validation ON/OFF. L'état est lu directement par le thread d'entraînement.
+    {
+        const int btn_h = 20;
+        const int btn_w = std::min(150, std::max(92, panel_w / 3));
+        const int btn_x = metrics_x + std::max(0, panel_w - 160 - btn_w - 8);
+        const int btn_y = metrics_y;
+        const bool enabled = validation_enabled_.load(std::memory_order_relaxed);
+        vizgfx::RectangleShape b(vizgfx::Vector2f((float)btn_w, (float)btn_h));
+        b.setPosition(vizgfx::Vector2f((float)btn_x, (float)btn_y));
+        b.setFillColor(enabled ? vizgfx::Color(35, 125, 78, 235) : vizgfx::Color(80, 84, 92, 230));
+        b.setOutlineColor(enabled ? vizgfx::Color(95, 220, 145, 245) : vizgfx::Color(145, 150, 160, 235));
+        b.setOutlineThickness(1);
+        window->draw(b);
+        last_validation_button_rect_ = make_rect((float)btn_x, (float)btn_y, (float)btn_w, (float)btn_h);
+        if (font_loaded) {
+            vizgfx::Text t(font);
+            t.setCharacterSize(12);
+            t.setFillColor(vizgfx::Color(245, 248, 248));
+            t.setPosition(vizgfx::Vector2f((float)btn_x + 7.f, (float)btn_y + 1.f));
+            t.setString(enabled ? "VALIDATION ON" : "VALIDATION OFF");
+            window->draw(t);
+        }
+    }
+
+    // Encoder-decoder skips: shared with htop and sampled at the next forward.
+    {
+        const int btn_h = 20;
+        const int btn_w = std::min(150, std::max(92, panel_w / 3));
+        const int btn_x = metrics_x + panel_w - btn_w;
+        const int btn_y = metrics_y + line_height;
+        const auto skips = std::atomic_load(&skip_control_);
+        const bool enabled = skips->available.load() && skips->enabled.load();
+        vizgfx::RectangleShape b(vizgfx::Vector2f((float)btn_w, (float)btn_h));
+        b.setPosition(vizgfx::Vector2f((float)btn_x, (float)btn_y));
+        b.setFillColor(enabled ? vizgfx::Color(35, 125, 78, 235) : vizgfx::Color(80, 84, 92, 230));
+        b.setOutlineColor(enabled ? vizgfx::Color(95, 220, 145, 245) : vizgfx::Color(145, 150, 160, 235));
+        b.setOutlineThickness(1);
+        window->draw(b);
+        last_skip_button_rect_ = make_rect((float)btn_x, (float)btn_y, (float)btn_w, (float)btn_h);
+        if (font_loaded) {
+            vizgfx::Text t(font);
+            t.setCharacterSize(12);
+            t.setFillColor(vizgfx::Color(245, 248, 248));
+            t.setPosition(vizgfx::Vector2f((float)btn_x + 7.f, (float)btn_y + 1.f));
+            t.setString(!skips->available.load() ? "SKIPS N/A" : (enabled ? "SKIPS ON" : "SKIPS OFF"));
             window->draw(t);
         }
     }
@@ -4214,23 +5406,83 @@ void Visualizer::renderMetrics() {
         };
 
         auto drawText = [&](int y_offset, const std::string& s) {
-            sf::Text t(font);
+            vizgfx::Text t(font);
             t.setFont(font);
             t.setCharacterSize(14);
-            t.setFillColor(sf::Color(230, 230, 235));
-            t.setPosition(sf::Vector2f(static_cast<float>(metrics_x + 6), static_cast<float>(metrics_y + y_offset - 2)));
-            t.setString(sf::String::fromUtf8(s.begin(), s.end()));
+            t.setFillColor(vizgfx::Color(230, 230, 235));
+            t.setPosition(vizgfx::Vector2f(static_cast<float>(metrics_x + 6), static_cast<float>(metrics_y + y_offset - 2)));
+            t.setString(vizgfx::String::fromUtf8(s.begin(), s.end()));
             window->draw(t);
+        };
+
+        auto drawSection = [&](int y_offset, const std::string& title, vizgfx::Color color) {
+            vizgfx::RectangleShape bar(vizgfx::Vector2f(static_cast<float>(panel_w), 18.f));
+            bar.setPosition(vizgfx::Vector2f(static_cast<float>(metrics_x), static_cast<float>(metrics_y + y_offset)));
+            bar.setFillColor(vizgfx::Color(color.r, color.g, color.b, 75));
+            window->draw(bar);
+            vizgfx::Text t(font);
+            t.setCharacterSize(11);
+            t.setStyle(vizgfx::Text::Bold);
+            t.setFillColor(color);
+            t.setPosition(vizgfx::Vector2f(static_cast<float>(metrics_x + 6), static_cast<float>(metrics_y + y_offset + 1)));
+            t.setString(title);
+            window->draw(t);
+        };
+
+        auto drawTag = [&](float x, float y, const std::string& label, vizgfx::Color color) {
+            const float w = std::max(48.f, 8.f * static_cast<float>(label.size()) + 12.f);
+            vizgfx::RectangleShape box(vizgfx::Vector2f(w, 18.f));
+            box.setPosition(vizgfx::Vector2f(x, y));
+            box.setFillColor(vizgfx::Color(color.r, color.g, color.b, 95));
+            box.setOutlineColor(vizgfx::Color(color.r, color.g, color.b, 220));
+            box.setOutlineThickness(1.f);
+            window->draw(box);
+            vizgfx::Text t(font);
+            t.setCharacterSize(11);
+            t.setFillColor(vizgfx::Color(245, 245, 248));
+            t.setPosition(vizgfx::Vector2f(x + 6.f, y + 1.f));
+            t.setString(label);
+            window->draw(t);
+        };
+
+        auto drawTableRow = [&](int y_offset, const std::string& label,
+                                const std::string& value, vizgfx::Color accent) {
+            vizgfx::RectangleShape row(vizgfx::Vector2f(static_cast<float>(panel_w), 21.f));
+            row.setPosition(vizgfx::Vector2f(static_cast<float>(metrics_x),
+                                         static_cast<float>(metrics_y + y_offset - 2)));
+            row.setFillColor(vizgfx::Color(28, 31, 39, 185));
+            window->draw(row);
+            vizgfx::RectangleShape mark(vizgfx::Vector2f(3.f, 21.f));
+            mark.setPosition(row.getPosition());
+            mark.setFillColor(accent);
+            window->draw(mark);
+            vizgfx::Text key(font);
+            key.setCharacterSize(12);
+            key.setStyle(vizgfx::Text::Bold);
+            key.setFillColor(accent);
+            key.setPosition(vizgfx::Vector2f(static_cast<float>(metrics_x + 8),
+                                         static_cast<float>(metrics_y + y_offset)));
+            key.setString(label);
+            window->draw(key);
+            vizgfx::Text val(font);
+            val.setCharacterSize(12);
+            val.setFillColor(vizgfx::Color(228, 231, 238));
+            val.setPosition(vizgfx::Vector2f(static_cast<float>(metrics_x + 112),
+                                         static_cast<float>(metrics_y + y_offset)));
+            val.setString(value);
+            window->draw(val);
         };
 
         drawText(0, "Epoch " + std::to_string(current_epoch) + "/" + std::to_string(std::max(1, current_total_epochs)));
         drawText(line_height, "Batch " + std::to_string(current_batch) + "/" + std::to_string(std::max(1, current_total_batches)));
         {
-            const float diffabs = std::sqrt(std::max(0.0f, current_mse));
+            const std::string recon_name = canonical_recon_loss_name(current_recon_loss_type);
+            const float recon_normalized = normalized_recon_loss(
+                current_mse, current_recon_loss_type);
             drawText(line_height * 2,
                      "Loss=" + format_decimal(current_loss, 8) +
                          " avg=" + format_decimal(current_avg_loss, 8) +
-                         " diffabs=" + format_decimal(diffabs, 8) +
+                         " " + recon_name + "_norm=" + format_decimal(recon_normalized, 8) +
                          " ent=" + format_decimal(current_ent, 8));
         }
         { drawText(line_height * 3, "LR=" + format_decimal(current_lr, 10)); }
@@ -4238,12 +5490,25 @@ void Visualizer::renderMetrics() {
         // -------------------------
         // Live tuning controls
         // -------------------------
+        const uint64_t external_version =
+            external_live_params_version_.load(std::memory_order_relaxed);
+        if (external_version != live_ui_external_version_) {
+            live_ui_lr_ = std::clamp(live_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
+            live_ui_lr_warmup_steps_ = live_lr_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_beta_ = std::clamp(live_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            live_ui_kl_warmup_steps_ = live_kl_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_enabled_ = live_kl_enabled_.load(std::memory_order_relaxed);
+            live_ui_recon_loss_index_ = live_recon_loss_index_.load(std::memory_order_relaxed);
+            live_ui_external_version_ = external_version;
+            live_ui_inited_ = true;
+        }
         if (!live_ui_inited_) {
-            live_ui_lr_ = std::clamp(current_lr, kLiveLRMin, kLiveLRMax);
-            live_ui_lr_warmup_steps_ = 0;
-            live_ui_kl_beta_ = std::clamp(current_kl_beta_effective, 0.0f, 1.0f);
-            live_ui_kl_warmup_steps_ = 0;
+            live_ui_lr_ = std::clamp(runtime_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
+            live_ui_lr_warmup_steps_ = runtime_lr_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
             live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
+            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
 
             // Démarre en mode NATIVE: aucun override tant que l'utilisateur n'interagit pas.
             live_overrides_enabled_.store(false, std::memory_order_relaxed);
@@ -4252,6 +5517,7 @@ void Visualizer::renderMetrics() {
             live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
             live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
             live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
+            live_recon_loss_index_.store(live_ui_recon_loss_index_, std::memory_order_relaxed);
             // Ne pas bump la version: on ne veut pas changer le training sans interaction.
             live_ui_inited_ = true;
         }
@@ -4259,12 +5525,14 @@ void Visualizer::renderMetrics() {
         // PS (user): MAJ en temps réel des scrollers (sliders) avec les valeurs runtime associées.
         // En mode NATIVE, refléter current_lr/current_kl_beta_effective tant qu'on ne drag pas.
         const bool live_on_rt = live_overrides_enabled_.load(std::memory_order_relaxed);
-        if (!live_on_rt && live_dragging_ == LiveDragTarget::None) {
-            live_ui_lr_ = std::clamp(current_lr, kLiveLRMin, kLiveLRMax);
-            live_ui_lr_warmup_steps_ = 0;
-            live_ui_kl_beta_ = std::clamp(current_kl_beta_effective, 0.0f, 1.0f);
-            live_ui_kl_warmup_steps_ = 0;
+        if (!live_on_rt && live_dragging_ == LiveDragTarget::None &&
+            live_input_target_ == LiveInputTarget::None) {
+            live_ui_lr_ = std::clamp(runtime_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
+            live_ui_lr_warmup_steps_ = runtime_lr_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
             live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
+            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
         }
 
         const int live_y0 = line_height * 4 + 6;
@@ -4274,7 +5542,7 @@ void Visualizer::renderMetrics() {
         const float track_h = 10.f;
         const float thumb_w = 10.f;
         const float thumb_h = 16.f;
-        const int rows = 5;
+        const int rows = 6;
 
         auto drawSliderRow = [&](int row,
                                  const std::string& label,
@@ -4283,9 +5551,9 @@ void Visualizer::renderMetrics() {
                                  LiveInputTarget input_target,
                                  const std::string& min_label,
                                  const std::string& max_label,
-                                 std::optional<sf::FloatRect>& out_track,
-                                 std::optional<sf::FloatRect>& out_thumb,
-                                 std::optional<sf::FloatRect>& out_value_box) {
+                                 std::optional<vizgfx::FloatRect>& out_track,
+                                 std::optional<vizgfx::FloatRect>& out_thumb,
+                                 std::optional<vizgfx::FloatRect>& out_value_box) {
             const float y = static_cast<float>(metrics_y + live_y0 + row * live_row_h);
             const float x0 = static_cast<float>(metrics_x + 6);
             const float x_track = static_cast<float>(metrics_x + label_w);
@@ -4294,63 +5562,63 @@ void Visualizer::renderMetrics() {
 
             // Label
             {
-                sf::Text tt(font);
+                vizgfx::Text tt(font);
                 tt.setFont(font);
                 tt.setCharacterSize(13);
-                tt.setFillColor(sf::Color(225, 225, 235));
-                tt.setPosition(sf::Vector2f(x0, y - 2.f));
-                tt.setString(sf::String::fromUtf8(label.begin(), label.end()));
+                tt.setFillColor(vizgfx::Color(225, 225, 235));
+                tt.setPosition(vizgfx::Vector2f(x0, y - 2.f));
+                tt.setString(vizgfx::String::fromUtf8(label.begin(), label.end()));
                 window->draw(tt);
             }
 
             // Track
             const float tt = clamp01(t);
             const float track_y = y + 7.f;
-            sf::RectangleShape track(sf::Vector2f(w_track, track_h));
-            track.setPosition(sf::Vector2f(x_track, track_y));
-            track.setFillColor(sf::Color(55, 55, 60, 210));
-            track.setOutlineColor(sf::Color(90, 90, 95, 220));
+            vizgfx::RectangleShape track(vizgfx::Vector2f(w_track, track_h));
+            track.setPosition(vizgfx::Vector2f(x_track, track_y));
+            track.setFillColor(vizgfx::Color(55, 55, 60, 210));
+            track.setOutlineColor(vizgfx::Color(90, 90, 95, 220));
             track.setOutlineThickness(1);
             window->draw(track);
 
-            sf::RectangleShape fill(sf::Vector2f(w_track * tt, track_h));
-            fill.setPosition(sf::Vector2f(x_track, track_y));
-            fill.setFillColor(sf::Color(90, 140, 200, 220));
+            vizgfx::RectangleShape fill(vizgfx::Vector2f(w_track * tt, track_h));
+            fill.setPosition(vizgfx::Vector2f(x_track, track_y));
+            fill.setFillColor(vizgfx::Color(90, 140, 200, 220));
             window->draw(fill);
 
             // Graduation: 5 repères visibles pour guider le réglage.
             for (int gi = 0; gi <= 4; ++gi) {
                 const float gt = static_cast<float>(gi) / 4.0f;
                 const float gx = x_track + gt * w_track;
-                sf::RectangleShape tick(sf::Vector2f(1.0f, 5.0f));
-                tick.setPosition(sf::Vector2f(gx, track_y + track_h + 1.0f));
-                tick.setFillColor(sf::Color(145, 145, 160, 210));
+                vizgfx::RectangleShape tick(vizgfx::Vector2f(1.0f, 5.0f));
+                tick.setPosition(vizgfx::Vector2f(gx, track_y + track_h + 1.0f));
+                tick.setFillColor(vizgfx::Color(145, 145, 160, 210));
                 window->draw(tick);
             }
 
             if (font_loaded) {
-                sf::Text tmin(font);
+                vizgfx::Text tmin(font);
                 tmin.setFont(font);
                 tmin.setCharacterSize(10);
-                tmin.setFillColor(sf::Color(178, 178, 190));
-                tmin.setPosition(sf::Vector2f(x_track, track_y + track_h + 7.0f));
-                tmin.setString(sf::String::fromUtf8(min_label.begin(), min_label.end()));
+                tmin.setFillColor(vizgfx::Color(178, 178, 190));
+                tmin.setPosition(vizgfx::Vector2f(x_track, track_y + track_h + 7.0f));
+                tmin.setString(vizgfx::String::fromUtf8(min_label.begin(), min_label.end()));
                 window->draw(tmin);
 
-                sf::Text tmax(font);
+                vizgfx::Text tmax(font);
                 tmax.setFont(font);
                 tmax.setCharacterSize(10);
-                tmax.setFillColor(sf::Color(178, 178, 190));
-                tmax.setPosition(sf::Vector2f(x_track + w_track - 8.0f * static_cast<float>(max_label.size()), track_y + track_h + 7.0f));
-                tmax.setString(sf::String::fromUtf8(max_label.begin(), max_label.end()));
+                tmax.setFillColor(vizgfx::Color(178, 178, 190));
+                tmax.setPosition(vizgfx::Vector2f(x_track + w_track - 8.0f * static_cast<float>(max_label.size()), track_y + track_h + 7.0f));
+                tmax.setString(vizgfx::String::fromUtf8(max_label.begin(), max_label.end()));
                 window->draw(tmax);
             }
 
             const float thumb_x = x_track + w_track * tt - thumb_w * 0.5f;
-            sf::RectangleShape thumb(sf::Vector2f(thumb_w, thumb_h));
-            thumb.setPosition(sf::Vector2f(thumb_x, track_y + track_h * 0.5f - thumb_h * 0.5f));
-            thumb.setFillColor(sf::Color(210, 210, 220, 235));
-            thumb.setOutlineColor(sf::Color(30, 30, 30, 220));
+            vizgfx::RectangleShape thumb(vizgfx::Vector2f(thumb_w, thumb_h));
+            thumb.setPosition(vizgfx::Vector2f(thumb_x, track_y + track_h * 0.5f - thumb_h * 0.5f));
+            thumb.setFillColor(vizgfx::Color(210, 210, 220, 235));
+            thumb.setOutlineColor(vizgfx::Color(30, 30, 30, 220));
             thumb.setOutlineThickness(1);
             window->draw(thumb);
 
@@ -4364,24 +5632,24 @@ void Visualizer::renderMetrics() {
                 const float vb_h = 18.0f;
                 const float vb_y = y + 1.0f;
 
-                sf::RectangleShape vb(sf::Vector2f(static_cast<float>(value_w), vb_h));
-                vb.setPosition(sf::Vector2f(x_value, vb_y));
-                vb.setFillColor(editing ? sf::Color(44, 58, 74, 225) : sf::Color(34, 36, 44, 215));
-                vb.setOutlineColor(invalid ? sf::Color(230, 110, 110, 235) : sf::Color(98, 104, 120, 225));
+                vizgfx::RectangleShape vb(vizgfx::Vector2f(static_cast<float>(value_w), vb_h));
+                vb.setPosition(vizgfx::Vector2f(x_value, vb_y));
+                vb.setFillColor(editing ? vizgfx::Color(44, 58, 74, 225) : vizgfx::Color(34, 36, 44, 215));
+                vb.setOutlineColor(invalid ? vizgfx::Color(230, 110, 110, 235) : vizgfx::Color(98, 104, 120, 225));
                 vb.setOutlineThickness(1.0f);
                 window->draw(vb);
 
                 out_value_box = make_rect(x_value, vb_y, static_cast<float>(value_w), vb_h);
 
-                sf::Text tt(font);
+                vizgfx::Text tt(font);
                 tt.setFont(font);
                 tt.setCharacterSize(13);
-                tt.setFillColor(sf::Color(225, 225, 235));
-                tt.setPosition(sf::Vector2f(x_value + 4.0f, y - 1.f));
+                tt.setFillColor(vizgfx::Color(225, 225, 235));
+                tt.setPosition(vizgfx::Vector2f(x_value + 4.0f, y - 1.f));
 
                 std::string shown = editing ? live_input_buffer_ : value;
                 if (editing) shown += "_";
-                tt.setString(sf::String::fromUtf8(shown.begin(), shown.end()));
+                tt.setString(vizgfx::String::fromUtf8(shown.begin(), shown.end()));
                 window->draw(tt);
             }
         };
@@ -4395,30 +5663,30 @@ void Visualizer::renderMetrics() {
             const float box_x = static_cast<float>(metrics_x + panel_w) - box_w - 6.f;
             const float box_y = y;
 
-            sf::RectangleShape b(sf::Vector2f(box_w, box_h));
-            b.setPosition(sf::Vector2f(box_x, box_y));
-            b.setFillColor(live_on ? sf::Color(50, 110, 70, 220) : sf::Color(60, 60, 65, 210));
-            b.setOutlineColor(live_on ? sf::Color(130, 220, 160, 235) : sf::Color(100, 100, 105, 220));
+            vizgfx::RectangleShape b(vizgfx::Vector2f(box_w, box_h));
+            b.setPosition(vizgfx::Vector2f(box_x, box_y));
+            b.setFillColor(live_on ? vizgfx::Color(50, 110, 70, 220) : vizgfx::Color(60, 60, 65, 210));
+            b.setOutlineColor(live_on ? vizgfx::Color(130, 220, 160, 235) : vizgfx::Color(100, 100, 105, 220));
             b.setOutlineThickness(1);
             window->draw(b);
 
             last_live_overrides_box_ = make_rect(box_x, box_y, box_w, box_h);
 
-            sf::Text tt(font);
+            vizgfx::Text tt(font);
             tt.setFont(font);
             tt.setCharacterSize(12);
-            tt.setFillColor(sf::Color(245, 245, 248));
-            tt.setPosition(sf::Vector2f(box_x + 6.f, box_y + 1.f));
+            tt.setFillColor(vizgfx::Color(245, 245, 248));
+            tt.setPosition(vizgfx::Vector2f(box_x + 6.f, box_y + 1.f));
             tt.setString(live_on ? "LIVE (click -> NATIVE)" : "NATIVE (click -> LIVE)");
             window->draw(tt);
 
             // Petit suffixe version (debug visuel)
             const uint64_t ver = live_params_version_.load(std::memory_order_relaxed);
-            sf::Text vv(font);
+            vizgfx::Text vv(font);
             vv.setFont(font);
             vv.setCharacterSize(12);
-            vv.setFillColor(sf::Color(210, 210, 215));
-            vv.setPosition(sf::Vector2f(box_x + box_w - 48.f, box_y + 1.f));
+            vv.setFillColor(vizgfx::Color(210, 210, 215));
+            vv.setPosition(vizgfx::Vector2f(box_x + box_w - 48.f, box_y + 1.f));
             vv.setString("v=" + std::to_string(ver));
             window->draw(vv);
         }
@@ -4439,10 +5707,17 @@ void Visualizer::renderMetrics() {
 
         // LR warmup
         {
+            const int warmup_total = std::max(0, live_ui_lr_warmup_steps_);
+            const int warmup_done = std::min(std::max(0, current_opt_step), warmup_total);
+            const bool native_progress = !live_on_rt && warmup_total > 0;
             drawSliderRow(1,
                           "LR wu",
-                          t_from_warmup(live_ui_lr_warmup_steps_),
-                          std::to_string(live_ui_lr_warmup_steps_) + " steps",
+                          native_progress
+                              ? static_cast<float>(warmup_done) / static_cast<float>(warmup_total)
+                              : t_from_warmup(live_ui_lr_warmup_steps_),
+                          native_progress
+                              ? std::to_string(warmup_done) + "/" + std::to_string(warmup_total)
+                              : std::to_string(live_ui_lr_warmup_steps_) + " steps",
                           LiveInputTarget::LRWarmup,
                           "0",
                           "5e4",
@@ -4467,10 +5742,17 @@ void Visualizer::renderMetrics() {
 
         // KL warmup
         {
+            const int warmup_total = std::max(0, live_ui_kl_warmup_steps_);
+            const int warmup_done = std::min(std::max(0, current_opt_step), warmup_total);
+            const bool native_progress = !live_on_rt && warmup_total > 0;
             drawSliderRow(3,
                           "KL wu",
-                          t_from_warmup(live_ui_kl_warmup_steps_),
-                          std::to_string(live_ui_kl_warmup_steps_) + " steps",
+                          native_progress
+                              ? static_cast<float>(warmup_done) / static_cast<float>(warmup_total)
+                              : t_from_warmup(live_ui_kl_warmup_steps_),
+                          native_progress
+                              ? std::to_string(warmup_done) + "/" + std::to_string(warmup_total)
+                              : std::to_string(live_ui_kl_warmup_steps_) + " steps",
                           LiveInputTarget::KLWarmup,
                           "0",
                           "5e4",
@@ -4487,58 +5769,96 @@ void Visualizer::renderMetrics() {
             const float box_x = static_cast<float>(metrics_x + label_w);
             const float box_y = y + 4.f;
 
-            sf::Text tt(font);
+            vizgfx::Text tt(font);
             tt.setFont(font);
             tt.setCharacterSize(13);
-            tt.setFillColor(sf::Color(225, 225, 235));
-            tt.setPosition(sf::Vector2f(x0, y - 2.f));
+            tt.setFillColor(vizgfx::Color(225, 225, 235));
+            tt.setPosition(vizgfx::Vector2f(x0, y - 2.f));
             tt.setString("KL");
             window->draw(tt);
 
-            sf::RectangleShape cb(sf::Vector2f(box, box));
-            cb.setPosition(sf::Vector2f(box_x, box_y));
-            cb.setFillColor(sf::Color(55, 55, 60, 210));
-            cb.setOutlineColor(sf::Color(90, 90, 95, 220));
+            vizgfx::RectangleShape cb(vizgfx::Vector2f(box, box));
+            cb.setPosition(vizgfx::Vector2f(box_x, box_y));
+            cb.setFillColor(vizgfx::Color(55, 55, 60, 210));
+            cb.setOutlineColor(vizgfx::Color(90, 90, 95, 220));
             cb.setOutlineThickness(1);
             window->draw(cb);
 
             if (live_ui_kl_enabled_) {
-                sf::RectangleShape mark(sf::Vector2f(box - 4.f, box - 4.f));
-                mark.setPosition(sf::Vector2f(box_x + 2.f, box_y + 2.f));
-                mark.setFillColor(sf::Color(90, 200, 120, 220));
+                vizgfx::RectangleShape mark(vizgfx::Vector2f(box - 4.f, box - 4.f));
+                mark.setPosition(vizgfx::Vector2f(box_x + 2.f, box_y + 2.f));
+                mark.setFillColor(vizgfx::Color(90, 200, 120, 220));
                 window->draw(mark);
             }
 
             last_live_kl_enable_box_ = make_rect(box_x, box_y, box, box);
 
-            sf::Text st(font);
+            vizgfx::Text st(font);
             st.setFont(font);
             st.setCharacterSize(13);
-            st.setFillColor(sf::Color(225, 225, 235));
-            st.setPosition(sf::Vector2f(box_x + box + 8.f, y - 2.f));
+            st.setFillColor(vizgfx::Color(225, 225, 235));
+            st.setPosition(vizgfx::Vector2f(box_x + box + 8.f, y - 2.f));
             st.setString(live_ui_kl_enabled_ ? "enabled" : "disabled");
             window->draw(st);
         }
 
-        int extra_y = live_y0 + rows * live_row_h + 10;
+        // Reconstruction loss selector
         {
-            std::string s = "t=" + format_decimal(current_timestep, 8) + " mse=" + format_decimal(current_mse, 8);
-            if (!current_recon_loss_type.empty()) {
-                s = "recon=" + current_recon_loss_type + "  " + s;
-            }
-            drawText(extra_y, s);
+            const float y = static_cast<float>(metrics_y + live_y0 + 5 * live_row_h);
+            const float x0 = static_cast<float>(metrics_x + 6);
+            const float box_x = static_cast<float>(metrics_x + label_w);
+            const float box_w = std::max(120.f, static_cast<float>(panel_w - label_w - 8));
+            const float box_h = 22.f;
+
+            vizgfx::Text label(font);
+            label.setCharacterSize(13);
+            label.setFillColor(vizgfx::Color(225, 225, 235));
+            label.setPosition(vizgfx::Vector2f(x0, y));
+            label.setString("Recon");
+            window->draw(label);
+
+            vizgfx::RectangleShape selector(vizgfx::Vector2f(box_w, box_h));
+            selector.setPosition(vizgfx::Vector2f(box_x, y));
+            selector.setFillColor(vizgfx::Color(34, 36, 44, 215));
+            selector.setOutlineColor(vizgfx::Color(98, 104, 120, 225));
+            selector.setOutlineThickness(1.f);
+            window->draw(selector);
+            last_live_recon_loss_box_ = make_rect(box_x, y, box_w, box_h);
+
+            const std::string value = std::string(recon_loss_name(live_ui_recon_loss_index_)) + "  >";
+            vizgfx::Text text(font);
+            text.setCharacterSize(13);
+            text.setFillColor(vizgfx::Color(225, 225, 235));
+            text.setPosition(vizgfx::Vector2f(box_x + 6.f, y + 1.f));
+            text.setString(value);
+            window->draw(text);
+        }
+
+        int extra_y = live_y0 + rows * live_row_h + 10;
+        drawSection(extra_y - 22, "RUNTIME / OPTIMIZER", vizgfx::Color(180, 145, 235));
+        metrics_content_height = static_cast<float>(extra_y + 7 * line_height + 20);
+        {
+            const std::string recon_name = canonical_recon_loss_name(current_recon_loss_type);
+            std::string s = "t=" + format_decimal(current_timestep, 8) +
+                "  " + recon_name + "=" + format_decimal(current_mse, 8) +
+                "  norm=" + format_decimal(
+                    normalized_recon_loss(current_mse, current_recon_loss_type), 8);
+            drawTableRow(extra_y, "SIGNAL", s, vizgfx::Color(105, 190, 230));
         }
 
         if (current_kl_beta_effective > 0.0f) {
-            drawText(extra_y + line_height, "KL beta_eff=" + format_decimal(current_kl_beta_effective, 8) + "  kl=" + format_decimal(current_kl, 8));
+            drawTableRow(extra_y + line_height, "KL", "beta_eff=" + format_decimal(current_kl_beta_effective, 8) + "  kl=" + format_decimal(current_kl, 8), vizgfx::Color(205, 125, 230));
             extra_y += line_height;
         }
-        drawText(extra_y + line_height, "grad=" + format_decimal(current_grad_norm, 8) + " max=" + format_decimal(current_grad_max, 8));
-        drawText(extra_y + 2 * line_height, "time=" + std::to_string(current_batch_time_ms) + "ms bps=" + format_decimal(current_bps, 8));
-        drawText(extra_y + 3 * line_height, "mem=" + std::to_string(current_memory_mb) + "MB params=" + std::to_string(current_params));
-        drawText(extra_y + 4 * line_height, "opt step=" + std::to_string(current_opt_step) + " wd=" + format_decimal(current_opt_weight_decay, 10));
+        drawTableRow(extra_y + line_height, "GRAD", "norm=" + format_decimal(current_grad_norm, 8) + "  max=" + format_decimal(current_grad_max, 8), vizgfx::Color(235, 155, 80));
+        drawTableRow(extra_y + 2 * line_height, "PERF", std::to_string(current_batch_time_ms) + "ms  bps=" + format_decimal(current_bps, 8), vizgfx::Color(90, 205, 155));
+        drawTableRow(extra_y + 3 * line_height, "MEM", std::to_string(current_memory_mb) + "MB RSS  alloc=" + std::to_string(current_allocator_memory_mb) + "MB  params=" + std::to_string(current_params), vizgfx::Color(105, 165, 235));
+        drawTableRow(extra_y + 4 * line_height, "OPT", std::string(optimizerTypeName(static_cast<OptimizerType>(current_opt_type))) + "  step=" + std::to_string(current_opt_step) + "  wd=" + format_decimal(current_opt_weight_decay, 10), vizgfx::Color(215, 180, 80));
 
         {
+            const int validation_header_y = extra_y + 5 * line_height;
+            const int validation_status_y = validation_header_y + 22;
+            const int validation_result_y = validation_status_y + line_height;
             std::string s;
             if (current_val_in_progress) {
                 s = "Val: EN COURS";
@@ -4553,7 +5873,39 @@ void Visualizer::renderMetrics() {
             } else {
                 s = "Val@" + std::to_string(current_val_step) + " " + (current_val_ok ? "OK" : "FAIL") + " items=" + std::to_string(current_val_items);
             }
-            drawText(extra_y + 5 * line_height, s);
+            drawSection(validation_header_y, "VALIDATION", vizgfx::Color(100, 190, 235));
+            drawTableRow(validation_status_y, "STATUS", s, vizgfx::Color(100, 190, 235));
+
+            const auto feedback_icon = static_cast<ValidationFeedbackIcon>(
+                validation_feedback_icon_.load(std::memory_order_relaxed));
+            vizgfx::Sprite* feedback_sprite = nullptr;
+            if (feedback_icon == ValidationFeedbackIcon::Reward && validation_reward_icon_loaded_) {
+                feedback_sprite = &validation_reward_sprite_;
+            } else if (feedback_icon == ValidationFeedbackIcon::Penalty && validation_penalty_icon_loaded_) {
+                feedback_sprite = &validation_penalty_sprite_;
+            }
+            if (feedback_sprite && current_val_has && !current_val_in_progress) {
+                const auto bounds = feedback_sprite->getLocalBounds();
+                const float icon_size = 20.0f;
+                feedback_sprite->setScale(vizgfx::Vector2f(
+                    icon_size / std::max(1.0f, bounds.size.x),
+                    icon_size / std::max(1.0f, bounds.size.y)));
+                feedback_sprite->setPosition(vizgfx::Vector2f(
+                    static_cast<float>(metrics_x + panel_w - 30),
+                    static_cast<float>(metrics_y + validation_status_y - 2)));
+                window->draw(*feedback_sprite);
+            }
+
+            if (current_val_has && !current_val_in_progress && !current_val_feedback.empty()) {
+                vizgfx::Color tag_color(145, 150, 165);
+                if (current_val_feedback == "reward") tag_color = vizgfx::Color(65, 205, 115);
+                else if (current_val_feedback == "penalty") tag_color = vizgfx::Color(235, 85, 85);
+                else if (current_val_feedback == "plateau") tag_color = vizgfx::Color(225, 175, 65);
+                else if (current_val_feedback == "kl_collapse" || current_val_feedback == "kl_excess") tag_color = vizgfx::Color(205, 105, 225);
+                drawTag(static_cast<float>(metrics_x + std::max(120, panel_w - 130)),
+                        static_cast<float>(metrics_y + validation_status_y),
+                        current_val_feedback, tag_color);
+            }
 
             // Afficher les métriques de validation dès qu'on en a (même partiellement).
             if (current_val_has || current_val_in_progress) {
@@ -4562,40 +5914,126 @@ void Visualizer::renderMetrics() {
                 if (std::fabs(current_val_align) > 1e-9f) {
                     ss << " align=" << format_decimal(current_val_align, 8);
                 }
-                drawText(extra_y + 6 * line_height, ss.str());
+                drawTableRow(validation_result_y, "RESULT", ss.str(), vizgfx::Color(115, 210, 160));
             }
         }
 
-        // Texte dataset (si dispo): prompt brut + tokens + résumé encodage.
+        // Texte dataset : cartes indépendantes avec clipping et scroll interne.
         if (show_prompt_text_ && has_dataset_text) {
             int y = extra_y + 8 * line_height;
-            const int y_max = static_cast<int>(area.position.y + area.size.y) - line_height;
             const size_t wrap_chars = static_cast<size_t>(std::max(30, panel_w / 8));
+            drawSection(y, "PROMPT / TOKENIZER / ENCODER", vizgfx::Color(100, 205, 190));
+            y += 24;
 
-            auto drawWrapped = [&](const std::string& s, int max_lines_hint) {
-                if (s.empty()) return;
-                const int avail_lines = std::max(0, (y_max - (metrics_y + y)) / line_height);
-                const int max_lines = (max_lines_hint > 0) ? std::min(max_lines_hint, avail_lines) : avail_lines;
-                const auto lines = wrap_lines(s, wrap_chars, max_lines);
-                for (const auto& ln : lines) {
-                    if (metrics_y + y > y_max) break;
-                    drawText(y, ln);
-                    y += line_height;
-                }
+            struct TextCard {
+                const char* title;
+                const std::string* value;
+                vizgfx::Color color;
+                DatasetTextSection section;
             };
+            const TextCard cards[] = {
+                {"PROMPT",  &dataset_text_raw,     vizgfx::Color(100, 190, 235), DatasetTextSection::Prompt},
+                {"TAGS",    &dataset_text_tags,    vizgfx::Color(100, 215, 145), DatasetTextSection::Tags},
+                {"TOKENS",  &dataset_text_tokens,  vizgfx::Color(225, 175, 70),  DatasetTextSection::Tokens},
+                {"ENCODER", &dataset_text_encoded, vizgfx::Color(190, 125, 230), DatasetTextSection::Encoder},
+            };
+            const int card_h = 104;
+            const int title_h = 22;
+            const int inner_pad = 7;
+            const int text_line_h = 18;
 
-            // Afficher autant que possible sans tronquer la source.
-            // (La zone visible est bornée par la hauteur de la fenêtre.)
-            drawWrapped("prompt: " + dataset_text_raw, 0);
-            drawWrapped("tags: " + dataset_text_tags, 4);
-            drawWrapped("tokens: " + dataset_text_tokens, 4);
-            drawWrapped("enc: " + dataset_text_encoded, 3);
+            for (const auto& card : cards) {
+                if (!card.value || card.value->empty()) continue;
+                const size_t index = static_cast<size_t>(card.section);
+                const float card_x = static_cast<float>(metrics_x);
+                const float card_y = static_cast<float>(metrics_y + y);
+                const float card_w = static_cast<float>(panel_w);
+
+                vizgfx::RectangleShape background(vizgfx::Vector2f(card_w, static_cast<float>(card_h)));
+                background.setPosition(vizgfx::Vector2f(card_x, card_y));
+                background.setFillColor(vizgfx::Color(24, 28, 36, 220));
+                background.setOutlineColor(vizgfx::Color(card.color.r, card.color.g, card.color.b, 165));
+                background.setOutlineThickness(1.f);
+                window->draw(background);
+
+                vizgfx::RectangleShape title_bg(vizgfx::Vector2f(card_w, static_cast<float>(title_h)));
+                title_bg.setPosition(vizgfx::Vector2f(card_x, card_y));
+                title_bg.setFillColor(vizgfx::Color(card.color.r, card.color.g, card.color.b, 72));
+                window->draw(title_bg);
+                vizgfx::Text title(font);
+                title.setCharacterSize(11);
+                title.setStyle(vizgfx::Text::Bold);
+                title.setFillColor(card.color);
+                title.setPosition(vizgfx::Vector2f(card_x + 7.f, card_y + 2.f));
+                title.setString(card.title);
+                window->draw(title);
+
+                const auto lines = wrap_lines(*card.value, wrap_chars, 0);
+                const float content_h = static_cast<float>(lines.size() * text_line_h + 2 * inner_pad);
+                const float viewport_h = static_cast<float>(card_h - title_h);
+                dataset_text_scroll_max_[index] = std::max(0.f, content_h - viewport_h);
+                dataset_text_scroll_y_[index] = std::clamp(
+                    dataset_text_scroll_y_[index], 0.f, dataset_text_scroll_max_[index]);
+                dataset_text_section_rects_[index] = make_rect(
+                    card_x, card_y + static_cast<float>(title_h), card_w, viewport_h);
+
+                // View dédiée : seul le corps de cette carte est clippé.
+                const vizgfx::View metrics_view = window->getView();
+                const float ww = static_cast<float>(std::max(1, window_width));
+                const float hh = static_cast<float>(std::max(1, window_height));
+                const float clip_top = std::max(area.position.y, card_y + static_cast<float>(title_h));
+                const float clip_bottom = std::min(area.position.y + area.size.y,
+                                                   card_y + static_cast<float>(card_h));
+                if (clip_bottom > clip_top) {
+                    vizgfx::View clip_view(make_rect(card_x, clip_top, card_w, clip_bottom - clip_top));
+                    clip_view.setViewport(make_rect(card_x / ww, clip_top / hh,
+                                                    card_w / ww, (clip_bottom - clip_top) / hh));
+                    window->setView(clip_view);
+                    float text_y = card_y + static_cast<float>(title_h + inner_pad) -
+                                   dataset_text_scroll_y_[index];
+                    for (const auto& line : lines) {
+                        vizgfx::Text text(font);
+                        text.setCharacterSize(12);
+                        text.setFillColor(vizgfx::Color(225, 229, 237));
+                        text.setPosition(vizgfx::Vector2f(card_x + inner_pad, text_y));
+                        text.setString(vizgfx::String::fromUtf8(line.begin(), line.end()));
+                        window->draw(text);
+                        text_y += static_cast<float>(text_line_h);
+                    }
+                    window->setView(metrics_view);
+                }
+
+                // Scrollbar interne toujours visible si le contenu déborde.
+                if (dataset_text_scroll_max_[index] > 0.f) {
+                    const float track_x = card_x + card_w - 5.f;
+                    const float track_y = card_y + static_cast<float>(title_h + 2);
+                    const float track_h = static_cast<float>(card_h - title_h - 4);
+                    vizgfx::RectangleShape track(vizgfx::Vector2f(3.f, track_h));
+                    track.setPosition(vizgfx::Vector2f(track_x, track_y));
+                    track.setFillColor(vizgfx::Color(65, 70, 82, 210));
+                    window->draw(track);
+                    const float ratio = viewport_h / std::max(viewport_h, content_h);
+                    const float thumb_h = std::max(14.f, track_h * ratio);
+                    const float progress = dataset_text_scroll_y_[index] /
+                                           dataset_text_scroll_max_[index];
+                    vizgfx::RectangleShape thumb(vizgfx::Vector2f(3.f, thumb_h));
+                    thumb.setPosition(vizgfx::Vector2f(track_x,
+                        track_y + progress * (track_h - thumb_h)));
+                    thumb.setFillColor(card.color);
+                    window->draw(thumb);
+                }
+                y += card_h + 8;
+            }
+            metrics_content_height = std::max(
+                metrics_content_height, static_cast<float>(y + line_height));
         }
     }
+    setPanelContentHeight(PanelId::Metrics, metrics_content_height);
+    window->setView(old_view);
 }
 
 void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int channels, int display_size) {
-    // Créer une image SFML à partir des pixels (grayscale/RGB/RGBA)
+    // Créer une image graphique à partir des pixels (grayscale/RGB/RGBA).
     if (w <= 0 || h <= 0) return;
     if (channels != 1 && channels != 3 && channels != 4) return;
 
@@ -4609,8 +6047,8 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
     img_data.channels = channels;
     img_data.display_size = display_size;
 
-    sf::Image sfml_image;
-    sfml_image.resize(sf::Vector2u(static_cast<unsigned>(w), static_cast<unsigned>(h)));
+    vizgfx::Image sfml_image;
+    sfml_image.resize(vizgfx::Vector2u(static_cast<unsigned>(w), static_cast<unsigned>(h)));
 
     // Si la taille ne colle pas exactement aux canaux annoncés, tenter une correction
     // best-effort pour éviter des previews noires au premier rendu.
@@ -4648,23 +6086,23 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
     for (int yy = 0; yy < h; ++yy) {
         for (int xx = 0; xx < w; ++xx) {
             const size_t base = (static_cast<size_t>(yy) * static_cast<size_t>(w) + static_cast<size_t>(xx)) * stride;
-            sf::Color c;
+            vizgfx::Color c;
             if (channels == 1) {
                 const uint8_t g = at(base);
-                c = sf::Color(g, g, g, 255);
+                c = vizgfx::Color(g, g, g, 255);
             } else if (channels == 3) {
-                c = sf::Color(at(base + 0), at(base + 1), at(base + 2), 255);
+                c = vizgfx::Color(at(base + 0), at(base + 1), at(base + 2), 255);
             } else {
-                c = sf::Color(at(base + 0), at(base + 1), at(base + 2), force_opaque_alpha ? 255 : at(base + 3));
+                c = vizgfx::Color(at(base + 0), at(base + 1), at(base + 2), force_opaque_alpha ? 255 : at(base + 3));
             }
-            sfml_image.setPixel(sf::Vector2u(static_cast<unsigned int>(static_cast<unsigned>(xx)), static_cast<unsigned int>(static_cast<unsigned>(yy))), c);
+            sfml_image.setPixel(vizgfx::Vector2u(static_cast<unsigned int>(static_cast<unsigned>(xx)), static_cast<unsigned int>(static_cast<unsigned>(yy))), c);
         }
     }
 
     bool loaded = img_data.texture.loadFromImage(sfml_image);
     if (!loaded) {
         // Fallback: downscale agressif puis retry (utile si la texture dépasse les limites GPU/driver).
-        const unsigned max_tex = sf::Texture::getMaximumSize();
+        const unsigned max_tex = vizgfx::Texture::getMaximumSize();
         const unsigned src_w = static_cast<unsigned>(std::max(1, w));
         const unsigned src_h = static_cast<unsigned>(std::max(1, h));
 
@@ -4673,13 +6111,13 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
         const unsigned dh = std::max(1u, std::min(src_h, hard_cap));
 
         if (dw != src_w || dh != src_h) {
-            sf::Image down;
-            down.resize(sf::Vector2u(dw, dh));
+            vizgfx::Image down;
+            down.resize(vizgfx::Vector2u(dw, dh));
             for (unsigned yy = 0; yy < dh; ++yy) {
                 const unsigned sy = (yy * src_h) / dh;
                 for (unsigned xx = 0; xx < dw; ++xx) {
                     const unsigned sx = (xx * src_w) / dw;
-                    down.setPixel(sf::Vector2u(static_cast<unsigned int>(xx), static_cast<unsigned int>(yy)), sfml_image.getPixel(sf::Vector2u(static_cast<unsigned int>(sx), static_cast<unsigned int>(sy))));
+                    down.setPixel(vizgfx::Vector2u(static_cast<unsigned int>(xx), static_cast<unsigned int>(yy)), sfml_image.getPixel(vizgfx::Vector2u(static_cast<unsigned int>(sx), static_cast<unsigned int>(sy))));
                 }
             }
             loaded = img_data.texture.loadFromImage(down);
@@ -4697,17 +6135,17 @@ void Visualizer::createImageTexture(ImageData& img_data, int w, int h, int chann
     const float sx = static_cast<float>(display_size) / static_cast<float>(w);
     const float sy = static_cast<float>(display_size) / static_cast<float>(h);
     const float scale = std::min(sx, sy);
-    img_data.sprite.setScale(sf::Vector2f(scale, scale));
+    img_data.sprite.setScale(vizgfx::Vector2f(scale, scale));
 }
 
-sf::Color Visualizer::getLossColor(float loss) {
+vizgfx::Color Visualizer::getLossColor(float loss) {
     // Gradient vert -> jaune -> rouge basé sur la loss
     if (loss < 50.0f) {
-        return sf::Color(100, 200, 100); // Vert
+        return vizgfx::Color(100, 200, 100); // Vert
     } else if (loss < 150.0f) {
-        return sf::Color(200, 200, 100); // Jaune
+        return vizgfx::Color(200, 200, 100); // Jaune
     } else {
-        return sf::Color(200, 100, 100); // Rouge
+        return vizgfx::Color(200, 100, 100); // Rouge
     }
 }
 
@@ -4721,7 +6159,8 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
     }
     
     // En-tête CSV (métriques complètes)
-    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,params,mse,kl_divergence,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step" << std::endl;
+    file << "step,epoch,total_epochs,batch,total_batches,loss,avg_loss,learning_rate,batch_time_ms,bps,memory_mb,allocator_memory_mb,params,mse,kl_divergence,kl_beta_effective,wasserstein,entropy_diff,moment_mismatch,spatial_coherence,temporal_consistency,timestep,grad_norm,grad_max,opt_type,opt_step,opt_beta1,opt_beta2,opt_eps,opt_weight_decay,val_loss,val_mse,val_step,val_feedback,val_rewarded,val_penalized" << std::endl;
+    file << std::defaultfloat << std::setprecision(std::numeric_limits<float>::max_digits10);
     
     // Écrire tout l'historique complet (toutes les epochs et tous les steps)
     for (const auto& record : full_loss_history) {
@@ -4730,15 +6169,17 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
              << record.total_epochs << ","
              << record.batch << "," 
              << record.total_batches << ","
-             << std::fixed << std::setprecision(6) << record.loss << ","
+             << record.loss << ","
              << record.avg_loss << ","
-             << std::scientific << record.lr << ","
-             << std::fixed << record.batch_time_ms << ","
+             << record.lr << ","
+             << record.batch_time_ms << ","
              << record.bps << ","
              << record.memory_mb << ","
+             << record.allocator_memory_mb << ","
              << record.params << ","
-             << std::fixed << std::setprecision(6) << record.mse << ","
+             << record.mse << ","
              << record.kl_divergence << ","
+             << record.kl_beta_effective << ","
              << record.wasserstein << ","
              << record.entropy_diff << ","
              << record.moment_mismatch << ","
@@ -4751,17 +6192,18 @@ void Visualizer::saveLossHistory(const std::string& filepath) const {
              << record.opt_step << ","
              << record.opt_beta1 << ","
              << record.opt_beta2 << ","
-             // opt_eps est souvent ~1e-8 : en fixed(6) ça apparaît comme 0.000000.
-             // On l'encode en scientifique pour préserver l'information.
-             << std::scientific << std::setprecision(8) << record.opt_eps << ","
-             << std::fixed << std::setprecision(6) << record.opt_weight_decay;
+             << record.opt_eps << ","
+             << record.opt_weight_decay;
         // Colonnes de validation : vides si ce step n'est pas un step de validation.
         if (record.is_val) {
             file << "," << record.val_loss
                  << "," << record.val_mse
-                 << "," << record.val_step_id;
+                 << "," << record.val_step_id
+                 << "," << record.val_feedback
+                 << "," << (record.val_feedback == "reward" ? 1 : 0)
+                 << "," << (record.val_feedback == "penalty" ? 1 : 0);
         } else {
-            file << ",,,";
+            file << ",,,,,,";
         }
         file << std::endl;
     }

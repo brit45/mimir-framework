@@ -1,5 +1,6 @@
 #include "DebugJsonDump.hpp"
 #include "../Model.hpp"
+#include "CheckpointState.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
 #include "../LayerTypes.hpp"
@@ -75,7 +76,7 @@ bool DebugJsonDump::save(
 ) {
     try {
         // Build JSON representation
-        json debug_json = build_json(model, options);
+        json debug_json = build_json(model, effective_save_options(model, options));
         
         // Ensure directory exists
         fs::path file_path(path);
@@ -298,11 +299,6 @@ json DebugJsonDump::build_json(
     }
     model_info["total_params"] = model.totalParamCount();
     model_info["num_layers"] = model.getLayers().size();
-    
-    if (model.width() > 0 && model.height() > 0) {
-        model_info["image_width"] = model.width();
-        model_info["image_height"] = model.height();
-    }
     
     root["model"] = model_info;
     
@@ -574,6 +570,7 @@ json DebugJsonDump::extract_layer_config(const Layer& layer) {
             break;
     }
     
+    if (layer.skip_input_index >= 0) config["skip_input_index"] = layer.skip_input_index;
     return config;
 }
 
@@ -908,8 +905,6 @@ void DebugJsonDump::add_tensor_info(
         model_state["num_layers"] = model.getLayers().size();
         model_state["has_encoder"] = model.getHasEncoder();
         model_state["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
-        model_state["image_width"] = model.width();
-        model_state["image_height"] = model.height();
         model_state["parameters_frozen"] = model.parametersFrozen();
         model_state["model_config"] = model.modelConfig.is_object() ? model.modelConfig : json::object();
         framework["model"] = model_state;
@@ -990,10 +985,8 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     model_info["logical_parameter_elements"] = logical_params;
     model_info["total_params"] = logical_params;
     model_info["parameters_frozen"] = model.parametersFrozen();
-    model_info["image_width"] = model.width();
-    model_info["image_height"] = model.height();
-    model_info["has_encoder"] = model.getHasEncoder();
-    model_info["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
+    model_info["has_encoder"] = options.save_encoder;
+    if (options.save_tokenizer) model_info["tokenizer_vocab_size"] = model.getTokenizer().getVocabSize();
     if (root["model_config"].contains("type") && root["model_config"]["type"].is_string()) {
         model_info["type"] = root["model_config"]["type"];
     }
@@ -1005,30 +998,11 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
     // Optimizer state (if requested)
     if (options.include_optimizer_state) {
         json opt_state;
-        if (const Optimizer* opt = model.getSerializedOptimizer()) {
-            auto type_to_string = [&](OptimizerType t) {
-                switch (t) {
-                    case OptimizerType::SGD: return "sgd";
-                    case OptimizerType::ADAM: return "adam";
-                    case OptimizerType::ADAMW: return "adamw";
-                    default: return "unknown";
-                }
-            };
-
-            opt_state["type"] = type_to_string(opt->type);
-            opt_state["step"] = opt->step;
-            opt_state["lr_current"] = opt->getCurrentLR();
-            opt_state["beta1"] = opt->beta1;
-            opt_state["beta2"] = opt->beta2;
-            opt_state["eps"] = opt->eps;
-            opt_state["weight_decay"] = opt->weight_decay;
-            opt_state["decay_strategy"] = static_cast<int>(opt->decay_strategy);
-            opt_state["initial_lr"] = opt->initial_lr;
-            opt_state["min_lr"] = opt->min_lr;
-            opt_state["decay_rate"] = opt->decay_rate;
-            opt_state["decay_steps"] = opt->decay_steps;
-            opt_state["total_steps"] = opt->total_steps;
-            opt_state["warmup_steps"] = opt->warmup_steps;
+        if (const Optimizer* live = model.getSerializedOptimizer()) {
+            const auto snapshot = model.optimizerSnapshot(*live);
+            const Optimizer* opt = &snapshot;
+            opt_state = optimizer_metadata(*opt);
+            opt_state["type"] = optimizerTypeName(opt->type);
 
             // State vectors (debug-only): stats + small sample
             if (!opt->m.empty()) {
@@ -1301,9 +1275,14 @@ json DebugJsonDump::build_json_enhanced(const Model& model, const DebugJsonOptio
 bool DebugJsonDump::save_enhanced(
     const std::string& path,
     const Model& model,
-    const DebugJsonOptions& options,
+    const DebugJsonOptions& requested_options,
     std::string* error
 ) {
+    auto options = requested_options;
+    options.save_encoder = options.save_encoder && component_enabled(model, "encoder", model.getHasEncoder());
+    options.save_tokenizer = options.save_tokenizer && component_enabled(model, "tokenizer", model.getHasTokenizer());
+    options.include_optimizer_state = options.include_optimizer_state && model.getSerializedOptimizer();
+
     try {
         json j = build_json_enhanced(model, options);
 

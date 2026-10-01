@@ -1,5 +1,6 @@
 #include "scriptings/ScriptingBridgeCommon.hpp"
 
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -11,6 +12,24 @@ namespace ScriptingBridgeCommon {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+std::string ensureRootWorkEnv() {
+    std::filesystem::path root;
+    if (const char* configured = std::getenv(kEnvRootWork); configured && *configured) {
+        root = configured;
+    } else {
+        root = std::filesystem::current_path();
+    }
+
+    root = std::filesystem::absolute(root).lexically_normal();
+    const std::string value = root.string();
+#ifdef _WIN32
+    _putenv_s(kEnvRootWork, value.c_str());
+#else
+    setenv(kEnvRootWork, value.c_str(), 1);
+#endif
+    return value;
+}
 
 std::string archCacheFilePath() {
     // Cache stable entre runs dans /tmp (non critique, best-effort).

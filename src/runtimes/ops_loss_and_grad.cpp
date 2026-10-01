@@ -1,6 +1,7 @@
 #include "runtimes/ops_loss_and_grad.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <mutex>
 #include <unordered_map>
@@ -14,6 +15,89 @@ float sigmoid_scalar(float x) {
     }
     const float z = std::exp(x);
     return z / (1.0f + z);
+}
+
+std::string canonical_pixel_loss_name(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (name == "l2") return "mse";
+    if (name == "l1") return "mae";
+    if (name == "smooth_l1") return "smoothl1";
+    if (name == "gaussian-nll") return "gaussian_nll";
+    return name;
+}
+
+LossWithGrad pixel_loss_and_grad(
+    const float* pred,
+    const float* target,
+    size_t count,
+    const std::string& loss_type,
+    const PixelLossOptions& options
+) {
+    LossWithGrad out;
+    out.grad.assign(count, 0.0f);
+    if (count == 0 || pred == nullptr || target == nullptr) return out;
+
+    const std::string type = canonical_pixel_loss_name(loss_type);
+    const double inv_n = 1.0 / static_cast<double>(count);
+    const double huber_delta = std::max(1e-6, static_cast<double>(options.huber_delta));
+    const double charbonnier_eps = std::max(1e-12, static_cast<double>(options.charbonnier_eps));
+    const double sigma = std::max(1e-6, static_cast<double>(options.gaussian_nll_sigma));
+    const double inv_variance = 1.0 / (sigma * sigma);
+    const double log_variance = std::log(sigma * sigma);
+    constexpr double bce_eps = 1e-7;
+
+    double sum = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        const double prediction = static_cast<double>(pred[i]);
+        const double expected = static_cast<double>(target[i]);
+        const double diff = prediction - expected;
+
+        if (type == "mae") {
+            sum += std::abs(diff);
+            out.grad[i] = static_cast<float>(inv_n * (diff > 0.0 ? 1.0 : (diff < 0.0 ? -1.0 : 0.0)));
+        } else if (type == "huber" || type == "smoothl1") {
+            const double abs_diff = std::abs(diff);
+            if (abs_diff <= huber_delta) {
+                sum += 0.5 * diff * diff;
+                out.grad[i] = static_cast<float>(inv_n * diff);
+            } else {
+                sum += huber_delta * (abs_diff - 0.5 * huber_delta);
+                out.grad[i] = static_cast<float>(inv_n * huber_delta * (diff > 0.0 ? 1.0 : -1.0));
+            }
+        } else if (type == "charbonnier") {
+            const double denominator = std::sqrt(diff * diff + charbonnier_eps * charbonnier_eps);
+            sum += denominator;
+            out.grad[i] = static_cast<float>(inv_n * diff / denominator);
+        } else if (type == "gaussian_nll" || type == "nll_gaussian") {
+            sum += 0.5 * (diff * diff * inv_variance + log_variance);
+            out.grad[i] = static_cast<float>(inv_n * diff * inv_variance);
+        } else if (type == "bce") {
+            const double probability = std::clamp(prediction, bce_eps, 1.0 - bce_eps);
+            sum += -(expected * std::log(probability) +
+                     (1.0 - expected) * std::log(1.0 - probability));
+            if (prediction > bce_eps && prediction < 1.0 - bce_eps) {
+                out.grad[i] = static_cast<float>(
+                    inv_n * (probability - expected) / (probability * (1.0 - probability)));
+            }
+        } else {
+            sum += diff * diff;
+            out.grad[i] = static_cast<float>(2.0 * inv_n * diff);
+        }
+    }
+
+    out.loss = sum * inv_n;
+    return out;
+}
+
+LossWithGrad pixel_loss_and_grad(
+    const std::vector<float>& pred,
+    const std::vector<float>& target,
+    const std::string& loss_type,
+    const PixelLossOptions& options
+) {
+    if (pred.size() != target.size()) return {};
+    return pixel_loss_and_grad(pred.data(), target.data(), pred.size(), loss_type, options);
 }
 
 GlobalSSIM ssim_global_hwc(

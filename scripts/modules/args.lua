@@ -8,8 +8,9 @@
 --   --no-flag (bool=false)
 --   -- (fin des options)
 
+---@class MimirArgsModule
 local M = {}
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 local caller_script_path = Help.find_script_from_stack(3, 24)
 
 Help.auto_exit_help({
@@ -212,10 +213,38 @@ local function apply_override(cfg, expr)
   return cfg
 end
 
+---@param argv? string[]
+---@return MimirScriptArgs opts
+---@return string[] positional
 function M.parse(argv)
   local opts = {}
   local pos = {}
-  local a = argv or {}
+  local raw_args = argv or {}
+  local a = {}
+
+  -- Certains copier-coller (éditeur riche, navigateur, messagerie) remplacent
+  -- l'espace ASCII entre une option et sa valeur par NBSP (U+00A0) ou NNBSP
+  -- (U+202F). Le shell ne les considère pas comme des séparateurs et transmet
+  -- alors un seul argument, par exemple "--image-h<U+202F>1024". On répare
+  -- uniquement ce cas précis pour ne pas modifier les valeurs ordinaires.
+  for _, raw in ipairs(raw_args) do
+    local v = raw
+    if type(v) == "string" and v:sub(1, 2) == "--" then
+      local key, value = v:match("^(%-%-[^\194\226]+)\194\160(.+)$") -- U+00A0
+      if key == nil then
+        key, value = v:match("^(%-%-[^\194\226]+)\226\128\175(.+)$") -- U+202F
+      end
+      if key ~= nil then
+        a[#a + 1] = key
+        a[#a + 1] = value
+      else
+        a[#a + 1] = v
+      end
+    else
+      a[#a + 1] = v
+    end
+  end
+
   local i = 1
   while i <= #a do
     local v = a[i]
@@ -289,6 +318,9 @@ function M.apply_overrides(cfg, opts)
   return cfg
 end
 
+---@param opts MimirScriptArgs
+---@param key string
+---@return boolean
 function M.has(opts, key)
   return opts and opts[key] == true
 end
@@ -398,5 +430,3 @@ function M.opt_bool(k, d)
 end
 
 return M
-
-

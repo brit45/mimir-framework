@@ -1,5 +1,5 @@
 #!/usr/bin/env lua
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- ══════════════════════════════════════════════════════════════
@@ -44,7 +44,7 @@ Mimir.Allocator.configure({
 -- Pipeline
 -- ---------------------------------------------------------------------------
 
-local P = dofile("scripts/modules/pipeline.lua")
+local P = dofile(ROOTWORK.."/scripts/modules/pipeline.lua")
 
 -- Config volontairement petite (rapide à builder)
 -- L'objectif est de produire un exemple qui passe vite en build même sur une

@@ -51,7 +51,7 @@ Référence complète des globals/aliases : `docs/03-API-Reference/19-Globals.md
 Ce template couvre 80% des scripts (benchmark/test/training) :
 
 ```lua
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
 local seed = Args.get_int(opts, "seed", 0)
 
@@ -98,7 +98,7 @@ Ces modules ne sont pas “magiques” : ils sont juste là pour uniformiser les
 Pour garantir la portabilité Linux/Windows, les scripts Lua doivent passer par `FS`:
 
 ```lua
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 FS.mkdir_p("checkpoint/my_run")
 local arch = FS.join("checkpoint", "my_run", "model", "architecture.json")
 if FS.file_exists(arch) then

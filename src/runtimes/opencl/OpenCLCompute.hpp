@@ -354,10 +354,11 @@ public:
         const float* b,
         float* out,
         int n,
-        int op
+        int op,
+        float alpha = 0.01f
     ) {
 #ifndef ENABLE_OPENCL
-        (void)a; (void)b; (void)out; (void)n; (void)op;
+        (void)a; (void)b; (void)out; (void)n; (void)op; (void)alpha;
         return false;
 #else
         if (!initialized_ || !context_ || !queue_ || !kernel_binary_) return false;
@@ -383,6 +384,7 @@ public:
         err |= clSetKernelArg(kernel_binary_, 2, sizeof(cl_mem), &buf_out);
         err |= clSetKernelArg(kernel_binary_, 3, sizeof(int), &n);
         err |= clSetKernelArg(kernel_binary_, 4, sizeof(int), &op);
+        err |= clSetKernelArg(kernel_binary_, 5, sizeof(float), &alpha);
         if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_out) clReleaseMemObject(buf_out); return false; }
 
         const size_t global = static_cast<size_t>(n);
@@ -568,21 +570,39 @@ __kernel void unary_forward(
 }
 
 __kernel void binary_forward(
-    __global const float* a,
-    __global const float* b,
-    __global float* out,
-    int n,
-    int op
+    __global const float* a, __global const float* b,
+    __global float* out, int n, int op, float alpha
 ) {
     const int i = (int)get_global_id(0);
     if (i >= n) return;
-    float y = a[i];
+    const float x = a[i], g = b[i];
+    float y = 0.0f;
     switch (op) {
-        case 0: y = a[i] + b[i]; break;                                // Add
-        case 1: y = a[i] - b[i]; break;                                // Subtract
-        case 2: y = a[i] * b[i]; break;                                // Multiply
-        case 3: { float d = b[i]; y = fabs(d) > 1e-12f ? (a[i] / d) : 0.0f; } break; // Divide
-        default: break;
+        case 0: y = x + g; break;
+        case 1: y = x - g; break;
+        case 2: y = x * g; break;
+        case 3: { float d = fabs(g) < 1e-8f ? (g >= 0.0f ? 1e-8f : -1e-8f) : g; y = x / d; } break;
+        case 4: { float d = fabs(g) < 1e-8f ? (g >= 0.0f ? 1e-8f : -1e-8f) : g; y = -x / (d*d); } break;
+        case 10: y = fmax(x,0.0f); break;
+        case 11: y = x > 0.0f ? x : alpha*x; break;
+        case 12: y = 1.0f/(1.0f+exp(-x)); break;
+        case 13: y = tanh(x); break;
+        case 14: y = x/(1.0f+exp(-x)); break;
+        case 15: y = 0.5f*x*(1.0f+tanh(0.7978845608f*(x+0.044715f*x*x*x))); break;
+        case 16: y = x > 20.0f ? x : log(1.0f+exp(x)); break;
+        case 17: y = x*tanh(x > 20.0f ? x : log(1.0f+exp(x))); break;
+        case 18: y = clamp((x+3.0f)/6.0f,0.0f,1.0f); break;
+        case 19: y = x*clamp((x+3.0f)/6.0f,0.0f,1.0f); break;
+        case 20: y = x > 0.0f ? g : 0.0f; break;
+        case 21: y = g*(x > 0.0f ? 1.0f : alpha); break;
+        case 22: { float s = 1.0f/(1.0f+exp(-x)); y = g*s*(1.0f-s); } break;
+        case 23: { float t = tanh(x); y = g*(1.0f-t*t); } break;
+        case 24: { float s = 1.0f/(1.0f+exp(-x)); y = g*(s+x*s*(1.0f-s)); } break;
+        case 25: { float t = tanh(0.7978845608f*(x+0.044715f*x*x*x)); y = g*(0.5f*(1.0f+t)+0.5f*x*(1.0f-t*t)*0.7978845608f*(1.0f+0.134145f*x*x)); } break;
+        case 26: y = g/(1.0f+exp(-x)); break;
+        case 27: { float t = tanh(x > 20.0f ? x : log(1.0f+exp(x))); float s = 1.0f/(1.0f+exp(-x)); y = g*(t+x*(1.0f-t*t)*s); } break;
+        case 28: y = x > -3.0f && x < 3.0f ? g/6.0f : 0.0f; break;
+        case 29: y = g*(x <= -3.0f ? 0.0f : (x >= 3.0f ? 1.0f : x/3.0f+0.5f)); break;
     }
     out[i] = y;
 }

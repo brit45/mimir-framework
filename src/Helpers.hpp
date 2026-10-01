@@ -680,7 +680,9 @@ struct MagicToken
 // Hash SHA256 du dataset basé sur les noms et tailles de fichiers
 static inline std::string datasetSHA256Hash(const std::string &dir)
 {
-    std::string combined;
+    // Versionne la sémantique d'indexation afin de ne pas restaurer un cache
+    // créé avant la prise en charge des sidecars associés à des symlinks.
+    std::string combined = "mimir_dataset_index_v2_lexical_symlinks\n";
     std::vector<std::string> file_infos;
     
     // Collecter tous les fichiers avec leurs métadonnées
@@ -915,7 +917,7 @@ struct DatasetItem {
         
         if (!image_file.empty() && !img_loaded) {
             // Estimation basée sur la taille cible
-            const size_t c = (img_c > 0) ? static_cast<size_t>(img_c) : 1ULL;
+            const size_t c = 3; // Les images sont chargées en RGB.
             total += (size_t)w * (size_t)h * c;
         }
         
@@ -983,64 +985,14 @@ struct DatasetItem {
         }
     }
     
+    // Le chargement générique conserve la couleur comme les chemins vision.
     bool loadImage(int target_w, int target_h) {
-        if (img_loaded) {
-            touch();
-            return true;
-        }
-        if (image_file.empty()) return false;
-        
-        auto& mgr = DatasetMemoryManager::instance();
-        
-        try {
-            // Estimer la RAM nécessaire
-            size_t needed = (size_t)target_w * (size_t)target_h * 4; // Buffer temporaire RGB + final
-            
-            if (!mgr.canAllocate(needed)) {
-                return false;
-            }
-            
-            int w_img = 0, h_img = 0, c = 0;
-            unsigned char *data = stbi_load(image_file.c_str(), &w_img, &h_img, &c, 3);
-            if (!data) return false;
-            
-            std::vector<unsigned char> src((size_t)w_img * (size_t)h_img * 3);
-            std::memcpy(src.data(), data, src.size());
-            stbi_image_free(data);
-            
-            std::vector<unsigned char> dst((size_t)target_w * (size_t)target_h * 3);
-            // Resize haute qualité avant conversion grayscale.
-            resizeBicubicRGB_SRGBLinear(src.data(), w_img, h_img, dst.data(), target_w, target_h);
-            
-            std::vector<uint8_t> grayscale((size_t)target_w * (size_t)target_h);
-            for (int yy = 0; yy < target_h; ++yy) {
-                for (int xx = 0; xx < target_w; ++xx) {
-                    size_t off = ((size_t)yy * (size_t)target_w + (size_t)xx) * 3;
-                    unsigned v = (unsigned)dst[off] + (unsigned)dst[off+1] + (unsigned)dst[off+2];
-                    grayscale[(size_t)yy * (size_t)target_w + (size_t)xx] = static_cast<uint8_t>(v / 3);
-                }
-            }
-            
-            size_t actual_size = grayscale.size();
-            img = std::move(grayscale);
-            img_loaded = true;
-            mgr.trackAllocation((void*)img.data(), actual_size);
-            estimated_ram_usage += actual_size;
-            
-            w = target_w;
-            h = target_h;
-            img_c = 1;
-            touch();
-            
-            return true;
-        } catch (...) {
-            return false;
-        }
+        return loadImageRGB(target_w, target_h);
     }
 
-    // Charge une image en RGB (3 canaux) et la redimensionne en nearest.
-    // Ne modifie pas loadImage() (grayscale) pour préserver la compatibilité.
+    // Charge en RGB et redimensionne par interpolation bicubique en linéaire sRGB.
     bool loadImageRGB(int target_w, int target_h) {
+        if (target_w <= 0 || target_h <= 0) return false;
         if (img_loaded && img_c == 3 && w == target_w && h == target_h) {
             touch();
             return true;
@@ -1231,6 +1183,18 @@ struct DatasetItem {
     bool isLoaded() const {
         return text.has_value() || img_loaded || audio_loaded || video_loaded;
     }
+};
+
+class DatasetItemUnloadGuard {
+public:
+    explicit DatasetItemUnloadGuard(DatasetItem& item) : item_(item) {}
+    ~DatasetItemUnloadGuard() { item_.unload(); }
+
+    DatasetItemUnloadGuard(const DatasetItemUnloadGuard&) = delete;
+    DatasetItemUnloadGuard& operator=(const DatasetItemUnloadGuard&) = delete;
+
+private:
+    DatasetItem& item_;
 };
 
 // Gestionnaire de Dataset avec éviction LRU intelligente
@@ -1491,6 +1455,12 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     // pour éviter les collisions quand plusieurs sous-dossiers contiennent le même stem.
     std::unordered_map<std::string, std::vector<fs::path>> files_by_key;
     
+    // `fs::relative()` canonicalise ses opérandes et suit les symlinks. Pour
+    // une image liée vers un disque externe, sa clé sortait alors du dataset
+    // tandis que le sidecar `.txt` gardait sa clé locale. Construire les clés
+    // à partir des chemins absolus lexicaux conserve le nom du lien lui-même.
+    const fs::path lexical_root = fs::absolute(fs::path(root_dir)).lexically_normal();
+
     for (auto &p : fs::recursive_directory_iterator(root_dir))
     {
         try {
@@ -1499,7 +1469,9 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
 
             fs::path rel = path;
             try {
-                rel = fs::relative(path, root_dir);
+                const fs::path lexical_path = fs::absolute(path).lexically_normal();
+                const fs::path candidate = lexical_path.lexically_relative(lexical_root);
+                if (!candidate.empty()) rel = candidate;
             } catch (...) {
                 // fallback: garder le path tel quel
             }
@@ -1763,7 +1735,7 @@ static inline std::vector<DatasetItem> loadDatasetCached(
             for (auto &item : cached->items) {
                 if (!item.image_file.empty()) {
                     // Vérifier si on a assez de RAM
-                    if (!mgr.canAllocate(target_w * target_h)) {
+                    if (!mgr.canAllocate(static_cast<size_t>(target_w) * static_cast<size_t>(target_h) * 3)) {
                         std::cerr << "  ⚠️  Limite RAM atteinte, arrêt du chargement" << std::endl;
                         break;
                     }

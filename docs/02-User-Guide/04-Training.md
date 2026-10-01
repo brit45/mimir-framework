@@ -39,7 +39,7 @@ Mimir.Dataset.load("dataset_2/")
 assert(Mimir.Model.train(100, 1e-4))
 ```
 
-L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, VAEConv calcule reconstruction + KL. La fonction `lua_trainModel` et ses branches par architecture se trouvent dans `src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp`. Les calculs VAE élémentaires sont dans `Model::trainStepVAE` et `Model::trainStepVAEText`, dans `src/Model.cpp`.
+L'implémentation exacte de la boucle dépend de l'architecture. Par exemple, VAEConv calcule reconstruction + KL. La fonction `lua_trainModel` construit un `TrainStepRequest` générique dans `src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp`. Les overrides VAE délèguent leurs calculs spécialisés à `VAETraining`, dans `src/Models/VAETraining.cpp`.
 
 ### Style boucle manuelle
 
@@ -60,7 +60,9 @@ end
 > **Note :** la boucle manuelle nécessite que vous calculiez vous-même les gradients de la loss. Pour les architectures complexes (diffusion, VAE), la boucle haut-niveau est beaucoup plus simple car elle intègre les spécificités numériques de chaque modèle.
 
 `optimizer_step` exige le learning rate en premier argument. Le second argument
-optionnel vaut `"adamw"` par défaut et accepte aussi `"adam"` ou `"sgd"`.
+optionnel vaut `"adamw"` par défaut. Les valeurs acceptées sont `"sgd"`,
+`"adam"`, `"adamw"`, `"lion"`, `"adafactor"`, `"radam"`, `"nadam"`,
+`"rmsprop"` et `"lamb"`.
 
 Le nom Lua exact est `zero_grads()`. Le nom C++ correspondant est `Model::zeroGradients()`.
 

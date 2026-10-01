@@ -226,8 +226,9 @@ Mimir.Model.optimizer_step(learning_rate: number, optimizer?: string = "adamw")
     -> true | (false, string)
 ```
 
-Applique une étape SGD, Adam ou AdamW. L'état de l'optimiseur est conservé
-entre les appels et peut être inclus dans un checkpoint.
+Applique une étape SGD, Adam, AdamW, Lion, Adafactor, RAdam, NAdam, RMSprop
+ou LAMB. L'état de l'optimiseur est conservé entre les appels et peut être
+inclus dans un checkpoint.
 
 ---
 

@@ -10,10 +10,12 @@
 --     --description "VAEConv baseline package" \
 --     --out exports/my_vae_pack.mpk
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
-local MPK = dofile("scripts/modules/mpk.lua")
-local MPKLayers = dofile("scripts/modules/mpk_layers.lua")
+dofile(ROOTWORK.."/scripts/modules/mpk_help.lua").show("build_mpk")
+
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local MPK = dofile(ROOTWORK.."/scripts/modules/mpk.lua")
+local MPKTools = dofile(ROOTWORK.."/scripts/modules/mpk_tools.lua")
+local MPKLayers = dofile(ROOTWORK.."/scripts/modules/mpk_layers.lua")
 
 local function log(...)
   local out = {}
@@ -28,28 +30,6 @@ local function die(msg)
   os.exit(1)
 end
 
-local function print_usage()
-  log("Usage:")
-  log("  mimir --lua scripts/tools/build_mpk.lua -- --name <name> --type <arch> --out <file.mpk> [options]")
-  log("")
-  log("Options:")
-  log("  --name <string>               Package name (required)")
-  log("  --type <architecture>         Model architecture type for registry load (required)")
-  log("  --author <string>             Header author (default: unknown)")
-  log("  --created-at <iso8601>        Header created_at (default: current UTC)")
-  log("  --modifiable / --no-modifiable Header modifiable flag (default: true)")
-  log("  --viz / --no-viz              Header viz_specified flag (default: false)")
-  log("  --config-json <path>          Base config JSON source")
-  log("  --from-registry               Use Mimir.Architectures.default_config(type)")
-  log("  --structure-json <path>       Model structure JSON source")
-  log("  --template <name>             model_structure template: vae_conv|unet|auto")
-  log("  --description <text>          Human description text")
-  log("  --description-file <path>     Description text file")
-  log("  (output)                      Always writes modern Visu-like MPK pseudocode")
-  log("  --out <path.mpk>              Output MPK path (required, .mpk)")
-  log("  --compile [path.mpk.bin]      Also emit opaque optimized binary-v4")
-  log("  --help                        Show this help")
-end
 
 local function read_json_or_die(path, label)
   local obj, err = MPK.read_json_file(path)
@@ -69,9 +49,16 @@ end
 
 local opts = Args.parse(arg) or {}
 
-if Args.has(opts, "help") then
-  print_usage()
-  return
+-- Keep the legacy template command while routing real source exports through one path.
+if opts.checkpoint or opts.arch or opts.register or Args.get_bool(opts, "from-registry", false) then
+  if opts.register and not opts.arch then
+    arg[#arg + 1] = "--arch"
+    arg[#arg + 1] = type(opts.register) == "string" and opts.register or Args.get_str(opts, "type", "")
+  elseif Args.get_bool(opts, "from-registry", false) and not opts.arch then
+    arg[#arg + 1] = "--arch"; arg[#arg + 1] = Args.get_str(opts, "type", "")
+  end
+  if opts["structure-json"] or opts.template then die("source export conflicts with --structure-json/--template") end
+  return dofile(ROOTWORK.."/scripts/tools/export_arch_mpk.lua")
 end
 if Args.has(opts, "j" .. "son") or Args.has(opts, "bin" .. "ary") then
   die("--json/--binary removed: write pseudocode, then use compile_mpk.lua for binary output")
@@ -86,6 +73,9 @@ if model_type == "" then die("missing --type") end
 if out_path == "" then die("missing --out") end
 if not out_path:lower():match("%.mpk$") then die("--out must end with .mpk") end
 
+local paths, path_err = MPKTools.output_paths(opts, out_path)
+if not paths then die(path_err) end
+
 local author = Args.get_str(opts, "author", "unknown")
 local created_at = Args.get_str(opts, "created-at", nil)
 local modifiable = Args.get_bool(opts, "modifiable", true)
@@ -98,24 +88,8 @@ end
 
 local base_config = {}
 local cfg_json = Args.get_str(opts, "config-json", "")
-local from_registry = Args.get_bool(opts, "from-registry", false)
-
 if cfg_json ~= "" then
   base_config = read_json_or_die(cfg_json, "config-json")
-elseif from_registry then
-  if type(_G.Mimir) ~= "table" or type(Mimir.Architectures) ~= "table" then
-    die("--from-registry requires running through ./bin/mimir")
-  end
-  local cfg, err = Mimir.Architectures.default_config(model_type)
-  if type(cfg) ~= "table" then
-    die("default_config(" .. tostring(model_type) .. ") failed: " .. tostring(err))
-  end
-  local cfg_tbl = {}
-  local cfg_any = cfg or {}
-  for k, v in pairs(cfg_any) do
-    cfg_tbl[k] = v
-  end
-  base_config = cfg_tbl
 end
 
 local model_structure = {
@@ -169,28 +143,9 @@ if not pkg then
   die("build failed: " .. tostring(err_build))
 end
 
-local parent = FS.dirname(out_path)
-if parent and parent ~= "" then
-  FS.mkdir_p(parent)
-end
-
-local ok_write, err_write = MPK.write(out_path, pkg)
-if not ok_write then
-  die("write failed: " .. tostring(err_write))
-end
-
-local compiled_path = nil
-if opts.compile ~= nil and opts.compile ~= false then
-  compiled_path = type(opts.compile) == "string" and opts.compile or
-    (out_path .. ".bin")
-  if not compiled_path:lower():match("%.mpk%.bin$") then
-    die("--compile output must end with .mpk.bin")
-  end
-  local compiled_parent = FS.dirname(compiled_path)
-  if compiled_parent and compiled_parent ~= "" then FS.mkdir_p(compiled_parent) end
-  local ok_compile, err_compile = MPK.compile(out_path, compiled_path)
-  if not ok_compile then die("compile failed: " .. tostring(err_compile)) end
-end
+local ok_write, err_write = MPKTools.write_outputs(pkg, paths)
+if not ok_write then die("write/compile failed: "..tostring(err_write)) end
+local compiled_path = paths.compiled
 
 log("[build_mpk] OK")
 log("  out:        " .. out_path)

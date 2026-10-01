@@ -1,4 +1,4 @@
-local Help = dofile("scripts/modules/help_cli.lua")
+local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
 Help.auto_exit_help()
 
 -- Test: le décodeur VAEConv doit dépendre du latent.
@@ -35,8 +35,8 @@ cfg.latent_w = 8
 cfg.latent_c = 64
 cfg.base_channels = 32
 
-cfg.use_attention = true
-cfg.use_attn = false
+cfg.resnet = true
+cfg.attention = false
 cfg.resnet_max_tokens = cfg.latent_h * cfg.latent_w
 cfg.attn_max_tokens = 0
 cfg.attn_heads = 2

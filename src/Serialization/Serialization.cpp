@@ -47,7 +47,7 @@ bool save_checkpoint(
                 // Convert SaveOptions to DebugJsonOptions
                 DebugJsonOptions debug_opts;
                 debug_opts.include_gradients = options.include_gradients;
-                debug_opts.include_optimizer_state = options.include_optimizer_state;
+                debug_opts.include_optimizer_state = options.include_optimizer_state || options.save_optimizer;
                 debug_opts.max_values_per_tensor = options.max_values_per_tensor;
                 debug_opts.include_activations = options.include_activations;
                 debug_opts.include_checksums = options.include_checksums;

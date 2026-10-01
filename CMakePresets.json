@@ -39,6 +39,7 @@
         "ENABLE_VULKAN": "OFF",
         "ENABLE_OPENCL": "OFF",
         "ENABLE_SFML": "OFF",
+        "ENABLE_FFMPEG": "OFF",
         "ENABLE_OPENMP": "ON",
         "ENABLE_LZ4": "ON"
       }

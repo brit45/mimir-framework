@@ -11,8 +11,11 @@
 
 ---@diagnostic disable: undefined-field, need-check-nil, param-type-mismatch
 
-local Args = dofile("scripts/modules/args.lua")
-local FS = dofile("scripts/modules/fs.lua")
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("convert_checkpoint2safetensor")
+
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function log(...)
     local out = {}
@@ -417,8 +420,8 @@ local function infer_cfg_vae_conv_from_arch(arch)
     end
 
     local cfg = arch.model_config
-    local use_attention = false
-    local use_attn      = false
+    local resnet        = false
+    local attention     = false
     local enc_norm      = nil
     local enc_gn_groups = nil
     local attn_heads    = nil
@@ -432,8 +435,13 @@ local function infer_cfg_vae_conv_from_arch(arch)
         base_channels = tonumber(cfg.base_channels) or base_channels
         downsamples = tonumber(cfg.downsamples) or downsamples
 
-        if cfg.use_attention == true then use_attention = true end
-        if cfg.use_attn      == true then use_attn      = true end
+        local configured_resnet = cfg.resnet
+        if configured_resnet == nil then configured_resnet = cfg.use_resnet end
+        if configured_resnet == nil then configured_resnet = cfg.use_attention end
+        local configured_attention = cfg.attention
+        if configured_attention == nil then configured_attention = cfg.use_attn end
+        resnet = configured_resnet == true
+        attention = configured_attention == true
         enc_norm        = (type(cfg.enc_norm) == "string" and cfg.enc_norm ~= "") and cfg.enc_norm or nil
         enc_gn_groups   = tonumber(cfg.enc_gn_groups)
         attn_heads      = tonumber(cfg.attn_heads)
@@ -469,8 +477,8 @@ local function infer_cfg_vae_conv_from_arch(arch)
         latent_c = math.floor(latent_c),
         base_channels = math.floor(base_channels),
         downsamples = downsamples,
-        use_attention     = use_attention,
-        use_attn          = use_attn,
+        resnet            = resnet,
+        attention         = attention,
         enc_norm          = enc_norm,
         enc_gn_groups     = enc_gn_groups,
         attn_heads        = attn_heads,
@@ -519,8 +527,8 @@ local function build_model_config_from_arch(model_type, arch)
         cfg.latent_w = math.floor(inferred.latent_w)
         cfg.latent_c = math.floor(inferred.latent_c)
         cfg.base_channels = math.floor(inferred.base_channels)
-        if inferred.use_attention     ~= nil then cfg.use_attention     = inferred.use_attention     end
-        if inferred.use_attn          ~= nil then cfg.use_attn          = inferred.use_attn          end
+        if inferred.resnet            ~= nil then cfg.resnet            = inferred.resnet            end
+        if inferred.attention         ~= nil then cfg.attention         = inferred.attention         end
         if inferred.enc_norm          ~= nil then cfg.enc_norm          = inferred.enc_norm          end
         if inferred.enc_gn_groups     ~= nil then cfg.enc_gn_groups     = math.floor(inferred.enc_gn_groups)     end
         if inferred.attn_heads        ~= nil then cfg.attn_heads        = math.floor(inferred.attn_heads)        end

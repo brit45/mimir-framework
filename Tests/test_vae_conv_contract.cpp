@@ -1,6 +1,7 @@
 #include "test_utils.hpp"
 
 #include "Model.hpp"
+#include "Models/Registry/ModelArchitectures.hpp"
 #include "Models/Vision/VAEConvModel.hpp"
 
 #include <algorithm>
@@ -9,6 +10,128 @@
 #include <vector>
 
 int main() {
+    // Canonical keys independently control residual blocks and attention.
+    auto registry_vae = ModelArchitectures::create("vae_conv", {
+        {"image_w", 4}, {"image_h", 4}, {"image_c", 1},
+        {"latent_w", 2}, {"latent_h", 2}, {"latent_c", 2},
+        {"base_channels", 8}, {"resnet", true}, {"attention", false},
+        {"enc_norm", "none"}, {"dec_norm", "none"}
+    });
+    bool saw_residual_add = false;
+    bool saw_self_attention = false;
+    for (const auto& layer : registry_vae->getLayers()) {
+        saw_residual_add = saw_residual_add || layer.name.find("/res/add") != std::string::npos;
+        saw_self_attention = saw_self_attention || layer.type == "SelfAttention";
+    }
+    TASSERT_TRUE(saw_residual_add);
+    TASSERT_TRUE(!saw_self_attention);
+
+    auto legacy_registry_vae = ModelArchitectures::create("vae_conv", {
+        {"image_w", 4}, {"image_h", 4}, {"image_c", 1},
+        {"latent_w", 2}, {"latent_h", 2}, {"latent_c", 2},
+        {"base_channels", 8}, {"use_attention", false},
+        {"use_attn", true}, {"enc_norm", "none"}, {"dec_norm", "none"}
+    });
+    bool legacy_saw_residual_add = false;
+    bool legacy_saw_self_attention = false;
+    for (const auto& layer : legacy_registry_vae->getLayers()) {
+        legacy_saw_residual_add = legacy_saw_residual_add ||
+                                  layer.name.find("/res/add") != std::string::npos;
+        legacy_saw_self_attention = legacy_saw_self_attention ||
+                                    layer.type == "SelfAttention";
+    }
+    TASSERT_TRUE(!legacy_saw_residual_add);
+    TASSERT_TRUE(legacy_saw_self_attention);
+
+    // Rectangular inputs are valid when both axes use the same power-of-two
+    // downsampling ratio (8x4 -> 4x2 here).
+    VAEConvModel::Config rectangular_cfg;
+    rectangular_cfg.image_w = 8;
+    rectangular_cfg.image_h = 4;
+    rectangular_cfg.image_c = 1;
+    rectangular_cfg.latent_w = 4;
+    rectangular_cfg.latent_h = 2;
+    rectangular_cfg.latent_c = 1;
+    rectangular_cfg.base_channels = 8;
+    rectangular_cfg.resnet = false;
+    rectangular_cfg.attention = false;
+    VAEConvModel rectangular_vae;
+    rectangular_vae.buildFromConfig(rectangular_cfg);
+    TASSERT_TRUE(!rectangular_vae.getLayers().empty());
+
+    // Decoder upsampling is selectable while preserving the same output shape.
+    const auto assert_upsample_graph = [&](const std::string& mode,
+                                           const std::string& up_type) -> int {
+        VAEConvModel::Config upsample_cfg = rectangular_cfg;
+        upsample_cfg.decoder_upsample = mode;
+
+        VAEConvModel full_model;
+        full_model.buildFromConfig(upsample_cfg);
+        Model decoder_model;
+        VAEConvModel::buildDecoderInto(decoder_model, upsample_cfg);
+
+        for (Model* candidate : std::vector<Model*>{&full_model, &decoder_model}) {
+            const Layer* up = candidate->getLayerByName("vae_conv/dec/up1/up");
+            TASSERT_TRUE(up != nullptr);
+            TASSERT_TRUE(up->type == up_type);
+
+            const Layer* conv = candidate->getLayerByName("vae_conv/dec/up1/conv");
+            TASSERT_TRUE(conv != nullptr);
+            TASSERT_TRUE(conv->type == "Conv2d");
+            if (mode == "pixel_shuffle") {
+                TASSERT_TRUE(conv->out_channels == 4 * upsample_cfg.base_channels);
+                TASSERT_TRUE(up->in_channels == 4 * upsample_cfg.base_channels);
+                TASSERT_TRUE(up->out_channels == upsample_cfg.base_channels);
+            }
+        }
+
+        decoder_model.allocateParams();
+        decoder_model.initializeWeights("xavier", 123u);
+        const std::vector<float> latent(
+            static_cast<size_t>(upsample_cfg.latent_w) * upsample_cfg.latent_h *
+                upsample_cfg.latent_c,
+            0.25f);
+        const std::vector<float> decoded = decoder_model.forwardPass(latent, false);
+        TASSERT_TRUE(decoded.size() ==
+                     static_cast<size_t>(upsample_cfg.image_w) * upsample_cfg.image_h *
+                         upsample_cfg.image_c);
+        return 0;
+    };
+    TASSERT_TRUE(assert_upsample_graph("nearest_conv", "UpsampleNearest") == 0);
+    TASSERT_TRUE(assert_upsample_graph("bilinear_conv", "UpsampleBilinear") == 0);
+    TASSERT_TRUE(assert_upsample_graph("pixel_shuffle", "PixelShuffle") == 0);
+
+    bool invalid_upsample_rejected = false;
+    try {
+        VAEConvModel::Config invalid_cfg = rectangular_cfg;
+        invalid_cfg.decoder_upsample = "unknown";
+        VAEConvModel invalid_vae;
+        invalid_vae.buildFromConfig(invalid_cfg);
+    } catch (const std::runtime_error&) {
+        invalid_upsample_rejected = true;
+    }
+    TASSERT_TRUE(invalid_upsample_rejected);
+
+    // Decoder normalization can be disabled independently from the encoder.
+    // This protects the CLI/config contract `enc_norm=groupnorm, dec_norm=none`.
+    VAEConvModel::Config decoder_no_norm_cfg = rectangular_cfg;
+    decoder_no_norm_cfg.resnet = true;
+    decoder_no_norm_cfg.resnet_max_tokens = 0;
+    decoder_no_norm_cfg.enc_norm = "groupnorm";
+    decoder_no_norm_cfg.dec_norm = "none";
+    VAEConvModel decoder_no_norm_vae;
+    decoder_no_norm_vae.buildFromConfig(decoder_no_norm_cfg);
+    bool saw_encoder_norm = false;
+    bool saw_decoder_norm = false;
+    for (const auto& layer : decoder_no_norm_vae.getLayers()) {
+        const bool is_norm = layer.type == "GroupNorm" || layer.type == "LayerNorm";
+        if (!is_norm) continue;
+        saw_encoder_norm = saw_encoder_norm || layer.name.rfind("vae_conv/enc/", 0) == 0;
+        saw_decoder_norm = saw_decoder_norm || layer.name.rfind("vae_conv/dec/", 0) == 0;
+    }
+    TASSERT_TRUE(saw_encoder_norm);
+    TASSERT_TRUE(!saw_decoder_norm);
+
     // A fixed Constant must remain fixed, while an explicitly trainable one
     // receives the exact upstream gradient and is updated by the optimizer.
     Model parameter_model;
@@ -51,8 +174,8 @@ int main() {
     cfg.latent_c = 2;
     cfg.base_channels = 8;
     cfg.stochastic_latent = true;
-    cfg.use_attention = false;
-    cfg.use_attn = false;
+    cfg.resnet = false;
+    cfg.attention = false;
     cfg.enc_norm = "none";
     cfg.dec_norm = "none";
     cfg.use_encoder_prior = true;
@@ -87,6 +210,37 @@ int main() {
         TASSERT_NEAR(z_biased[i], z[i] + prior_values[i], 1e-6f);
     }
 
+    // The generic hook must dispatch through Model, honor an explicit target,
+    // and accumulate gradients without advancing the optimizer.
+    std::vector<float> target(input.size(), 0.25f);
+    vae.modelConfig["recon_loss"] = "mse";
+    Optimizer train_optimizer;
+    train_optimizer.type = OptimizerType::SGD;
+    train_optimizer.decay_strategy = LRDecayStrategy::NONE;
+    Model::TrainStepRequest train_request;
+    train_request.float_inputs["__input__"] = &input;
+    train_request.target = &target;
+    train_request.optimizer = &train_optimizer;
+    train_request.mode = Model::TrainStepMode::Accumulate;
+    train_request.grad_scale = 0.5f;
+
+    Model& generic_vae = vae;
+    const auto train_result = generic_vae.trainStep(train_request);
+    TASSERT_TRUE(train_result.has_value());
+    TASSERT_TRUE(train_result->metrics.count("mse") == 1);
+    TASSERT_TRUE(train_result->metrics.count("kl") == 1);
+    TASSERT_TRUE(train_optimizer.step == 0);
+    TASSERT_TRUE(vae.hasTensor("vae_conv/recon"));
+
+    const auto& trained_recon = vae.getTensor("vae_conv/recon");
+    double expected_mse = 0.0;
+    for (size_t i = 0; i < target.size(); ++i) {
+        const double delta = static_cast<double>(trained_recon[i]) - target[i];
+        expected_mse += delta * delta;
+    }
+    expected_mse /= static_cast<double>(target.size());
+    TASSERT_NEAR(train_result->metrics.at("mse"), static_cast<float>(expected_mse), 1e-5f);
+
     // VIZ contract: a deliberately tiny historical limit must not hide graph
     // layers. Every node gets one canonical <model>/blocks/... label.
     vae.setVizTapsEnabled(true);
@@ -109,6 +263,94 @@ int main() {
     }
     for (const auto& layer : vae.getLayers()) {
         TASSERT_TRUE(tapped_layers.find(layer.name) != tapped_layers.end());
+    }
+
+    // Training RGB previews must preserve geometry and channel order through
+    // HWC->CHW, decoder Tanh and CHW->HWC. Compare the actual rendered bytes.
+    {
+        VAEConvModel::Config rgb_cfg;
+        rgb_cfg.image_w = 8;
+        rgb_cfg.image_h = 8;
+        rgb_cfg.image_c = 3;
+        rgb_cfg.latent_w = 4;
+        rgb_cfg.latent_h = 4;
+        rgb_cfg.latent_c = 4;
+        rgb_cfg.base_channels = 8;
+        rgb_cfg.resnet = false;
+        rgb_cfg.attention = false;
+        rgb_cfg.enc_norm = "none";
+        rgb_cfg.dec_norm = "none";
+        VAEConvModel rgb_model;
+        rgb_model.buildFromConfig(rgb_cfg);
+        rgb_model.allocateParams();
+        rgb_model.initializeWeights("xavier", 123u);
+        rgb_model.setVizTapsEnabled(true);
+        rgb_model.setVizTapsLimits(100, 32);
+        std::vector<float> rgb_input(8 * 8 * 3);
+        for (size_t i = 0; i < rgb_input.size(); i += 3) {
+            rgb_input[i] = 1.0f;
+            rgb_input[i + 1] = 0.0f;
+            rgb_input[i + 2] = -1.0f;
+        }
+        (void)rgb_model.forwardPass(rgb_input, true);
+        const auto frames = rgb_model.consumeVizTaps();
+        const auto find_frame = [&](const std::string& name) -> const Model::VizFrame* {
+            for (const auto& frame : frames) {
+                if (frame.label.find("/blocks/" + name + "/") != std::string::npos)
+                    return &frame;
+            }
+            return nullptr;
+        };
+        const auto* raw = find_frame("vae_conv/raw_in");
+        const auto* chw = find_frame("vae_conv/in_to_chw");
+        const auto* tanh = find_frame("vae_conv/dec/tanh");
+        const auto* recon = find_frame("vae_conv/recon_to_hwc");
+        TASSERT_TRUE(raw && chw && tanh && recon);
+        const auto* feature = find_frame("vae_conv/enc/conv_in");
+        TASSERT_TRUE(feature != nullptr);
+        TASSERT_TRUE(feature->heatmap_kind == 1);
+        TASSERT_TRUE(feature->pixels_real.size() == static_cast<size_t>(feature->w) * feature->h * 3);
+        TASSERT_TRUE(feature->tensor_info.find("Capture: entrainement") != std::string::npos);
+        TASSERT_TRUE(feature->tensor_info.find("non finies: 0") != std::string::npos);
+        bool distinct_channels = false;
+        for (size_t i = 0; i < feature->pixels_real.size(); i += 3)
+            distinct_channels = distinct_channels || feature->pixels_real[i] != feature->pixels_real[i + 1] ||
+                feature->pixels_real[i + 1] != feature->pixels_real[i + 2];
+        TASSERT_TRUE(distinct_channels);
+        for (const auto* frame : {raw, chw, tanh, recon}) {
+            TASSERT_TRUE(frame->w == 8 && frame->h == 8 && frame->channels == 3);
+            TASSERT_TRUE(frame->pixels.size() == 8 * 8 * 3);
+            TASSERT_TRUE(frame->pixels_real.empty() || frame->pixels_real.size() == 8 * 8 * 3);
+        }
+        TASSERT_TRUE(raw->pixels == chw->pixels);
+        TASSERT_TRUE(tanh->pixels == recon->pixels);
+        TASSERT_TRUE(raw->pixels[0] > raw->pixels[1] && raw->pixels[1] > raw->pixels[2]);
+        TASSERT_TRUE(rgb_model.getTensor("vae_conv/in_hwc") == rgb_input);
+        TASSERT_TRUE(rgb_model.getTensor("vae_conv/recon").size() == rgb_input.size());
+    }
+
+    // Rectangular feature previews retain their RGB alternative after resizing.
+    {
+        Model features;
+        features.modelConfig["image_w"] = 4;
+        features.modelConfig["image_h"] = 2;
+        features.push("features", "Identity", 0);
+        features.getLayerByName("features")->inputs = {"__input__"};
+        features.getLayerByName("features")->output = "features";
+        features.allocateParams();
+        features.setVizTapsEnabled(true);
+        features.setVizTapsLimits(10, 32);
+        std::vector<float> values(32);
+        for (size_t i = 0; i < values.size(); i += 4) {
+            values[i] = -1; values[i + 1] = 0; values[i + 2] = 1; values[i + 3] = 0;
+        }
+        (void)features.forwardPass(values, true);
+        const auto frames = features.consumeVizTaps();
+        TASSERT_TRUE(frames.size() == 1);
+        TASSERT_TRUE(frames[0].w == 4 && frames[0].h == 4);
+        TASSERT_TRUE(frames[0].pixels_real.size() == 48);
+        TASSERT_TRUE(frames[0].pixels_real[0] < frames[0].pixels_real[1]);
+        TASSERT_TRUE(frames[0].pixels_real[1] < frames[0].pixels_real[2]);
     }
 
     // Composition contract: a child model executed before the root taps are

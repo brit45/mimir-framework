@@ -24,12 +24,40 @@ option(ENABLE_ROCM "Enable ROCm GPU compute (rocBLAS/HIP)" OFF)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
 option(ENABLE_FFMPEG "Enable FFmpeg-backed audio/video loading" ON)
 option(ENABLE_SFML "Enable SFML visualization" ON)
+set(MIMIR_VIZ_BACKEND "SFML" CACHE STRING
+    "Viz interface selected at compile time: SFML, QT, GTK, WEB, or NONE")
+set_property(CACHE MIMIR_VIZ_BACKEND PROPERTY STRINGS SFML QT GTK WEB NONE)
 option(ENABLE_SCRIPTING_REST "Enable REST scripting bridge" OFF)
 option(ENABLE_SCRIPTING_RUST "Enable Rust scripting bridge" ON)
 option(ENABLE_SCRIPTING_JS "Enable JavaScript scripting bridge" ON)
 option(ENABLE_SCRIPTING_CSHARP "Enable C# scripting bridge" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
 option(MIMIR_ENABLE_FACE_RECOGNITION_TOOL "Build OpenCV face detection/recognition tool" OFF)
+option(MIMIR_PORTABLE_BUILD "Disable host-specific CPU optimizations for portable binaries" OFF)
+
+string(TOUPPER "${MIMIR_VIZ_BACKEND}" MIMIR_VIZ_BACKEND)
+set(_MIMIR_VIZ_BACKENDS SFML QT GTK WEB NONE)
+if(NOT MIMIR_VIZ_BACKEND IN_LIST _MIMIR_VIZ_BACKENDS)
+    message(FATAL_ERROR
+        "MIMIR_VIZ_BACKEND='${MIMIR_VIZ_BACKEND}' invalide. "
+        "Valeurs possibles: SFML, QT, GTK, WEB, NONE.")
+endif()
+
+# Compatibilité historique : avec le backend par défaut SFML,
+# ENABLE_SFML=OFF signifie encore NONE. Les autres backends sont indépendants.
+if(NOT ENABLE_SFML)
+    if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+        set(MIMIR_VIZ_BACKEND "NONE")
+    endif()
+endif()
+if(MIMIR_VIZ_BACKEND STREQUAL "NONE")
+    set(ENABLE_SFML OFF)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+    set(ENABLE_SFML ON)
+else()
+    set(ENABLE_SFML OFF)
+endif()
+message(STATUS "Viz interface: ${MIMIR_VIZ_BACKEND}")
 
 if(ENABLE_SCRIPTING_REST)
     message(WARNING "ENABLE_SCRIPTING_REST=ON demandé, mais aucun bridge REST natif n'est implémenté dans ce dépôt. Option forcée à OFF.")
@@ -49,6 +77,19 @@ option(MIMIR_ENABLE_LEGACY_PARAMS "Enable legacy params structure (high RAM usag
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
+
+# Le build principal alimente ./bin pour rester compatible avec run_mimir.sh.
+# Les builds secondaires (notamment les builds CPU des tests du planner) gardent
+# leurs exécutables dans leur propre arbre afin de ne jamais écraser le binaire
+# de production avec une configuration matérielle différente.
+if(CMAKE_BINARY_DIR STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/build")
+    set(MIMIR_RUNTIME_OUTPUT_DIRECTORY_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+else()
+    set(MIMIR_RUNTIME_OUTPUT_DIRECTORY_DEFAULT "${CMAKE_BINARY_DIR}/bin")
+endif()
+set(MIMIR_RUNTIME_OUTPUT_DIRECTORY
+    "${MIMIR_RUNTIME_OUTPUT_DIRECTORY_DEFAULT}"
+    CACHE PATH "Directory for Mimir runtime executables")
 
 # ============================================================================
 # Détection des capacités hardware
@@ -109,7 +150,10 @@ endif()
 if(MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
 else()
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG")
+    if(NOT MIMIR_PORTABLE_BUILD)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+    endif()
 endif()
 
 # Flags de debug
@@ -189,6 +233,7 @@ if(ENABLE_VULKAN)
         file(MAKE_DIRECTORY "${MIMIR_SHADER_OUT_DIR}")
 
         set(MIMIR_VULKAN_SHADER_NAMES
+            elementwise
             linear_forward
             add_forward
             mul_forward
@@ -259,14 +304,23 @@ endif()
 # Threads
 find_package(Threads REQUIRED)
 
-# SFML (visualisation)
-if(ENABLE_SFML)
-    find_package(SFML COMPONENTS Graphics Window System)
-    if(SFML_FOUND)
-        message(STATUS "SFML found: ${SFML_VERSION}")
-    else()
-        message(WARNING "SFML not found - Visualization may be limited")
-    endif()
+# SFML is used only by the legacy SFML backend. Alternative backends use the
+# independent CPU renderer below.
+if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+    find_package(SFML 3 REQUIRED COMPONENTS Graphics Window System)
+endif()
+if(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK|WEB)$" AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "The QT/GTK/WEB Viz hosts currently require Linux")
+endif()
+if(MIMIR_VIZ_BACKEND STREQUAL "QT")
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "GTK")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(VIZ_GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
+endif()
+if(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK|WEB)$")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(VIZ_CAIRO REQUIRED IMPORTED_TARGET cairo)
 endif()
 
 # OpenCL (calcul GPU)
@@ -350,11 +404,32 @@ endif()
 # Fichiers sources
 # ============================================================================
 
+set(MIMIR_VIZ_WINDOW_SOURCES)
+if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/backends/SfmlVizWindow.cpp)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "QT")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/SoftwareVizWindow.cpp
+        src/viz/backends/QtVizWindow.cpp)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "GTK")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/SoftwareVizWindow.cpp
+        src/viz/backends/GtkVizWindow.cpp)
+elseif(MIMIR_VIZ_BACKEND STREQUAL "WEB")
+    list(APPEND MIMIR_VIZ_WINDOW_SOURCES
+        src/viz/SoftwareVizWindow.cpp
+        src/viz/backends/WebVizWindow.cpp)
+endif()
+
 set(MIMIR_SOURCES
     src/Model.cpp
+    src/ModelRuntimeConfig.cpp
+    src/Models/VAETraining.cpp
     src/Encoder.cpp
     src/Tokenizer.cpp
     src/Visualizer.cpp
+    ${MIMIR_VIZ_WINDOW_SOURCES}
     src/tensors.cpp
     src/Sha256.cpp
     src/scriptings/Lua/luaScripting/LuaScripting.cpp
@@ -366,6 +441,7 @@ set(MIMIR_SOURCES
     src/Helpers.cpp
     src/stb_image_impl.cpp
     src/runtimes/AbstractRuntime.cpp
+    src/runtimes/Autograd.cpp
     src/runtimes/RuntimeRouter.cpp
     src/runtimes/ops_loss_and_grad.cpp
     src/runtimes/cpu/CpuRuntime.cpp
@@ -392,6 +468,7 @@ set(MIMIR_SOURCES
     src/Models/Diffusion/DiffusionModel.cpp
     src/Models/Diffusion/CondDiffusionModel.cpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.cpp
+    src/Models/Diffusion/LumenLatentDiffusionModel.cpp
     src/Models/Diffusion/SD35Model.cpp
     src/Serialization/Serialization.cpp
     src/Serialization/SafeTensorsWriter.cpp
@@ -403,6 +480,7 @@ set(MIMIR_SOURCES
 
 set(MIMIR_HEADERS
     src/Model.hpp
+    src/Models/VAETraining.hpp
     src/Encoder.hpp
     src/Tokenizer.hpp
     src/Visualizer.hpp
@@ -461,6 +539,7 @@ set(MIMIR_HEADERS
     src/Models/Diffusion/DiffusionModel.hpp
     src/Models/Diffusion/CondDiffusionModel.hpp
     src/Models/Diffusion/HFSDXLTransformerBlockModel.hpp
+    src/Models/Diffusion/LumenLatentDiffusionModel.hpp
     src/Models/Diffusion/SD35Model.hpp
     src/Serialization/Serialization.hpp
     src/Serialization/SafeTensorsWriter.hpp
@@ -504,9 +583,10 @@ endif()
 
 list(APPEND MIMIR_SOURCES src/runtimes/LayerOps.cpp)
 
-# Variante de sources sans SFML (utile pour builds headless / statiques)
+# Variante de sources sans Viz (utile pour builds headless / statiques)
 set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})
 list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML src/Visualizer.cpp)
+list(REMOVE_ITEM MIMIR_SOURCES_NO_SFML ${MIMIR_VIZ_WINDOW_SOURCES})
 
 # Variante stricte pour build statique: sans runtimes GPU afin d'eviter des
 # dependances dynamiques (Vulkan/OpenCL/CUDA/ROCm) lors du linkage statique.
@@ -522,17 +602,81 @@ list(REMOVE_ITEM MIMIR_SOURCES_STATIC
 # Bibliothèque principale Mímir
 # ============================================================================
 
-if(ENABLE_SFML AND SFML_FOUND)
+if(NOT MIMIR_VIZ_BACKEND STREQUAL "NONE")
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES}
         ${MIMIR_HEADERS}
     )
-    target_compile_definitions(mimir_core PUBLIC ENABLE_SFML)
+    target_compile_definitions(mimir_core PUBLIC ENABLE_VIZ)
 else()
     add_library(mimir_core STATIC
         ${MIMIR_SOURCES_NO_SFML}
         ${MIMIR_HEADERS}
     )
+endif()
+
+if(NOT MIMIR_VIZ_BACKEND STREQUAL "NONE")
+    # Graphics.hpp fait partie de l'interface de Visualizer.hpp : le backend doit
+    # être visible par les consommateurs pour conserver exactement les mêmes
+    # types et le même layout ABI que mimir_core.
+    target_compile_definitions(mimir_core PUBLIC MIMIR_VIZ_BACKEND_${MIMIR_VIZ_BACKEND})
+    if(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK|WEB)$")
+        target_sources(mimir_core PRIVATE src/viz/SoftwareGraphics.cpp)
+        target_link_libraries(mimir_core PUBLIC PkgConfig::VIZ_CAIRO)
+    endif()
+    if(MIMIR_VIZ_BACKEND STREQUAL "WEB")
+        target_sources(mimir_core PRIVATE src/viz/WebHost.cpp)
+    elseif(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK)$")
+        target_sources(mimir_core PRIVATE src/viz/ProcessHost.cpp)
+        add_executable(mimir_viz_host src/viz/DesktopHost.cpp)
+        target_compile_definitions(mimir_viz_host PRIVATE MIMIR_VIZ_BACKEND_${MIMIR_VIZ_BACKEND})
+        target_link_libraries(mimir_viz_host PRIVATE Threads::Threads)
+        if(MIMIR_VIZ_BACKEND STREQUAL "QT")
+            target_link_libraries(mimir_viz_host PRIVATE Qt6::Widgets)
+        else()
+            target_link_libraries(mimir_viz_host PRIVATE PkgConfig::VIZ_GTK)
+        endif()
+        set_target_properties(mimir_viz_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
+        install(TARGETS mimir_viz_host RUNTIME DESTINATION bin)
+        add_dependencies(mimir_core mimir_viz_host)
+    endif()
+endif()
+
+# Opt-in graphical integration executable (requires a display / Xvfb).
+if(NOT MIMIR_VIZ_BACKEND STREQUAL "NONE")
+    add_executable(mimir_viz_smoke EXCLUDE_FROM_ALL
+        Tests/test_viz_window.cpp
+        ${MIMIR_VIZ_WINDOW_SOURCES})
+    target_include_directories(mimir_viz_smoke PRIVATE src)
+    target_compile_definitions(mimir_viz_smoke PRIVATE MIMIR_VIZ_BACKEND_${MIMIR_VIZ_BACKEND})
+    target_link_libraries(mimir_viz_smoke PRIVATE Threads::Threads)
+    if(MIMIR_VIZ_BACKEND STREQUAL "SFML")
+        target_link_libraries(mimir_viz_smoke PRIVATE SFML::Graphics SFML::Window SFML::System)
+    else()
+        target_sources(mimir_viz_smoke PRIVATE src/viz/SoftwareGraphics.cpp)
+        target_link_libraries(mimir_viz_smoke PRIVATE PkgConfig::VIZ_CAIRO)
+    endif()
+    if(MIMIR_VIZ_BACKEND STREQUAL "WEB")
+        target_sources(mimir_viz_smoke PRIVATE src/viz/WebHost.cpp)
+    elseif(MIMIR_VIZ_BACKEND MATCHES "^(QT|GTK)$")
+        target_sources(mimir_viz_smoke PRIVATE src/viz/ProcessHost.cpp)
+        add_dependencies(mimir_viz_smoke mimir_viz_host)
+    endif()
+    set_target_properties(mimir_viz_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
+
+    add_executable(mimir_viz_script_smoke EXCLUDE_FROM_ALL Tests/test_viz_script.cpp Tests/test_log_stub.cpp)
+    target_link_libraries(mimir_viz_script_smoke PRIVATE mimir_core)
+    set_target_properties(mimir_viz_script_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
+    if(TARGET mimir_viz_host)
+        add_dependencies(mimir_viz_script_smoke mimir_viz_host)
+    endif()
+    add_executable(mimir_viz_scene_smoke EXCLUDE_FROM_ALL Tests/test_viz_scene.cpp)
+    target_link_libraries(mimir_viz_scene_smoke PRIVATE mimir_core)
+    if(TARGET mimir_viz_host)
+        add_dependencies(mimir_viz_scene_smoke mimir_viz_host)
+    endif()
+    set_target_properties(mimir_viz_scene_smoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}")
 endif()
 
 target_include_directories(mimir_core PUBLIC
@@ -613,7 +757,7 @@ if(ENABLE_FFMPEG AND FFMPEG_FOUND)
 endif()
 
 # SFML (visualisation)
-if(ENABLE_SFML AND SFML_FOUND)
+if(MIMIR_VIZ_BACKEND STREQUAL "SFML" AND SFML_FOUND)
     if(TARGET SFML::Graphics)
         target_link_libraries(mimir_core PUBLIC SFML::Graphics SFML::Window SFML::System)
     else()
@@ -643,7 +787,7 @@ endif()
 
 # Installation dans bin/
 set_target_properties(mimir PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+    RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}"
 )
 
 # ==========================================================================
@@ -713,7 +857,7 @@ if(BUILD_MIMIR_STATIC)
     target_link_libraries(mimir_static PRIVATE mimir_core_static)
 
     set_target_properties(mimir_static PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}"
     )
 
     if(UNIX AND NOT APPLE)
@@ -740,7 +884,7 @@ if(MIMIR_ENABLE_FACE_RECOGNITION_TOOL)
         target_link_libraries(face_recognition_tool PRIVATE ${OpenCV_LIBS})
         target_include_directories(face_recognition_tool PRIVATE ${OpenCV_INCLUDE_DIRS})
         set_target_properties(face_recognition_tool PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+            RUNTIME_OUTPUT_DIRECTORY "${MIMIR_RUNTIME_OUTPUT_DIRECTORY}"
         )
         message(STATUS "Face recognition tool: enabled (${OpenCV_VERSION})")
     endif()
@@ -773,6 +917,7 @@ file(COPY ${LUA_SCRIPTS} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/scripts)
 # Installer l'exécutable principal
 install(TARGETS mimir
     RUNTIME DESTINATION bin
+    COMPONENT Runtime
 )
 
 if(BUILD_MIMIR_STATIC)
@@ -795,6 +940,7 @@ install(FILES ${MIMIR_HEADERS}
 # Installer les scripts Lua
 install(DIRECTORY scripts/
     DESTINATION share/mimir/scripts
+    COMPONENT Runtime
     FILES_MATCHING PATTERN "*.lua"
 )
 
@@ -803,6 +949,102 @@ install(DIRECTORY docs/
     DESTINATION share/mimir/docs
     FILES_MATCHING PATTERN "*.md"
 )
+
+# ============================================================================
+# AppImage Linux portable (build non natif)
+# ============================================================================
+
+if(UNIX AND NOT APPLE AND NOT MIMIR_APPIMAGE_INNER_BUILD)
+    set(MIMIR_LINUXDEPLOY "" CACHE FILEPATH
+        "Path to linuxdeploy or linuxdeploy-x86_64.AppImage")
+    if(MIMIR_LINUXDEPLOY)
+        set(_MIMIR_LINUXDEPLOY "${MIMIR_LINUXDEPLOY}")
+    else()
+        find_program(_MIMIR_LINUXDEPLOY
+            NAMES linuxdeploy linuxdeploy-x86_64.AppImage
+            HINTS "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    endif()
+
+    set(MIMIR_APPIMAGE_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_appimage")
+    set(MIMIR_APPDIR "${MIMIR_APPIMAGE_BUILD_DIR}/AppDir")
+    set(MIMIR_APPIMAGE_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist")
+    set(MIMIR_APPIMAGE_DESKTOP "${CMAKE_CURRENT_BINARY_DIR}/appimage/mimir.desktop")
+    set(MIMIR_APPIMAGE_ICON "${CMAKE_CURRENT_BINARY_DIR}/appimage/mimir.svg")
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" MIMIR_APPIMAGE_ARCH)
+    if(MIMIR_APPIMAGE_ARCH MATCHES "^(amd64|x86_64)$")
+        set(MIMIR_APPIMAGE_ARCH "x86_64")
+        set(MIMIR_APPIMAGE_ENABLE_SIMD ON)
+    elseif(MIMIR_APPIMAGE_ARCH MATCHES "^(aarch64|arm64)$")
+        set(MIMIR_APPIMAGE_ARCH "aarch64")
+        set(MIMIR_APPIMAGE_ENABLE_SIMD OFF)
+    else()
+        set(MIMIR_APPIMAGE_ENABLE_SIMD OFF)
+    endif()
+
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/appimage")
+    file(WRITE "${MIMIR_APPIMAGE_DESKTOP}"
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Mimir\n"
+        "Comment=Machine learning framework and scripting runtime\n"
+        "Exec=mimir\n"
+        "Icon=mimir\n"
+        "Terminal=true\n"
+        "Categories=Development;Science;\n")
+    file(WRITE "${MIMIR_APPIMAGE_ICON}"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"256\" height=\"256\" viewBox=\"0 0 256 256\">"
+        "<rect width=\"256\" height=\"256\" rx=\"32\" fill=\"#15191f\"/>"
+        "<path d=\"M48 192V64h32l48 72 48-72h32v128h-32v-76l-48 68-48-68v76z\" fill=\"#62d6a8\"/>"
+        "</svg>\n")
+
+    if(_MIMIR_LINUXDEPLOY)
+        add_custom_target(appimage
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "${MIMIR_APPIMAGE_BUILD_DIR}"
+            COMMAND ${CMAKE_COMMAND} -S "${CMAKE_CURRENT_SOURCE_DIR}"
+                    -B "${MIMIR_APPIMAGE_BUILD_DIR}"
+                    -G "${CMAKE_GENERATOR}"
+                    -DCMAKE_BUILD_TYPE=Release
+                    -DCMAKE_INSTALL_PREFIX=/usr
+                    -DMIMIR_APPIMAGE_INNER_BUILD=ON
+                    -DMIMIR_PORTABLE_BUILD=ON
+                    -DMIMIR_ENABLE_TESTS=OFF
+                    -DENABLE_SIMD=${MIMIR_APPIMAGE_ENABLE_SIMD}
+                    -DENABLE_VULKAN=ON
+                    -DENABLE_OPENCL=ON
+                    -DENABLE_CUDA=OFF
+                    -DENABLE_ROCM=OFF
+                    -DENABLE_SFML=ON
+            COMMAND ${CMAKE_COMMAND} --build "${MIMIR_APPIMAGE_BUILD_DIR}"
+                    --config Release --target mimir --parallel
+            COMMAND ${CMAKE_COMMAND} -E env
+                    DESTDIR=${MIMIR_APPDIR}
+                    ${CMAKE_COMMAND} --install "${MIMIR_APPIMAGE_BUILD_DIR}"
+                    --config Release --prefix /usr --component Runtime
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${MIMIR_APPIMAGE_DIST_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E env
+                    VERSION=${PROJECT_VERSION}
+                    ARCH=${MIMIR_APPIMAGE_ARCH}
+                    OUTPUT=${MIMIR_APPIMAGE_DIST_DIR}/Mimir-${PROJECT_VERSION}-${MIMIR_APPIMAGE_ARCH}.AppImage
+                    "${_MIMIR_LINUXDEPLOY}"
+                    --appdir "${MIMIR_APPDIR}"
+                    --executable "${MIMIR_APPDIR}/usr/bin/mimir"
+                    --desktop-file "${MIMIR_APPIMAGE_DESKTOP}"
+                    --icon-file "${MIMIR_APPIMAGE_ICON}"
+                    --output appimage
+            COMMENT "Building portable Mimir AppImage (no -march=native)"
+            USES_TERMINAL
+            VERBATIM
+        )
+    else()
+        add_custom_target(appimage
+            COMMAND ${CMAKE_COMMAND} -E echo
+                    "linuxdeploy not found. Set -DMIMIR_LINUXDEPLOY=/path/to/linuxdeploy-x86_64.AppImage"
+            COMMAND ${CMAKE_COMMAND} -E false
+            COMMENT "Cannot build AppImage without linuxdeploy"
+            VERBATIM
+        )
+    endif()
+endif()
 
 # ============================================================================
 # Résumé de la configuration

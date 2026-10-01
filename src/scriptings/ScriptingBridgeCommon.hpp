@@ -15,6 +15,10 @@ inline constexpr const char* kEnvBridgeArchAvailJson   = "MIMIR_BRIDGE_ARCH_AVAI
 inline constexpr const char* kEnvBridgeArchCacheJson   = "MIMIR_BRIDGE_ARCH_CACHE_JSON";
 inline constexpr const char* kEnvBridgeDtypesCount     = "MIMIR_BRIDGE_DTYPES_COUNT";
 inline constexpr const char* kEnvBridgeArchAvailCount  = "MIMIR_BRIDGE_ARCH_AVAIL_COUNT";
+inline constexpr const char* kEnvRootWork              = "ROOTWORK";
+
+// Racine stable utilisee par les scripts pour resoudre leurs dependances.
+std::string ensureRootWorkEnv();
 
 // Chemin du fichier cache inter-exécutions (dans $TMPDIR).
 std::string archCacheFilePath();

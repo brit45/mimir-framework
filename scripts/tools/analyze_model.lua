@@ -10,7 +10,10 @@
 
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local Args = dofile("scripts/modules/args.lua")
+local ToolHelp = dofile(ROOTWORK.."/scripts/modules/tools_help.lua")
+ToolHelp.show("analyze_model")
+
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 
 -- ---------------------------------------------------------------------------
 -- Couleurs ANSI (désactivées si NO_COLOR)
@@ -1366,7 +1369,7 @@ local function render_summary(info, opts)
         local interesting = {
             "task", "image_w", "image_h", "image_c",
             "latent_h", "latent_w", "latent_c", "base_channels", "downsamples",
-            "use_attention", "use_attn", "enc_norm", "enc_gn_groups",
+            "resnet", "attention", "enc_norm", "enc_gn_groups",
             "attn_heads", "resnet_max_tokens", "attn_max_tokens",
             "stochastic_latent", "text_cond",
             "d_model", "num_heads", "num_layers", "mlp_hidden",
@@ -2600,49 +2603,7 @@ local function render_top_tensors(info, opts)
     return make_table(columns, rows)
 end
 
-local function render_help()
-    local lines = {
-        colorize("Analyseur de modèles/checkpoints Mimir (SafeTensors / RawFolder / DebugJson)", C.bold, C.blue),
-        "",
-        colorize("Usage:", C.bold, C.cyan),
-        "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in model.safetensors",
-        "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in checkpoint_dir/",
-        "  ./bin/mimir --lua scripts/tools/analyze_model.lua --in debug.json",
-        "",
-        colorize("Formats supportés:", C.bold, C.cyan),
-        "  - SafeTensors: *.safetensors (ou *.st)",
-        "  - RawFolder  : dossier contenant manifest.json",
-        "  - DebugJson  : dump JSON (format=mimir_debug_dump ou JSON enhanced v1.4)",
-        "",
-        colorize("Options:", C.bold, C.cyan),
-        "  --in <path>                         Chemin du modèle (requis)",
-        "  --max-layers <n>                    Limite l'affichage des couches / graphe",
-        "  --top-tensors <n>                   Nb de tensors listés (par taille)",
-        "  --enrich-tensors <n>                [RawFolder] enrichit les N plus gros tensors (dtype/shape)",
-        "  --graph-format <table|blocks|mermaid|mlp_graph|visu-bloc|visu-tree>",
-        "                                     Format de graphe (défaut: table; visu = visu-bloc)",
-        "                                     Alias accepté: mermaind -> mermaid",
-        "  --graph-out <path.{svg|png|jpg}>    Exporte le graphe Mermaid vers un fichier image",
-        "  --graph-blocks <bool>               Affiche le graphe 'blocks' en plus du graphe principal (défaut: false)",
-        "  --graph-in-width <n>                Largeur inputs (mode blocks)",
-        "  --graph-layer-width <n>             Largeur layer (mode blocks)",
-        "  --graph-out-width <n>               Largeur output (mode blocks)",
-        "  --graph-units <n>                   Neurones/canaux visibles par couche (visu-tree, défaut: 8, max: 32)",
-        "  --all <bool>                        Affiche toutes les valeurs sans troncature dans l'entête (sur plusieurs lignes si besoin) (défaut: false)",
-        "  --debug <bool>                      Logs de debug (défaut: false)",
-        "  --script-help <bool>                Affiche cette aide (alias: --help-script, --h)",
-        "",
-        colorize("Notes:", C.bold, C.cyan),
-        "  - Le graphe Mermaid est émis en Markdown via un bloc ```mermaid```.",
-        "  - Le format mlp_graph émet un diagramme Mermaid orienté architecture MLP (type image).",
-        "  - visu-bloc utilise une liste CNN et des routes, sans layout circulaire.",
-        "  - visu-tree utilise un tableau par couche et une map de connexions, sans layout circulaire.",
-        "  - L'export image utilise Mermaid CLI (mmdc). Pour .jpg, ImageMagick est aussi requis.",
-        "  - Les dumps DebugJson n'embarquent pas forcément inputs/output; dans ce cas le graphe Mermaid",
-        "    utilise un fallback linéaire (layer1 -> layer2 -> ...).",
-    }
-    return table.concat(lines, "\n")
-end
+
 
 -- ---------------------------------------------------------------------------
 -- Main
@@ -2673,7 +2634,7 @@ opts.script_help = Args.get_bool(opts, "script-help", Args.get_bool(opts, "scrip
 ))
 
 if IN == "" or opts.script_help then
-    log(render_help())
+    ToolHelp.print("analyze_model")
     if IN == "" and not opts.script_help then
         os.exit(1)
     else

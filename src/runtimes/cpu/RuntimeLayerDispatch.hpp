@@ -14,6 +14,7 @@
 #include "../../Layers.hpp"
 #include "LayerOps.hpp"
 #include "LayerOpsExt.hpp"
+#include "ConvolutionKernels.hpp"
 
 namespace RuntimeLayerDispatch {
 
@@ -29,13 +30,12 @@ inline bool cpu_forward_layer(
     const std::vector<const std::vector<float>*>& inputs,
     std::vector<std::vector<float>>& outputs,
     const Layer& layer,
-    bool training
+    bool training,
+    std::vector<uint8_t>* output_mask = nullptr
 ) {
-    if (inputs.empty() || inputs[0] == nullptr) {
-        return false;
-    }
-
-    const std::vector<float>& x = *inputs[0];
+    if (layer.type_enum != LayerType::Constant && (inputs.empty() || inputs[0] == nullptr)) return false;
+    static const std::vector<float> empty;
+    const std::vector<float>& x = inputs.empty() ? empty : *inputs[0];
     outputs.clear();
 
     try {
@@ -47,9 +47,9 @@ inline bool cpu_forward_layer(
                 const int in_c = layer.in_channels > 0 ? layer.in_channels : 1;
                 const int out_c = layer.out_channels > 0 ? layer.out_channels : 1;
                 const int k = layer.kernel_h > 0 ? layer.kernel_h : layer.get_kernel_h();
-                const int stride = layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h();
-                const int pad = layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h();
-                const int dilation = layer.dilation_h > 0 ? layer.dilation_h : 1;
+                const int stride = layer.get_stride_h();
+                const int pad = layer.get_pad_h();
+                const int dilation = layer.dilation_h != 1 ? layer.dilation_h : layer.dilation;
                 int H = layer.input_height > 0 ? layer.input_height : 0;
                 int W = layer.input_width > 0 ? layer.input_width : 0;
 
@@ -88,14 +88,8 @@ inline bool cpu_forward_layer(
                 const size_t need = w_kernel + (layer.use_bias ? static_cast<size_t>(out_c) : 0ULL);
                 if (layer.getWeightsSize() < need) return false;
 
-                std::vector<float> kernel(w, w + w_kernel);
-                std::vector<float> bias;
-                if (layer.use_bias) {
-                    bias.assign(w + w_kernel, w + w_kernel + static_cast<size_t>(out_c));
-                }
-
                 outputs.resize(1);
-                Conv::conv2d(x, outputs[0], kernel, bias, H, W, in_c, out_c, k, stride, pad, dilation);
+                CpuConvolution::forward(x, outputs[0], w, layer.use_bias ? w + w_kernel : nullptr, H, W, in_c, out_c, k, stride, pad, dilation);
                 return true;
             }
 
@@ -103,8 +97,8 @@ inline bool cpu_forward_layer(
                 const int in_c = layer.in_channels > 0 ? layer.in_channels : 1;
                 const int out_c = layer.out_channels > 0 ? layer.out_channels : 1;
                 const int k = layer.kernel_h > 0 ? layer.kernel_h : layer.get_kernel_h();
-                const int stride = layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h();
-                const int pad = layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h();
+                const int stride = layer.get_stride_h();
+                const int pad = layer.get_pad_h();
                 int H = layer.input_height > 0 ? layer.input_height : 0;
                 int W = layer.input_width > 0 ? layer.input_width : 0;
 
@@ -488,11 +482,12 @@ inline bool cpu_forward_layer(
             case LayerType::Dropout:
             case LayerType::Dropout2d: {
                 outputs.resize(1);
-                outputs[0] = LayerOps::dropout_forward(x, layer, training);
+                outputs[0] = LayerOps::dropout_forward(x, layer, training, output_mask);
                 return true;
             }
 
             case LayerType::AlphaDropout: {
+                if (output_mask) output_mask->assign(x.size(),1);
                 if (!training) {
                     outputs.resize(1);
                     outputs[0] = x;
@@ -500,6 +495,11 @@ inline bool cpu_forward_layer(
                 }
 
                 const float p = std::clamp(layer.dropout_p, 0.0f, 1.0f);
+                if (p >= 1.0f) {
+                    outputs.assign(1,std::vector<float>(x.size(),0.0f));
+                    if (output_mask) output_mask->assign(x.size(),0);
+                    return true;
+                }
                 const float alpha = 1.6732632423543772848170429916717f;
                 const float scale = 1.0507009873554804934193349852946f;
                 const float alpha_p = -alpha * scale;
@@ -509,10 +509,11 @@ inline bool cpu_forward_layer(
 
                 outputs.resize(1);
                 outputs[0].resize(x.size());
-                static thread_local std::mt19937 rng(1337);
+                auto& rng = MimirRng::generator();
                 std::uniform_real_distribution<float> dist(0.0f, 1.0f);
                 for (size_t i = 0; i < x.size(); ++i) {
                     const bool keep = (dist(rng) > p);
+                    if (output_mask) (*output_mask)[i]=keep;
                     const float v = keep ? x[i] : alpha_p;
                     outputs[0][i] = a * v + b;
                 }
@@ -1020,6 +1021,18 @@ inline bool cpu_forward_layer(
             }
 
             case LayerType::PixelShuffle: {
+                const int r = static_cast<int>(layer.scale_h);
+                const int in_channels = layer.in_channels;
+                const int in_h = layer.input_height;
+                const int in_w = layer.input_width;
+                if (r < 1 || static_cast<float>(r) != layer.scale_h ||
+                    in_channels < 1 || in_h < 1 || in_w < 1 ||
+                    in_channels % (r * r) != 0 ||
+                    x.size() != static_cast<size_t>(in_channels) *
+                                    static_cast<size_t>(in_h) *
+                                    static_cast<size_t>(in_w)) {
+                    return false;
+                }
                 outputs.resize(1);
                 outputs[0] = LayerOpsExt::pixel_shuffle_forward(x, layer);
                 return true;
@@ -1254,6 +1267,12 @@ inline bool cpu_forward_layer(
     }
 }
 
+inline void accumulate_packed_bias(Layer& layer, size_t index, float gradient) {
+    layer.grad_bias[index] += gradient;
+    if (layer.grad_weights.size() >= layer.grad_bias.size())
+        layer.grad_weights[layer.grad_weights.size() - layer.grad_bias.size() + index] += gradient;
+}
+
 inline bool cpu_backward_layer(
     const std::vector<const std::vector<float>*>& inputs,
     const std::vector<const std::vector<float>*>& grad_outputs,
@@ -1376,7 +1395,7 @@ inline bool cpu_backward_layer(
                     }
                     for (int b = 0; b < batch; ++b) {
                         for (int o = 0; o < out_f; ++o) {
-                            layer.grad_bias[static_cast<size_t>(o)] += go[static_cast<size_t>(b) * static_cast<size_t>(out_f) + static_cast<size_t>(o)];
+                            accumulate_packed_bias(layer, static_cast<size_t>(o), go[static_cast<size_t>(b) * static_cast<size_t>(out_f) + static_cast<size_t>(o)]);
                         }
                     }
                 }
@@ -1519,7 +1538,7 @@ inline bool cpu_backward_layer(
                     }
                     for (int n = 0; n < batch; ++n) {
                         for (int o = 0; o < out; ++o) {
-                            layer.grad_bias[static_cast<size_t>(o)] += go[static_cast<size_t>(n) * static_cast<size_t>(out) + static_cast<size_t>(o)];
+                            accumulate_packed_bias(layer, static_cast<size_t>(o), go[static_cast<size_t>(n) * static_cast<size_t>(out) + static_cast<size_t>(o)]);
                         }
                     }
                 }
@@ -1635,20 +1654,15 @@ inline bool cpu_backward_layer(
             }
 
             case LayerType::Add: {
-                if (inputs.size() < 2 || !inputs[1]) return false;
-                const std::vector<float>& a = *inputs[0];
-                const std::vector<float>& b = *inputs[1];
-                const std::vector<float>& go = *grad_outputs[0];
-                if (a.size() != b.size() || go.size() != a.size()) return false;
-
-                grad_inputs.resize(2);
-                grad_inputs[0].assign(a.size(), 0.0f);
-                grad_inputs[1].assign(a.size(), 0.0f);
-
-                for (size_t i = 0; i < a.size(); ++i) {
-                    const float g = go[i];
-                    grad_inputs[0][i] = g;
-                    grad_inputs[1][i] = g;
+                if (inputs.size() != 2 || !inputs[1]) return false;
+                const size_t a = inputs[0]->size(), b = inputs[1]->size();
+                const auto& go = *grad_outputs[0];
+                const size_t large = std::max(a,b), small = std::min(a,b);
+                if (!small || go.size() != large || large % small != 0) return false;
+                grad_inputs = {std::vector<float>(a,0.0f), std::vector<float>(b,0.0f)};
+                for (size_t i = 0; i < large; ++i) {
+                    grad_inputs[0][i % a] += go[i];
+                    grad_inputs[1][i % b] += go[i];
                 }
                 return true;
             }
@@ -2041,7 +2055,7 @@ inline bool cpu_backward_layer(
                         for (int i = 0; i < norm; ++i) {
                             const float gi = go[static_cast<size_t>(base + i)];
                             layer.grad_weights[static_cast<size_t>(i)] += gi * xhat[static_cast<size_t>(i)];
-                            if (use_bias) layer.grad_bias[static_cast<size_t>(i)] += gi;
+                            if (use_bias) accumulate_packed_bias(layer, static_cast<size_t>(i), gi);
                         }
                     }
                 }
@@ -2104,7 +2118,7 @@ inline bool cpu_backward_layer(
                             const float xh = x[static_cast<size_t>(base + i)] * inv;
                             const float gi = go[static_cast<size_t>(base + i)];
                             layer.grad_weights[static_cast<size_t>(i)] += gi * xh;
-                            if (use_bias) layer.grad_bias[static_cast<size_t>(i)] += gi;
+                            if (use_bias) accumulate_packed_bias(layer, static_cast<size_t>(i), gi);
                         }
                     }
                 }
@@ -2237,7 +2251,7 @@ inline bool cpu_backward_layer(
                                     const float xhat = (x[idx] - mean) * invstd;
                                     layer.grad_weights[static_cast<size_t>(ch)] += go[idx] * xhat;
                                     if (layer.use_bias && ch < static_cast<int>(layer.grad_bias.size())) {
-                                        layer.grad_bias[static_cast<size_t>(ch)] += go[idx];
+                                        accumulate_packed_bias(layer, static_cast<size_t>(ch), go[idx]);
                                     }
                                 }
                             }
@@ -2372,7 +2386,7 @@ inline bool cpu_backward_layer(
                                     const float xhat = (x[idx] - mean) * invstd;
                                     layer.grad_weights[static_cast<size_t>(ch)] += go[idx] * xhat;
                                     if (layer.use_bias && ch < static_cast<int>(layer.grad_bias.size())) {
-                                        layer.grad_bias[static_cast<size_t>(ch)] += go[idx];
+                                        accumulate_packed_bias(layer, static_cast<size_t>(ch), go[idx]);
                                     }
                                 }
                             }
@@ -2386,13 +2400,14 @@ inline bool cpu_backward_layer(
                 const std::vector<float>& x = *inputs[0];
                 const std::vector<float>& grad_out = *grad_outputs[0];
 
-                const int kernel_size = layer.kernel_size > 0 ? layer.kernel_size : 3;
+                const int kernel_size = layer.get_kernel_h();
                 const int in_channels = layer.in_channels > 0 ? layer.in_channels : 1;
                 const int out_channels = layer.out_channels > 0 ? layer.out_channels : 1;
                 int height = layer.input_height > 0 ? layer.input_height : 0;
                 int width = layer.input_width > 0 ? layer.input_width : 0;
-                const int stride = layer.stride > 0 ? layer.stride : 1;
-                const int padding = layer.padding;
+                const int stride = layer.get_stride_h();
+                const int padding = layer.get_pad_h();
+                const int dilation = layer.dilation_h != 1 ? layer.dilation_h : layer.dilation;
 
                 if (in_channels <= 0 || out_channels <= 0 || kernel_size <= 0) return false;
 
@@ -2406,8 +2421,8 @@ inline bool cpu_backward_layer(
                 }
                 if (height <= 0 || width <= 0) return false;
 
-                const int out_h = (height + 2 * padding - kernel_size) / stride + 1;
-                const int out_w = (width + 2 * padding - kernel_size) / stride + 1;
+                const int out_h = (height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+                const int out_w = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
                 const int out_spatial = out_h * out_w;
                 if (out_h <= 0 || out_w <= 0) return false;
                 if (grad_out.size() != static_cast<size_t>(out_channels) * static_cast<size_t>(out_spatial)) return false;
@@ -2420,87 +2435,9 @@ inline bool cpu_backward_layer(
                     * static_cast<size_t>(kernel_size) * static_cast<size_t>(kernel_size);
                 if (!w || layer.getWeightsSize() < w_need) return false;
 
-                if (layer.grad_weights.size() != layer.getWeightsSize()) {
-                    layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
-                }
-
-                std::vector<float> grad_input(in_size, 0.0f);
-
-                for (int oc = 0; oc < out_channels; ++oc) {
-                    for (int ic = 0; ic < in_channels; ++ic) {
-                        for (int kh = 0; kh < kernel_size; ++kh) {
-                            for (int kw = 0; kw < kernel_size; ++kw) {
-                                float grad_weight = 0.0f;
-
-                                for (int oh = 0; oh < out_h; ++oh) {
-                                    for (int ow = 0; ow < out_w; ++ow) {
-                                        const int ih = oh * stride + kh - padding;
-                                        const int iw = ow * stride + kw - padding;
-                                        if (ih < 0 || ih >= height || iw < 0 || iw >= width) continue;
-
-                                        const size_t out_idx = static_cast<size_t>(oc) * static_cast<size_t>(out_spatial)
-                                            + static_cast<size_t>(oh) * static_cast<size_t>(out_w)
-                                            + static_cast<size_t>(ow);
-                                        const size_t in_idx = static_cast<size_t>(ic) * static_cast<size_t>(height) * static_cast<size_t>(width)
-                                            + static_cast<size_t>(ih) * static_cast<size_t>(width)
-                                            + static_cast<size_t>(iw);
-                                        grad_weight += grad_out[out_idx] * x[in_idx];
-                                    }
-                                }
-
-                                const size_t w_idx = ((static_cast<size_t>(oc) * static_cast<size_t>(in_channels)
-                                    + static_cast<size_t>(ic)) * static_cast<size_t>(kernel_size)
-                                    + static_cast<size_t>(kh)) * static_cast<size_t>(kernel_size)
-                                    + static_cast<size_t>(kw);
-                                if (w_idx < layer.grad_weights.size()) {
-                                    layer.grad_weights[w_idx] += grad_weight;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                for (int ic = 0; ic < in_channels; ++ic) {
-                    for (int ih = 0; ih < height; ++ih) {
-                        for (int iw = 0; iw < width; ++iw) {
-                            float grad_sum = 0.0f;
-
-                            for (int oc = 0; oc < out_channels; ++oc) {
-                                for (int kh = 0; kh < kernel_size; ++kh) {
-                                    for (int kw = 0; kw < kernel_size; ++kw) {
-                                        int oh = ih - kh + padding;
-                                        int ow = iw - kw + padding;
-
-                                        if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w &&
-                                            (oh % stride) == 0 && (ow % stride) == 0) {
-                                            oh /= stride;
-                                            ow /= stride;
-
-                                            const size_t out_idx = static_cast<size_t>(oc) * static_cast<size_t>(out_spatial)
-                                                + static_cast<size_t>(oh) * static_cast<size_t>(out_w)
-                                                + static_cast<size_t>(ow);
-                                            const size_t w_idx = ((static_cast<size_t>(oc) * static_cast<size_t>(in_channels)
-                                                + static_cast<size_t>(ic)) * static_cast<size_t>(kernel_size)
-                                                + static_cast<size_t>(kh)) * static_cast<size_t>(kernel_size)
-                                                + static_cast<size_t>(kw);
-                                            if (w_idx < layer.getWeightsSize()) {
-                                                grad_sum += grad_out[out_idx] * w[w_idx];
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            const size_t in_idx = static_cast<size_t>(ic) * static_cast<size_t>(height) * static_cast<size_t>(width)
-                                + static_cast<size_t>(ih) * static_cast<size_t>(width)
-                                + static_cast<size_t>(iw);
-                            grad_input[in_idx] = grad_sum;
-                        }
-                    }
-                }
-
+                if (layer.use_bias && layer.getWeightsSize() < w_need + static_cast<size_t>(out_channels)) return false;
                 grad_inputs.resize(1);
-                grad_inputs[0] = std::move(grad_input);
+                CpuConvolution::backward(x,grad_out,grad_inputs[0],layer,height,width,in_channels,out_channels,kernel_size,stride,padding,dilation);
                 return true;
             }
 
@@ -2509,9 +2446,9 @@ inline bool cpu_backward_layer(
                 const std::vector<float>& grad_out = *grad_outputs[0];
                 const int in_channels = layer.in_channels > 0 ? layer.in_channels : 1;
                 const int out_channels = layer.out_channels > 0 ? layer.out_channels : 1;
-                const int kernel_size = layer.kernel_h > 0 ? layer.kernel_h : 3;
-                const int stride = layer.stride_h > 0 ? layer.stride_h : 1;
-                const int padding = layer.pad_h >= 0 ? layer.pad_h : 0;
+                const int kernel_size = layer.get_kernel_h();
+                const int stride = layer.get_stride_h();
+                const int padding = layer.get_pad_h();
                 const int length = static_cast<int>(x.size()) / std::max(1, in_channels);
                 const int out_length = (length + 2 * padding - kernel_size) / stride + 1;
                 if (length <= 0 || out_length <= 0) return false;
@@ -2533,7 +2470,7 @@ inline bool cpu_backward_layer(
                 for (int oc = 0; oc < out_channels; ++oc) {
                     for (int ol = 0; ol < out_length; ++ol) {
                         const float g = grad_out[static_cast<size_t>(oc) * static_cast<size_t>(out_length) + static_cast<size_t>(ol)];
-                        if (layer.use_bias && oc < static_cast<int>(layer.grad_bias.size())) layer.grad_bias[static_cast<size_t>(oc)] += g;
+                        if (layer.use_bias && oc < static_cast<int>(layer.grad_bias.size())) accumulate_packed_bias(layer, static_cast<size_t>(oc), g);
                         for (int ic = 0; ic < in_channels; ++ic) {
                             for (int kk = 0; kk < kernel_size; ++kk) {
                                 const int il = ol * stride + kk - padding;
@@ -2557,9 +2494,9 @@ inline bool cpu_backward_layer(
                 const int channels = layer.in_channels > 0 ? layer.in_channels : 0;
                 int height = layer.input_height > 0 ? layer.input_height : 0;
                 int width = layer.input_width > 0 ? layer.input_width : 0;
-                const int kernel_size = layer.kernel_h > 0 ? layer.kernel_h : 3;
-                const int stride = layer.stride_h > 0 ? layer.stride_h : 1;
-                const int padding = layer.pad_h >= 0 ? layer.pad_h : 0;
+                const int kernel_size = layer.get_kernel_h();
+                const int stride = layer.get_stride_h();
+                const int padding = layer.get_pad_h();
                 if (channels <= 0) return false;
                 if ((height <= 0 || width <= 0) && !x.empty() && (x.size() % static_cast<size_t>(channels)) == 0) {
                     const size_t hw = x.size() / static_cast<size_t>(channels);
@@ -2590,7 +2527,7 @@ inline bool cpu_backward_layer(
                         for (int ow = 0; ow < out_w; ++ow) {
                             const float g = grad_out[static_cast<size_t>(c) * static_cast<size_t>(out_h) * static_cast<size_t>(out_w)
                                 + static_cast<size_t>(oh) * static_cast<size_t>(out_w) + static_cast<size_t>(ow)];
-                            if (layer.use_bias && c < static_cast<int>(layer.grad_bias.size())) layer.grad_bias[static_cast<size_t>(c)] += g;
+                            if (layer.use_bias && c < static_cast<int>(layer.grad_bias.size())) accumulate_packed_bias(layer, static_cast<size_t>(c), g);
                             for (int kh = 0; kh < kernel_size; ++kh) {
                                 for (int kw = 0; kw < kernel_size; ++kw) {
                                     const int ih = oh * stride + kh - padding;
@@ -2617,9 +2554,9 @@ inline bool cpu_backward_layer(
                 const std::vector<float>& grad_out = *grad_outputs[0];
                 const int in_c = layer.in_channels > 0 ? layer.in_channels : 1;
                 const int out_c = layer.out_channels > 0 ? layer.out_channels : 1;
-                const int k = layer.kernel_h > 0 ? layer.kernel_h : layer.get_kernel_h();
-                const int stride = layer.stride_h > 0 ? layer.stride_h : layer.get_stride_h();
-                const int pad = layer.pad_h >= 0 ? layer.pad_h : layer.get_pad_h();
+                const int k = layer.get_kernel_h();
+                const int stride = layer.get_stride_h();
+                const int pad = layer.get_pad_h();
                 int H = layer.input_height > 0 ? layer.input_height : 0;
                 int W = layer.input_width > 0 ? layer.input_width : 0;
                 if ((H <= 0 || W <= 0) && !x.empty() && (x.size() % static_cast<size_t>(in_c)) == 0) {
@@ -2654,7 +2591,7 @@ inline bool cpu_backward_layer(
                             const float g = grad_out[static_cast<size_t>(oc) * static_cast<size_t>(out_h) * static_cast<size_t>(out_w)
                                 + static_cast<size_t>(oh) * static_cast<size_t>(out_w) + static_cast<size_t>(ow)];
                             if (layer.use_bias && oc < static_cast<int>(layer.grad_bias.size())) {
-                                layer.grad_bias[static_cast<size_t>(oc)] += g;
+                                accumulate_packed_bias(layer, static_cast<size_t>(oc), g);
                             }
                         }
                     }
@@ -2940,6 +2877,8 @@ inline bool cpu_backward_layer(
                 if (go.size() != x.size()) return false;
 
                 const float p = std::clamp(layer.dropout_p, 0.0f, 1.0f);
+                if (!training || p == 0.0f) { grad_inputs={go}; return true; }
+                if (p == 1.0f) { grad_inputs={std::vector<float>(go.size(),0.0f)}; return true; }
                 const float scale = (p < 1.0f) ? (1.0f / (1.0f - p)) : 0.0f;
 
                 grad_inputs.resize(1);
@@ -2948,8 +2887,7 @@ inline bool cpu_backward_layer(
                 const std::vector<float>* y = (inputs.size() >= 2 && inputs[1] && inputs[1]->size() == go.size()) ? inputs[1] : nullptr;
                 if (!y) {
                     // Fallback déterministe (inference/no-mask): identité.
-                    grad_inputs[0] = go;
-                    return true;
+                    return false;
                 }
 
                 for (size_t i = 0; i < go.size(); ++i) {
@@ -2965,6 +2903,8 @@ inline bool cpu_backward_layer(
                 if (go.size() != x.size()) return false;
 
                 const float p = std::clamp(layer.dropout_p, 0.0f, 1.0f);
+                if (!training || p == 0.0f) { grad_inputs={go}; return true; }
+                if (p == 1.0f) { grad_inputs={std::vector<float>(go.size(),0.0f)}; return true; }
                 const float scale = (p < 1.0f) ? (1.0f / (1.0f - p)) : 0.0f;
 
                 grad_inputs.resize(1);
@@ -2972,8 +2912,7 @@ inline bool cpu_backward_layer(
 
                 const std::vector<float>* y = (inputs.size() >= 2 && inputs[1] && inputs[1]->size() == go.size()) ? inputs[1] : nullptr;
                 if (!y) {
-                    grad_inputs[0] = go;
-                    return true;
+                    return false;
                 }
 
                 for (size_t i = 0; i < go.size(); ++i) {
@@ -2989,6 +2928,8 @@ inline bool cpu_backward_layer(
                 if (go.size() != x.size()) return false;
 
                 const float p = std::clamp(layer.dropout_p, 0.0f, 1.0f);
+                if (!training || p == 0.0f) { grad_inputs={go}; return true; }
+                if (p == 1.0f) { grad_inputs={std::vector<float>(go.size(),0.0f)}; return true; }
                 const float alpha = 1.6732632423543772848170429916717f;
                 const float scale_selu = 1.0507009873554804934193349852946f;
                 const float alpha_p = -alpha * scale_selu;
@@ -3001,8 +2942,7 @@ inline bool cpu_backward_layer(
 
                 const std::vector<float>* y = (inputs.size() >= 2 && inputs[1] && inputs[1]->size() == go.size()) ? inputs[1] : nullptr;
                 if (!y) {
-                    grad_inputs[0] = go;
-                    return true;
+                    return false;
                 }
 
                 for (size_t i = 0; i < go.size(); ++i) {
@@ -3163,7 +3103,8 @@ inline bool cpu_backward_layer(
                 const int in_channels = layer.in_channels > 0 ? layer.in_channels : 0;
                 const int in_h = layer.input_height > 0 ? layer.input_height : 0;
                 const int in_w = layer.input_width > 0 ? layer.input_width : 0;
-                if (r <= 0 || in_channels <= 0 || in_h <= 0 || in_w <= 0) return false;
+                if (r <= 0 || static_cast<float>(r) != layer.scale_h ||
+                    in_channels <= 0 || in_h <= 0 || in_w <= 0) return false;
                 const int out_channels = in_channels / (r * r);
                 const int out_h = in_h * r;
                 const int out_w = in_w * r;
@@ -3408,19 +3349,15 @@ inline bool cpu_backward_layer(
             }
 
             case LayerType::Stack: {
-                const std::vector<float>& x = *inputs[0];
+                const auto& go = *grad_outputs[0];
                 size_t total = 0;
-                for (const auto* g : grad_outputs) {
-                    if (!g) return false;
-                    total += g->size();
-                }
-                if (total != x.size()) return false;
-
-                grad_inputs.resize(1);
-                grad_inputs[0].clear();
-                grad_inputs[0].reserve(total);
-                for (const auto* g : grad_outputs) {
-                    grad_inputs[0].insert(grad_inputs[0].end(), g->begin(), g->end());
+                for (auto* input : inputs) { if (!input) return false; total += input->size(); }
+                if (go.size() != total) return false;
+                grad_inputs.resize(inputs.size());
+                size_t offset = 0;
+                for (size_t i = 0; i < inputs.size(); ++i) {
+                    grad_inputs[i].assign(go.begin() + offset, go.begin() + offset + inputs[i]->size());
+                    offset += inputs[i]->size();
                 }
                 return true;
             }
@@ -3545,7 +3482,7 @@ inline bool cpu_backward_layer(
                         const float stdv = std::exp(0.5f * lv);
                         const float inv_std = (stdv > 1e-12f) ? (1.0f / stdv) : 0.0f;
                         const float eps_recon = (z_or_eps[i] - mu[i]) * inv_std;
-                        grad_inputs[1][i] = go[i] * 0.5f * stdv * eps_recon;
+                        grad_inputs[1][i] = (logvar[i] >= -20.0f && logvar[i] <= 20.0f) ? go[i] * 0.5f * stdv * eps_recon : 0.0f;
                     }
                     return true;
                 }

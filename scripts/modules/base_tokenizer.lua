@@ -6,12 +6,13 @@
 --   - Pour forcer la présence: $MIMIR_REQUIRE_BASE_TOKENIZER=1
 --
 -- Usage (dans un script):
---   local BaseTok = dofile("scripts/modules/base_tokenizer.lua")
+--   local BaseTok = dofile(ROOTWORK.."/scripts/modules/base_tokenizer.lua")
 --   BaseTok.load_base({ max_vocab = 50000, require = true })
 --   cfg.vocab_size = BaseTok.vocab_size()  -- important pour Embedding
 
+---@class MimirBaseTokenizerModule
 local BaseTok = {}
-local FS = dofile("scripts/modules/fs.lua")
+local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 
 local function env_str(k, d)
   local v = os.getenv(k)
@@ -43,6 +44,9 @@ function BaseTok.default_path()
   return env_str("MIMIR_BASE_TOKENIZER", "checkpoint/base_tokenizer/tokenizer.json")
 end
 
+---@param opts? MimirBaseTokenizerOptions
+---@return boolean ok
+---@return string? err
 function BaseTok.load_base(opts)
   opts = opts or {}
   local path = opts.path or BaseTok.default_path()

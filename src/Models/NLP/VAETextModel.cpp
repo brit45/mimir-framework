@@ -1,10 +1,33 @@
 #include "VAETextModel.hpp"
 
 #include <algorithm>
+#include <stdexcept>
 
 VAETextModel::VAETextModel() {
     setModelName("VAETextModel");
     setHasEncoder(false);
+}
+
+std::optional<Model::TrainStepResult> VAETextModel::trainStep(const TrainStepRequest& request) {
+    if (!request.optimizer) {
+        return std::nullopt;
+    }
+    const auto text_it = request.int_inputs.find("text_ids");
+    if (text_it == request.int_inputs.end() || !text_it->second) {
+        return std::nullopt;
+    }
+
+    static const std::vector<float> empty_input;
+    const std::vector<float>* input = &empty_input;
+    if (const auto it = request.float_inputs.find("__input__"); it != request.float_inputs.end() && it->second) {
+        input = it->second;
+    } else if (const auto it = request.float_inputs.find("image"); it != request.float_inputs.end() && it->second) {
+        input = it->second;
+    }
+
+    return vae_training_.trainText(*this, *input, *text_it->second, request.target,
+                                   *request.optimizer, request.learning_rate,
+                                   request.mode, request.grad_scale);
 }
 
 void VAETextModel::buildFromConfig(const Config& cfg) {

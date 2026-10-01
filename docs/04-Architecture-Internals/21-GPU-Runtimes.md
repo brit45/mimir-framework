@@ -355,7 +355,7 @@ backend est proposée au suivant.
 
 ## 8) Ajouter un nouveau fast-path GPU
 
-Pré-requis pratique : vérifier que le nouveau case est intégré au dispatch du forward principal (direct ou via `forwardLayer()`) pour être effectivement utilisé au runtime.
+Les layers du modèle passent par `RuntimeRouter` en forward et backward. Ajouter le calcul dans le runtime, déclarer sa capacité réelle et tester le runtime sélectionné ; aucun nouveau switch mathématique ne doit être ajouté dans `Model.cpp`.
 
 1. Ajouter les flags dans `RuntimeConfig` (`src/runtimes/AbstractRuntime.hpp`)
 2. Ajouter le parsing `fromEnv` correspondant
@@ -368,3 +368,25 @@ Pré-requis pratique : vérifier que le nouveau case est intégré au dispatch d
 - [Page précédente : Internals : CLI (binaire `mimir`) et points d’entrée](20-CLI-EntryPoints.md)
 - [Index de la documentation](../00-INDEX.md)
 - [Page suivante : Internals : Execution Planner (C++)](22-Planning.md)
+
+## OpenCL et Vulkan : autograd partagé
+
+`src/runtimes/NativeBackward.hpp` orchestre les noyaux natifs des deux backends :
+
+| Famille | Forward et backward natifs communs |
+|---|---|
+| Matrices | Linear, MatMul, BatchMatMul |
+| Arithmétique | Add, Subtract, Multiply, Divide, pour les formes acceptées |
+| Activations | ReLU, LeakyReLU, Sigmoid, Tanh, SiLU, GELU, Softplus, Mish, HardSigmoid, HardSwish |
+
+Les autres dérivées passent par le CPU via le dispatcher. Les transpositions de préparation restent sur l’hôte. Les gradients de paramètres ne sont validés qu’après réussite de tous les noyaux : un échec suivi d’un repli CPU ne doit pas les accumuler deux fois.
+
+Compilation et validation :
+
+```bash
+cmake -S . -B build -DENABLE_OPENCL=ON -DENABLE_VULKAN=ON -DMIMIR_ENABLE_TESTS=ON -DBUILD_TESTING=ON
+cmake --build build -j2
+ctest --test-dir build --output-on-failure -R 'AutogradTest\.|RuntimeTest.*BackwardParity'
+```
+
+Les comparaisons de référence ont été exécutées avec Rusticl/llvmpipe et Vulkan/Lavapipe. Elles valident le calcul et le routage ; elles ne mesurent pas les performances d’un GPU physique. La couverture native complète du CPU n’est pas encore atteinte.

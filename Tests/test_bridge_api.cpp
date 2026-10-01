@@ -105,6 +105,24 @@ static bool assertParamsAllocated(const ScriptingContext& ctx, const std::string
 // ---------------------------------------------------------------------------
 
 static int testBridgeCommonData() {
+    const char* previous_rootwork = std::getenv(ScriptingBridgeCommon::kEnvRootWork);
+    const std::string saved_rootwork = previous_rootwork ? previous_rootwork : "";
+    const fs::path configured_root = fs::temp_directory_path() / "mimir bridge root";
+#if defined(_WIN32)
+    _putenv_s(ScriptingBridgeCommon::kEnvRootWork, configured_root.string().c_str());
+#else
+    setenv(ScriptingBridgeCommon::kEnvRootWork, configured_root.string().c_str(), 1);
+#endif
+    const std::string rootwork = ScriptingBridgeCommon::ensureRootWorkEnv();
+    MIMIR_ASSERT(fs::path(rootwork) == fs::absolute(configured_root).lexically_normal(),
+                 "ROOTWORK explicite non conserve");
+#if defined(_WIN32)
+    _putenv_s(ScriptingBridgeCommon::kEnvRootWork, saved_rootwork.c_str());
+#else
+    if (previous_rootwork) setenv(ScriptingBridgeCommon::kEnvRootWork, saved_rootwork.c_str(), 1);
+    else unsetenv(ScriptingBridgeCommon::kEnvRootWork);
+#endif
+
     const std::string avail = ScriptingBridgeCommon::buildAvailableJson();
     MIMIR_ASSERT(!avail.empty(), "buildAvailableJson vide");
     MIMIR_ASSERT(avail.find("basic_mlp") != std::string::npos,

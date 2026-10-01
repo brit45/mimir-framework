@@ -8,6 +8,7 @@
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
 #include "Helpers.hpp"
+#include "scriptings/ScriptingBridgeCommon.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -48,6 +49,8 @@ bool _mimir_live_params_overrides_enabled(const T& p) {
 LuaScripting::LuaScripting() {
     L = luaL_newstate();
     luaL_openlibs(L);  // Charger les bibliothèques standard Lua
+    setString(ScriptingBridgeCommon::kEnvRootWork,
+              ScriptingBridgeCommon::ensureRootWorkEnv());
     registerAPI();
 }
 
@@ -207,6 +210,9 @@ void LuaScripting::registerAPI() {
     lua_pushcfunction(L, lua_totalParams);
     lua_setfield(L, -2, "total_params");
 
+    lua_pushcfunction(L, lua_modelGetConfig);
+    lua_setfield(L, -2, "get_config");
+
     lua_pushcfunction(L, lua_getModelLayers);
     lua_setfield(L, -2, "get_layers");
 
@@ -234,6 +240,24 @@ void LuaScripting::registerAPI() {
     
     lua_pushcfunction(L, lua_getGradients);
     lua_setfield(L, -2, "get_gradients");
+
+    lua_pushcfunction(L, lua_lumenText2Img);
+    lua_setfield(L, -2, "lumen_text2img");
+
+    lua_pushcfunction(L, lua_lumenBeginVaeCalibration);
+    lua_setfield(L, -2, "lumen_begin_vae_calibration");
+
+    lua_pushcfunction(L, lua_lumenAddVaeCalibrationImage);
+    lua_setfield(L, -2, "lumen_add_vae_calibration_image");
+
+    lua_pushcfunction(L, lua_lumenFinishVaeCalibration);
+    lua_setfield(L, -2, "lumen_finish_vae_calibration");
+
+    lua_pushcfunction(L, lua_lumenTrainStep);
+    lua_setfield(L, -2, "lumen_train_step");
+
+    lua_pushcfunction(L, lua_lumenValidateStep);
+    lua_setfield(L, -2, "lumen_validate_step");
     
     // Hardware
     lua_pushcfunction(L, lua_setHardwareAccel);
@@ -421,6 +445,9 @@ void LuaScripting::registerAPI() {
     
     lua_pushcfunction(L, lua_getDataset);
     lua_setfield(L, -2, "get");
+
+    lua_pushcfunction(L, lua_releaseDatasetItem);
+    lua_setfield(L, -2, "release");
     
     lua_pushcfunction(L, lua_prepareSequences);
     lua_setfield(L, -2, "prepare_sequences");
@@ -568,9 +595,15 @@ void LuaScripting::registerAPI() {
     
     lua_setfield(L, -2, "Htop");  // Mimir.Htop
     
-    // ========== Sous-table "Mimir.Viz" (Visualizer SFML) ==========
+    // ========== Sous-table "Mimir.Viz" (backend sélectionné) ==========
     lua_newtable(L);
     
+    lua_pushcfunction(L, lua_vizConfigure);
+    lua_setfield(L, -2, "configure");
+    lua_pushcfunction(L, lua_vizPollEvents);
+    lua_setfield(L, -2, "poll_events");
+    lua_pushcfunction(L, lua_vizBackend);
+    lua_setfield(L, -2, "backend");
     lua_pushcfunction(L, lua_vizCreate);
     lua_setfield(L, -2, "create");
     
@@ -594,6 +627,9 @@ void LuaScripting::registerAPI() {
 
     lua_pushcfunction(L, lua_vizSetValidation);
     lua_setfield(L, -2, "set_validation");
+
+    lua_pushcfunction(L, lua_vizValidationEnabled);
+    lua_setfield(L, -2, "validation_enabled");
     
     lua_pushcfunction(L, lua_vizAddLossPoint);
     lua_setfield(L, -2, "add_loss_point");

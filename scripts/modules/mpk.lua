@@ -6,6 +6,7 @@
 --   2) binary-v4  : opaque typed representation (no embedded source)
 -- Legacy JSON and binary-v1/v2/v3 remain readable, but are never written.
 
+---@class MimirMPKModule
 local M = {}
 
 local MPK_BINARY_MAGIC = "MPKB"
@@ -797,6 +798,10 @@ end
 
 function M.decode_pseudocode(s)
   return parse_pseudocode(s)
+end
+
+function M.decode_json(text)
+  return parse_json_with_fallback(text)
 end
 
 function M.read_json_file(path)

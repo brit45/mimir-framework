@@ -1,7 +1,7 @@
 #!/usr/bin/env lua
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 
 local function logf(fmt, ...)
   local msg = string.format(fmt, ...)

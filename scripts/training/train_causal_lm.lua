@@ -8,7 +8,7 @@
 -- All CLI parsing and --override handling goes through scripts/modules/args.lua.
 
 local DEFAULT_CONFIG_PATH = "configs/causal_lm.json"
-local Args = dofile("scripts/modules/args.lua")
+local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}
 local cli_config_path =
     Args.get_str(opts, "conf", Args.get_str(opts, "config", DEFAULT_CONFIG_PATH))
@@ -103,7 +103,7 @@ if type(tokenizer_path) ~= "string" or tokenizer_path == "" then
   CONF.tokenizer = tokenizer_cfg
 end
 
-local CausalTokenizer = dofile("scripts/modules/causal_lm_tokenizer.lua")
+local CausalTokenizer = dofile(ROOTWORK.."/scripts/modules/causal_lm_tokenizer.lua")
 local tokens, tokenizer_status = CausalTokenizer.ensure({
   corpus = corpus,
   path = tokenizer_path,

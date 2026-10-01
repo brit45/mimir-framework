@@ -8,6 +8,7 @@
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
 #include "Helpers.hpp"
+#include "runtimes/LayerOps.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -21,6 +22,7 @@
 #include <unordered_set>
 #include <type_traits>
 #include <utility>
+#include <thread>
 
 int LuaScripting::lua_allocateParams(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
@@ -145,6 +147,7 @@ int LuaScripting::lua_getModelLayers(lua_State* L) {
         lua_pushinteger(L, la.num_groups);    lua_setfield(L, -2, "num_groups");
         lua_pushnumber(L, la.dropout_p);      lua_setfield(L, -2, "dropout_p");
         lua_pushinteger(L, la.axis);          lua_setfield(L, -2, "axis");
+        lua_pushinteger(L, la.skipInputIndex()); lua_setfield(L, -2, "skip_input_index");
         lua_pushinteger(L, la.concat_axis);   lua_setfield(L, -2, "concat_axis");
         lua_pushinteger(L, la.split_axis);    lua_setfield(L, -2, "split_axis");
         lua_pushinteger(L, la.num_splits);    lua_setfield(L, -2, "num_splits");
@@ -281,6 +284,7 @@ int LuaScripting::lua_pushLayer(lua_State* L) {
             set_ints("shape", layer->shape);
             set_ints("permute_dims", layer->permute_dims);
             set_int("concat_axis", layer->concat_axis);
+            set_int("skip_input_index", layer->skip_input_index);
             set_int("num_splits", layer->num_splits);
             set_ints("split_sizes", layer->split_sizes);
             set_int("split_axis", layer->split_axis);
@@ -383,6 +387,12 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
         return 2;
     }
     
+    if (ctx.asyncMonitor) {
+        ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
+        ctx.currentModel->publishRuntimeConfiguration();
+        ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+    }
+
     // Argument 1: input
     // - soit un tableau (array) de floats/ints
     // - soit une table nommée { __input__ = <array_float>, text_ids = <array_int> }
@@ -415,6 +425,8 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
             bf.h = f.h;
             bf.channels = f.channels;
             bf.pixels_real = std::move(f.pixels_real);
+            bf.heatmap_kind = f.heatmap_kind;
+            bf.tensor_info = std::move(f.tensor_info);
                             bf.label = std::move(f.label);
             frames.push_back(std::move(bf));
         }
@@ -690,23 +702,24 @@ int LuaScripting::lua_optimizerStep(lua_State* L) {
         if (!ctx.currentModel->getSerializedOptimizer()) {
             Optimizer opt;
             opt.initial_lr = lr;
-            if (std::string(opt_type) == "sgd") {
-                opt.type = OptimizerType::SGD;
-            } else if (std::string(opt_type) == "adam") {
-                opt.type = OptimizerType::ADAM;
-            } else {
-                opt.type = OptimizerType::ADAMW;
+            if (!optimizerTypeFromString(opt_type, opt.type)) {
+                throw std::runtime_error("optimiseur inconnu: " + std::string(opt_type));
             }
             const auto& cfg = ctx.currentModel->modelConfig;
-            if (cfg.contains("beta1")) opt.beta1 = cfg["beta1"].get<float>();
-            if (cfg.contains("beta2")) opt.beta2 = cfg["beta2"].get<float>();
-            if (cfg.contains("epsilon")) opt.eps = cfg["epsilon"].get<float>();
-            if (cfg.contains("weight_decay")) opt.weight_decay = cfg["weight_decay"].get<float>();
+            configureOptimizerFromJson(opt, cfg);
+            optimizerTypeFromString(opt_type, opt.type);
             ctx.currentModel->setSerializedOptimizer(std::move(opt));
         }
         Optimizer* opt = ctx.currentModel->getMutableSerializedOptimizer();
         if (!opt) throw std::runtime_error("optimizer state unavailable");
         opt->initial_lr = lr;
+        if (ctx.asyncMonitor) {
+            ctx.currentModel->publishRuntimeConfiguration(opt);
+            ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+            ctx.asyncMonitor->updateRuntimeTrainParams(static_cast<float>(lr), opt->warmup_steps, 0, 0, "mse");
+            const auto live = ctx.asyncMonitor->liveTrainParamsSnapshot();
+            if (live.overrides_enabled) { lr = live.lr; opt->initial_lr = live.lr; opt->warmup_steps = live.lr_warmup_steps; }
+        }
         ctx.currentModel->optimizerStep(*opt, lr, nullptr);
         lua_pushboolean(L, true);
         return 1;
@@ -719,7 +732,7 @@ int LuaScripting::lua_optimizerStep(lua_State* L) {
 
 int LuaScripting::lua_setHardwareAccel(lua_State* L) {
     bool enable = lua_toboolean(L, 1);
-    Model::setHardwareAcceleration(enable);
+    RuntimeLayerOps::setHardwareAcceleration(enable);
     lua_pushboolean(L, true);
     return 1;
 }
@@ -1581,7 +1594,11 @@ int LuaScripting::lua_guardSetLimit(lua_State* L) {
         bytes = static_cast<size_t>(value);
     }
     
-    guard.setLimit(bytes);
+    const double max_ram_gb = static_cast<double>(bytes) /
+                              (1024.0 * 1024.0 * 1024.0);
+
+    // Un guard actif doit toujours disposer du chemin d'éviction LRU/spill.
+    DynamicTensorAllocator::instance().configure(max_ram_gb, true, true);
     
     lua_pushboolean(L, true);
     return 1;
@@ -1787,31 +1804,11 @@ int LuaScripting::lua_htopCreate(lua_State* L) {
 
         ctx.asyncMonitor->start(enable_htop, enable_viz, viz_config);
 
-        // Appliquer les options CSV côté HtopDisplay si présent.
-        // Par défaut, AsyncMonitor désactive le CSV Htop si la Viz est active,
-        // pour éviter les écritures concurrentes.
-        if (enable_htop) {
-            auto h = ctx.asyncMonitor->getHtop();
-            if (h) {
-                if (csv_path.has_value() && !csv_path->empty()) {
-                    h->setCsvLogFile(*csv_path);
-                }
-
-                bool enable_csv = !enable_viz;
-                if (csv_path.has_value()) {
-                    // Si l'utilisateur fournit un chemin, activer par défaut.
-                    enable_csv = true;
-                }
-                if (csv_flag.has_value()) {
-                    enable_csv = *csv_flag;
-                }
-                if (csv_enabled.has_value()) {
-                    enable_csv = *csv_enabled;
-                }
-
-                h->setCsvEnabled(enable_csv);
-            }
-        }
+        bool enable_csv = true;
+        if (csv_flag.has_value()) enable_csv = *csv_flag;
+        if (csv_enabled.has_value()) enable_csv = *csv_enabled;
+        ctx.asyncMonitor->configureMetricsCsv(
+            csv_path.value_or("checkpoints/loss_history.csv"), enable_csv);
 
         ctx.addLog(std::string("AsyncMonitor démarré (") + (enable_htop ? "htop enabled" : "htop disabled") + ")");
         lua_pushboolean(L, true);
@@ -1908,11 +1905,8 @@ int LuaScripting::lua_htopUpdate(lua_State* L) {
         metrics.opt_weight_decay = get_num("opt_weight_decay", get_num("optWeightDecay", 0.0f));
 
         auto parse_opt_type = [&](const std::string& s) -> int {
-            std::string t = s;
-            std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-            if (t == "sgd") return 0;
-            if (t == "adam") return 1;
-            if (t == "adamw") return 2;
+            OptimizerType type;
+            if (optimizerTypeFromString(s, type)) return static_cast<int>(type);
             return metrics.opt_type;
         };
 
@@ -2341,9 +2335,25 @@ int LuaScripting::lua_vizSetValidation(lua_State* L) {
     const float kl = getNumField("kl", 0.0f);
     const float align = getNumField("align", 0.0f);
 
+    lua_getfield(L, 1, "enabled");
+    if (lua_isboolean(L, -1)) {
+        ctx.asyncMonitor->updateRuntimeValidationEnabled(lua_toboolean(L, -1));
+    }
+    lua_pop(L, 1);
+
     ctx.asyncMonitor->updateValidation(in_progress, step, done, total, has, ok, recon, kl, align);
 
     lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_vizValidationEnabled(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.asyncMonitor) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    lua_pushboolean(L, ctx.asyncMonitor->validationEnabledSnapshot());
     return 1;
 }
 
@@ -2429,5 +2439,46 @@ int LuaScripting::lua_extractKeywords(lua_State* L) {
         lua_rawseti(L, -2, i + 1);
     }
     
+    return 1;
+}
+
+int LuaScripting::lua_vizBackend(lua_State* L) {
+#ifdef ENABLE_VIZ
+    lua_pushstring(L, vizBackendName());
+#else
+    lua_pushstring(L, "NONE");
+#endif
+    return 1;
+}
+
+int LuaScripting::lua_vizConfigure(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    auto& ctx = LuaContext::getInstance();
+    auto viz = ctx.asyncMonitor ? ctx.asyncMonitor->getViz() : nullptr;
+    if (!viz) { lua_pushboolean(L, false); lua_pushstring(L, "Viz non créée"); return 2; }
+    try {
+        json config = luaTableToJson(L, 1);
+        if (config.is_array() && config.empty()) config = json::object();
+        viz->configureScript(config);
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false); lua_pushstring(L, e.what()); return 2;
+    }
+}
+
+int LuaScripting::lua_vizPollEvents(lua_State* L) {
+    const auto timeout = luaL_optinteger(L, 1, 0);
+    luaL_argcheck(L, timeout >= 0 && timeout <= 1000, 1, "timeout_ms must be 0..1000");
+    auto& ctx = LuaContext::getInstance();
+    auto viz = ctx.asyncMonitor ? ctx.asyncMonitor->getViz() : nullptr;
+    json events = json::array();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+    do {
+        if (viz) events = viz->pollScriptEvents();
+        if (!events.empty() || !viz || timeout == 0 || std::chrono::steady_clock::now() >= deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    } while (true);
+    jsonToLuaTable(L, events);
     return 1;
 }

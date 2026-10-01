@@ -7,6 +7,8 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+## [3.5.0] - 2026-10-01
+
 ### ✨ Ajouté — CLI `--run <task>` et JSON Schema `--conf`
 
 - **`--run <task>`** : nouvel argument CLI pour sélectionner une tâche nommée depuis la section `tasks` d'un fichier `--conf`.

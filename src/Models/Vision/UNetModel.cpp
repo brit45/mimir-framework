@@ -152,6 +152,7 @@ void UNetModel::buildInto(Model& model, const Config& cfg) {
         // Concat skip
         model.push(b + "/concat", "Concat", 0);
         if (auto* L = model.getLayerByName(b + "/concat")) {
+            L->skip_input_index = 1;
             L->inputs = {x, skips[static_cast<size_t>(d)]};
             L->output = b + "/cat";
             L->concat_axis = 0;
