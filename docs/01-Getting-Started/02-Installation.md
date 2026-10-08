@@ -16,6 +16,7 @@ Pour compiler Mímir, il faut CMake, C++17 et quelques dépendances. Cette page 
 ## Sur cette page
 
 - [Dépendances](#dépendances)
+- [Google Colab](#google-colab-cuda)
 - [🔨 Build — Guide par OS](#build-guide-par-os)
 - [📋 Options CMake principales](#options-cmake-principales)
 - [🧪 Vérifier l'installation](#vérifier-linstallation)
@@ -55,6 +56,45 @@ Pour compiler Mímir, il faut CMake, C++17 et quelques dépendances. Cette page 
 ---
 
 ## 🔨 Build — Guide par OS
+
+### Google Colab (CUDA)
+
+Sélectionnez d'abord un environnement d'exécution avec GPU dans Colab, puis
+vérifiez que le GPU NVIDIA est visible:
+
+```bash
+!nvidia-smi
+```
+
+Après avoir cloné le dépôt dans `/content/tensor-2`, installez les dépendances
+de compilation:
+
+```bash
+!apt-get update -qq
+!apt-get install -y ninja-build build-essential pkg-config \
+  liblua5.3-dev liblz4-dev \
+  libavcodec-dev libavformat-dev libavutil-dev \
+  libswresample-dev libswscale-dev
+```
+
+Compilez ensuite le binaire headless. Le preset détecte automatiquement CUDA
+ou ROCm selon le toolkit disponible et limite la compilation à deux tâches
+parallèles afin de rester compatible avec la mémoire des sessions Colab
+gratuites:
+
+```bash
+%cd /content/tensor-2
+!cmake --preset colab-cuda
+!cmake --build --preset build-colab-cuda
+!./build-colab/bin/mimir --version
+```
+
+Le preset `colab-cuda` active l'auto-détection CUDA/ROCm, OpenMP, SIMD, FFmpeg
+et LZ4. Il désactive Vulkan, OpenCL, l'interface graphique, les bridges
+externes, les exemples et les tests. Vérifiez les lignes `CUDA Compute` et
+`ROCm Compute` du résumé CMake. Si les deux valent `OFF`, vérifiez que le
+notebook utilise bien un environnement GPU et que `nvcc` ou `hipcc` est
+accessible.
 
 ### Linux (Ubuntu/Debian)
 
@@ -215,6 +255,9 @@ cmake -S . -B build [OPTIONS]
 
 # Activer ROCm (AMD GPU)
 -DENABLE_ROCM=ON -DMIMIR_ROCM_ROOT=/opt/rocm
+
+# Détecter automatiquement CUDA et ROCm
+-DMIMIR_AUTO_DETECT_GPU_BACKENDS=ON
 
 # Build static (pas de dépendances dynamiques)
 -DBUILD_MIMIR_STATIC=ON

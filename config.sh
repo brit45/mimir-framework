@@ -36,6 +36,7 @@ declare -a FEATURE_KEYS=(
   ENABLE_OPENMP
   ENABLE_VULKAN
   ENABLE_OPENCL
+  MIMIR_AUTO_DETECT_GPU_BACKENDS
   ENABLE_CUDA
   ENABLE_ROCM
   ENABLE_FFMPEG
@@ -52,6 +53,7 @@ declare -A FEATURE_LABELS=(
   [ENABLE_OPENMP]="OpenMP"
   [ENABLE_VULKAN]="Vulkan Compute"
   [ENABLE_OPENCL]="OpenCL Compute"
+  [MIMIR_AUTO_DETECT_GPU_BACKENDS]="Auto-détection GPU (CUDA/ROCm)"
   [ENABLE_CUDA]="CUDA Compute"
   [ENABLE_ROCM]="ROCm Compute"
   [ENABLE_FFMPEG]="FFmpeg (audio/vidéo)"
@@ -68,6 +70,7 @@ declare -A FEATURE_DEFAULTS=(
   [ENABLE_OPENMP]=1
   [ENABLE_VULKAN]=1
   [ENABLE_OPENCL]=1
+  [MIMIR_AUTO_DETECT_GPU_BACKENDS]=0
   [ENABLE_CUDA]=0
   [ENABLE_ROCM]=0
   [ENABLE_FFMPEG]=1
@@ -336,10 +339,12 @@ fi
 if [[ "${FEATURE_VALUES[ENABLE_OPENCL]}" == "1" ]]; then
   command -v clinfo >/dev/null 2>&1 && clinfo | sed -n '1,20p' || true
 fi
-if [[ "${FEATURE_VALUES[ENABLE_CUDA]}" == "1" ]]; then
+if [[ "${FEATURE_VALUES[MIMIR_AUTO_DETECT_GPU_BACKENDS]}" == "1" ]]; then
+  echo "[note] Auto-détection GPU activée: CMake recherchera CUDA et ROCm/HIP."
+elif [[ "${FEATURE_VALUES[ENABLE_CUDA]}" == "1" ]]; then
   echo "[note] CUDA activé: installe CUDA Toolkit si nécessaire (non installé automatiquement ici)."
 fi
-if [[ "${FEATURE_VALUES[ENABLE_ROCM]}" == "1" ]]; then
+if [[ "${FEATURE_VALUES[MIMIR_AUTO_DETECT_GPU_BACKENDS]}" != "1" && "${FEATURE_VALUES[ENABLE_ROCM]}" == "1" ]]; then
   echo "[note] ROCm activé: installe ROCm/HIP si nécessaire (non installé automatiquement ici)."
 fi
 

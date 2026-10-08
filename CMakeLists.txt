@@ -21,6 +21,7 @@ option(ENABLE_VULKAN "Enable Vulkan Compute acceleration" ON)
 option(ENABLE_OPENCL "Enable OpenCL GPU compute" ON)
 option(ENABLE_CUDA "Enable CUDA GPU compute (cuBLAS)" OFF)
 option(ENABLE_ROCM "Enable ROCm GPU compute (rocBLAS/HIP)" OFF)
+option(MIMIR_AUTO_DETECT_GPU_BACKENDS "Auto-detect and enable available CUDA/ROCm backends" OFF)
 option(ENABLE_LZ4 "Enable LZ4 compression" ON)
 option(ENABLE_FFMPEG "Enable FFmpeg-backed audio/video loading" ON)
 option(ENABLE_SFML "Enable SFML visualization" ON)
@@ -339,6 +340,12 @@ endif()
 set(MIMIR_CUDA_ROOT "" CACHE PATH "CUDA Toolkit root (e.g. /usr/local/cuda)")
 set(MIMIR_ROCM_ROOT "" CACHE PATH "ROCm root (e.g. /opt/rocm)")
 
+if(MIMIR_AUTO_DETECT_GPU_BACKENDS)
+    message(STATUS "GPU backend auto-detection enabled (CUDA/ROCm)")
+    set(ENABLE_CUDA ON)
+    set(ENABLE_ROCM ON)
+endif()
+
 # CUDA (optionnel)
 if(ENABLE_CUDA)
     # Aider find_package(CUDAToolkit) si CUDAToolkit_ROOT n'est pas fourni.
@@ -376,8 +383,11 @@ if(ENABLE_ROCM)
     if(DEFINED ENV{ROCM_HOME} AND NOT "$ENV{ROCM_HOME}" STREQUAL "")
         list(APPEND _MIMIR_ROCM_HINTS "$ENV{ROCM_HOME}")
     endif()
+    if(DEFINED ENV{HIP_PATH} AND NOT "$ENV{HIP_PATH}" STREQUAL "")
+        list(APPEND _MIMIR_ROCM_HINTS "$ENV{HIP_PATH}")
+    endif()
     # Chemin standard sur Linux
-    list(APPEND _MIMIR_ROCM_HINTS "/opt/rocm")
+    list(APPEND _MIMIR_ROCM_HINTS "/opt/rocm" "/usr/local/rocm")
 
     find_path(HIP_INCLUDE_DIR hip/hip_runtime.h
         HINTS ${_MIMIR_ROCM_HINTS}

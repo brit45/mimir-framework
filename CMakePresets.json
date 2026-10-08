@@ -22,6 +22,34 @@
       }
     },
     {
+      "name": "colab-cuda",
+      "displayName": "Google Colab GPU (headless)",
+      "description": "Release headless avec auto-détection CUDA/ROCm pour Google Colab",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-colab",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MIMIR_ENABLE_TESTS": "OFF",
+        "MIMIR_PORTABLE_BUILD": "ON",
+        "MIMIR_VIZ_BACKEND": "NONE",
+        "ENABLE_SIMD": "ON",
+        "ENABLE_OPENMP": "ON",
+        "ENABLE_VULKAN": "OFF",
+        "ENABLE_OPENCL": "OFF",
+        "MIMIR_AUTO_DETECT_GPU_BACKENDS": "ON",
+        "ENABLE_CUDA": "OFF",
+        "ENABLE_ROCM": "OFF",
+        "ENABLE_FFMPEG": "ON",
+        "ENABLE_SFML": "OFF",
+        "ENABLE_LZ4": "ON",
+        "ENABLE_SCRIPTING_REST": "OFF",
+        "ENABLE_SCRIPTING_RUST": "OFF",
+        "ENABLE_SCRIPTING_JS": "OFF",
+        "ENABLE_SCRIPTING_CSHARP": "OFF",
+        "BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
       "name": "windows-cross-base",
       "displayName": "Windows Cross (MinGW + vcpkg)",
       "hidden": true,
@@ -67,6 +95,14 @@
     {
       "name": "build-linux-release",
       "configurePreset": "linux-release"
+    },
+    {
+      "name": "build-colab-cuda",
+      "configurePreset": "colab-cuda",
+      "targets": [
+        "mimir"
+      ],
+      "jobs": 2
     },
     {
       "name": "build-windows-cross",
