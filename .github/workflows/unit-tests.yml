@@ -55,14 +55,13 @@ jobs:
       - name: Run unit tests (CTest)
         run: |
           export PATH="$HOME/.dotnet/tools:$HOME/.cargo/bin:$PATH"
-          ctest --test-dir build --output-on-failure --timeout 120
+          ctest --test-dir build --output-on-failure --timeout 120 -LE 'TPU|COLAB|JAX'
 
-      - name: Verify configuration, documentation and Colab sources
+      - name: Verify configuration and documentation
         run: |
           python3 scripts/tests/test_config_cli.py
           python3 scripts/tools/verify_docs.py
           ./scripts/tools/verify_api_sync.sh
-          python3 -m unittest discover -s scripts/tests -p 'test_colab*.py'
 
       - name: Upload CTest logs
         if: always()

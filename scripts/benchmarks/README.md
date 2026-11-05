@@ -75,3 +75,73 @@ limite globale du processus. Le test spill utilise un budget spécifique de 4 Mi
 sans compression, dans un dossier temporaire isolé avec un lanceur POSIX.
 Les fichiers temporaires sont nettoyés après succès ; ceux d'un test spill en
 échec sont conservés au chemin indiqué. Aucun checkpoint utilisateur n'est écrasé.
+
+## Colab multi-framework
+
+`Colab-bench-multi-framework.ipynb` conserve les microbenchmarks (Linear,
+Conv2d, normalisation, attention et produits matriciels) et le benchmark
+d'entraînement MNIST. Le balayage factoriel des options du lanceur est appliqué
+au chemin public `Model.trainStep`, pas au pilote micro qui contourne le planner.
+Chaque combinaison reçoit un identifiant stable et les résultats terminés sont
+repris après interruption, après validation de leur configuration et de leur
+identité.
+
+Le balayage MNIST compare les états de configuration Mímir avec PyTorch,
+TensorFlow et JAX sur le même cas et le même matériel. Il mesure actuellement
+la famille MLP MNIST et mesure séparément les architectures décrites ci-dessous.
+Les résultats d'entraînement MNIST et les résultats d'inférence avant ne doivent
+pas être fusionnés ni présentés comme la même mesure.
+
+### Comparaison d'inférence avant par architecture
+
+`colab_architecture_suite.py` compare huit familles enregistrées par Mímir :
+MLP, VGG16, ResNet, VAEConv, Transformer encodeur, Transformer causal, ViT et
+U-Net. Chaque framework reçoit la même entrée fixe et les mêmes dimensions de
+modèle par cas. Les processus sont lancés séparément et séquentiellement, avec
+des limites de temps/mémoire, une affinité et un environnement de périphérique
+communs. Le profil rapide exécute trois processus par cas/configuration/framework ;
+le profil standard en exécute cinq, avec respectivement 12 et 30 échantillons
+chauds par processus. La mesure principale est la latence médiane de forward
+synchronisé ; le rapport porte explicitement la mention
+« fixed-input forward inference only » et ne mesure ni l'entraînement ni la
+convergence.
+
+Le notebook active ce passage séparément avec `RUN_ARCHITECTURE_BENCH=True`.
+Il réutilise le produit factoriel des états de configuration et affiche le
+nombre de processus estimé avant exécution. Le produit complet peut représenter
+des dizaines de milliers de processus. Les résultats terminés sont reprenables,
+mais une note comparative n'est fournie que lorsque tous les frameworks ont
+couvert les mêmes architectures, configurations, périphériques et répétitions,
+et les comptes de paramètres des modèles comparés ne diffèrent pas de plus de
+5 %. Une différence de taille empêche le classement. Cette condition vérifie
+une partie de la comparabilité, pas l'identité exacte des graphes ni des
+initialisations. Les différences de topologie restantes doivent donc être
+examinées avant de tirer des conclusions absolues. La variabilité inter-essais
+est reportée ; un coefficient de variation supérieur à 10 % est signalé comme
+bruité et un nombre d'essais inférieur à trois est signalé comme insuffisant.
+
+Chaque run inclut un protocole JSON versionné avec le matériel, l'affinité, les
+versions runtime/framework, les empreintes des sources et du binaire Mímir, le
+seed, les options et tous les workloads. Les exports `architecture-trials.csv`
+et `architecture-details.csv` exposent les essais bruts et les statistiques ;
+`architecture-trials.jsonl` conserve les résultats complets. Le cache de reprise
+est invalidé dès que configuration, sources, exécutables, versions, matériel ou
+environnement enregistrés diffèrent. Par défaut, le notebook écrit sous le
+dossier du run ; `ARCHITECTURE_RUN_DIR` permet un dossier persistant entre
+sessions.
+
+Mímir exporte aussi `planning-diagnostics.json` et
+`architecture-layer-profile.csv` : comptage d'opérations, affectation runtime,
+fusion, mémoire planifiée, et temps mural par couche sur une passe diagnostique
+séparée, avec planificateur/fusion désactivés pour ré-exécuter chaque couche.
+La sortie de cette passe est comparée à celle du forward mesuré avant de garder
+le profil. Ces temps incluent routage et matérialisation, ont une instrumentation
+différente des mesures officielles et servent à repérer les zones à profiler ;
+ils ne sont pas directement comparables aux latences des autres frameworks.
+
+Le pilote Mímir utilise `ModelArchitectures::create` et l'API publique de
+forward. Les adaptateurs concurrents visent des graphes de même famille et les
+mêmes dimensions d'entrée/sortie ; les différences de backend et d'opérations
+propres aux frameworks restent indiquées dans les résultats. En l'absence de
+PyTorch, TensorFlow ou JAX compatibles, leurs essais échouent explicitement et
+aucune note inter-framework n'est publiée.

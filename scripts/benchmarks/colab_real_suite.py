@@ -123,11 +123,18 @@ def validate_result(result,config,gold,min_accuracy):
     if result.get('case')!=config['case']:raise RuntimeError('Wrong result identity')
     if result.get('framework')=='mimir':
         options=config.get('mimir',{})
+        effective_mode=('cost' if options.get('planner_mode','cost')=='cost' and
+                        options.get('cost_model',True) else
+                        'static' if options.get('planner_mode','cost')=='static' else 'legacy')
         for phase in ('training_plan','inference_plan'):
             plan=result.get(phase,{})
-            if not plan.get('planned') or plan.get('mode')!=options.get('planner_mode','cost'):
-                raise RuntimeError('Mimir planner not active: '+phase)
-            if plan.get('fusion')!=options.get('fusion',True):raise RuntimeError('Mimir fusion setting differs from protocol')
+            if options.get('planner_enabled',True):
+                if not plan.get('planned') or plan.get('mode')!=effective_mode:
+                    raise RuntimeError('Mimir planner mode differs from requested configuration: '+phase)
+                if plan.get('fusion')!=options.get('fusion',True):
+                    raise RuntimeError('Mimir fusion setting differs from protocol: '+phase)
+            elif plan.get('planned'):
+                raise RuntimeError('Mimir planner unexpectedly active: '+phase)
 
     for key,expected in [('first_prediction',gold['prediction']),('first_parameter_probe',gold['probe']),('first_loss',gold['loss'])]:
         actual=np.asarray(result[key],float);expected=np.asarray(expected,float)
@@ -153,18 +160,35 @@ def validate_result(result,config,gold,min_accuracy):
 
 
 def run_suite(directory,configs,frameworks,pythons,binary,worker,environment,affinity,trials,
-              timeout_s,memory_mib,min_accuracy,seed,install_errors=None):
+              timeout_s,memory_mib,min_accuracy,seed,install_errors=None,resume=True):
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True);records=[]
     references={c['case']:first_step_reference(c) for c in configs}
-    for config in configs:(directory/(config['case']+'.config.json')).write_text(json.dumps(config,indent=2))
+    for config in configs:
+        (directory/(config['case']+'.config.json')).write_text(json.dumps(config,indent=2,allow_nan=False))
     jobs=[(f,c,t) for t in range(trials) for c in configs for f in frameworks];random.Random(seed).shuffle(jobs)
     for i,(framework,config,trial) in enumerate(jobs,1):
         stem=f'{config["case"]}.{framework}.{trial}';path=directory/(stem+'.json');log=directory/(stem+'.log')
-        path.unlink(missing_ok=True)
-        Path(str(path)+'.progress.json').unlink(missing_ok=True)
-        row=dict(framework=framework,backend=config['backend'],case=config['case'],trial=trial,status='error')
+        config_sha256=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+        row=dict(framework=framework,backend=config['backend'],case=config['case'],trial=trial,
+                 configuration_sha256=config_sha256,configuration_id=config.get('configuration_id'),status='error')
         print(f'Usage reel [{i}/{len(jobs)}] {stem}',flush=True)
         try:
+            if resume and path.is_file():
+                try:
+                    cached=json.loads(path.read_text())
+                except (OSError,ValueError) as error:
+                    print(' -> résultat antérieur illisible, nouvel essai:',error,flush=True)
+                else:
+                    if (cached.get('configuration_sha256')==config_sha256 and
+                        cached.get('framework')==framework and cached.get('backend')==config['backend'] and
+                        cached.get('case')==config['case'] and cached.get('trial')==trial and cached.get('status')=='ok'):
+                        validate_result(cached,config,references[config['case']],min_accuracy)
+                        records.append(cached)
+                        (directory/'records.json').write_text(json.dumps(records,indent=2,allow_nan=False))
+                        print(' -> reprise: mesure valide déjà présente',flush=True)
+                        continue
+            path.unlink(missing_ok=True)
+            Path(str(path)+'.progress.json').unlink(missing_ok=True)
             if framework in (install_errors or {}):raise RuntimeError(install_errors[framework])
             command=([ 'bash',Path(__file__).resolve().parents[2]/'run_mimir.sh',config['backend'],directory/(config['case']+'.config.json'),path] if framework=='mimir' else
                      [pythons[framework],worker,framework,config['backend'],directory/(config['case']+'.config.json'),path])
@@ -173,6 +197,10 @@ def run_suite(directory,configs,frameworks,pythons,binary,worker,environment,aff
             if framework=='mimir':
                 job_environment['MIMIR_EXECUTABLE']=str(Path(binary).resolve())
                 job_environment['GOMP_CPU_AFFINITY']=' '.join(map(str,affinity))
+                job_environment.update(config.get('mimir_environment',{}))
+                if 'MIMIR_PLANNER_JSON' in job_environment:
+                    job_environment['MIMIR_PLANNER_JSON']=str(
+                        directory/'planner-dumps'/(stem+'.json'))
             budget=constrained_run(command,job_environment,log,timeout_s,memory_mib)
             row.update(budget)
             if budget['budget_status']!='completed':
@@ -190,7 +218,8 @@ def run_suite(directory,configs,frameworks,pythons,binary,worker,environment,aff
             if progress.exists():
                 try:row['partial_progress']=json.loads(progress.read_text())
                 except (ValueError,OSError):pass
-        row.update(trial=trial,case=config['case'],framework=framework,backend=config['backend'])
+        row.update(trial=trial,case=config['case'],framework=framework,backend=config['backend'],
+                   configuration_sha256=config_sha256,configuration_id=config.get('configuration_id'))
         path.write_text(json.dumps(row,indent=2,allow_nan=False));records.append(row)
         (directory/'records.json').write_text(json.dumps(records,indent=2,allow_nan=False))
         print(' ->',row['status'],row.get('error',''),flush=True)

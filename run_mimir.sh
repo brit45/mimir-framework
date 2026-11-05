@@ -25,10 +25,12 @@ export MIMIR_ENABLE_PLANNER="${MIMIR_ENABLE_PLANNER:-1}"
 export MIMIR_PLANNER_MODE="${MIMIR_PLANNER_MODE:-static}" # legacy | static | cost
 export MIMIR_PLANNER_BUFFER_REUSE="${MIMIR_PLANNER_BUFFER_REUSE:-1}"
 export MIMIR_PLANNER_FUSION="${MIMIR_PLANNER_FUSION:-1}"
-export MIMIR_PLANNER_COST_MODEL="${MIMIR_PLANNER_COST_MODEL:-1}"
-export MIMIR_PLANNER_DUMP="${MIMIR_PLANNER_DUMP:-1}"
+export MIMIR_ENABLE_FUSION_TRAIN="${MIMIR_ENABLE_FUSION_TRAIN:-1}"
+export MIMIR_RUNTIME_AUTOTUNE="${MIMIR_RUNTIME_AUTOTUNE:-1}"
+export MIMIR_PLANNER_COST_MODEL="${MIMIR_PLANNER_COST_MODEL:-0}"
+export MIMIR_PLANNER_DUMP="${MIMIR_PLANNER_DUMP:-0}"
 export MIMIR_PLANNER_JSON="${MIMIR_PLANNER_JSON:-.mimir-spill/execution-plan.json}"
-export MIMIR_PLANNER_DEVICE_RESIDENCY="${MIMIR_PLANNER_DEVICE_RESIDENCY:-1}"
+export MIMIR_PLANNER_DEVICE_RESIDENCY="${MIMIR_PLANNER_DEVICE_RESIDENCY:-0}"
 
 # OpenCL Rusticl (AMD/Mesa): activer automatiquement sur iGPU AMD.
 # Override possible: RUSTICL_ENABLE=... ./run_mimir.sh
@@ -51,7 +53,7 @@ export OMP_NESTED=false
 export OMP_MAX_ACTIVE_LEVELS=1
 
 # CRITIQUE : Garder les threads en vie entre les régions parallèles
-export OMP_WAIT_POLICY=active     # Les threads restent actifs (pas de sleep)
+export OMP_WAIT_POLICY="${OMP_WAIT_POLICY:-active}"
 export OMP_DYNAMIC=false           # Nombre de threads fixe
 # Pinning: ne pas brider par défaut. Si l'utilisateur n'a rien défini,
 # épingler sur les OMP_NUM_THREADS premiers CPU logiques.

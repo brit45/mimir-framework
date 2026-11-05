@@ -2554,6 +2554,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
     const bool runtime_verbose = !Model::frameworkLogsSuppressed();
     const bool runtime_trace = runtime_verbose && env_flag_true("MIMIR_RUNTIME_TRACE", false);
+    const bool layer_profile = runtime_verbose && env_flag_true("MIMIR_LAYER_PROFILE", false);
     if (runtime_verbose && (graph_plan_changed || runtime_trace)) {
         auto join_strings = [](const std::vector<std::string>& items, const char* sep) -> std::string {
             if (items.empty()) return std::string();
@@ -2870,6 +2871,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             continue;
         }
 
+        const auto layer_profile_start = std::chrono::steady_clock::now();
         auto &layer = layers[layer_idx];
         if (!layer.shared_weights_from.empty()) {
             Layer* owner = getLayerByName(layer.shared_weights_from);
@@ -4049,6 +4051,15 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                       << " call=" << executed_call
                       << " output_size=" << layer_out_view.size()
                       << std::endl;
+        }
+        if (layer_profile) {
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - layer_profile_start).count();
+            json sample = {{"layer", layer_idx}, {"name", layer.name},
+                {"type", layer.type.empty() ? type_to_string(layer.type_enum) : layer.type},
+                {"runtime", executed_backend}, {"call", executed_call},
+                {"elapsed_ms", elapsed_ms}, {"output_size", layer_out_view.size()}};
+            std::cerr << "[layer-profile] " << sample.dump() << std::endl;
         }
 
         // Gestion des branches
