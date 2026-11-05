@@ -1,4 +1,7 @@
 #!/usr/bin/env lua
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_medical_detector.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 ---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 
 local Help = dofile(ROOTWORK.."/scripts/modules/help_cli.lua")
@@ -18,7 +21,7 @@ Help.auto_exit_help({
     "--viz : active le moniteur Viz avec les cadres prédits",
   },
   examples = {
-    "./bin/mimir --lua scripts/training/train_medical_detector.lua -- --dataset-root dataset/mammographies --epochs 30 --viz",
+    "./run_mimir.sh --lua scripts/training/train_medical_detector.lua -- --dataset-root dataset/mammographies --epochs 30 --viz",
   },
 })
 

@@ -9,7 +9,7 @@
 namespace TensorSelection {
 struct Summary {
     int x0=0, y0=0, x1=0, y1=0;
-    size_t finite=0, zeros=0, nan=0, inf=0;
+    size_t finite=0, zeros=0, positive=0, negative=0, nan=0, inf=0;
     double mean=0, stddev=0, l2=0;
     float min=0, max=0;
     std::vector<std::pair<size_t,float>> values;
@@ -36,6 +36,8 @@ inline Summary analyze(const std::vector<float>& values, const std::vector<size_
             if(result.finite==0) result.min=result.max=value;
             result.min=std::min(result.min,value);result.max=std::max(result.max,value);
             ++result.finite; if(value==0.f) ++result.zeros;
+            if(value>0.f) ++result.positive;
+            if(value<0.f) ++result.negative;
             const double delta=static_cast<double>(value)-result.mean;
             result.mean+=delta/static_cast<double>(result.finite);
             m2+=delta*(static_cast<double>(value)-result.mean);
@@ -44,5 +46,18 @@ inline Summary analyze(const std::vector<float>& values, const std::vector<size_
     if(result.finite) result.stddev=std::sqrt(std::max(0.0,m2/result.finite));
     result.l2=std::sqrt(squared);
     return result;
+}
+
+inline std::vector<std::pair<size_t,float>> strongest(const Summary& summary, size_t limit) {
+    std::vector<std::pair<size_t,float>> ranked;
+    ranked.reserve(summary.values.size());
+    for (const auto& value : summary.values)
+        if (std::isfinite(value.second)) ranked.push_back(value);
+    std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b) {
+        const float abs_a=std::fabs(a.second), abs_b=std::fabs(b.second);
+        return abs_a==abs_b ? a.first<b.first : abs_a>abs_b;
+    });
+    if (ranked.size()>limit) ranked.resize(limit);
+    return ranked;
 }
 }

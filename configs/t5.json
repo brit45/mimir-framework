@@ -1,0 +1,38 @@
+{
+  "lua": {
+    "scripts": [
+      "scripts/training/train_t5.lua"
+    ]
+  },
+  "model": {
+    "architecture": "t5",
+    "vocab_size": 4096,
+    "seq_len": 77,
+    "d_model": 128,
+    "num_layers": 4,
+    "num_heads": 4,
+    "mlp_hidden": 512,
+    "padding_idx": 0,
+    "relative_attention_num_buckets": 32,
+    "relative_attention_max_distance": 128,
+    "norm_eps": 1e-06
+  },
+  "dataset": {
+    "text_path": "data/corpus.txt"
+  },
+  "tokenizer": {
+    "path": "checkpoint/t5/tokenizer.json"
+  },
+  "training": {
+    "steps": 10000,
+    "learning_rate": 0.0003,
+    "optimizer": "adamw",
+    "weight_decay": 0.01,
+    "grad_clip_norm": 1.0,
+    "mask_ratio": 0.15,
+    "log_every": 10,
+    "save_every": 500,
+    "checkpoint_dir": "checkpoint/t5",
+    "seed": 1337
+  }
+}

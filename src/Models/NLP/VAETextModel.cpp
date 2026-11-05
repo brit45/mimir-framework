@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <cmath>
 
 VAETextModel::VAETextModel() {
     setModelName("VAETextModel");
@@ -25,9 +26,17 @@ std::optional<Model::TrainStepResult> VAETextModel::trainStep(const TrainStepReq
         input = it->second;
     }
 
-    return vae_training_.trainText(*this, *input, *text_it->second, request.target, request.loss_weights,
-                                   *request.optimizer, request.learning_rate,
-                                   request.mode, request.grad_scale);
+    clean_training_ids_ = *text_it->second;
+    try {
+        auto result = vae_training_.trainText(*this, *input, *text_it->second, request.target, request.loss_weights,
+                                             *request.optimizer, request.learning_rate,
+                                             request.mode, request.grad_scale);
+        clean_training_ids_.clear();
+        return result;
+    } catch (...) {
+        clean_training_ids_.clear();
+        throw;
+    }
 }
 
 void VAETextModel::buildFromConfig(const Config& cfg) {
@@ -70,6 +79,9 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["latent_dim"] = latent_dim;
     model.modelConfig["proj_dim"] = proj_dim;
     model.modelConfig["decoder_causal"] = cfg.decoder_causal;
+    model.modelConfig["contextual_encoding"] = cfg.contextual_encoding;
+    model.modelConfig["encoder_causal"] = cfg.encoder_causal;
+    model.modelConfig["text_context_version"] = cfg.contextual_encoding ? 2 : 1;
     model.modelConfig["tokenizer_integrated"] = cfg.tokenizer_integrated;
     model.modelConfig["enable_conditional_encoder"] = cfg.enable_conditional_encoder;
     model.modelConfig["enable_context_heads"] = cfg.enable_context_heads;
@@ -84,7 +96,8 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
     const int context_tail = sem_dim + them_dim + dialog_dim;
     model.modelConfig["image_dim"] = logits_dim;
     model.modelConfig["target_tensor"] = "vae_text/target"; // kept for optional alignment heads
-    model.modelConfig["output_dim"] = logits_dim + 2 * latent_dim + 2 * proj_dim + context_tail;
+    model.modelConfig["output_dim"] = logits_dim + 2 * latent_dim + 2 * proj_dim + context_tail + (cfg.contextual_encoding ? vocab : 0);
+    model.modelConfig["content_dim"] = cfg.contextual_encoding ? vocab : 0;
 
     // ---------------------------------------------------------------------
     // text_ids -> embedding
@@ -108,6 +121,20 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
     }
 
     std::string h = "vae_text/tok_emb_out";
+
+    if (cfg.contextual_encoding) {
+        // Learned positions make role/order changes visible even with bidirectional attention.
+        model.push("vae_text/enc/position", "Constant", size_t(seq_len) * d_model);
+        auto* position = model.getLayerByName("vae_text/enc/position");
+        position->output = "vae_text/enc/positions";
+        position->seq_len = seq_len; position->embed_dim = d_model;
+        position->trainable_parameter = true;
+        model.push("vae_text/enc/add_position", "Add", 0);
+        auto* add = model.getLayerByName("vae_text/enc/add_position");
+        add->inputs = {h, "vae_text/enc/positions"};
+        add->output = "vae_text/enc/positioned";
+        h = add->output;
+    }
 
     const size_t attn_params = static_cast<size_t>(4) * static_cast<size_t>(d_model) * static_cast<size_t>(d_model);
 
@@ -134,7 +161,7 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
             L->seq_len = seq_len;
             L->embed_dim = d_model;
             L->num_heads = heads;
-            L->causal = cfg.decoder_causal;
+            L->causal = cfg.contextual_encoding ? cfg.encoder_causal : cfg.decoder_causal;
         }
 
         model.push(p + "/add1", "Add", 0);
@@ -262,7 +289,7 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
             L->seq_len = seq_len;
             L->embed_dim = d_model;
             L->num_heads = heads;
-            L->causal = false;
+            L->causal = cfg.contextual_encoding ? cfg.decoder_causal : false;
         }
 
         model.push(p + "/add1", "Add", 0);
@@ -397,7 +424,8 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
     }
 
     if (cfg.enable_context_heads) {
-        const std::string ctx_src = cfg.enable_conditional_encoder ? "vae_text/cond/corr" : "vae_text/text_proj";
+        const std::string ctx_src = cfg.contextual_encoding ? "vae_text/img_proj" :
+            (cfg.enable_conditional_encoder ? "vae_text/cond/corr" : "vae_text/text_proj");
 
         model.push("vae_text/context/semantic", "Linear",
                    static_cast<size_t>(proj_dim) * static_cast<size_t>(sem_dim) + static_cast<size_t>(sem_dim));
@@ -430,6 +458,17 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
         }
     }
 
+    if (cfg.contextual_encoding) {
+        model.push("vae_text/content/pool", "TokenMeanPool", 0);
+        auto* pool = model.getLayerByName("vae_text/content/pool");
+        pool->inputs = {"vae_text/mu"}; pool->output = "vae_text/content/latent";
+        pool->seq_len = latent_tokens; pool->embed_dim = d_model;
+        model.push("vae_text/content/head", "Linear", size_t(d_model) * vocab + vocab);
+        auto* head = model.getLayerByName("vae_text/content/head");
+        head->inputs = {"vae_text/content/latent"}; head->output = "vae_text/content/logits";
+        head->in_features = d_model; head->out_features = vocab; head->use_bias = true;
+    }
+
     // ---------------------------------------------------------------------
     // Pack output: logits || mu || logvar || img_proj || text_proj
     // ---------------------------------------------------------------------
@@ -441,6 +480,7 @@ void VAETextModel::buildInto(Model& model, const Config& cfg) {
             L->inputs.push_back("vae_text/context/thematic");
             L->inputs.push_back("vae_text/context/dialog");
         }
+        if (cfg.contextual_encoding) L->inputs.push_back("vae_text/content/logits");
         L->output = "x";
         L->concat_axis = 0;
     }
@@ -586,4 +626,83 @@ void VAETextModel::buildDecoderInto(Model& model, const Config& cfg) {
         L->out_features = vocab;
         L->use_bias = true;
     }
+}
+
+bool VAETextModel::InitVizTips() {
+    clearVizTipsRegistry();
+    registerVizTip("vae_text/tok_emb", "Texte / embeddings des tokens");
+    registerVizTip("vae_text/enc/add_position", "Contexte / contenu et position");
+    for (int i = 1; i <= modelConfig.value("num_layers", 0); ++i) {
+        registerVizTip("vae_text/enc/block" + std::to_string(i) + "/add2", "Contexte / bloc " + std::to_string(i));
+    }
+    registerVizTip("vae_text/enc/pool", "Contexte / synthèse des tokens");
+    registerVizTip("vae_text/mu", "Latent / moyenne utilisée par Lumen");
+    registerVizTip("vae_text/logvar", "Latent / log-variance");
+    registerVizTip("vae_text/reparam", "Latent / échantillon pour reconstruction");
+    registerVizTip("vae_text/dec/init", "Décodeur / reconstruction depuis le latent");
+    registerVizTip("vae_text/dec/lm_head", "Texte / logits de reconstruction");
+    registerVizTip("vae_text/content/head", "Contenu / vocabulaire prédit depuis mu");
+    registerVizTip("vae_text/context/semantic", "Auxiliaire / empreinte lexicale");
+    registerVizTip("vae_text/context/thematic", "Auxiliaire / empreinte des bigrammes");
+    registerVizTip("vae_text/context/dialog", "Auxiliaire / empreinte lexicale secondaire");
+    return true;
+}
+
+bool VAETextModel::UpdateVizTips(const Layer& layer, VizFrame& frame) {
+    const bool registered = Model::UpdateVizTips(layer, frame);
+    if (layer.name.rfind("vae_text/", 0) != 0) return registered;
+    if (!registered) frame.label += " | VAEText";
+    frame.tensor_info += " | seq_len=" + std::to_string(modelConfig.value("seq_len", 0)) +
+        " d_model=" + std::to_string(modelConfig.value("d_model", 0));
+    if (layer.name == "vae_text/mu") frame.tensor_info += " | déterministe, conditionnement Lumen";
+    if (layer.name.rfind("vae_text/context/", 0) == 0)
+        frame.tensor_info += " | cible: empreinte de tokens; aucune annotation sémantique externe";
+    return true;
+}
+
+const std::vector<float>& VAETextModel::forwardPassNamedView(
+    const std::unordered_map<std::string, std::vector<float>>& floats,
+    const std::unordered_map<std::string, std::vector<int>>& ints, bool training) {
+    const auto& output = Model::forwardPassNamedView(floats, ints, training);
+    if (!isVizTapsEnabled() || modelConfig.value("viz_taps_suppressed", false)) return output;
+    auto ids = ints.find("seq");
+    if (ids == ints.end()) ids = ints.find("text_ids");
+    const int vocab = modelConfig.value("vocab_size", 0);
+    const int sequence = modelConfig.value("seq_len", 0);
+    if (ids == ints.end() || vocab < 2 || sequence < 1 || output.size() < size_t(vocab) * sequence) return output;
+    const size_t count = std::min({ids->second.size(), size_t(sequence), size_t(128)});
+    if (!count) return output;
+    const int pad = modelConfig.value("padding_idx", 0);
+    std::vector<int> input_ids, encoded_ids, reconstructed;
+    const auto& clean = training && clean_training_ids_.size() == ids->second.size() ? clean_training_ids_ : ids->second;
+    VizFrame frame;
+    frame.label = "Texte / entrée et reconstruction";
+    frame.w = int(std::min(count, size_t(std::max(1, getVizTapsMaxSide()))));
+    frame.h = int((count + size_t(frame.w) - 1) / size_t(frame.w));
+    frame.channels = 3;
+    frame.pixels.assign(size_t(frame.w) * frame.h * 3, 0);
+    frame.tensor_sample_channels = 1;
+    size_t correct = 0, valid = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const auto begin = output.begin() + i * size_t(vocab);
+        const auto best = std::max_element(begin, begin + vocab);
+        const int token = int(best - begin);
+        const int expected = clean[i];
+        if (expected != pad) {
+            input_ids.push_back(expected); encoded_ids.push_back(ids->second[i]); reconstructed.push_back(token); ++valid;
+            correct += token == expected;
+            frame.pixels[i*3] = token == expected ? 40 : 220;
+            frame.pixels[i*3+1] = token == expected ? 200 : 60;
+            frame.pixels[i*3+2] = 50;
+        }
+        frame.tensor_values.push_back(*best);
+        frame.tensor_indices.push_back(i * size_t(vocab) + size_t(token));
+    }
+    frame.tensor_info = "Texte reçu: " + getTokenizer().decode(input_ids) +
+        "\nEntrée encodeur: " + getTokenizer().decode(encoded_ids) +
+        "\nReconstruction: " + getTokenizer().decode(reconstructed) +
+        "\nTokens reconstruits correctement: " + std::to_string(correct) + "/" + std::to_string(valid) +
+        " | vert=identique, rouge=différent; aperçu limité à 128 tokens";
+    addVizTapFrame(std::move(frame));
+    return output;
 }

@@ -344,6 +344,10 @@ Ne suppose pas qu’un checkpoint PyTorch/Hugging Face est directement compatibl
 | --- | --- |
 | `train_vae_conv.lua` | VAE image convolutionnel |
 | `train_vae_texte.lua` | VAE texte |
+| `train_t5.lua` | encodeur T5 entraîné depuis un corpus local |
+| `train_lumen_diffusion.lua` | diffusion latente Lumen |
+| `train_medical_detector.lua` | détection médicale multi-classe |
+| `train_causal_lm.lua` | modèle de langage causal |
 | `pretrain_vgg16_feat.lua` | extracteur perceptuel |
 | `train_vgg16_tags_multilabel.lua` | classification multi-label |
 | `prepare_tokenizer_dataset.lua` | préparation tokenizer |
@@ -360,7 +364,7 @@ Les scripts d’entraînement peuvent écrire checkpoints, historique CSV, logs 
 | `fs.lua` | chemins et filesystem multiplateforme |
 | `pipeline.lua` | façade compatible vers `pipeline_api.lua` |
 | `pipeline_api.lua` | construction registry-first, train, infer, save |
-| `checkpoint_resume.lua` | résolution d’un RawFolder ou du dernier `epoch_*` |
+| `checkpoint_resume.lua` | résolution du RawFolder récent parmi `epoch_*`, `step_*`, `final` et le dossier racine |
 | `base_tokenizer.lua` | vocabulaire/tokenizer partagé |
 | `mpk.lua` | format MPK |
 | `mpk_layers.lua` | validation de graphes MPK |

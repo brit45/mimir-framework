@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
+#include "Parallel.hpp"
 #include <vector>
 #ifdef _OPENMP
 #include <omp.h>
@@ -20,16 +21,11 @@
 
 namespace HardwareOpt {
 
-// Keep small tiled GEMMs inside one worker. A large global thread setting
-// otherwise launches a full team for every small convolution tile.
+// Respect the planner's measured choice and the number of independent row
+// tiles. Nested calls never create another OpenMP team.
 inline int matmul_workers(size_t rows,size_t columns,size_t reduction) {
     if(!rows || !columns || !reduction)return 1;
-#ifdef _OPENMP
-    const size_t workers=std::min(rows,std::max(size_t(1),rows*columns*reduction/(1024*1024)));
-    return static_cast<int>(std::min(size_t(omp_get_max_threads()),workers));
-#else
-    return 1;
-#endif
+    return RuntimeParallel::workers(rows);
 }
 
 #if defined(_MSC_VER)
@@ -160,58 +156,53 @@ inline void matmul_fma_saturated_impl(float* MIMIR_RESTRICT C,
                                   const float* MIMIR_RESTRICT B,
                                   size_t M, size_t N, size_t K) {
 
-    const size_t vecN8 = N & ~static_cast<size_t>(7);
-    const size_t vecN24 = (N / 24) * 24;
-
-    const int workers=matmul_workers(M,N,K);
-    #pragma omp parallel for if(workers>1) num_threads(workers) schedule(static)
+    const size_t column_tiles = (N + 23) / 24;
+    const int workers = matmul_workers(M * column_tiles, 24, K);
+    #pragma omp parallel for collapse(2) if(workers>1) num_threads(workers) schedule(static)
     for (size_t i = 0; i < M; ++i) {
-        // 24-wide unroll (3x8) for FMA saturation
-        for (size_t j = 0; j < vecN24; j += 24) {
-            __m256 acc0 = _mm256_setzero_ps();
-            __m256 acc1 = _mm256_setzero_ps();
-            __m256 acc2 = _mm256_setzero_ps();
+        for (size_t tile = 0; tile < column_tiles; ++tile) {
+            const size_t tile_start = tile * 24;
+            const size_t tile_end = std::min(N, tile_start + 24);
+            size_t j = tile_start;
 
-            for (size_t k = 0; k < K; ++k) {
-                __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
-
-                __m256 b0 = _mm256_loadu_ps(&B[k * N + j]);
-                __m256 b1 = _mm256_loadu_ps(&B[k * N + j + 8]);
-                __m256 b2 = _mm256_loadu_ps(&B[k * N + j + 16]);
-
-                acc0 = _mm256_fmadd_ps(a_broadcast, b0, acc0);
-                acc1 = _mm256_fmadd_ps(a_broadcast, b1, acc1);
-                acc2 = _mm256_fmadd_ps(a_broadcast, b2, acc2);
+            if (j + 24 <= tile_end) {
+                __m256 acc0 = _mm256_setzero_ps();
+                __m256 acc1 = _mm256_setzero_ps();
+                __m256 acc2 = _mm256_setzero_ps();
+                for (size_t k = 0; k < K; ++k) {
+                    const __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
+                    const size_t row = k * N + j;
+                    acc0 = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[row]), acc0);
+                    acc1 = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[row + 8]), acc1);
+                    acc2 = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[row + 16]), acc2);
+                }
+                if constexpr (Accumulate) acc0 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j]), acc0);
+                _mm256_storeu_ps(&C[i * N + j], acc0);
+                if constexpr (Accumulate) acc1 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j + 8]), acc1);
+                _mm256_storeu_ps(&C[i * N + j + 8], acc1);
+                if constexpr (Accumulate) acc2 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j + 16]), acc2);
+                _mm256_storeu_ps(&C[i * N + j + 16], acc2);
+                j += 24;
             }
 
-            if constexpr (Accumulate) acc0 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j]), acc0);
-            _mm256_storeu_ps(&C[i * N + j], acc0);
-            if constexpr (Accumulate) acc1 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j + 8]), acc1);
-            _mm256_storeu_ps(&C[i * N + j + 8], acc1);
-            if constexpr (Accumulate) acc2 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j + 16]), acc2);
-            _mm256_storeu_ps(&C[i * N + j + 16], acc2);
-        }
-
-        // Remaining full 8-wide vectors (after vecN24)
-        for (size_t j = vecN24; j < vecN8; j += 8) {
-            __m256 acc = _mm256_setzero_ps();
-            for (size_t k = 0; k < K; ++k) {
-                __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
-                __m256 b = _mm256_loadu_ps(&B[k * N + j]);
-                acc = _mm256_fmadd_ps(a_broadcast, b, acc);
+            for (; j + 8 <= tile_end; j += 8) {
+                __m256 acc = _mm256_setzero_ps();
+                for (size_t k = 0; k < K; ++k) {
+                    const __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
+                    acc = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[k * N + j]), acc);
+                }
+                if constexpr (Accumulate) acc = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j]), acc);
+                _mm256_storeu_ps(&C[i * N + j], acc);
             }
-            if constexpr (Accumulate) acc = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j]), acc);
-            _mm256_storeu_ps(&C[i * N + j], acc);
-        }
 
-        // Scalar tail (N not multiple of 8)
-        for (size_t j = vecN8; j < N; ++j) {
-            float acc = 0.0f;
-            for (size_t k = 0; k < K; ++k) {
-                acc += A[i * K + k] * B[k * N + j];
+            for (; j < tile_end; ++j) {
+                float acc = 0.0f;
+                for (size_t k = 0; k < K; ++k) {
+                    acc += A[i * K + k] * B[k * N + j];
+                }
+                if constexpr (Accumulate) C[i * N + j] += acc;
+                else C[i * N + j] = acc;
             }
-            if constexpr (Accumulate) C[i * N + j] += acc;
-            else C[i * N + j] = acc;
         }
     }
 }
@@ -238,7 +229,7 @@ inline void conv2d_fma_saturated(float* MIMIR_RESTRICT output,
                                   int kernel_size, int stride, int padding) {
     std::memset(output, 0, out_h * out_w * sizeof(float));
 
-    #pragma omp parallel for collapse(2) if(static_cast<long long>(out_h) * out_w * kernel_size * kernel_size > 262144) schedule(static)
+    #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(static_cast<long long>(out_h) * out_w * kernel_size * kernel_size)>1) num_threads(RuntimeParallel::workers(static_cast<long long>(out_h) * out_w * kernel_size * kernel_size)) schedule(static)
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             // 3 accumulateurs pour saturation FMA

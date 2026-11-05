@@ -1230,9 +1230,133 @@ void portable_sequence_constant_backward(int source,int rows,int result,int widt
  int row=i/width,c=i%width,a=int(memory[rows+(2*row)]),b=a+1<base_rows?a+1:base_rows-1;
  float t=memory[rows+(2*row+1)];atomicAdd(result+a*width+c,(1.0-t)*memory[source+(i)]);atomicAdd(result+b*width+c,t*memory[source+(i)]);
 }
+float fusion_value(float x,int op,float alpha){
+    switch (op) {
+        case 0:
+            return x > 0.0 ? x : 0.0;
+        case 1:
+            return x > 0.0 ? x : alpha * x;
+        case 2:
+            return 1.0 / (1.0 + exp(-x));
+        case 3:
+            return tanh(x);
+        case 4: {
+            float s = 1.0 / (1.0 + exp(-x));
+            return x * s;
+        }
+        case 5: {
+            float c = 0.7978845608;
+            float x3 = x * x * x;
+            return 0.5 * x * (1.0 + tanh(c * (x + 0.044715 * x3)));
+        }
+        case 6:
+            return x > 20.0 ? x : log1pf(exp(x));
+        case 7: {
+            float sp = x > 20.0 ? x : log1pf(exp(x));
+            return x * tanh(sp);
+        }
+        case 8: {
+            float hs = (x + 3.0) / 6.0;
+            return min(1.0, max(0.0, hs));
+        }
+        case 9: {
+            float hs = min(1.0, max(0.0, (x + 3.0) / 6.0));
+            return x * hs;
+        }
+        default:
+            return x;
+    }
+}
+float fusion_derivative(float x,int op,float alpha){
+    float d = 1.0;
+
+    switch (op) {
+        case 0:
+            d = x > 0.0 ? 1.0 : 0.0;
+            break;
+        case 1:
+            d = x > 0.0 ? 1.0 : alpha;
+            break;
+        case 2: {
+            float s = 1.0 / (1.0 + exp(-x));
+            d = s * (1.0 - s);
+            break;
+        }
+        case 3: {
+            float t = tanh(x);
+            d = 1.0 - t * t;
+            break;
+        }
+        case 4: {
+            float s = 1.0 / (1.0 + exp(-x));
+            d = s + x * s * (1.0 - s);
+            break;
+        }
+        case 5: {
+            float c = 0.7978845608;
+            float x2 = x * x;
+            float x3 = x2 * x;
+            float u = c * (x + 0.044715 * x3);
+            float t = tanh(u);
+            float sech2 = 1.0 - t * t;
+            float du = c * (1.0 + 0.134145 * x2);
+            d = 0.5 * (1.0 + t) + 0.5 * x * sech2 * du;
+            break;
+        }
+        case 6:
+            d = 1.0 / (1.0 + exp(-x));
+            break;
+        case 7: {
+            float sp = x > 20.0 ? x : log1pf(exp(x));
+            float t = tanh(sp);
+            float s = 1.0 / (1.0 + exp(-x));
+            d = t + x * s * (1.0 - t * t);
+            break;
+        }
+        case 8:
+            d = (x > -3.0 && x < 3.0) ? (1.0 / 6.0) : 0.0;
+            break;
+        case 9:
+            if (x <= -3.0) d = 0.0;
+            else if (x >= 3.0) d = 1.0;
+            else d = x / 3.0 + 0.5;
+            break;
+        default:
+            d = 1.0;
+            break;
+    }
+
+    return d;
+}
+void pointwise_fusion_forward(int input_value,int program,int output_value,int n,int stages,bool retain){
+    int i=blockIdx_x*blockDim_x+threadIdx_x;
+    if(i>=n)return;
+    float value=memory[input_value+(i)];
+    for(int j=0;j<stages;++j) {
+        value=fusion_value(value,int(memory[program+(2*j)]),memory[program+(2*j+1)]);
+        if(truth(retain))memory[output_value+(j*n+i)]=value;
+    }
+    if(!truth(retain))memory[output_value+(i)]=value;
+}
+void pointwise_fusion_backward(int gradient,int snapshots,int program,int output_value,int n,int stages){
+    int i=blockIdx_x*blockDim_x+threadIdx_x;
+    if(i>=n)return;
+    float value=memory[gradient+(i)];
+    for(int j=stages-1;j>=0;--j) {
+        float d=fusion_derivative(memory[snapshots+(j*n+i)],int(memory[program+(2*j)]),memory[program+(2*j+1)]);
+        value=value*d;
+    }
+    memory[output_value+(i)]=value;
+}
 
 void tiled_gemm(int a,int b,int c,int m,int n,int k,int lda,int ldb,int ldc,bool ta,bool tb,float alpha,float beta){
  int local_value=int(gl_LocalInvocationID.x),group=int(gl_WorkGroupID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x);
+ if(m<16 || n<16){
+  int index=group*256+local_value;if(index>=m*n)return;
+  int row=index%m,col=index/m;float sum=0.;
+  for(int f=0;f<k;++f)sum+=memory[a+(ta?f+row*lda:row+f*lda)]*memory[b+(tb?col+f*ldb:f+col*ldb)];
+  memory[c+row+col*ldc]=alpha*sum+(beta==0.?0.:beta*memory[c+row+col*ldc]);return;
+ }
  int tiles=(m+15)/16,r=local_value%16,d=local_value/16,row=(group%tiles)*16+r,col=(group/tiles)*16+d;
  float sum=0;
  for(int base=0;base<k;base+=16){
@@ -1250,7 +1374,7 @@ int invocation_id(){return int(gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWo
 void reference_main(){
  blockDim_x=arguments[1];gridDim_x=arguments[2];
  int selected=specializedOperation>=0?specializedOperation:arguments[0];if(selected==0){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);norm_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],intBitsToFloat(arguments[11]),arguments[12]!=0);return;}if(selected==1){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);norm_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10]);return;}if(selected==2){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);channel_gradient(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7]);return;}if(selected==7){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);softmax_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]!=0);return;}if(selected==10){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);row_norm_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],intBitsToFloat(arguments[9]),arguments[10]!=0,arguments[11]!=0);return;}if(selected==15){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);GPool g=GPool(arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13],arguments[14],arguments[15],arguments[16],arguments[17],arguments[18]!=0,arguments[19]!=0);pool_kernel(arguments[3],arguments[4],arguments[5],arguments[6],g,arguments[20]);return;}if(selected==21){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);GBatchNorm g=GBatchNorm(arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,arguments[14]!=0);batch_norm_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],g,intBitsToFloat(arguments[15]),arguments[16]!=0);return;}if(selected==24){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);GAttention g=GAttention(arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11]!=0,arguments[12]!=0,arguments[13],arguments[14],arguments[15],arguments[16]);attention_probabilities(arguments[3],arguments[4],arguments[5],g);return;}if(selected==27){blockDim_x=256;blockIdx_x=group_id();threadIdx_x=int(gl_LocalInvocationID.x);GAttention g=GAttention(arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,arguments[14],arguments[15],arguments[16],arguments[17]);attention_score_grad(arguments[3],arguments[4],arguments[5],arguments[6],g);return;}if(selected==39){tiled_gemm(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,intBitsToFloat(arguments[14]),intBitsToFloat(arguments[15]));return;}
- int id=selected;bool parallel=(id>=0 && id<=42 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id():0;if(!parallel && invocation_id()!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){
+ int id=selected;bool parallel=(id>=0 && id<=44 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id():0;if(!parallel && invocation_id()!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){
 case 0: {norm_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],intBitsToFloat(arguments[11]),arguments[12]!=0);break;}
 case 1: {norm_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10]);break;}
 case 2: {channel_gradient(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7]);break;}
@@ -1294,6 +1418,8 @@ case 39: {portable_gemm(arguments[3],arguments[4],arguments[5],arguments[6],argu
 case 40: {portable_ger(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],intBitsToFloat(arguments[11]));break;}
 case 41: {portable_sequence_constant_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]);break;}
 case 42: {portable_sequence_constant_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]);break;}
+case 43: {pointwise_fusion_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]!=0);break;}
+case 44: {pointwise_fusion_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]);break;}
 default:break;}}}
 
 void main(){reference_main();}

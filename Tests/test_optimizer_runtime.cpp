@@ -2,6 +2,7 @@
 #include "runtimes/optimizers/OptimizerDispatch.hpp"
 #include "runtimes/portable/PortableDevice.hpp"
 #include "runtimes/RuntimeRouter.hpp"
+#include "runtimes/cpu/Parallel.hpp"
 #include "runtimes/opencl/OpenCLRuntime.hpp"
 #include "runtimes/vulkan/VulkanRuntime.hpp"
 #include "runtimes/tpu/TpuRuntime.hpp"
@@ -37,6 +38,68 @@ static void compare(const Buffers& a,const Buffers& b){
     compareVector(a.m,b.m);
     compareVector(a.v,b.v);
 }
+static void checkHostParallelism() {
+    // Count-one requests take the scalar path: independently verify vector
+    // lanes, non-divisible tails, moments and decoupled weight decay.
+    for (auto kind : {OptimizerType::ADAM,OptimizerType::ADAMW}) {
+        Optimizer optimizer;optimizer.type=kind;optimizer.weight_decay=.04f;
+        Buffers actual(257),expected=actual;
+        for (int step : {1,2,17,1000}) {
+            optimizer.step=step;
+            optimizerHostStep(actual.request(optimizer));
+            for(size_t i=0;i<expected.w.size();++i){
+                auto scalar=expected.request(optimizer);
+                scalar.count=1;scalar.weights+=i;scalar.gradients+=i;
+                scalar.first_moment+=i;scalar.second_moment+=i;
+                optimizerHostStep(scalar);
+            }
+            compare(actual,expected);
+        }
+    }
+#ifdef _OPENMP
+    const int previous_threads = omp_get_max_threads();
+    const int previous_dynamic = omp_get_dynamic();
+    omp_set_dynamic(0);
+    // Exercise actual threaded updates, including both global reductions and
+    // non-divisible tails. Compare complete multi-step optimizer states.
+    for (int kind=0; kind<9; ++kind) for (int variant=0; variant<2; ++variant) {
+        Optimizer optimizer;
+        optimizer.type=OptimizerType(kind);
+        optimizer.beta1=.8f;
+        optimizer.beta2=.9f;
+        optimizer.adafactor_beta1=variant?.7f:0.f;
+        optimizer.adafactor_relative_step=variant;
+        optimizer.adafactor_scale_parameter=!variant;
+        Buffers actual(131075), expected=actual;
+        omp_set_num_threads(1);
+        for (int step=1; step<=12; ++step) {
+            optimizer.step=step;
+            optimizerHostStep(expected.request(optimizer));
+        }
+        omp_set_num_threads(4);
+        Mimir::Planning::ExecutionPolicy::CpuScope measured_workers(4);
+        require(RuntimeParallel::workers(actual.w.size())==4,"optimizer ignored planner worker scope");
+        for (int step=1; step<=12; ++step) {
+            optimizer.step=step;
+            optimizerHostStep(actual.request(optimizer));
+        }
+        compare(actual,expected);
+        require(actual.g==expected.g,"optimizer modified input gradients");
+    }
+    // Even with nested OpenMP enabled, kernels must defer to the outer team.
+    const int previous_levels=omp_get_max_active_levels();
+    omp_set_max_active_levels(2);
+    int nested_workers=0;
+    #pragma omp parallel num_threads(2) reduction(+:nested_workers)
+    {
+        nested_workers+=RuntimeParallel::workers(1u<<24);
+    }
+    require(nested_workers==2,"nested kernel created additional workers");
+    omp_set_max_active_levels(previous_levels);
+    omp_set_num_threads(previous_threads);
+    omp_set_dynamic(previous_dynamic);
+#endif
+}
 class MockRuntime final:public AbstractRuntime {
 public:
     bool fail=false;int calls=0;const char* label;
@@ -52,6 +115,7 @@ public:
 };
 int main(int argc,char**argv){try {
     const std::string mode=argc>1?argv[1]:"router";
+    if(mode=="router")checkHostParallelism();
     for (size_t count : {size_t{1}, size_t{257}, size_t{4096}}) {
         Optimizer sgd;
         sgd.type = OptimizerType::SGD;

@@ -1,4 +1,7 @@
 #!/usr/bin/env lua
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_lumen_diffusion.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 ---@diagnostic disable: undefined-field, need-check-nil
 
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
@@ -71,6 +74,41 @@ if resume_path ~= "" then
   checkpoint_vocab_size=tonumber(saved.vocab_size)
   if not checkpoint_vocab_size or checkpoint_vocab_size<1 then die("vocab_size absent du checkpoint Lumen") end
 end
+local text_conditioning = Args.get_str(opts, "text-conditioning", "vae_text")
+if text_conditioning ~= "vae_text" and text_conditioning ~= "transformer" and text_conditioning ~= "t5" then die("--text-conditioning: vae_text, transformer ou t5 attendu") end
+local text_vae_path = Args.get_str(opts, "text-vae-checkpoint", cfg.text_vae_checkpoint or "checkpoint/vae_text_trained")
+local text_t5_path = Args.get_str(opts, "text-t5-checkpoint", cfg.text_t5_checkpoint or "checkpoint/t5/final")
+if text_conditioning ~= "t5" then text_t5_path = "" end
+if text_conditioning ~= "vae_text" then text_vae_path = "" end
+if resume_path ~= "" then
+  local architecture = read_json(FS.join(resume_path, "model", "architecture.json"))
+  text_vae_path = architecture.model_config.text_vae_checkpoint or ""
+  text_t5_path = architecture.model_config.text_t5_checkpoint or ""
+  cfg.text_seq_len = architecture.model_config.text_seq_len
+  cfg.dynamic_text_seq_len = architecture.model_config.dynamic_text_seq_len
+elseif not prepare_tokenizer_only and text_conditioning == "vae_text" then
+  text_vae_path = (Checkpoint.resolve_dir_prefer_final or Checkpoint.resolve_dir)(text_vae_path)
+  if not text_vae_path then die("--text-vae-checkpoint requis: entraînez d'abord train_vae_texte.lua sur des contextes naturels") end
+end
+local text_vae_config = nil
+if text_t5_path ~= "" and resume_path == "" and not prepare_tokenizer_only then
+  text_t5_path = (Checkpoint.resolve_dir_prefer_final or Checkpoint.resolve_dir)(text_t5_path)
+  if not text_t5_path then die("--text-t5-checkpoint requis: entraînez train_t5.lua") end
+  local architecture = read_json(FS.join(text_t5_path, "model", "architecture.json"))
+  text_vae_config = type(architecture) == "table" and architecture.model_config
+  if type(text_vae_config) ~= "table" or text_vae_config.type ~= "t5" then die("Checkpoint T5 invalide") end
+  tokenizer_path = FS.join(text_t5_path, "tokenizer", "tokenizer.json")
+  require_tokenizer = true
+end
+cfg.text_t5_checkpoint = text_t5_path
+if text_vae_path ~= "" and resume_path == "" and not prepare_tokenizer_only then
+  local architecture = read_json(FS.join(text_vae_path, "model", "architecture.json"))
+  text_vae_config = type(architecture) == "table" and architecture.model_config
+  if type(text_vae_config) ~= "table" or text_vae_config.type ~= "vae_text" then die("Checkpoint VAEText invalide") end
+  tokenizer_path = FS.join(text_vae_path, "tokenizer", "tokenizer.json")
+  require_tokenizer = true
+end
+cfg.text_vae_checkpoint = text_vae_path
 local epochs = math.max(1, Args.get_int(opts, "epochs", training.epochs or 10))
 local learning_rate = Args.get_num(opts, "lr", training.learning_rate or 1e-4)
 local optimizer = Args.get_str(opts, "optimizer", training.optimizer or "adamw")
@@ -199,6 +237,10 @@ else
   if not cfg.text_seq_len or cfg.text_seq_len%1~=0 then die("--text-seq-len doit être auto ou un entier positif") end
 end
 cfg.dynamic_text_seq_len = Args.get_bool(opts,"dynamic-text-seq-len",cfg.dynamic_text_seq_len ~= false)
+if text_vae_config then
+  cfg.text_seq_len = assert(tonumber(text_vae_config.seq_len))
+  cfg.dynamic_text_seq_len = false
+end
 cfg.text_layers = Args.get_int(opts, "text-layers", cfg.text_layers or 2)
 cfg.num_heads = Args.get_int(opts, "num-heads", cfg.num_heads or 8)
 cfg.diffusion_steps = Args.get_int(opts, "diffusion-steps", cfg.diffusion_steps or 1000)
@@ -385,14 +427,23 @@ local function hydrate_tokenizer(reason)
 end
 
 
-if resume_path=="" then hydrate_tokenizer("dataset") end
+if resume_path=="" and not text_vae_config then hydrate_tokenizer("dataset") end
+if text_vae_config then
+  local actual = Mimir.Tokenizer.vocab_size()
+  if (text_vae_config.type == "t5" and actual > text_vae_config.vocab_size) or
+     (text_vae_config.type ~= "t5" and actual ~= text_vae_config.vocab_size) then
+    die("Tokenizer incompatible avec le checkpoint texte")
+  end
+end
 local tokenizer_vocab_size = math.floor(tonumber(Mimir.Tokenizer.vocab_size()) or 0)
 if tokenizer_vocab_size < 7 then
   die("tokenizer incomplet après hydratation: vocab=" .. tokenizer_vocab_size)
 end
 if resume_path=="" then
-  check(Mimir.Tokenizer.set_max_vocab(tokenizer_vocab_size),nil,"Tokenizer.freeze_vocab")
-  cfg.vocab_size=tokenizer_vocab_size
+  if not text_vae_config then
+    check(Mimir.Tokenizer.set_max_vocab(tokenizer_vocab_size),nil,"Tokenizer.freeze_vocab")
+  end
+  cfg.vocab_size=(text_vae_config and text_vae_config.type == "t5") and text_vae_config.vocab_size or tokenizer_vocab_size
 else
   if tokenizer_vocab_size>checkpoint_vocab_size then die("Tokenizer incompatible avec les embeddings du checkpoint Lumen") end
   cfg.vocab_size=checkpoint_vocab_size
@@ -405,7 +456,7 @@ if not cfg.dynamic_text_seq_len and type(Mimir.Dataset.prepare_sequences) == "fu
 end
 
 FS.mkdir_p(output_dir)
-if resume_path=="" then
+if resume_path=="" and not text_vae_config then
   local ok_source_save, source_save_err = Mimir.Tokenizer.save(tokenizer_path)
   check(ok_source_save, source_save_err, "Tokenizer.save(source)")
 end

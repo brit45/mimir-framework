@@ -1,3 +1,4 @@
+#include "runtimes/cpu/Parallel.hpp"
 #include "Encoder.hpp"
 #include <random>
 #include <algorithm>
@@ -169,12 +170,11 @@ void ConditioningEncoder::ensureVocabSize(size_t new_vocab_size, uint64_t seed)
     const size_t start = old * dim_t;
     const size_t n_new = token_embeddings.size() - start;
 
-    // Initialisation parallèle : chaque thread utilise son propre RNG
-    // pour éviter tout verrou et saturer les coeurs disponibles.
-    #pragma omp parallel if(n_new > 65536)
+    // Stateful RNG initialization uses the deterministic serial reference;
+    // it cannot be replayed to tune latency or switch streams by tensor size.
     {
-        const int tid = omp_get_thread_num();
-        const int nth = omp_get_num_threads();
+        const int tid = 0;
+        const int nth = 1;
         // Graine distincte par thread pour garantir la reproductibilité.
         std::mt19937 rng(static_cast<uint32_t>(
             (seed ^ 0xC0FFEEu) ^ (static_cast<uint64_t>(tid + 1) * 0x9e3779b97f4a7c15ULL)));
@@ -210,7 +210,7 @@ void ConditioningEncoder::setMagicFromToken(const MagicToken &mt)
 
     // Projection 8-d -> dim avec poids pseudo-aléatoires déterministes.
     // Parallélisé : chaque dimension est indépendante.
-    #pragma omp parallel for schedule(static) if(dim > 256)
+    #pragma omp parallel for schedule(static) if(RuntimeParallel::workers(size_t(dim))>1) num_threads(RuntimeParallel::workers(size_t(dim)))
     for (int d = 0; d < dim; ++d) {
         float acc = 0.0f;
         for (int i = 0; i < 8; ++i) {

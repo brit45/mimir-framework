@@ -52,6 +52,8 @@ public:
     );
 
     void activateAvailableRuntimes() const;
+    // Read-only effective runtime configuration for the planner/GraphSet.
+    const std::vector<AbstractRuntime*>& configuredRuntimes() const {return runtime_priority_;}
 
     // Prépare une route map forward par layer avant exécution.
     // La map est ensuite réutilisée pendant le forward.
@@ -99,6 +101,17 @@ public:
         AbstractRuntime** selected_runtime = nullptr,
         const RuntimeBackwardContext& context = {}
     ) const;
+
+    // Execute the planner's measured winner: native fused kernel or ordinary
+    // routed program. A null selected_runtime denotes the ordinary program.
+    bool dispatchPointwiseForward(const std::vector<const Layer*>& chain,
+        const std::vector<float>& input, std::vector<std::vector<float>>& outputs,
+        bool retain_intermediates, AbstractRuntime** selected_runtime=nullptr,
+        bool training=false,Mimir::DType dtype=Mimir::DType::F32) const;
+    bool dispatchPointwiseBackward(const std::vector<const Layer*>& chain,
+        const std::vector<const std::vector<float>*>& inputs,const std::vector<float>& grad,
+        std::vector<float>& result, AbstractRuntime** selected_runtime=nullptr,
+        Mimir::DType dtype=Mimir::DType::F32) const;
 
 private:
     RuntimeRouter() = default;

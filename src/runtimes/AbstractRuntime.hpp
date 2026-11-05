@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "LayerTypes.hpp"
+#include "Planning/ExecutionPolicy.hpp"
 #include "TypedTensor.hpp"
 
 struct Layer;
@@ -65,16 +66,16 @@ struct RuntimeConfig {
 
     // Fast-paths (opt-in)
     bool linear_enabled   = false;
-    int  linear_min_ops   = 1 << 20;
+    int  linear_min_ops   = Mimir::Planning::ExecutionPolicy::automatic_minimum;
 
     bool conv_enabled     = false;
-    int  conv_min_ops     = 1 << 18;  // ~256K MACs
+    int  conv_min_ops     = Mimir::Planning::ExecutionPolicy::automatic_minimum;
 
     bool norm_enabled         = false;
-    int  norm_min_elements    = 1 << 12; // 4096 éléments
+    int  norm_min_elements    = Mimir::Planning::ExecutionPolicy::automatic_minimum; // 4096 éléments
 
     bool attention_enabled  = false;
-    int  attention_min_ops  = 1 << 18;  // ~256K MACs
+    int  attention_min_ops  = Mimir::Planning::ExecutionPolicy::automatic_minimum;
 
     // Optionnel: sélection de device (ex: MIMIR_CUDA_DEVICE=0)
     int device_index = 0;
@@ -113,6 +114,18 @@ public:
         int in_f,
         int out_f
     ) = 0;
+
+    // Optional native fusion programs. The planner compares these with the
+    // ordinary routed chain; Unsupported is never treated as host fallback.
+    virtual RuntimeCapabilityLevel queryPointwiseFusionCapability(
+        const std::vector<const Layer*>&,bool backward,bool training) const {
+        return RuntimeCapabilityLevel::Unsupported;
+    }
+    virtual bool pointwiseFusionForward(const std::vector<const Layer*>&,const std::vector<float>&,
+        std::vector<std::vector<float>>&,bool retain,bool training) {return false;}
+    virtual bool pointwiseFusionBackward(const std::vector<const Layer*>&,
+        const std::vector<const std::vector<float>*>&,const std::vector<float>&,
+        std::vector<float>&) {return false;}
 
     // Typed path. Backends must return false when they do not implement the
     // requested dtype; callers must not silently relabel float32 output.

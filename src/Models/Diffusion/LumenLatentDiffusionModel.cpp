@@ -1,5 +1,6 @@
 #include "LumenLatentDiffusionModel.hpp"
 #include "Models/Vision/VAEConvModel.hpp"
+#include "Models/Registry/ModelArchitectures.hpp"
 #include "Serialization/Serialization.hpp"
 #include "training/BBoxSupervision.hpp"
 #include "runtimes/ops_loss_and_grad.hpp"
@@ -680,7 +681,9 @@ void LumenLatentDiffusionModel::appendReconstructionGraph() {
             layer.grad_weights.clear();
             getMutableLayers().push_back(std::move(layer));
         }
-        modelConfig["frozen_layer_prefixes"] = json::array({prefix});
+        auto& frozen = modelConfig["frozen_layer_prefixes"];
+        if (!frozen.is_array()) frozen = json::array();
+        frozen.push_back(prefix);
         modelConfig["initialize_from_layer_weights"] = true;
         image = prefix + "x";
     } else {
@@ -976,6 +979,51 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
         }
     };
 
+    std::string context;
+    if (!cfg.text_t5_checkpoint.empty() && !cfg.text_vae_checkpoint.empty())
+        throw std::invalid_argument("Lumen: choose T5 or VAEText, not both");
+    if (!cfg.text_t5_checkpoint.empty()) {
+        Model metadata;
+        Mimir::Serialization::LoadOptions options;
+        options.format = Mimir::Serialization::CheckpointFormat::RawFolder;
+        options.load_optimizer = false; options.load_tokenizer = false; options.load_encoder = false;
+        options.metadata_only = true;
+        std::string error;
+        if (!Mimir::Serialization::load_checkpoint(metadata, cfg.text_t5_checkpoint, options, &error))
+            throw std::runtime_error("Lumen: cannot read T5 checkpoint: " + error);
+        auto config = metadata.modelConfig;
+        if (config.value("type", std::string()) != "t5" ||
+            config.value("vocab_size", 0) != vocab || config.value("seq_len", 0) != text_len)
+            throw std::runtime_error("Lumen: incompatible T5 vocabulary or sequence length");
+        const int dim = config.at("d_model").get<int>();
+        config["encoder_only"] = true;
+        auto encoder = ModelArchitectures::create("t5", config);
+        encoder->allocateParams();
+        options.metadata_only = false; options.apply_model_config = false;
+        options.strict_mode = false; // Training head intentionally excluded.
+        if (!Mimir::Serialization::load_checkpoint(*encoder, cfg.text_t5_checkpoint, options, &error))
+            throw std::runtime_error("Lumen: cannot load T5 weights: " + error);
+        const std::string prefix = "lumen/t5/";
+        for (const auto& source : encoder->getLayers()) {
+            Layer layer = source;
+            layer.name = prefix + source.name; layer.output = prefix + source.output;
+            for (auto& input : layer.inputs) input = (input == "__input__" || input == "text_ids") ? "text_ids" : prefix + input;
+            if (!layer.shared_weights_from.empty()) layer.shared_weights_from = prefix + layer.shared_weights_from;
+            if (source.getWeightsSize()) layer.weights.assign(source.getWeights(), source.getWeights()+source.getWeightsSize());
+            layer.weight_block = nullptr; layer.grad_weights.clear();
+            model.getMutableLayers().push_back(std::move(layer));
+        }
+        model.modelConfig["text_t5_checkpoint"] = cfg.text_t5_checkpoint;
+        model.modelConfig["dynamic_text_seq_len"] = false;
+        model.modelConfig["frozen_layer_prefixes"] = json::array({prefix});
+        model.modelConfig["initialize_from_layer_weights"] = true;
+        model.push("lumen/text/t5_projection", "Linear", size_t(dim)*context_dim);
+        auto* projection = model.getLayerByName("lumen/text/t5_projection");
+        projection->inputs = {prefix+"x"}; projection->output = "lumen/text/context";
+        projection->in_features=dim; projection->out_features=context_dim;
+        projection->seq_len=text_len; projection->use_bias=false;
+        context=projection->output;
+    } else if (cfg.text_vae_checkpoint.empty()) {
     model.push("lumen/text/token_embedding", "Embedding",
                static_cast<size_t>(vocab) * static_cast<size_t>(context_dim));
     if (auto* layer = model.getLayerByName("lumen/text/token_embedding")) {
@@ -1000,7 +1048,7 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
         layer->output = "lumen/text/context0";
     }
 
-    std::string context = "lumen/text/context0";
+    context = "lumen/text/context0";
     for (int index = 0; index < std::max(1, cfg.text_layers); ++index) {
         const std::string prefix = "lumen/text/block" + std::to_string(index + 1);
         model.push(prefix + "/norm1", "LayerNorm", static_cast<size_t>(2 * context_dim));
@@ -1082,6 +1130,69 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
         layer->eps = 1e-5f;
     }
     context = "lumen/text/context";
+    } else {
+        Model metadata_model;
+        Mimir::Serialization::LoadOptions options;
+        options.format = Mimir::Serialization::CheckpointFormat::RawFolder;
+        options.load_optimizer = false;
+        options.load_tokenizer = false;
+        options.load_encoder = false;
+        std::string error;
+        options.metadata_only = true;
+        if (!Mimir::Serialization::load_checkpoint(metadata_model, cfg.text_vae_checkpoint, options, &error))
+            throw std::runtime_error("Lumen: cannot load VAEText: " + error);
+        const auto& metadata = metadata_model.modelConfig;
+        if (metadata.value("type", std::string()) != "vae_text" ||
+            metadata.value("vocab_size", 0) != cfg.vocab_size)
+            throw std::runtime_error("Lumen: incompatible VAEText configuration/tokenizer");
+        const int dim = metadata.at("d_model").get<int>();
+        const int latent_tokens = metadata.at("latent_tokens").get<int>();
+        if (dim < 1 || latent_tokens < 1 || metadata.at("seq_len").get<int>() != text_len)
+            throw std::runtime_error("Lumen: incompatible VAEText dimensions");
+        auto encoder_model = ModelArchitectures::create("vae_text", metadata);
+        auto& encoder_layers = encoder_model->getMutableLayers();
+        encoder_layers.erase(std::remove_if(encoder_layers.begin(), encoder_layers.end(), [](const Layer& layer) {
+            return layer.name != "vae_text/tok_emb" && layer.name.rfind("vae_text/enc/", 0) != 0 && layer.name != "vae_text/mu";
+        }), encoder_layers.end());
+        encoder_model->allocateParams();
+        options.metadata_only = false;
+        options.apply_model_config = false;
+        options.strict_mode = false; // decoder tensors are intentionally excluded
+        if (!Mimir::Serialization::load_checkpoint(*encoder_model, cfg.text_vae_checkpoint, options, &error))
+            throw std::runtime_error("Lumen: cannot load VAEText encoder weights: " + error);
+        const std::string prefix = "lumen/text_vae/";
+        bool found_mu = false;
+        for (const auto& source : encoder_model->getLayers()) {
+            if (source.name != "vae_text/tok_emb" && source.name.rfind("vae_text/enc/", 0) != 0 &&
+                source.name != "vae_text/mu") continue;
+            Layer layer = source;
+            layer.name = prefix + source.name;
+            layer.output = prefix + source.output;
+            for (auto& input : layer.inputs) if (input != "text_ids") input = prefix + input;
+            if (!layer.shared_weights_from.empty()) layer.shared_weights_from = prefix + layer.shared_weights_from;
+            if (source.getWeightsSize())
+                layer.weights.assign(source.getWeights(), source.getWeights() + source.getWeightsSize());
+            layer.weight_block = nullptr;
+            layer.grad_weights.clear();
+            model.getMutableLayers().push_back(std::move(layer));
+            found_mu |= source.name == "vae_text/mu";
+        }
+        if (!found_mu) throw std::runtime_error("Lumen: VAEText encoder has no mu output");
+        model.modelConfig["text_vae_checkpoint"] = cfg.text_vae_checkpoint;
+        model.modelConfig["dynamic_text_seq_len"] = false;
+        model.modelConfig["frozen_layer_prefixes"] = json::array({prefix});
+        model.modelConfig["initialize_from_layer_weights"] = true;
+        model.push("lumen/text/latent_projection", "Linear", size_t(dim) * context_dim + context_dim);
+        auto* projection = model.getLayerByName("lumen/text/latent_projection");
+        projection->inputs = {prefix + "vae_text/mu"};
+        projection->output = "lumen/text/context";
+        projection->in_features = dim;
+        projection->out_features = context_dim;
+        projection->seq_len = latent_tokens;
+        projection->use_bias = true;
+        context = projection->output;
+    }
+
 
     model.push("lumen/time/input", "Identity", 0);
     if (auto* layer = model.getLayerByName("lumen/time/input")) {

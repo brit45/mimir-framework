@@ -26,11 +26,22 @@ struct ModelGraphTree {
     size_t columns=0, rows=0;
     float card_width=190.f;
     float card_height=70.f,column_gap=80.f,top=35.f;
-    static constexpr float row_gap=40.f;
-    static constexpr float left=120.f;
-    float width() const { return left+float(columns)*(card_width+column_gap)+24.f; }
+    float row_gap=40.f, left=120.f;
+    struct FusionBlock {
+        size_t id=0, level=0, count=0;
+        float x=0,y=0,width=0,height=0;
+        std::string label;
+    };
+    std::vector<FusionBlock> fusion_blocks;
+    float width() const {
+        float extent=left+float(columns)*(card_width+column_gap)+24.f;
+        for(const auto& block:fusion_blocks) extent=std::max(extent,block.x+block.width+24.f);
+        return extent;
+    }
     float height() const {
-        return top+float(rows)*card_height+(rows>0?float(rows-1)*row_gap:0.f)+24.f;
+        float extent=top+float(rows)*card_height+(rows>0?float(rows-1)*row_gap:0.f)+24.f;
+        for(const auto& block:fusion_blocks) extent=std::max(extent,block.y+block.height+24.f);
+        return extent;
     }
     vizgfx::Vector2f position(size_t i) const {
         return {left+float(depths[i])*(card_width+column_gap)+card_width*.5f,
@@ -77,6 +88,51 @@ inline ModelGraphTree modelGraphTree(const nlohmann::json& graph) {
     const size_t long_edges=static_cast<size_t>(std::count_if(result.edges.begin(),result.edges.end(),
         [&](const auto& edge){return result.depths[edge.to]>result.depths[edge.from]+1;}));
     result.top+=float(long_edges)*10.f;
+    if(graph.contains("fusion_groups")) {
+        const auto& groups=graph.at("fusion_groups");
+        std::vector<size_t> levels(groups.size(),0);
+        size_t nesting=0;
+        // Groups are emitted bottom-up by the planner, so no call-stack
+        // recursion (or repeated subtree traversal) is needed for deep fusions.
+        for(size_t i=groups.size();i-->0;) {
+            for(const auto& child:groups[i].at("children")) {
+                const auto id=child.get<size_t>();
+                if(id<i) levels[id]=levels[i]+1;
+            }
+            nesting=std::max(nesting,levels[i]+1);
+        }
+        result.top+=float(nesting)*32.f;
+        result.left=std::max(result.left,float(nesting)*12.f+24.f);
+        result.row_gap=std::max(result.row_gap,float(nesting)*44.f+16.f);
+        for(size_t i=0;i<groups.size();++i) {
+            float x=std::numeric_limits<float>::max(), y=x, right=0,bottom=0;
+            size_t count=0;
+            auto include=[&](float bx,float by,float bw,float bh) {
+                x=std::min(x,bx);y=std::min(y,by);
+                right=std::max(right,bx+bw);bottom=std::max(bottom,by+bh);
+            };
+            for(const auto& member:groups[i].at("layers")) {
+                const size_t id=member.get<size_t>();
+                if(id>=nodes.size())continue;
+                const auto p=result.position(id);
+                include(p.x-result.card_width*.5f,p.y-result.card_height*.5f,
+                    result.card_width,result.card_height);
+                ++count;
+            }
+            for(const auto& child:groups[i].at("children")) {
+                const size_t id=child.get<size_t>();
+                if(id>=result.fusion_blocks.size())continue;
+                const auto& block=result.fusion_blocks[id];
+                include(block.x,block.y,block.width,block.height);count+=block.count;
+            }
+            if(count==0) { result.fusion_blocks.push_back({}); continue; }
+            const bool kernel=groups[i].value("kernel_fused",false);
+            result.fusion_blocks.push_back({i,levels[i],count,x-12.f,y-30.f,
+                right-x+24.f,bottom-y+42.f,
+                "Fusion #"+std::to_string(i)+" | "+std::to_string(count)+
+                " layer"+(count>1?"s":"")+(kernel?" | kernel":" | graphe")});
+        }
+    }
     return result;
 }
 
@@ -179,6 +235,22 @@ inline std::vector<vizgfx::Vector2f> modelGraphTreeEdgePath(const ModelGraphTree
     const float source_route=source_right+gap*float(output_rank+1)/float(outgoing.size()+1);
     return {{source_right+1.f,source_y},{source_route,source_y},
         {source_route,target_y},{target_left-2.f,target_y}};
+}
+
+// Draw outer blocks first: translucent fills and distinct outlines keep the
+// original nodes, connections and nested group boundaries readable.
+template<class Canvas, class Text> inline void drawModelGraphFusionBlocks(
+    Canvas& canvas,const ModelGraphTree& layout,Text&& text) {
+    for(auto it=layout.fusion_blocks.rbegin();it!=layout.fusion_blocks.rend();++it) {
+        const auto& block=*it;
+        if(!block.count)continue;
+        const auto color=graphLaneColor(block.level+1);
+        vizgfx::RectangleShape box({block.width,block.height});
+        box.setPosition({block.x,block.y});
+        box.setFillColor(vizgfx::Color(color.r,color.g,color.b,18));
+        box.setOutlineColor(color);box.setOutlineThickness(1.5f);canvas.draw(box);
+        text(block.x+8.f,block.y+7.f,block.label,color,11);
+    }
 }
 
 template<class Canvas> inline void drawModelGraphTreeEdges(Canvas& canvas,const ModelGraphTree& layout,

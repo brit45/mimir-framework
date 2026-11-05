@@ -52,6 +52,8 @@ __global__ void portable_sequence_constant_backward(const float* source,const fl
 }
 '''
 
+sources['Fusion']=Path('src/runtimes/PointwiseFusionKernels.cuh').read_text()
+
 # Scalar GPU geometries have no dynamic containers.
 gs=Path('src/runtimes/cuda/CudaOperationGeometry.hpp').read_text(); geometries={}
 for name in ['Resize','Pool','Projection','ExtendedConv','BatchNorm','Attention','Recurrent']:
@@ -285,6 +287,12 @@ for name in team_kernels:
 shader+=r'''
 void tiled_gemm(int a,int b,int c,int m,int n,int k,int lda,int ldb,int ldc,bool ta,bool tb,float alpha,float beta){
  int local=int(gl_LocalInvocationID.x),group=int(gl_WorkGroupID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x);
+ if(m<16 || n<16){
+  int index=group*256+local;if(index>=m*n)return;
+  int row=index%m,col=index/m;float sum=0.;
+  for(int f=0;f<k;++f)sum+=memory[a+(ta?f+row*lda:row+f*lda)]*memory[b+(tb?col+f*ldb:f+col*ldb)];
+  memory[c+row+col*ldc]=alpha*sum+(beta==0.?0.:beta*memory[c+row+col*ldc]);return;
+ }
  int tiles=(m+15)/16,r=local%16,d=local/16,row=(group%tiles)*16+r,col=(group/tiles)*16+d;
  float sum=0;
  for(int base=0;base<k;base+=16){
@@ -300,7 +308,7 @@ void tiled_gemm(int a,int b,int c,int m,int n,int k,int lda,int ldb,int ldc,bool
 '''
 
 # A single command entry dispatches one reference kernel over its logical grid.
-entry='int group_id(){return int(gl_WorkGroupID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x); }\nint invocation_id(){return int(gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x*256u); }\nvoid reference_main(){\n blockDim_x=arguments[1];gridDim_x=arguments[2];\n int selected=specializedOperation>=0?specializedOperation:arguments[0];NORM_ENTRY\n int id=selected;bool parallel=(id>=0 && id<=42 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id():0;if(!parallel && invocation_id()!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){\n'
+entry='int group_id(){return int(gl_WorkGroupID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x); }\nint invocation_id(){return int(gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x*256u); }\nvoid reference_main(){\n blockDim_x=arguments[1];gridDim_x=arguments[2];\n int selected=specializedOperation>=0?specializedOperation:arguments[0];NORM_ENTRY\n int id=selected;bool parallel=(id>=0 && id<=44 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id():0;if(!parallel && invocation_id()!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){\n'
 pack=''
 norm_entry=''
 gemm_entry=''
@@ -329,7 +337,7 @@ write_if_changed(OUT/'reference.comp','#version 450\nlayout(local_size_x=256)in;
 # GPU host wrappers are generated from CUDA; PortableRuntime orchestration is
 # maintained independently to preserve backend-specific dispatch and validation.
 for family,s in sources.items():
- if family in ('Extra','Runtime'):continue
+ if family in ('Extra','Runtime','Fusion'):continue
  if family=='Recurrent':
   start=s.index('struct SequenceArena');end=s.index('inline bool recurrent(');s=s[:start]+s[end:]
  else:
@@ -368,6 +376,8 @@ for i,(name,args) in enumerate(kernels):
  pack+=f'case {i}:return {{'+','.join(map(str,indices))+'};\n'
 pack+='default:return {};}}\n'
 write_if_changed(OUT/'PortableKernelArguments.hpp',pack)
+fusion_ids={name:i for i,(name,args) in enumerate(kernels)}
+write_if_changed(OUT/'PointwiseFusionIds.hpp','#pragma once\nnamespace Mimir::GpuFusion {\ninline constexpr int forward_kernel_id='+str(fusion_ids['pointwise_fusion_forward'])+';\ninline constexpr int backward_kernel_id='+str(fusion_ids['pointwise_fusion_backward'])+';\n}\n')
 print('generated',len(kernels),'kernels')
 
 from pathlib import Path

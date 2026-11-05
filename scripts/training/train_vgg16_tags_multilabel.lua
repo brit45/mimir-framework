@@ -1,3 +1,6 @@
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_vgg16_tags_multilabel.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 -- Train VGG16/VGG19 en classification multi-label à partir de tags dot-séparés.
 --
 -- Dataset attendu: pour chaque image `a.png`, un texte `a.txt` contenant des tags/phrases courtes,
@@ -8,7 +11,7 @@
 -- --tags-vocab permet de fournir explicitement une liste fixe (une entrée par ligne).
 --
 -- Usage:
---   ./bin/mimir --lua scripts/training/train_vgg16_tags_multilabel.lua -- \
+--   ./run_mimir.sh --lua scripts/training/train_vgg16_tags_multilabel.lua -- \
 --     --arch vgg16 \
 --     --dataset-root dataset_2 \
 --     --tags-vocab checkpoint/tags_vocab.txt \

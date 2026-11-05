@@ -72,6 +72,17 @@ Extensions reconnues (actuellement):
 
 Pour une image `portraits/photo.jpg`, le fichier `portraits/photo.json` peut contenir le document produit par [l’atelier d’annotation](../../annotator/README.md). Le loader reconnaît son objet `captions` et valide la description principale, le nom de l’image, les identifiants d’entités, les références et les boîtes normalisées.
 
+L’atelier possède une boîte de sélection de dossiers pour choisir le parent d’un
+nouveau dataset ou ouvrir un dataset existant afin de le modifier. Lors de
+l’import d’un dossier déjà composé par Mímir Dataset Composer, les sidecars
+JSON et `composition.mimir-meta` sont copiés avec les images : les classes,
+libellés et boîtes alimentent les fiches d’entités. Les masques image dans les
+dossiers usuels (`masks/`, `segmentations/`) ou suffixés `_mask`,
+`-mask`, `.mask`, `_segmentation` et `-segmentation` sont associés à leur
+image par chemin relatif. Annoter calcule leur boîte englobante et préremplit
+une entité. Les détails d’utilisation et formats pris en charge figurent dans
+le [guide de l’atelier](../../annotator/README.md).
+
 ```json
 {
   "image": "photo.jpg",
@@ -96,6 +107,28 @@ Une annotation invalide provoque une erreur explicite au chargement, sans rempla
 
 Le document complet est disponible sous `item.annotation`, son chemin sous `item.annotation_file`. Le contenu est chargé à la demande et libéré par `Mimir.Dataset.release(i)`. Les boîtes restent normalisées dans le document après redimensionnement des pixels.
 
+L’atelier d’annotation peut aussi créer des entités de décor avec `entities[].mask = {type: "polygon", points: [[x,y], ...]}`. Les coordonnées sont normalisées sur l’image ; un polygone doit contenir au moins trois points et avoir une aire non nulle. Le parseur du chargeur natif garde le masque dans `item.annotation` et calcule une `bbox` englobante, même si elle était absente du JSON. Les masques peuvent être ciblés par les relations et les points de squelette comme les autres entités. Leur géométrie polygonale, plutôt que leur rectangle englobant, contribue à la pondération spatiale ; une forme plus petite que la grille est affectée à sa cellule la plus proche.
+
+L’atelier permet également de tracer les zones de texte d’une image et d’y conserver une transcription, une traduction, les codes de langue et des tags. Une entité OCR utilise le même masque polygonal que les décors :
+
+```json
+{"id":"ocr_1","phrase":"texte dans l’image","role":"text",
+ "mask":{"type":"polygon","points":[[0.2,0.1],[0.8,0.1],[0.8,0.2],[0.2,0.2]]},
+ "ocr":{"text":"こんにちは","translation":"Bonjour","source_language":"ja","target_language":"fr","tags":["dialogue"]}}
+```
+
+Le texte OCR et sa traduction sont ajoutés au contexte textuel des modèles conditionnés; ils ne remplacent ni ne modifient `captions.primary`. Les langues et tags sont des métadonnées de contexte.
+
+Pour la continuité d’un personnage au fil des images, les entités peuvent aussi porter un `track` stable. Le même ID doit être réutilisé pour chaque occurrence annotée de cette identité dans le dataset; chaque occurrence exige son propre masque. Le champ `name` apporte un nom explicite lisible :
+
+```json
+{"id":"person_1","phrase":"Asha","role":"primary_subject",
+ "mask":{"type":"polygon","points":[[0.2,0.1],[0.5,0.1],[0.5,0.9],[0.2,0.9]]},
+ "track":{"id":"chapter-asha","name":"Asha"}}
+```
+
+Au scan, l’atelier agrège les identités déjà enregistrées et propose leur réutilisation pour tracer une nouvelle occurrence. Le loader natif valide et conserve les champs `ocr` et `track` dans `item.annotation`, et le conditionnement texte inclut le nom/ID suivi et les informations OCR. Ce suivi est une identité annotée par l’utilisateur, pas une association automatique ni une garantie de reconnaissance du personnage.
+
 ```lua
 local ok, n = Mimir.Dataset.load("/chemin/dataset", 64, 64, 2)
 assert(ok, n)
@@ -113,11 +146,11 @@ for i = 1, n do
 end
 ```
 
-Les entraînements VAE avec conditionnement texte, VAEText et DiT/Lumen qui consomment déjà `loadText()` ou `item.text` reçoivent cette description sans conversion préalable en `.txt`. Les entraînements VAE image, avec ou sans texte, utilisent automatiquement les `entities[].bbox` pour pondérer la reconstruction. DiT/Lumen les applique à la prédiction du bruit sur sa grille latente, en entraînement et en validation. Chaque boîte contribue à parts égales, quelle que soit sa taille ; son recouvrement exact avec les cellules préserve aussi les petites boîtes. Les masques de segmentation existants sont combinés avec cette pondération.
+Les entraînements VAE avec conditionnement texte, VAEText et DiT/Lumen qui consomment déjà `loadText()` ou `item.text` reçoivent cette description sans conversion préalable en `.txt`. Les entraînements VAE image, avec ou sans texte, utilisent automatiquement les `entities[].bbox` et `entities[].mask` pour pondérer la reconstruction. DiT/Lumen les applique à la prédiction du bruit sur sa grille latente, en entraînement et en validation. Chaque région contribue à parts égales, quelle que soit sa taille ; le recouvrement exact des boîtes et le raster polygonal des masques préservent les formes fines. Les masques de segmentation existants sont combinés avec cette pondération.
 
 Avec `bbox_loss_weight = 1` (défaut), les zones annotées contribuent à la loss en plus de l’image globale. En présence de relations, la pondération régionale inclut aussi le contexte entre les centres des boîtes liées. Chaque relation dont les deux entités possèdent une bbox ajoute une perte différentiable : elle compare les différences d’apparence moyenne et de moments spatiaux entre les régions prédites et les régions cibles. Ses gradients couplent les deux régions. `left_of/right_of` sélectionnent le moment horizontal, `above/below` le moment vertical ; les autres prédicats utilisent les deux axes. Cette perte s’applique aux sorties spatiales et au bruit latent de Lumen ; les classifieurs à sortie globale utilisent la pondération du contexte en entrée.
 
-Pour les modèles vision conditionnés par du texte, le contexte natif contient les identifiants et descriptions des entités, leurs rôles, les coordonnées des bbox, les squelettes, leurs attaches et leurs relations, puis les attributs, l’éclairage, la composition et la description principale. Le texte brut du dataset et de VIZ reste intact. Ce mécanisme fournit une supervision visuelle et textuelle ; il ne garantit pas à lui seul une compréhension sémantique générale. `bbox_loss_weight = 0` désactive la supervision spatiale ; le contexte reste transmis au modèle. Sans annotation, le comportement historique est conservé.
+Pour les modèles vision conditionnés par du texte, le contexte natif contient les identifiants et descriptions des entités, leurs rôles, les coordonnées des bbox et la présence de leurs masques polygonaux, les squelettes, leurs attaches et leurs relations, puis les attributs, l’éclairage, la composition et la description principale. Le texte brut du dataset et de VIZ reste intact. Ce mécanisme fournit une supervision visuelle et textuelle ; il ne garantit pas à lui seul une compréhension sémantique générale. `bbox_loss_weight = 0` désactive la supervision spatiale ; le contexte reste transmis au modèle. Sans annotation, le comportement historique est conservé.
 
 Les relations sont pondérées par le rôle de leurs deux entités : poids moyen `(poids_sujet + poids_objet) / 2`. Les valeurs par défaut sont `relation_primary_weight = 3`, `relation_secondary_weight = 2`, `relation_other_weight = 1`. `primary_subject`/`secondary_subject` et les variantes `primary_subjet`/`secondary_subjet` sont reconnus ; les rôles absents ou autres (`object`, `background`, etc.) utilisent le troisième poids. Cette importance multiplie la perte relationnelle et ses gradients, et pondère le contexte entre régions. Les bbox individuelles gardent leur pondération existante. Une relation dont les deux rôles valent zéro ne contribue plus aux contraintes visuelles.
 

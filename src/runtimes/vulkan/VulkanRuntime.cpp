@@ -1,3 +1,4 @@
+#include "runtimes/portable/PortablePointwiseFusion.hpp"
 #include "runtimes/optimizers/PortableOptimizer.hpp"
 #include "runtimes/vulkan/VulkanRuntime.hpp"
 
@@ -14,9 +15,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <new>
+#include <limits>
 #include <vector>
 
 struct VulkanRuntime::Impl {
+    Mimir::GpuFusion::PortableExecutor fusion;
     PortableRuntime reference{"VULKAN"};
 #ifdef ENABLE_VULKAN
     VulkanCompute::ComputeEngine engine;
@@ -262,7 +265,7 @@ bool VulkanRuntime::forwardLayer(
             const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
             const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
 
-            if (ops < std::max(0, config_.linear_min_ops) || x.size() != expected_in) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops) || x.size() != expected_in) return false;
             const float* w = layer.getWeights();
             if (!w || layer.getWeightsSize() < expected_total_w) return false;
 
@@ -286,7 +289,7 @@ bool VulkanRuntime::forwardLayer(
             if (B.size() != static_cast<size_t>(K) * static_cast<size_t>(N)) return false;
 
             const long long ops = static_cast<long long>(M) * static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) return false;
 
             outputs.resize(1);
             outputs[0].assign(static_cast<size_t>(M) * static_cast<size_t>(N), 0.0f);
@@ -308,7 +311,7 @@ bool VulkanRuntime::forwardLayer(
             if (B.size() != static_cast<size_t>(batches) * static_cast<size_t>(K) * static_cast<size_t>(N)) return false;
 
             const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) * static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) return false;
 
             outputs.resize(1);
             outputs[0].assign(static_cast<size_t>(batches) * static_cast<size_t>(M) * static_cast<size_t>(N), 0.0f);
@@ -359,7 +362,7 @@ bool VulkanRuntime::forwardLayer(
             if (out_h <= 0 || out_w <= 0) return false;
 
             const long long ops = static_cast<long long>(out_c) * static_cast<long long>(in_c) * static_cast<long long>(k) * static_cast<long long>(k) * static_cast<long long>(out_h) * static_cast<long long>(out_w);
-            if (ops < std::max(0, config_.conv_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.conv_min_ops)) return false;
 
             const size_t expected_in = static_cast<size_t>(in_c) * static_cast<size_t>(in_h) * static_cast<size_t>(in_w);
             if (x.size() != expected_in) return false;
@@ -380,7 +383,7 @@ bool VulkanRuntime::forwardLayer(
             const std::vector<float>& A = *inputs[0];
             const std::vector<float>& B = *inputs[1];
             if (A.size() != B.size() || A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.addForward(A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()));
@@ -390,7 +393,7 @@ bool VulkanRuntime::forwardLayer(
             const std::vector<float>& A = *inputs[0];
             const std::vector<float>& B = *inputs[1];
             if (A.size() != B.size() || A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.mulForward(A.data(), B.data(), outputs[0].data(), static_cast<int>(A.size()));
@@ -402,7 +405,7 @@ bool VulkanRuntime::forwardLayer(
             const std::vector<float>& A = *inputs[0];
             const std::vector<float>& B = *inputs[1];
             if (A.size() != B.size() || A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
 
             int op = 0;
             if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op)) return false;
@@ -415,7 +418,7 @@ bool VulkanRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
             if (A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.reluForward(A.data(), outputs[0].data(), static_cast<int>(A.size()));
@@ -424,7 +427,7 @@ bool VulkanRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
             if (A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.siluForward(A.data(), outputs[0].data(), static_cast<int>(A.size()));
@@ -433,7 +436,7 @@ bool VulkanRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
             if (A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.geluForward(A.data(), outputs[0].data(), static_cast<int>(A.size()));
@@ -442,7 +445,7 @@ bool VulkanRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
             if (A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.sigmoidForward(A.data(), outputs[0].data(), static_cast<int>(A.size()));
@@ -451,7 +454,7 @@ bool VulkanRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
             if (A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
             outputs.resize(1);
             outputs[0].assign(A.size(), 0.0f);
             return impl_->engine.tanhForward(A.data(), outputs[0].data(), static_cast<int>(A.size()));
@@ -464,7 +467,7 @@ bool VulkanRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
             if (A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
 
             int op = 0;
             float alpha = 0.01f;
@@ -513,4 +516,31 @@ bool VulkanRuntime::optimizerStep(const RuntimeOptimizerRequest& request) {
 #include "runtimes/losses/LossDispatch.hpp"
 bool VulkanRuntime::reconstructionLoss(const RuntimeLossGrad::Request& r,RuntimeLossGrad::LossWithGrad& out) {
     return supportsReconstructionLoss() && RuntimeLossGrad::portable(r,out,name(),config_.device_index);
+}
+
+
+RuntimeCapabilityLevel VulkanRuntime::queryPointwiseFusionCapability(
+    const std::vector<const Layer*>& chain,bool,bool) const {
+#if defined(ENABLE_VULKAN)
+    if(isInitialized() && !config_.disabled && config_.linear_enabled && Mimir::GpuFusion::supported(chain))
+        return RuntimeCapabilityLevel::NativeOptimized;
+#endif
+    (void)chain;return RuntimeCapabilityLevel::Unsupported;
+}
+
+bool VulkanRuntime::pointwiseFusionForward(const std::vector<const Layer*>& chain,const std::vector<float>& input,
+    std::vector<std::vector<float>>& output,bool retain,bool training) {
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,false,training)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(input.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,input,retain) || !impl_->fusion.run(program,name(),config_.device_index))return false;
+    program.forwardResult(output);return true;
+}
+bool VulkanRuntime::pointwiseFusionBackward(const std::vector<const Layer*>& chain,
+    const std::vector<const std::vector<float>*>& inputs,const std::vector<float>& grad,std::vector<float>& output) {
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,true,true)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(grad.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,grad,false,&inputs) || !impl_->fusion.run(program,name(),config_.device_index))return false;
+    program.backwardResult(output);return true;
 }

@@ -27,6 +27,11 @@ int main() {
     require(referenceDispatchFits(1024, {39, 1, 1, 1, 2, 3, 8, 8, 8}));
     require(!referenceDispatchFits(1024, {39, 1, 1, 1, 2, 3, 256, 256, 256}));
     require(!referenceDispatchFits(1024, {39, 1, 1, 1, 2, 3, INT_MAX, INT_MAX, INT_MAX}));
+    // Skinny GEMMs map actual output elements to threads, including odd tails.
+    require(parallelInvocationCount({39,1,1,1,2,3,65541,1,7})==65541);
+    require(parallelInvocationCount({39,1,1,1,2,3,1,65541,7})==65541);
+    require(parallelInvocationCount({39,1,1,1,2,3,17,33,7})==6*256);
+    require(parallelInvocationCount({39,1,1,1,2,3,0,33,7})==0);
     require(parallelDispatchFits(3*1024*1024,{36,256,12288}));
     require(!parallelDispatchFits(65*1024*1024,{36,256,12288}));
     require(!parallelDispatchFits(1024,{39,1,1,1,2,3,8,8,65537}));

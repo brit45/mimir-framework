@@ -1,5 +1,6 @@
 #include "runtimes/FiniteCheck.hpp"
 #include "runtimes/RuntimeRouter.hpp"
+#include "Planning/FusionCalibration.hpp"
 
 #include "Layers.hpp"
 #include "Planning/ExecutionCalibration.hpp"
@@ -84,6 +85,9 @@ void RuntimeRouter::setRuntimes(
     AbstractRuntime* cpu
 ) {
     ++optimizer_routing_generation_;
+    Mimir::Planning::FusionCalibration::clearProfiles();
+    Mimir::Planning::Calibration::forward_profiles.clear();
+    Mimir::Planning::Calibration::backward_profiles.clear();
     runtime_priority_.clear();
     runtime_priority_.reserve(6);
 
@@ -319,7 +323,8 @@ bool RuntimeRouter::dispatchForwardLayer(
     }
 
     auto ranking=rankForward(it->second,layer,inputs,training,optimizer_routing_generation_,context);
-    auto route=ranking.route;
+    Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(ranking.cpu_workers,ranking.cpu_algorithm);
+    auto& route=ranking.route;
     if (route.empty()) return false;
 
     size_t i = 0;
@@ -384,8 +389,9 @@ bool RuntimeRouter::dispatchForwardLayerPlanned(
             &layer, buildForwardRouteForLayer(layer)).first;
     }
     auto ranking=rankForward(route_it->second,layer,inputs,training,optimizer_routing_generation_,context);
-    auto route=ranking.route;
-    if(ranking.calibrated && !route.empty())preferred=route.front();
+    Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(ranking.cpu_workers,ranking.cpu_algorithm);
+    auto& route=ranking.route;
+    if(ranking.ordered && !route.empty())preferred=route.front();
 
     auto is_eligible = [&](AbstractRuntime* runtime) {
         return runtime && runtime->isInitialized() &&
@@ -477,6 +483,7 @@ bool RuntimeRouter::dispatchBackwardLayer(
 
     auto ranking=Mimir::Planning::Calibration::rank(std::vector<AbstractRuntime*>(route,route+count),layer,inputs,grad_outputs,true,training,optimizer_routing_generation_,
         [&](AbstractRuntime& rt,Layer& disposable,std::vector<std::vector<float>>& outputs){return rt.backwardLayerWithContext(inputs,grad_outputs,outputs,disposable,training,context);});
+    Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(ranking.cpu_workers,ranking.cpu_algorithm);
     for (size_t i = 0; i < ranking.route.size(); ++i) {
         AbstractRuntime* rt = ranking.route[i];
         if (!rt->isInitialized()) continue;
@@ -519,4 +526,141 @@ bool RuntimeRouter::dispatchBranchMerge(const std::vector<float>& left,
         }
     }
     return false;
+}
+
+bool RuntimeRouter::dispatchPointwiseForward(const std::vector<const Layer*>& chain,
+    const std::vector<float>& input,std::vector<std::vector<float>>& outputs,bool retain,
+    AbstractRuntime** selected,bool training,Mimir::DType dtype) const {
+    if(selected)*selected=nullptr;
+    ensureActivatedAndComposed();
+    if(!Mimir::RuntimeChecks::allFinite(input.data(),input.size()))return false;
+    namespace Fusion=Mimir::Planning::FusionCalibration;
+    Fusion::Request request;request.layers=chain;request.input=&input;request.training=training;
+    request.retain=retain;request.dtype=dtype;request.generation=optimizer_routing_generation_;
+    for(auto* rt:runtime_priority_)if(rt && rt->isInitialized() && !rt->config().disabled)request.available.push_back(rt);
+    auto ordinary=[&](Fusion::Buffers& result) {
+        const std::vector<float>* value=&input;
+        std::vector<float> current;
+        result.clear();if(retain)result.reserve(chain.size());
+        for(const auto* layer:chain) {
+            Fusion::Buffers next;
+            if(!dispatchForwardLayer({value},next,*layer,training) || next.size()!=1)return false;
+            if(retain){result.push_back(std::move(next[0]));value=&result.back();}
+            else {current=std::move(next[0]);value=&current;}
+        }
+        if(!retain)result.push_back(std::move(current));
+        return true;
+    };
+    std::vector<Fusion::Candidate> candidates;
+    const auto worker_candidates=Mimir::Planning::ExecutionPolicy::cpuCandidates();
+    candidates.reserve(1+request.available.size()*worker_candidates.size());
+    candidates.push_back({nullptr,{},1});
+    for(auto* rt:request.available)
+        if(runtimeCapabilityIsNative(rt->queryPointwiseFusionCapability(chain,false,training))) {
+            if(std::string(rt->name())=="CPU") {
+                for(int workers:worker_candidates)candidates.push_back({rt,{},workers});
+            } else candidates.push_back({rt,{},1});
+        }
+    Fusion::Decision decision;
+    if(!Fusion::lookup(request,candidates,decision)) {
+        candidates[0].execute=ordinary;
+        for(size_t i=1;i<candidates.size();++i) {
+            auto* rt=candidates[i].runtime;
+            candidates[i].execute=[&,rt](Fusion::Buffers& result) {
+                return rt->pointwiseFusionForward(chain,input,result,retain,training) && tensorsAreFinite(result);
+            };
+        }
+        decision=Fusion::select(request,candidates);
+    }
+    if(!decision.measured)return false;
+    Fusion::Buffers result;
+    if(!decision.fused) {
+        if(!ordinary(result) || result.empty() || !tensorsAreFinite(result))return false;
+        outputs=std::move(result);return true;
+    }
+    if(!decision.runtime)return false;
+    Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(decision.cpu_workers);
+    if(!decision.runtime->pointwiseFusionForward(chain,input,result,retain,training) ||
+        result.empty() || !tensorsAreFinite(result)) {Fusion::invalidate(decision.key);return false;}
+    outputs=std::move(result);if(selected)*selected=decision.runtime;return true;
+}
+bool RuntimeRouter::dispatchPointwiseBackward(const std::vector<const Layer*>& chain,
+    const std::vector<const std::vector<float>*>& inputs,const std::vector<float>& grad,
+    std::vector<float>& result,AbstractRuntime** selected,Mimir::DType dtype) const {
+    if(selected)*selected=nullptr;
+    ensureActivatedAndComposed();
+    if(chain.size()!=inputs.size())return false;
+    for(size_t i=0;i<chain.size();++i)
+        if(!chain[i] || (chain[i]->type_enum!=LayerType::Identity && (!inputs[i] || inputs[i]->size()!=grad.size())))return false;
+    namespace Fusion=Mimir::Planning::FusionCalibration;
+    Fusion::Request request;request.layers=chain;request.input=&grad;request.snapshots=inputs;
+    request.training=true;request.backward=true;request.dtype=dtype;request.generation=optimizer_routing_generation_;
+    for(auto* rt:runtime_priority_)if(rt && rt->isInitialized() && !rt->config().disabled)request.available.push_back(rt);
+    std::vector<Layer> disposable;
+    auto ordinary=[&](Fusion::Buffers& output) {
+        // Disposable gradients are part of every ordinary program execution,
+        // so their copies are included in each latency sample as well.
+        disposable.clear();disposable.reserve(chain.size());
+        for(const auto* layer:chain)disposable.push_back(*layer);
+        const std::vector<float>* value=&grad;std::vector<float> current;
+        for(size_t i=chain.size();i-->0;) {
+            // Identity backward needs only a shape, exactly as the normal
+            // Model backward path supplies the current gradient as that view.
+            const std::vector<const std::vector<float>*> x{inputs[i]?inputs[i]:value},g{value};
+            const auto route=buildBackwardRouteForLayer(*chain[i]);
+            const auto ranked=Mimir::Planning::Calibration::rank(route,*chain[i],x,g,true,true,
+                optimizer_routing_generation_,[&](AbstractRuntime& rt,Layer& copy,Fusion::Buffers& dx) {
+                    return rt.backwardLayerWithContext(x,g,dx,copy,true,{});
+                });
+            Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(ranked.cpu_workers,ranked.cpu_algorithm);
+            bool valid=false;
+            for(auto* rt:ranked.route) {
+                if(!rt || !rt->isInitialized() || !runtimeCapabilityIsNative(
+                    rt->queryBackwardOperationCapability(*chain[i],x,g,true)))continue;
+                disposable[i].grad_weights.clear();disposable[i].grad_bias.clear();
+                Fusion::Buffers dx;
+                if(rt->backwardLayerWithContext(x,g,dx,disposable[i],true,{}) && dx.size()==1 && tensorsAreFinite(dx)) {
+                    current=std::move(dx[0]);value=&current;valid=true;break;
+                }
+            }
+            if(!valid)return false;
+        }
+        output.clear();output.push_back(std::move(current));return true;
+    };
+    std::vector<Fusion::Candidate> candidates;
+    const auto worker_candidates=Mimir::Planning::ExecutionPolicy::cpuCandidates();
+    candidates.reserve(1+request.available.size()*worker_candidates.size());
+    candidates.push_back({nullptr,{},1});
+    for(auto* rt:request.available)
+        if(runtimeCapabilityIsNative(rt->queryPointwiseFusionCapability(chain,true,true))) {
+            if(std::string(rt->name())=="CPU") {
+                for(int workers:worker_candidates)candidates.push_back({rt,{},workers});
+            } else candidates.push_back({rt,{},1});
+        }
+    Fusion::Decision decision;
+    if(!Fusion::lookup(request,candidates,decision)) {
+        candidates[0].execute=ordinary;
+        for(size_t i=1;i<candidates.size();++i) {
+            auto* rt=candidates[i].runtime;
+            candidates[i].execute=[&,rt](Fusion::Buffers& output) {
+                std::vector<float> dx;
+                if(!rt->pointwiseFusionBackward(chain,inputs,grad,dx) ||
+                   !Mimir::RuntimeChecks::allFinite(dx.data(),dx.size()))return false;
+                output.clear();output.push_back(std::move(dx));return true;
+            };
+        }
+        decision=Fusion::select(request,candidates);
+    }
+    if(!decision.measured)return false;
+    if(!decision.fused) {
+        Fusion::Buffers output;
+        if(!ordinary(output) || output.size()!=1 || !tensorsAreFinite(output))return false;
+        result=std::move(output[0]);return true;
+    }
+    if(!decision.runtime)return false;
+    Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(decision.cpu_workers);
+    std::vector<float> dx;
+    if(!decision.runtime->pointwiseFusionBackward(chain,inputs,grad,dx) ||
+        !Mimir::RuntimeChecks::allFinite(dx.data(),dx.size())) {Fusion::invalidate(decision.key);return false;}
+    result=std::move(dx);if(selected)*selected=decision.runtime;return true;
 }

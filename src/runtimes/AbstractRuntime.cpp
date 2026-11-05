@@ -78,25 +78,25 @@ RuntimeConfig RuntimeConfig::fromEnv(const char* backend_upper) {
     // Fast-path Linear
     {
         cfg.linear_enabled = env_flag_true(make_env_name(backend_upper, "_LINEAR").c_str(), false);
-        cfg.linear_min_ops = env_int(make_env_name(backend_upper, "_LINEAR_MIN_OPS").c_str(), 1 << 20);
+        cfg.linear_min_ops = Mimir::Planning::ExecutionPolicy::configuredMinimum(backend_upper,Mimir::Planning::ExecutionPolicy::Work::Linear);
     }
 
     // Fast-path Conv
     {
         cfg.conv_enabled  = env_flag_true(make_env_name(backend_upper, "_CONV").c_str(), false);
-        cfg.conv_min_ops  = env_int(make_env_name(backend_upper, "_CONV_MIN_OPS").c_str(), 1 << 18);
+        cfg.conv_min_ops = Mimir::Planning::ExecutionPolicy::configuredMinimum(backend_upper,Mimir::Planning::ExecutionPolicy::Work::Convolution);
     }
 
     // Fast-path Normalization
     {
         cfg.norm_enabled       = env_flag_true(make_env_name(backend_upper, "_NORM").c_str(), false);
-        cfg.norm_min_elements  = env_int(make_env_name(backend_upper, "_NORM_MIN_ELEMS").c_str(), 1 << 12);
+        cfg.norm_min_elements = Mimir::Planning::ExecutionPolicy::configuredMinimum(backend_upper,Mimir::Planning::ExecutionPolicy::Work::Normalization);
     }
 
     // Fast-path Attention
     {
         cfg.attention_enabled  = env_flag_true(make_env_name(backend_upper, "_ATTENTION").c_str(), false);
-        cfg.attention_min_ops  = env_int(make_env_name(backend_upper, "_ATTENTION_MIN_OPS").c_str(), 1 << 18);
+        cfg.attention_min_ops = Mimir::Planning::ExecutionPolicy::configuredMinimum(backend_upper,Mimir::Planning::ExecutionPolicy::Work::Attention);
     }
 
     // Device index (optionnel)
@@ -268,7 +268,7 @@ RuntimeCapabilityLevel AbstractRuntime::queryConfiguredForwardOperationCapabilit
         inputs.empty() || !inputs[0]) return RuntimeCapabilityLevel::Unsupported;
 
     const auto meets = [](long long work, int threshold) {
-        return work >= static_cast<long long>(std::max(0, threshold));
+        return Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(work,threshold);
     };
     const auto has_weights = [&layer](size_t required) {
         return layer.getWeights() && layer.getWeightsSize() >= required;

@@ -3,6 +3,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include "Parallel.hpp"
 #include <limits>
 #include <stdexcept>
 #include <omp.h>
@@ -22,6 +23,7 @@
 
 namespace LayerOpsExt {
 
+
 // ============================================================================
 // ACTIVATIONS MANQUANTES
 // ============================================================================
@@ -33,10 +35,9 @@ inline std::vector<float> leaky_relu_forward(
 ) {
     std::vector<float> output(input.size());
     
-    #pragma omp simd
-    for (size_t i = 0; i < input.size(); ++i) {
+    RuntimeParallel::forEach(input.size(), RuntimeParallel::workers(input.size()), [&](size_t i) {
         output[i] = input[i] > 0.0f ? input[i] : alpha * input[i];
-    }
+    });
     
     return output;
 }
@@ -45,13 +46,12 @@ inline std::vector<float> leaky_relu_forward(
 inline std::vector<float> mish_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp simd
-    for (size_t i = 0; i < input.size(); ++i) {
+    RuntimeParallel::forEach(input.size(), RuntimeParallel::workers(input.size()), [&](size_t i) {
         float x = input[i];
         // softplus(x) = ln(1 + e^x) ≈ x pour x grand, évite overflow
         float sp = x > 20.0f ? x : std::log1p(std::exp(x));
         output[i] = x * std::tanh(sp);
-    }
+    });
     
     return output;
 }
@@ -60,12 +60,11 @@ inline std::vector<float> mish_forward(const std::vector<float>& input) {
 inline std::vector<float> softplus_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp simd
-    for (size_t i = 0; i < input.size(); ++i) {
+    RuntimeParallel::forEach(input.size(), RuntimeParallel::workers(input.size()), [&](size_t i) {
         float x = input[i];
         // Pour x > 20, softplus(x) ≈ x (évite overflow)
         output[i] = x > 20.0f ? x : std::log1p(std::exp(x));
-    }
+    });
     
     return output;
 }
@@ -74,12 +73,11 @@ inline std::vector<float> softplus_forward(const std::vector<float>& input) {
 inline std::vector<float> hard_sigmoid_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp simd
-    for (size_t i = 0; i < input.size(); ++i) {
+    RuntimeParallel::forEach(input.size(), RuntimeParallel::workers(input.size()), [&](size_t i) {
         float x = input[i];
         float val = (x + 3.0f) / 6.0f;
         output[i] = std::max(0.0f, std::min(1.0f, val));
-    }
+    });
     
     return output;
 }
@@ -88,12 +86,11 @@ inline std::vector<float> hard_sigmoid_forward(const std::vector<float>& input) 
 inline std::vector<float> hard_swish_forward(const std::vector<float>& input) {
     std::vector<float> output(input.size());
     
-    #pragma omp simd
-    for (size_t i = 0; i < input.size(); ++i) {
+    RuntimeParallel::forEach(input.size(), RuntimeParallel::workers(input.size()), [&](size_t i) {
         float x = input[i];
         float hs = std::max(0.0f, std::min(1.0f, (x + 3.0f) / 6.0f));
         output[i] = x * hs;
-    }
+    });
     
     return output;
 }
@@ -116,10 +113,9 @@ inline std::vector<float> subtract_forward(
     
     std::vector<float> output(a.size());
     
-    #pragma omp simd
-    for (size_t i = 0; i < a.size(); ++i) {
+    RuntimeParallel::forEach(a.size(), RuntimeParallel::workers(a.size()), [&](size_t i) {
         output[i] = a[i] - b[i];
-    }
+    });
     
     return output;
 }
@@ -139,14 +135,14 @@ inline std::vector<float> divide_forward(
     
     std::vector<float> output(a.size());
     
-    for (size_t i = 0; i < a.size(); ++i) {
+    RuntimeParallel::forEach(a.size(), RuntimeParallel::workers(a.size()), [&](size_t i) {
         // Protection division par zéro
         float divisor = b[i];
         if (std::abs(divisor) < eps) {
             divisor = divisor >= 0 ? eps : -eps;
         }
         output[i] = a[i] / divisor;
-    }
+    });
     
     return output;
 }
@@ -299,7 +295,7 @@ inline std::vector<float> instance_norm2d_forward(
     const int spatial_size = height * width;
     
     // Normalize each channel independently
-    for (int c = 0; c < channels; ++c) {
+    RuntimeParallel::forEach(channels, RuntimeParallel::workers(input.size()), [&](int c) {
         const float* channel_data = &input[c * spatial_size];
         float* out_channel = &output[c * spatial_size];
         
@@ -338,7 +334,7 @@ inline std::vector<float> instance_norm2d_forward(
                 out_channel[i] = gamma * out_channel[i] + beta;
             }
         }
-    }
+    });
     
     return output;
 }
@@ -412,7 +408,7 @@ inline std::vector<float> conv1d_forward(
     (void)weights_size;
     
     const long long conv1d_work = static_cast<long long>(out_channels) * out_length * in_channels * kernel_size;
-    #pragma omp parallel for if(conv1d_work >= 262144) schedule(static)
+    #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(conv1d_work)>1) num_threads(RuntimeParallel::workers(conv1d_work)) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int ol = 0; ol < out_length; ++ol) {
             float sum = 0.0f;
@@ -466,39 +462,35 @@ inline std::vector<float> depthwise_conv2d_forward(
     const float* bias = layer.use_bias ? (weights + channels * kernel_size * kernel_size) : nullptr;
     (void)weights_size;
     
-    // Each channel processed independently
     const long long dwconv_work = static_cast<long long>(channels) * out_height * out_width * kernel_size * kernel_size;
-    #pragma omp parallel for if(dwconv_work >= 262144) schedule(static)
-    for (int c = 0; c < channels; ++c) {
-        for (int oh = 0; oh < out_height; ++oh) {
-            for (int ow = 0; ow < out_width; ++ow) {
-                float sum = 0.0f;
-                
-                for (int kh = 0; kh < kernel_size; ++kh) {
-                    for (int kw = 0; kw < kernel_size; ++kw) {
-                        int ih = oh * stride + kh - padding;
-                        int iw = ow * stride + kw - padding;
-                        
-                        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                            int in_idx = c * (height * width) + ih * width + iw;
-                            int w_idx = c * (kernel_size * kernel_size) + kh * kernel_size + kw;
-                            
-                            if (in_idx < static_cast<int>(input.size()) &&
-                                w_idx < static_cast<int>(layer.getWeightsSize())) {
-                                sum += input[in_idx] * weights[w_idx];
-                            }
-                        }
+    RuntimeParallel::forEach(output_size, RuntimeParallel::workers(dwconv_work), [&](size_t out_idx) {
+        const int spatial_idx = static_cast<int>(out_idx % static_cast<size_t>(out_height * out_width));
+        const int c = static_cast<int>(out_idx / static_cast<size_t>(out_height * out_width));
+        const int oh = spatial_idx / out_width;
+        const int ow = spatial_idx % out_width;
+        float sum = 0.0f;
+
+        for (int kh = 0; kh < kernel_size; ++kh) {
+            for (int kw = 0; kw < kernel_size; ++kw) {
+                int ih = oh * stride + kh - padding;
+                int iw = ow * stride + kw - padding;
+
+                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                    int in_idx = c * (height * width) + ih * width + iw;
+                    int w_idx = c * (kernel_size * kernel_size) + kh * kernel_size + kw;
+
+                    if (in_idx < static_cast<int>(input.size()) &&
+                        w_idx < static_cast<int>(layer.getWeightsSize())) {
+                        sum += input[in_idx] * weights[w_idx];
                     }
                 }
-                
-                // Add bias
-                if (bias) sum += bias[c];
-                
-                int out_idx = c * (out_height * out_width) + oh * out_width + ow;
-                output[out_idx] = sum;
             }
         }
-    }
+
+        if (bias) sum += bias[c];
+
+        output[out_idx] = sum;
+    });
     
     return output;
 }
@@ -521,24 +513,24 @@ inline std::vector<float> maxpool1d_forward(
     const int out_length = (length + 2 * padding - kernel_size) / stride + 1;
     std::vector<float> output(channels * out_length, -std::numeric_limits<float>::infinity());
     
-    for (int c = 0; c < channels; ++c) {
-        for (int ol = 0; ol < out_length; ++ol) {
-            float max_val = -std::numeric_limits<float>::infinity();
-            
-            for (int k = 0; k < kernel_size; ++k) {
-                int il = ol * stride + k - padding;
-                
-                if (il >= 0 && il < length) {
-                    int in_idx = c * length + il;
-                    if (in_idx < static_cast<int>(input.size())) {
-                        max_val = std::max(max_val, input[in_idx]);
-                    }
+    RuntimeParallel::forEach(output.size(), RuntimeParallel::workers(output.size()), [&](size_t out_idx) {
+        const int c = static_cast<int>(out_idx / static_cast<size_t>(out_length));
+        const int ol = static_cast<int>(out_idx % static_cast<size_t>(out_length));
+        float max_val = -std::numeric_limits<float>::infinity();
+
+        for (int k = 0; k < kernel_size; ++k) {
+            int il = ol * stride + k - padding;
+
+            if (il >= 0 && il < length) {
+                int in_idx = c * length + il;
+                if (in_idx < static_cast<int>(input.size())) {
+                    max_val = std::max(max_val, input[in_idx]);
                 }
             }
-            
-            output[c * out_length + ol] = max_val;
         }
-    }
+
+        output[out_idx] = max_val;
+    });
     
     return output;
 }
@@ -557,26 +549,26 @@ inline std::vector<float> avgpool1d_forward(
     const int out_length = (length + 2 * padding - kernel_size) / stride + 1;
     std::vector<float> output(channels * out_length, 0.0f);
     
-    for (int c = 0; c < channels; ++c) {
-        for (int ol = 0; ol < out_length; ++ol) {
-            float sum = 0.0f;
-            int count = 0;
-            
-            for (int k = 0; k < kernel_size; ++k) {
-                int il = ol * stride + k - padding;
-                
-                if (il >= 0 && il < length) {
-                    int in_idx = c * length + il;
-                    if (in_idx < static_cast<int>(input.size())) {
-                        sum += input[in_idx];
-                        count++;
-                    }
+    RuntimeParallel::forEach(output.size(), RuntimeParallel::workers(output.size()), [&](size_t out_idx) {
+        const int c = static_cast<int>(out_idx / static_cast<size_t>(out_length));
+        const int ol = static_cast<int>(out_idx % static_cast<size_t>(out_length));
+        float sum = 0.0f;
+        int count = 0;
+
+        for (int k = 0; k < kernel_size; ++k) {
+            int il = ol * stride + k - padding;
+
+            if (il >= 0 && il < length) {
+                int in_idx = c * length + il;
+                if (in_idx < static_cast<int>(input.size())) {
+                    sum += input[in_idx];
+                    count++;
                 }
             }
-            
-            output[c * out_length + ol] = count > 0 ? sum / count : 0.0f;
         }
-    }
+
+        output[out_idx] = count > 0 ? sum / count : 0.0f;
+    });
     
     return output;
 }
@@ -603,16 +595,19 @@ inline std::vector<float> zero_pad2d_forward(
     
     std::vector<float> output(channels * out_height * out_width, 0.0f);
     
-    for (int c = 0; c < channels; ++c) {
-        for (int h = 0; h < in_height; ++h) {
-            for (int w = 0; w < in_width; ++w) {
-                int in_idx = c * (in_height * in_width) + h * in_width + w;
-                int out_idx = c * (out_height * out_width) + 
-                              (h + pad_top) * out_width + (w + pad_left);
-                output[out_idx] = input[in_idx];
-            }
-        }
+    const size_t input_elements = static_cast<size_t>(channels) * in_height * in_width;
+    if (input.size() < input_elements) {
+        throw std::runtime_error("ZeroPad2d: input smaller than configured shape");
     }
+    RuntimeParallel::forEach(input_elements, RuntimeParallel::workers(input_elements), [&](size_t in_idx) {
+        const int spatial_idx = static_cast<int>(in_idx % static_cast<size_t>(in_height * in_width));
+        const int c = static_cast<int>(in_idx / static_cast<size_t>(in_height * in_width));
+        const int h = spatial_idx / in_width;
+        const int w = spatial_idx % in_width;
+        const size_t out_idx = static_cast<size_t>(c) * out_height * out_width +
+            static_cast<size_t>(h + pad_top) * out_width + static_cast<size_t>(w + pad_left);
+        output[out_idx] = input[in_idx];
+    });
     
     return output;
 }
@@ -632,9 +627,11 @@ inline std::vector<float> reflection_pad2d_forward(
     
     std::vector<float> output(channels * out_height * out_width, 0.0f);
     
-    for (int c = 0; c < channels; ++c) {
-        for (int oh = 0; oh < out_height; ++oh) {
-            for (int ow = 0; ow < out_width; ++ow) {
+    RuntimeParallel::forEach(output.size(), RuntimeParallel::workers(output.size()), [&](size_t out_idx) {
+                const int spatial_idx = static_cast<int>(out_idx % static_cast<size_t>(out_height * out_width));
+                const int c = static_cast<int>(out_idx / static_cast<size_t>(out_height * out_width));
+                const int oh = spatial_idx / out_width;
+                const int ow = spatial_idx % out_width;
                 // Map output position to input with reflection
                 int ih = oh - pad;
                 int iw = ow - pad;
@@ -650,12 +647,8 @@ inline std::vector<float> reflection_pad2d_forward(
                 iw = std::max(0, std::min(iw, in_width - 1));
                 
                 int in_idx = c * (in_height * in_width) + ih * in_width + iw;
-                int out_idx = c * (out_height * out_width) + oh * out_width + ow;
-                
                 output[out_idx] = input[in_idx];
-            }
-        }
-    }
+    });
     
     return output;
 }
@@ -675,20 +668,18 @@ inline std::vector<float> replication_pad2d_forward(
     
     std::vector<float> output(channels * out_height * out_width, 0.0f);
     
-    for (int c = 0; c < channels; ++c) {
-        for (int oh = 0; oh < out_height; ++oh) {
-            for (int ow = 0; ow < out_width; ++ow) {
+    RuntimeParallel::forEach(output.size(), RuntimeParallel::workers(output.size()), [&](size_t out_idx) {
+                const int spatial_idx = static_cast<int>(out_idx % static_cast<size_t>(out_height * out_width));
+                const int c = static_cast<int>(out_idx / static_cast<size_t>(out_height * out_width));
+                const int oh = spatial_idx / out_width;
+                const int ow = spatial_idx % out_width;
                 // Map to input with clamping (replication)
                 int ih = std::max(0, std::min(oh - pad, in_height - 1));
                 int iw = std::max(0, std::min(ow - pad, in_width - 1));
                 
                 int in_idx = c * (in_height * in_width) + ih * in_width + iw;
-                int out_idx = c * (out_height * out_width) + oh * out_width + ow;
-                
                 output[out_idx] = input[in_idx];
-            }
-        }
-    }
+    });
     
     return output;
 }
@@ -725,8 +716,7 @@ inline std::vector<float> upsample_bicubic_forward(
     const size_t in_hw = static_cast<size_t>(in_h) * static_cast<size_t>(in_w);
     const size_t total = static_cast<size_t>(channels) * out_hw;
 
-    #pragma omp parallel for if(total >= 65536) schedule(static)
-    for (size_t idx = 0; idx < total; ++idx) {
+    RuntimeParallel::forEach(total, RuntimeParallel::workers(total), [&](size_t idx) {
         const int c = static_cast<int>(idx / out_hw);
         const size_t rem = idx - static_cast<size_t>(c) * out_hw;
         const int oh = static_cast<int>(rem / static_cast<size_t>(out_w));
@@ -753,7 +743,7 @@ inline std::vector<float> upsample_bicubic_forward(
         }
 
         output[idx] = (weight_sum != 0.0f) ? (sum / weight_sum) : 0.0f;
-    }
+    });
 
     return output;
 }
@@ -787,8 +777,7 @@ inline std::vector<float> pixel_shuffle_forward(
     const size_t out_hw = static_cast<size_t>(out_height) * static_cast<size_t>(out_width);
     const size_t in_hw = static_cast<size_t>(height) * static_cast<size_t>(width);
     const size_t total = static_cast<size_t>(out_channels) * out_hw;
-    #pragma omp simd
-    for (size_t out_idx = 0; out_idx < total; ++out_idx) {
+    RuntimeParallel::forEach(total, RuntimeParallel::workers(total), [&](size_t out_idx) {
         const int oc = static_cast<int>(out_idx / out_hw);
         const size_t rem = out_idx - static_cast<size_t>(oc) * out_hw;
         const int oh = static_cast<int>(rem / static_cast<size_t>(out_width));
@@ -806,7 +795,7 @@ inline std::vector<float> pixel_shuffle_forward(
         if (in_idx < input.size()) {
             output[out_idx] = input[in_idx];
         }
-    }
+    });
     
     return output;
 }

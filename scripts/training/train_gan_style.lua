@@ -1,8 +1,11 @@
 #!/usr/bin/env mimir --lua
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_gan_style.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 -- GAN image -> image non apparié Mímir.
 -- architecture native Gan_Style : générateur et discriminateur convolutionnels.
 -- Le L1 de contenu limite les changements; ce modèle n'est pas un CycleGAN.
--- Usage : ./bin/mimir --lua scripts/training/train_gan_style.lua \
+-- Usage : ./run_mimir.sh --lua scripts/training/train_gan_style.lua \
 --   --source-root datasets/photos --style-root datasets/style --epochs 20
 -- Inférence : même script --input photo.png --checkpoint checkpoint/gan_style/epoch_0020 --output result.ppm
 local root = ROOTWORK or '.'

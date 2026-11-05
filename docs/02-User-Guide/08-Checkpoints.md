@@ -65,6 +65,22 @@ Bon pattern :
 - écrire dans des sous-dossiers `_interrupt_*` en cas de Ctrl+C
 - reprendre via `scripts/modules/checkpoint_resume.lua`
 
+`checkpoint_resume.lua` sélectionne les checkpoints RawFolder. Il examine les
+sous-dossiers `epoch_*` et `step_*`, le sous-dossier `final` et le dossier
+racine. Si `model/training.json` expose un step (`step` ou
+`loop.global_step`), il retient le checkpoint dont la progression est la plus
+récente. Les epochs et steps sont d'abord triés numériquement ; à progression
+égale ou absente, l'ordre de parcours permet à un checkpoint `step_*`, puis
+`final` ou le dossier racine, de remplacer le précédent. Sans métadonnées de
+progression, `final` ou le dossier racine peut donc être choisi même si un
+checkpoint périodique existe. Le helper reconnaît aussi un RawFolder dans un
+sous-dossier epoch sans supposer une disposition unique des poids.
+
+Les scripts d'entraînement qui sauvegardent un résultat final utilisent
+généralement `<out-dir>/final`. Passer ce dossier directement à un loader ou au
+script d'inférence évite toute ambiguïté ; le résolveur est destiné à la reprise
+depuis le dossier de run.
+
 VAEText : voir `scripts/training/train_vae_texte.lua`.
 
 ## Étapes suivantes

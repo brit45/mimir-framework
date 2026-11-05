@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include "Parallel.hpp"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -199,10 +200,12 @@ inline bool cpu_forward_layer(
 
                 outputs.resize(1);
                 outputs[0].assign(static_cast<size_t>(batch) * static_cast<size_t>(out), 0.0f);
+                const long long work = static_cast<long long>(batch) * out * in1 * in2;
+                #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work)) schedule(static)
                 for (int n = 0; n < batch; ++n) {
-                    const float* x1 = &x[static_cast<size_t>(n) * static_cast<size_t>(in1)];
-                    const float* x2 = &y[static_cast<size_t>(n) * static_cast<size_t>(in2)];
                     for (int o = 0; o < out; ++o) {
+                        const float* x1 = &x[static_cast<size_t>(n) * static_cast<size_t>(in1)];
+                        const float* x2 = &y[static_cast<size_t>(n) * static_cast<size_t>(in2)];
                         float sum = has_bias ? b[static_cast<size_t>(o)] : 0.0f;
                         const float* Wo = w + static_cast<size_t>(o) * static_cast<size_t>(in1) * static_cast<size_t>(in2);
                         for (int i = 0; i < in1; ++i) {
@@ -231,6 +234,8 @@ inline bool cpu_forward_layer(
 
                 outputs.resize(1);
                 outputs[0].assign(x.size() * static_cast<size_t>(dim), 0.0f);
+                const long long work = static_cast<long long>(x.size()) * dim;
+                #pragma omp parallel for if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work)) schedule(static)
                 for (size_t t = 0; t < x.size(); ++t) {
                     const int id = static_cast<int>(std::llround(static_cast<double>(x[t])));
                     if (pad >= 0 && id == pad) continue;
@@ -269,6 +274,8 @@ inline bool cpu_forward_layer(
 
                 outputs.resize(1);
                 outputs[0].assign(static_cast<size_t>(num_bags) * static_cast<size_t>(dim), 0.0f);
+                const long long work = static_cast<long long>(ids_f.size()) * dim;
+                #pragma omp parallel for if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work)) schedule(static)
                 for (int b = 0; b < num_bags; ++b) {
                     const int start = std::clamp(offsets[static_cast<size_t>(b)], 0, static_cast<int>(ids_f.size()));
                     const int end = std::clamp(offsets[static_cast<size_t>(b + 1)], start, static_cast<int>(ids_f.size()));
@@ -409,6 +416,8 @@ inline bool cpu_forward_layer(
                 outputs[0].assign(static_cast<size_t>(in_channels) * static_cast<size_t>(out_height) * static_cast<size_t>(out_width),
                                   -std::numeric_limits<float>::infinity());
 
+                const size_t output_size = outputs[0].size();
+                #pragma omp parallel for collapse(3) if(RuntimeParallel::workers(output_size)>1) num_threads(RuntimeParallel::workers(output_size)) schedule(static)
                 for (int c = 0; c < in_channels; ++c) {
                     for (int oh = 0; oh < out_height; ++oh) {
                         for (int ow = 0; ow < out_width; ++ow) {
@@ -459,16 +468,14 @@ inline bool cpu_forward_layer(
 
                 outputs.resize(1);
                 outputs[0].assign(static_cast<size_t>(embed_dim), 0.0f);
-                for (int t = 0; t < seq_len; ++t) {
-                    const int base = t * embed_dim;
-                    for (int d = 0; d < embed_dim; ++d) {
-                        outputs[0][static_cast<size_t>(d)] += x[static_cast<size_t>(base + d)];
+                const long long work = static_cast<long long>(seq_len) * embed_dim;
+                RuntimeParallel::forEach(embed_dim, RuntimeParallel::workers(work), [&](int d) {
+                    float sum = 0.0f;
+                    for (int t = 0; t < seq_len; ++t) {
+                        sum += x[static_cast<size_t>(t) * embed_dim + d];
                     }
-                }
-                const float inv = 1.0f / static_cast<float>(seq_len);
-                for (int d = 0; d < embed_dim; ++d) {
-                    outputs[0][static_cast<size_t>(d)] *= inv;
-                }
+                    outputs[0][static_cast<size_t>(d)] = sum / static_cast<float>(seq_len);
+                });
                 return true;
             }
 
@@ -603,10 +610,12 @@ inline bool cpu_forward_layer(
 
                 const float* b = w + patch_dim * d_model;
                 const float inv = 1.0f / std::sqrt(static_cast<float>(patch_dim));
+                const long long work = static_cast<long long>(num_patches) * d_model * patch_dim;
+                #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work)) schedule(static)
                 for (int p = 0; p < num_patches; ++p) {
-                    const int in_off = text_dim + p * patch_dim;
-                    const int out_off = (seq_text + 1 + p) * d_model;
                     for (int d = 0; d < d_model; ++d) {
+                        const int in_off = text_dim + p * patch_dim;
+                        const int out_off = (seq_text + 1 + p) * d_model;
                         float sum = b[d];
                         for (int k = 0; k < patch_dim; ++k) {
                             sum += (x[static_cast<size_t>(in_off + k)] * inv) * w[static_cast<size_t>(k * d_model + d)];
@@ -1353,11 +1362,13 @@ inline bool cpu_backward_layer(
                 // multiply. Each lane still reduces in the original o/b order.
                 constexpr int tile = 64;
                 const long long work = static_cast<long long>(batch) * in_f * out_f;
-                #pragma omp parallel for schedule(static) if(work > 262144)
+                const int input_tiles = (in_f + tile - 1) / tile;
+                #pragma omp parallel for collapse(2) schedule(static) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work))
                 for (int b = 0; b < batch; ++b) {
-                    const float* row_go = go.data() + static_cast<size_t>(b) * out_f;
-                    float* row_gx = grad_inputs[0].data() + static_cast<size_t>(b) * in_f;
-                    for (int base = 0; base < in_f; base += tile) {
+                    for (int tile_idx = 0; tile_idx < input_tiles; ++tile_idx) {
+                        const float* row_go = go.data() + static_cast<size_t>(b) * out_f;
+                        float* row_gx = grad_inputs[0].data() + static_cast<size_t>(b) * in_f;
+                        const int base = tile_idx * tile;
                         alignas(64) float sums[tile] = {};
                         const int count = std::min(tile, in_f - base);
                         for (int o = 0; o < out_f; ++o) {
@@ -1373,10 +1384,22 @@ inline bool cpu_backward_layer(
                 if (layer.grad_weights.size() != layer.getWeightsSize()) {
                     layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
                 }
-                #pragma omp parallel for schedule(static) if(work > 262144)
+                const int output_tiles = (in_f + tile - 1) / tile;
+                if (batch == 1) {
+                    // A single example is an outer product: update each row
+                    // directly, without a zeroed temporary for every 64 values.
+                    RuntimeParallel::forEach(out_f, RuntimeParallel::workers(work), [&](int o) {
+                        float* row_gw = layer.grad_weights.data() + static_cast<size_t>(o) * in_f;
+                        const float g = go[static_cast<size_t>(o)];
+                        #pragma omp simd
+                        for (int i = 0; i < in_f; ++i) row_gw[i] += g * x[static_cast<size_t>(i)];
+                    });
+                } else {
+                #pragma omp parallel for collapse(2) schedule(static) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work))
                 for (int o = 0; o < out_f; ++o) {
-                    float* row_gw = layer.grad_weights.data() + static_cast<size_t>(o) * in_f;
-                    for (int base = 0; base < in_f; base += tile) {
+                    for (int tile_idx = 0; tile_idx < output_tiles; ++tile_idx) {
+                        float* row_gw = layer.grad_weights.data() + static_cast<size_t>(o) * in_f;
+                        const int base = tile_idx * tile;
                         alignas(64) float sums[tile] = {};
                         const int count = std::min(tile, in_f - base);
                         for (int b = 0; b < batch; ++b) {
@@ -1388,6 +1411,7 @@ inline bool cpu_backward_layer(
                         #pragma omp simd
                         for (int i = 0; i < count; ++i) row_gw[base + i] += sums[i];
                     }
+                }
                 }
 
                 if (layer.use_bias && layer.getWeightsSize() >= w_elems + static_cast<size_t>(out_f)) {
@@ -1607,11 +1631,11 @@ inline bool cpu_backward_layer(
                 grad_inputs.resize(2);
                 grad_inputs[0].assign(a.size(), 0.0f);
                 grad_inputs[1].assign(a.size(), 0.0f);
-                for (size_t i = 0; i < a.size(); ++i) {
+                RuntimeParallel::forEach(a.size(), RuntimeParallel::workers(a.size()), [&](size_t i) {
                     const float g = go[i];
                     grad_inputs[0][i] = g;
                     grad_inputs[1][i] = -g;
-                }
+                });
                 return true;
             }
 
@@ -1625,11 +1649,11 @@ inline bool cpu_backward_layer(
                 grad_inputs.resize(2);
                 grad_inputs[0].assign(a.size(), 0.0f);
                 grad_inputs[1].assign(a.size(), 0.0f);
-                for (size_t i = 0; i < a.size(); ++i) {
+                RuntimeParallel::forEach(a.size(), RuntimeParallel::workers(a.size()), [&](size_t i) {
                     const float g = go[i];
                     grad_inputs[0][i] = g * b[i];
                     grad_inputs[1][i] = g * a[i];
-                }
+                });
                 return true;
             }
 
@@ -1645,14 +1669,14 @@ inline bool cpu_backward_layer(
                 grad_inputs[1].assign(a.size(), 0.0f);
 
                 const float eps = 1e-8f;
-                for (size_t i = 0; i < a.size(); ++i) {
+                RuntimeParallel::forEach(a.size(), RuntimeParallel::workers(a.size()), [&](size_t i) {
                     const float g = go[i];
                     const float ai = a[i];
                     const float bi = b[i];
                     const float d = (std::abs(bi) < eps) ? (bi >= 0.0f ? eps : -eps) : bi;
                     grad_inputs[0][i] = g / d;
                     grad_inputs[1][i] = -g * ai / (d * d);
-                }
+                });
                 return true;
             }
 
@@ -1664,9 +1688,9 @@ inline bool cpu_backward_layer(
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
 
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     grad_inputs[0][i] = go[i] * ((x[i] > 0.0f) ? 1.0f : 0.0f);
-                }
+                });
                 return true;
             }
 
@@ -1678,9 +1702,9 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     grad_inputs[0][i] = go[i] * ((x[i] > 0.0f) ? 1.0f : alpha);
-                }
+                });
                 return true;
             }
 
@@ -1691,10 +1715,10 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     const float s = sigmoid_scalar(x[i]);
                     grad_inputs[0][i] = go[i] * s * (1.0f - s);
-                }
+                });
                 return true;
             }
 
@@ -1705,10 +1729,10 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     const float t = std::tanh(x[i]);
                     grad_inputs[0][i] = go[i] * (1.0f - t * t);
-                }
+                });
                 return true;
             }
 
@@ -1719,10 +1743,10 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     const float s = sigmoid_scalar(x[i]);
                     grad_inputs[0][i] = go[i] * (s + x[i] * s * (1.0f - s));
-                }
+                });
                 return true;
             }
 
@@ -1733,9 +1757,9 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     grad_inputs[0][i] = go[i] * gelu_tanh_grad(x[i]);
-                }
+                });
                 return true;
             }
 
@@ -1752,10 +1776,11 @@ inline bool cpu_backward_layer(
                 grad_inputs[0].assign(x.size(), 0.0f);
 
                 const float c = std::sqrt(2.0f / 3.14159265358979323846f);
+                #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(go.size())>1) num_threads(RuntimeParallel::workers(go.size())) schedule(static)
                 for (int t = 0; t < seq; ++t) {
-                    const size_t xb = static_cast<size_t>(t) * static_cast<size_t>(hid) * 2ULL;
-                    const size_t gb = static_cast<size_t>(t) * static_cast<size_t>(hid);
                     for (int i = 0; i < hid; ++i) {
+                        const size_t xb = static_cast<size_t>(t) * static_cast<size_t>(hid) * 2ULL;
+                        const size_t gb = static_cast<size_t>(t) * static_cast<size_t>(hid);
                         const float a = x[xb + static_cast<size_t>(i)];
                         const float z = x[xb + static_cast<size_t>(hid) + static_cast<size_t>(i)];
                         const float g = go[gb + static_cast<size_t>(i)];
@@ -1781,9 +1806,9 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     grad_inputs[0][i] = go[i] * sigmoid_scalar(x[i]);
-                }
+                });
                 return true;
             }
 
@@ -1794,14 +1819,14 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     const float xi = x[i];
                     const float sp = xi > 20.0f ? xi : std::log1p(std::exp(xi));
                     const float tsp = std::tanh(sp);
                     const float sig = sigmoid_scalar(xi);
                     const float d = tsp + xi * (1.0f - tsp * tsp) * sig;
                     grad_inputs[0][i] = go[i] * d;
-                }
+                });
                 return true;
             }
 
@@ -1812,10 +1837,10 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     const float d = (x[i] > -3.0f && x[i] < 3.0f) ? (1.0f / 6.0f) : 0.0f;
                     grad_inputs[0][i] = go[i] * d;
-                }
+                });
                 return true;
             }
 
@@ -1826,13 +1851,13 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                for (size_t i = 0; i < x.size(); ++i) {
+                RuntimeParallel::forEach(x.size(), RuntimeParallel::workers(x.size()), [&](size_t i) {
                     float d;
                     if (x[i] <= -3.0f) d = 0.0f;
                     else if (x[i] >= 3.0f) d = 1.0f;
                     else d = x[i] / 3.0f + 0.5f;
                     grad_inputs[0][i] = go[i] * d;
-                }
+                });
                 return true;
             }
 
@@ -1858,20 +1883,20 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-
-                for (size_t o = 0; o < outer; ++o) {
-                    for (size_t in = 0; in < inner; ++in) {
-                        const size_t base = o * axis_size * inner + in;
-                        float dot = 0.0f;
-                        for (size_t a = 0; a < axis_size; ++a) {
-                            dot += go[base + a * inner] * y[base + a * inner];
-                        }
-                        for (size_t a = 0; a < axis_size; ++a) {
-                            const float yi = y[base + a * inner];
-                            grad_inputs[0][base + a * inner] = yi * (go[base + a * inner] - dot);
-                        }
+                const size_t rows = outer * inner;
+                RuntimeParallel::forEach(rows, RuntimeParallel::workers(x.size()), [&](size_t row) {
+                    const size_t o = row / inner;
+                    const size_t in = row % inner;
+                    const size_t base = o * axis_size * inner + in;
+                    float dot = 0.0f;
+                    for (size_t a = 0; a < axis_size; ++a) {
+                        dot += go[base + a * inner] * y[base + a * inner];
                     }
-                }
+                    for (size_t a = 0; a < axis_size; ++a) {
+                        const float yi = y[base + a * inner];
+                        grad_inputs[0][base + a * inner] = yi * (go[base + a * inner] - dot);
+                    }
+                });
                 return true;
             }
 
@@ -1898,16 +1923,17 @@ inline bool cpu_backward_layer(
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
 
-                for (size_t o = 0; o < outer; ++o) {
-                    for (size_t in = 0; in < inner; ++in) {
-                        const size_t base = o * axis_size * inner + in;
-                        float s = 0.0f;
-                        for (size_t a = 0; a < axis_size; ++a) s += go[base + a * inner];
-                        for (size_t a = 0; a < axis_size; ++a) {
-                            grad_inputs[0][base + a * inner] = go[base + a * inner] - y[base + a * inner] * s;
-                        }
+                const size_t rows = outer * inner;
+                RuntimeParallel::forEach(rows, RuntimeParallel::workers(x.size()), [&](size_t row) {
+                    const size_t o = row / inner;
+                    const size_t in = row % inner;
+                    const size_t base = o * axis_size * inner + in;
+                    float s = 0.0f;
+                    for (size_t a = 0; a < axis_size; ++a) s += go[base + a * inner];
+                    for (size_t a = 0; a < axis_size; ++a) {
+                        grad_inputs[0][base + a * inner] = go[base + a * inner] - y[base + a * inner] * s;
                     }
-                }
+                });
                 return true;
             }
 

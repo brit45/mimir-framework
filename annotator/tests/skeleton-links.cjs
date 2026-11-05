@@ -35,5 +35,10 @@ assert.equal(assess(a,100,1000)[1].status,'misplaced');
 assert.equal(assess(fixture(),0,0)[1].status,'unknown');
 a=fixture();delete a.entities[0].skeleton.points[2].parent;a.entities[0].skeleton.edges=[{from:'root',to:'tail tip'}];
 assert.equal(assess(a,800,400).length,2); // Free edges also define the skeleton roots.
+a=fixture();a.entities[1]={id:'floor',mask:{type:'polygon',points:[[0,.7],[1,.7],[1,1],[0,1]]}};
+a.entities[0].skeleton.points[1].entities=['floor'];a.entities[0].skeleton.points[1].position=[.75,.8];
+results=assess(a,800,400);assert.equal(results[1].status,'plausible');assert.deepEqual(results[1].endpoint,[.75,.8]);
+a.entities[0].skeleton.points[1].position=[.75,.6];
+results=assess(a,800,400,.06);assert.equal(results[1].status,'plausible');assert.ok(Math.abs(results[1].endpoint[1]-.7)<1e-9);
 
-console.log('PASS: plausible, ambiguous, misplaced, missing data, suggestions, custom tails, explicit multiple targets, tolerance, image aspect ratio, annotation immutability.');
+console.log('PASS: plausible, ambiguous, misplaced, masks, missing data, suggestions, custom tails, explicit multiple targets, tolerance, image aspect ratio, annotation immutability.');

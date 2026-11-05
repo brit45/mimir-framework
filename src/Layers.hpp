@@ -4,6 +4,7 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
+#include "runtimes/cpu/Parallel.hpp"
 #include <memory>
 #include <functional>
 #include <immintrin.h>  // AVX2
@@ -615,6 +616,8 @@ inline void conv1d(const std::vector<float>& input, std::vector<float>& output,
     int out_length = (in_length + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     output.resize(out_length * out_channels, 0.0f);
     
+    const long long work = static_cast<long long>(out_channels) * out_length * in_channels * kernel_size;
+    #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work)) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int ol = 0; ol < out_length; ++ol) {
             float sum = 0.0f;
@@ -654,7 +657,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
     
     #ifdef __AVX2__
     // Version SIMD optimisée
-        #pragma omp parallel for collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144) schedule(static)
+        #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size)>1) num_threads(RuntimeParallel::workers(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size)) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -722,7 +725,7 @@ inline void conv2d(const std::vector<float>& input, std::vector<float>& output,
     }
     #else
     // Version CPU standard optimisée
-        #pragma omp parallel for collapse(2) if(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size > 262144) schedule(static)
+        #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size)>1) num_threads(RuntimeParallel::workers(static_cast<long long>(out_channels) * out_height * out_width * in_channels * kernel_size * kernel_size)) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -768,6 +771,9 @@ inline void conv3d(const std::vector<float>& input, std::vector<float>& output,
     
     output.resize(out_depth * out_height * out_width * out_channels, 0.0f);
     
+    const long long work = static_cast<long long>(out_channels) * out_depth * out_height * out_width
+        * in_channels * kernel_size * kernel_size * kernel_size;
+    #pragma omp parallel for collapse(4) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work)) schedule(static)
     for (int oc = 0; oc < out_channels; ++oc) {
         for (int od = 0; od < out_depth; ++od) {
             for (int oh = 0; oh < out_height; ++oh) {
@@ -870,6 +876,7 @@ inline void maxpool2d(const std::vector<float>& input, std::vector<float>& outpu
     
     output.resize(out_height * out_width * channels);
     
+    #pragma omp parallel for collapse(3) if(RuntimeParallel::workers(static_cast<long long>(channels) * out_height * out_width)>1) num_threads(RuntimeParallel::workers(static_cast<long long>(channels) * out_height * out_width)) schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -902,6 +909,7 @@ inline void avgpool2d(const std::vector<float>& input, std::vector<float>& outpu
     
     output.resize(out_height * out_width * channels);
     
+    #pragma omp parallel for collapse(3) if(RuntimeParallel::workers(static_cast<long long>(channels) * out_height * out_width)>1) num_threads(RuntimeParallel::workers(static_cast<long long>(channels) * out_height * out_width)) schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -929,6 +937,7 @@ inline void adaptive_avgpool2d(const std::vector<float>& input, std::vector<floa
                                 int out_height, int out_width) {
     output.resize(out_height * out_width * channels);
     
+    #pragma omp parallel for collapse(3) if(RuntimeParallel::workers(static_cast<long long>(channels) * out_height * out_width)>1) num_threads(RuntimeParallel::workers(static_cast<long long>(channels) * out_height * out_width)) schedule(static)
     for (int c = 0; c < channels; ++c) {
         for (int oh = 0; oh < out_height; ++oh) {
             for (int ow = 0; ow < out_width; ++ow) {
@@ -968,6 +977,8 @@ inline void batch_norm(std::vector<float>& data, const std::vector<float>& gamma
                        const std::vector<float>& running_var, int batch_size, int channels,
                        int spatial_size, float eps = 1e-5f, bool training = false) {
     
+    const int channel_elements = batch_size * spatial_size;
+    #pragma omp parallel for if(RuntimeParallel::workers(data.size())>1) num_threads(RuntimeParallel::workers(data.size())) schedule(static)
     for (int c = 0; c < channels; ++c) {
         float mean = running_mean[c];
         float var = running_var[c];
@@ -975,28 +986,30 @@ inline void batch_norm(std::vector<float>& data, const std::vector<float>& gamma
         if (training) {
             // Calculer mean et var pour ce batch
             mean = 0.0f;
-            for (int b = 0; b < batch_size; ++b) {
-                for (int s = 0; s < spatial_size; ++s) {
-                    mean += data[b * channels * spatial_size + c * spatial_size + s];
-                }
+            #pragma omp simd reduction(+:mean)
+            for (int i = 0; i < channel_elements; ++i) {
+                const int idx = (i / spatial_size) * channels * spatial_size +
+                    c * spatial_size + i % spatial_size;
+                mean += data[idx];
             }
-            mean /= (batch_size * spatial_size);
+            mean /= channel_elements;
             
             var = 0.0f;
-            for (int b = 0; b < batch_size; ++b) {
-                for (int s = 0; s < spatial_size; ++s) {
-                    float diff = data[b * channels * spatial_size + c * spatial_size + s] - mean;
-                    var += diff * diff;
-                }
+            #pragma omp simd reduction(+:var)
+            for (int i = 0; i < channel_elements; ++i) {
+                const int idx = (i / spatial_size) * channels * spatial_size +
+                    c * spatial_size + i % spatial_size;
+                const float diff = data[idx] - mean;
+                var += diff * diff;
             }
-            var /= (batch_size * spatial_size);
+            var /= channel_elements;
         }
         
         float inv_std = 1.0f / std::sqrt(var + eps);
         
         for (int b = 0; b < batch_size; ++b) {
             for (int s = 0; s < spatial_size; ++s) {
-                int idx = b * channels * spatial_size + c * spatial_size + s;
+                const int idx = b * channels * spatial_size + c * spatial_size + s;
                 data[idx] = (data[idx] - mean) * inv_std * gamma[c] + beta[c];
             }
         }
@@ -1008,8 +1021,9 @@ inline void layer_norm(std::vector<float>& data, const std::vector<float>& gamma
                        const std::vector<float>& beta, int normalized_size,
                        float eps = 1e-5f) {
     
-    int num_groups = data.size() / normalized_size;
-    
+    int num_groups = static_cast<int>(data.size() / normalized_size);
+
+    #pragma omp parallel for if(num_groups > 1 && RuntimeParallel::workers(data.size())>1) num_threads(RuntimeParallel::workers(data.size())) schedule(static)
     for (int g = 0; g < num_groups; ++g) {
         float mean = 0.0f;
         for (int i = 0; i < normalized_size; ++i) {
@@ -1037,8 +1051,9 @@ inline void layer_norm(std::vector<float>& data, const std::vector<float>& gamma
 inline void rms_norm(std::vector<float>& data, const std::vector<float>& gamma,
                      int normalized_size, float eps = 1e-6f) {
     
-    int num_groups = data.size() / normalized_size;
-    
+    int num_groups = static_cast<int>(data.size() / normalized_size);
+
+    #pragma omp parallel for if(num_groups > 1 && RuntimeParallel::workers(data.size())>1) num_threads(RuntimeParallel::workers(data.size())) schedule(static)
     for (int g = 0; g < num_groups; ++g) {
         float rms = 0.0f;
         for (int i = 0; i < normalized_size; ++i) {

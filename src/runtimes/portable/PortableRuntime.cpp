@@ -490,14 +490,14 @@ RuntimeCapabilityLevel PortableRuntime::queryForwardGeometryCapability(
         CudaOperationGeometry::Recurrent g;return g.valid(layer,inputs[0]->size())?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::attentionType(layer.type_enum)){
-        CudaOperationGeometry::Attention g;return config_.attention_enabled && g.valid(layer,inputs) && 2LL*g.q*g.k*g.ed>=std::max(0,config_.attention_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+        CudaOperationGeometry::Attention g;return config_.attention_enabled && g.valid(layer,inputs) && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(2LL*g.q*g.k*g.ed,config_.attention_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::extendedConvType(layer.type_enum)){
         CudaOperationGeometry::ExtendedConv g;
-        return config_.conv_enabled && g.valid(layer,inputs[0]->size()) && static_cast<long long>(g.outputSize())*g.kh*g.kw*(g.mode==2?1:g.ic)>=std::max(0,config_.conv_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+        return config_.conv_enabled && g.valid(layer,inputs[0]->size()) && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(g.outputSize())*g.kh*g.kw*(g.mode==2?1:g.ic),config_.conv_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::batchNormType(layer.type_enum)){
-        CudaOperationGeometry::BatchNorm g;return config_.norm_enabled && inputs[0]->size()>=static_cast<size_t>(std::max(0,config_.norm_min_elements)) && g.valid(layer,inputs[0]->size())?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+        CudaOperationGeometry::BatchNorm g;return config_.norm_enabled && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(inputs[0]->size(),config_.norm_min_elements) && g.valid(layer,inputs[0]->size())?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::stochasticType(layer.type_enum)){
         if(layer.type_enum==LayerType::Reparameterize && (inputs.size()<2 || !inputs[1] || inputs[1]->size()!=inputs[0]->size()))return RuntimeCapabilityLevel::Unsupported;
@@ -509,7 +509,7 @@ RuntimeCapabilityLevel PortableRuntime::queryForwardGeometryCapability(
         CudaOperationGeometry::Projection g;return g.valid(layer,inputs)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(layer.type_enum==LayerType::LayerNorm || layer.type_enum==LayerType::RMSNorm){
-        return config_.norm_enabled && inputs[0]->size()>=static_cast<size_t>(std::max(0,config_.norm_min_elements)) &&
+        return config_.norm_enabled && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(inputs[0]->size(),config_.norm_min_elements) &&
             PortableLayerGeometry::rowNormFits(layer,inputs[0]->size(),false)
             ?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
@@ -526,7 +526,7 @@ RuntimeCapabilityLevel PortableRuntime::queryForwardGeometryCapability(
         case LayerType::InstanceNorm2d:
         case LayerType::GroupNorm: {
             CudaOperationGeometry::Norm shape;
-            valid=config_.norm_enabled && count>=static_cast<size_t>(std::max(0,config_.norm_min_elements)) && shape.valid(layer,count);
+            valid=config_.norm_enabled && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(count,config_.norm_min_elements) && shape.valid(layer,count);
             break;
         }
         case LayerType::UpsampleNearest:
@@ -536,7 +536,7 @@ RuntimeCapabilityLevel PortableRuntime::queryForwardGeometryCapability(
         }
         case LayerType::Softmax:
         case LayerType::LogSoftmax:
-            valid=config_.linear_enabled && count>=static_cast<size_t>(std::max(0,config_.linear_min_ops)); break;
+            valid=config_.linear_enabled && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(count,config_.linear_min_ops); break;
         case LayerType::Conv2d: {
             CudaOperationGeometry::Conv shape; valid=shape.valid(layer,count); break;
         }
@@ -617,7 +617,7 @@ RuntimeCapabilityLevel PortableRuntime::queryBackwardOperationCapability(
     }
     if(layer.type_enum==LayerType::LayerNorm || layer.type_enum==LayerType::RMSNorm){
         return !config_.disabled && config_.norm_enabled && grad_outputs.size()==1 && grad_outputs[0]->size()==inputs[0]->size() &&
-            inputs[0]->size()>=static_cast<size_t>(std::max(0,config_.norm_min_elements)) && PortableLayerGeometry::rowNormFits(layer,inputs[0]->size(),true)
+            Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(inputs[0]->size(),config_.norm_min_elements) && PortableLayerGeometry::rowNormFits(layer,inputs[0]->size(),true)
             ?queryBackwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     switch (layer.type_enum) {
@@ -823,7 +823,7 @@ bool PortableRuntime::forwardLayer(
                         const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
             // Fallback pour les chemins non encore couverts en backward GPU.
                         const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-                        if (ops >= std::max(0, config_.linear_min_ops) && x.size() == expected_in) {
+                        if (Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops) && x.size() == expected_in) {
                             const float* w = layer.getWeights();
                             if (w && layer.getWeightsSize() >= expected_total_w) {
                                 const float* b = layer.use_bias ? (w + expected_w) : nullptr;
@@ -862,7 +862,7 @@ bool PortableRuntime::forwardLayer(
 
             const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) *
                                   static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) break;
 
             Impl::DeviceBuf d_a, d_b, d_c;
             if (!d_a.alloc(static_cast<size_t>(batches) * a_batch_elems * sizeof(float))) break;
@@ -932,7 +932,7 @@ bool PortableRuntime::forwardLayer(
 
             const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) *
                                   static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) break;
 
             Impl::DeviceBuf d_a, d_b, d_c;
             if (!d_a.alloc(static_cast<size_t>(batches) * a_batch_elems * sizeof(float))) break;
@@ -1030,7 +1030,7 @@ bool PortableRuntime::forwardLayer(
             const int K  = C_in * k * k;
             const int HW = H_out * W_out;
             const long long ops = static_cast<long long>(C_out) * K * HW;
-            if (ops < static_cast<long long>(config_.conv_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.conv_min_ops)) return false;
             if (static_cast<int>(xc.size()) != C_in * H * W) return false;
 
             const size_t w_k = static_cast<size_t>(C_out) * K;
@@ -1096,7 +1096,7 @@ bool PortableRuntime::forwardLayer(
             const std::vector<float>& a = *inputs[0];
             const std::vector<float>& b = *inputs[1];
             if (a.empty() || a.size() != b.size()) break;
-            if (static_cast<long long>(a.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(a.size()),config_.linear_min_ops)) break;
 
             int op_code = 0;
             if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op_code)) break;
@@ -1123,7 +1123,7 @@ bool PortableRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& in = *inputs[0];
             if (in.empty()) break;
-            if (static_cast<long long>(in.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(in.size()),config_.linear_min_ops)) break;
 
             int op_code = 0;
             float alpha = 0.01f;

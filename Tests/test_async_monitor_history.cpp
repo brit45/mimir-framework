@@ -173,6 +173,42 @@ int main() {
         TASSERT_TRUE(history.size()==4 && history.back().step==3);
         TASSERT_NEAR(history.back().loss,0.0625f,1e-7f);
     }
+    // A checkpoint directory is a CSV destination directory, never the CSV file itself.
+    const auto directory = std::filesystem::temp_directory_path() / "mimir_metrics_checkpoint_directory";
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const auto directory_csv = directory / "loss_history.csv";
+    {
+        AsyncMonitor directory_monitor;
+        directory_monitor.configureMetricsCsv(directory.string());
+        AsyncMonitor::Metrics metrics; metrics.epoch=1; metrics.batch=1; metrics.loss=0.75f;
+        directory_monitor.updateMetrics(metrics);
+        directory_monitor.flushMetricsCsv();
+        TASSERT_TRUE(std::filesystem::is_regular_file(directory_csv));
+        const auto records = MetricsCsv::read(directory_csv.string());
+        TASSERT_TRUE(records.size()==1);
+        TASSERT_NEAR(records.front().loss,0.75f,1e-7f);
+    }
+    {
+        AsyncMonitor directory_resume;
+        directory_resume.configureMetricsCsv(directory.string());
+        TASSERT_TRUE(directory_resume.metricsHistorySnapshot().size()==1);
+        AsyncMonitor::Metrics metrics; metrics.epoch=2; metrics.batch=1; metrics.loss=0.25f;
+        directory_resume.updateMetrics(metrics);
+        directory_resume.flushMetricsCsv();
+        TASSERT_TRUE(MetricsCsv::read(directory_csv.string()).size()==2);
+    }
+    {
+        AsyncMonitor future_directory;
+        const auto future = directory / "new_subdirectory";
+        future_directory.configureMetricsCsv(future.string()+"/");
+        AsyncMonitor::Metrics metrics; metrics.epoch=1; metrics.batch=1; metrics.loss=0.5f;
+        future_directory.updateMetrics(metrics);
+        future_directory.flushMetricsCsv();
+        TASSERT_TRUE(MetricsCsv::read((future/"loss_history.csv").string()).size()==1);
+    }
+    std::filesystem::remove_all(directory);
+
     // Legacy htop header remains appendable without introducing mismatched columns.
     const auto legacy=path.string()+".legacy";
     {std::ofstream file(legacy); file << MetricsCsv::header.substr(0,MetricsCsv::header.find(",val_feedback")) << '\n';}

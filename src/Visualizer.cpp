@@ -2078,6 +2078,7 @@ void Visualizer::renderModelGraphOverlay() {
         view_w/std::max(1.f,width),view_h/std::max(1.f,height)));
     window->setView(view);
     if(!nodes.empty())model_graph_selected_=std::min(model_graph_selected_,nodes.size()-1);
+    Mimir::Viz::drawModelGraphFusionBlocks(*window,layout,text);
     Mimir::Viz::drawModelGraphTreeEdges(*window,layout,model_graph_selected_);
     for(size_t i=0;i<nodes.size();++i) {
         const auto& n=nodes[i];
@@ -2121,6 +2122,18 @@ void Visualizer::renderModelGraphOverlay() {
             " | scratch : "+std::to_string(n.value("scratch_bytes",size_t(0))),muted,12);
         text(20,bottom+113,"Entrees externes : "+std::to_string(graph.at("external_inputs").size())+
             " | mise a jour au prochain forward actif (max 2/s)",muted,12);
+        if(n.contains("fusion_forward_decision") && n["fusion_forward_decision"].value("fused",false)) {
+            const auto& choice=n["fusion_forward_decision"];
+            text(20,bottom+132,"Planner fusion : "+choice.value("runtime",std::string())+
+                " | plafond CPU : "+std::to_string(choice.value("cpu_workers",1)),accent,11);
+        } else if(!n.value("kernel_fused",false) && n.contains("forward_execution_choices")) {
+            for(const auto& choice:n["forward_execution_choices"])if(choice.value("runtime",std::string())=="CPU") {
+                text(20,bottom+132,"Profil CPU mesure : max "+std::to_string(choice.value("cpu_workers",1))+
+                    " workers | "+choice.value("cpu_algorithm",std::string())+
+                    " | "+std::to_string(choice.value("seconds",0.0)*1e6)+" us",accent,11);
+                break;
+            }
+        }
     } else text(20,bottom+32,"Le modele ne contient aucun layer.",white);
 }
 
@@ -2220,6 +2233,8 @@ void Visualizer::processEvents() {
 
     // Garantir que les coordonnées UI (pixels) sont actives avant tout hit-test.
     syncUIView();
+    const bool script_keyboard_capture = script_scene_.value("events", false) &&
+        script_scene_.value("capture_keys", false);
 
     auto publish_live_params = [&](bool bump_version) {
         live_lr_.store(std::clamp(live_ui_lr_, kLiveLRMin, kLiveLRMax), std::memory_order_relaxed);
@@ -2445,7 +2460,7 @@ void Visualizer::processEvents() {
                 else if (key->code==vizgfx::Keyboard::Key::X) model_graph_png_requested_=true;
                 continue;
             }
-            if (!show_help_overlay_ && !config_editor_.visible && !zoom_active_ &&
+            if (!script_keyboard_capture && !show_help_overlay_ && !config_editor_.visible && !zoom_active_ &&
                 live_input_target_==LiveInputTarget::None && !blocks_tips_limit_editing_ &&
                 key->code==vizgfx::Keyboard::Key::N && !key->control) {
                 show_model_graph_=true;
@@ -2459,7 +2474,7 @@ void Visualizer::processEvents() {
                     help_scroll_y_=std::clamp(help_scroll_y_+(key->code==vizgfx::Keyboard::Key::Down?48.f:-48.f),0.f,help_scroll_max_);
                 continue;
             }
-            if (!config_editor_.editing && live_input_target_ == LiveInputTarget::None &&
+            if (!script_keyboard_capture && !config_editor_.editing && live_input_target_ == LiveInputTarget::None &&
                 !blocks_tips_limit_editing_ && key->code == vizgfx::Keyboard::Key::C && !key->control) {
                 config_editor_.toggle();
                 continue;
@@ -2516,7 +2531,7 @@ void Visualizer::processEvents() {
                 emitScriptEvent({{"type", "pointer_down"}, {"x", button->position.x}, {"y", button->position.y}, {"button", static_cast<int>(button->button)}});
             if (const auto* button = event.getIf<vizgfx::Event::MouseButtonReleased>())
                 emitScriptEvent({{"type", "pointer_up"}, {"x", button->position.x}, {"y", button->position.y}, {"button", static_cast<int>(button->button)}});
-            if (event.is<vizgfx::Event::KeyPressed>() && script_scene_.value("capture_keys", false)) {
+            if (event.is<vizgfx::Event::KeyPressed>() && script_keyboard_capture) {
                 continue;
             }
         }
@@ -3042,6 +3057,8 @@ void Visualizer::processEvents() {
                 saveUILayoutToLast();
             }
             if (code == vizgfx::Keyboard::Key::P) show_prompt_text_ = !show_prompt_text_;
+            if (code == vizgfx::Keyboard::Key::I && zoom_active_)
+                show_picker_tooltip_ = !show_picker_tooltip_;
             if (code == vizgfx::Keyboard::Key::F) {
                 show_feature_probe_ = !show_feature_probe_;
                 saveUILayoutToLast();
@@ -3639,6 +3656,7 @@ bool Visualizer::saveModelGraphPng() {
                     text(20,-header_height+68.f,
                         "Connections orthogonales, fleches vers les nodes cibles.",muted,12);
                 }
+                Mimir::Viz::drawModelGraphFusionBlocks(canvas,layout,text);
                 Mimir::Viz::drawModelGraphTreeEdges(canvas,layout,std::numeric_limits<size_t>::max());
                 for(size_t i=0;i<nodes.size();++i) {
                     const auto& node=nodes[i];
@@ -3886,6 +3904,7 @@ void Visualizer::renderHelpOverlay() {
             {"G / P / B","Afficher ou masquer le graphe, le prompt et les boîtes."}}},
         {"Zoom et inspection des tenseurs",{{"Z / Entrée","Agrandir l’élément sélectionné."},
             {"T","Basculer en taille réelle 1:1."},
+            {"I","Afficher ou masquer l’info-bulle du picker."},
             {"F","Picker : sections de features, canaux actifs et detections surlignees."},
             {"Gauche / Droite","Parcourir les tips ou les images."},
             {"Survol","Lire la valeur brute et son indice dans la cellule encadrée."},
@@ -4229,9 +4248,32 @@ void Visualizer::renderZoomOverlay() {
                 }
                 yrow+=24.f;
             };
+            auto wrapped_row=[&](std::string line) {
+                while(line.size()>chars) {
+                    size_t split=line.rfind(' ',chars);
+                    if(split==std::string::npos || split==0) split=chars;
+                    row(line.substr(0,split));
+                    line.erase(0,split);
+                    const size_t first=line.find_first_not_of(' ');
+                    line=first==std::string::npos?std::string():line.substr(first);
+                }
+                if(!line.empty()) row(line);
+            };
             auto numeric=[](double value) {std::ostringstream text;text<<std::setprecision(9)<<value;return text.str();};
+            const bool vector_preview=picker_selection_source_.label.find("/vec")!=std::string::npos;
             row("SELECTION / ANALYSE",true);
             row(picker_selection_raw_?"Tenseur : capture figee":"Pixels affiches uint8 : capture figee");
+            wrapped_row("Source : "+picker_selection_source_.label);
+            if(!picker_selection_source_.tensor_info.empty()) {
+                std::istringstream info(picker_selection_source_.tensor_info);
+                for(std::string line;std::getline(info,line);) wrapped_row("Tensor : "+line);
+            }
+            if(picker_selection_raw_) {
+                row(vector_preview?"Vecteur 1D projete sur une grille de preview":"Carte d'activations spatiale");
+                row(vector_preview?"Index source = dimension du vecteur":"Index source = position originale");
+                row("Activations brutes, avant colorisation");
+                if(!vector_preview) row("Valeurs par position : plusieurs canaux possibles");
+            }
             row("Glisser : selectionner | Clic droit / Esc : effacer");
             row("Molette : parcourir toutes les valeurs");
             row("Zone ["+std::to_string(selection.x0)+","+std::to_string(selection.y0)+"] -> ["+
@@ -4239,12 +4281,19 @@ void Visualizer::renderZoomOverlay() {
             row("Canaux captures : "+std::to_string(picker_selection_source_.tensor_sample_channels));
             row("Valeurs uniques : "+std::to_string(selection.values.size()));
             row("Finies : "+std::to_string(selection.finite)+" | zeros : "+std::to_string(selection.zeros));
+            row("Positives : "+std::to_string(selection.positive)+" | negatives : "+std::to_string(selection.negative));
             row("NaN : "+std::to_string(selection.nan)+" | Inf : "+std::to_string(selection.inf));
             row("Min : "+(selection.finite?numeric(selection.min):"--")+" | Max : "+(selection.finite?numeric(selection.max):"--"));
             row("Moyenne : "+(selection.finite?numeric(selection.mean):"--"));
             row("Ecart-type : "+(selection.finite?numeric(selection.stddev):"--"));
             row("Norme L2 (valeurs finies) : "+numeric(selection.l2));
-            if (picker_selection_raw_) row("Echantillons de la preview, avant colorisation");
+            if (picker_selection_raw_) {
+                row("ACTIVATIONS SAILLANTES (dans la selection)",true);
+                for(const auto& entry:TensorSelection::strongest(selection,5))
+                    row(std::string(vector_preview?"dim [":"index source [")+std::to_string(entry.first)+"] = "+numeric(entry.second));
+                if(vector_preview)
+                    row("Sans labels/metadonnees associes, ne pas inferer un concept.");
+            }
             row("INDICES / VALEURS",true);
             for (const auto& entry:selection.values) {
                 if(yrow>=pad+8.f && yrow+20.f<pad+sidebar_h-8.f)
@@ -4393,6 +4442,7 @@ void Visualizer::renderZoomOverlay() {
         std::to_string(current_allocator_memory_mb) + " MB allocator");
     draw_value("optimiseur", optimizerTypeName(static_cast<OptimizerType>(current_opt_type)));
     draw_value("optim step", std::to_string(current_opt_step));
+    draw_text(show_picker_tooltip_ ? "I: info-bulle ON" : "I: info-bulle OFF", 11, vizgfx::Color(164,174,190));
     draw_text(show_feature_probe_ ? "F: features ON | Molette: defiler" : "F: features OFF | Molette: defiler", 11, vizgfx::Color(164,174,190));
     zoom_info_scroll_max_ = std::max(0.0f, text_y + zoom_info_scroll_ - (pad + sidebar_h) + 16.0f);
     zoom_info_scroll_ = std::min(zoom_info_scroll_, zoom_info_scroll_max_);
@@ -4470,6 +4520,10 @@ void Visualizer::renderZoomOverlay() {
             if(hits>4){value << "\n+ " << hits-4 << " detections"; ++lines;}
         }
         last_picker_text_ = value.str();
+        if (!show_picker_tooltip_) {
+            last_picker_text_.clear();
+            return;
+        }
         const float bw=show_feature_probe_?360.f:270.f, bh=static_cast<float>(lines*17+14);
         const float bx=std::clamp(picker_mouse_.x+16.f,0.f,std::max(0.f,static_cast<float>(window_width)-bw));
         const float by=std::clamp(picker_mouse_.y+16.f,0.f,std::max(0.f,static_cast<float>(window_height)-bh));

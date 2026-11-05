@@ -1,3 +1,6 @@
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_vae_conv.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 ---@diagnostic disable: undefined-global, undefined-field, inject-field
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local opts = Args.parse(arg) or {}

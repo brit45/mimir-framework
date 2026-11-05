@@ -326,6 +326,7 @@ private:
     bool hide_normalisation_blocks = false;
     bool show_detection_overlay_ = true;
     bool show_feature_probe_ = false;
+    bool show_picker_tooltip_ = true;
     float detection_score_threshold_ = 0.60f;
     int blocks_tips_visible_limit_ = 0; // 0 = illimite
     bool blocks_tips_limit_editing_ = false;

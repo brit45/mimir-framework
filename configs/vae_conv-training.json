@@ -2,6 +2,11 @@
   "$schema": "./conf.schema.json",
   "description": "Entraînement VAEConv générique v7 sans skip connections avec régularisation L2",
   "env": {
+    "MIMIR_ENABLE_PLANNER": 1,
+    "MIMIR_PLANNER_MODE": "cost",
+    "MIMIR_PLANNER_FUSION": 1,
+    "MIMIR_ENABLE_FUSION_TRAIN": 1,
+    "MIMIR_RUNTIME_AUTOTUNE": 1,
     "OMP_NUM_THREADS": 10
   },
   "lua": {

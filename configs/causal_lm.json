@@ -1,4 +1,11 @@
 {
+  "env": {
+    "MIMIR_ENABLE_PLANNER": 1,
+    "MIMIR_PLANNER_MODE": "cost",
+    "MIMIR_PLANNER_FUSION": 1,
+    "MIMIR_ENABLE_FUSION_TRAIN": 1,
+    "MIMIR_RUNTIME_AUTOTUNE": 1
+  },
   "$schema": "./conf.schema.json",
   "lua": {
     "scripts": ["scripts/training/train_causal_lm.lua"]

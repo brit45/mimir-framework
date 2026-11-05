@@ -1,3 +1,4 @@
+#include "runtimes/GpuPointwiseFusion.hpp"
 #include "runtimes/optimizers/OptimizerDispatch.hpp"
 #include "../ops_sequence_constant.hpp"
 #include "runtimes/cuda/CudaRuntime.hpp"
@@ -8,6 +9,9 @@
 
 #ifdef ENABLE_CUDA
 #include <cuda_runtime.h>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#include "runtimes/PointwiseFusionKernels.cuh"
+#endif
 #include <cublas_v2.h>
 #include "runtimes/cuda/CudaNativeOps.cuh"
 #include "runtimes/optimizers/OptimizerCudaKernel.cuh"
@@ -682,14 +686,14 @@ RuntimeCapabilityLevel CudaRuntime::queryForwardOperationCapability(
         CudaOperationGeometry::Recurrent g;return g.valid(layer,inputs[0]->size())?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::attentionType(layer.type_enum)){
-        CudaOperationGeometry::Attention g;return config_.attention_enabled && g.valid(layer,inputs) && 2LL*g.q*g.k*g.ed>=std::max(0,config_.attention_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+        CudaOperationGeometry::Attention g;return config_.attention_enabled && g.valid(layer,inputs) && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(2LL*g.q*g.k*g.ed,config_.attention_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::extendedConvType(layer.type_enum)){
         CudaOperationGeometry::ExtendedConv g;
-        return config_.conv_enabled && g.valid(layer,inputs[0]->size()) && static_cast<long long>(g.outputSize())*g.kh*g.kw*(g.mode==2?1:g.ic)>=std::max(0,config_.conv_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+        return config_.conv_enabled && g.valid(layer,inputs[0]->size()) && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(g.outputSize())*g.kh*g.kw*(g.mode==2?1:g.ic),config_.conv_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::batchNormType(layer.type_enum)){
-        CudaOperationGeometry::BatchNorm g;return config_.norm_enabled && inputs[0]->size()>=static_cast<size_t>(std::max(0,config_.norm_min_elements)) && g.valid(layer,inputs[0]->size())?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+        CudaOperationGeometry::BatchNorm g;return config_.norm_enabled && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(inputs[0]->size(),config_.norm_min_elements) && g.valid(layer,inputs[0]->size())?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::stochasticType(layer.type_enum)){
         if(layer.type_enum==LayerType::Reparameterize && (inputs.size()<2 || !inputs[1] || inputs[1]->size()!=inputs[0]->size()))return RuntimeCapabilityLevel::Unsupported;
@@ -702,7 +706,7 @@ RuntimeCapabilityLevel CudaRuntime::queryForwardOperationCapability(
     }
     if(layer.type_enum==LayerType::LayerNorm || layer.type_enum==LayerType::RMSNorm){
         const size_t n=inputs[0]->size(),width=layer.in_features>0?static_cast<size_t>(layer.in_features):n;
-        if(!config_.norm_enabled || n<static_cast<size_t>(std::max(0,config_.norm_min_elements)) || !width || n%width ||
+        if(!config_.norm_enabled || !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(n,config_.norm_min_elements) || !width || n%width ||
             (layer.affine && (!layer.getWeights() || layer.getWeightsSize()<width*(layer.type_enum==LayerType::LayerNorm && layer.use_bias?2ULL:1ULL))) || !(layer.eps>0.f) || (layer.type_enum==LayerType::RMSNorm && layer.in_features<=0 && (layer.embed_dim>0 || !layer.shape.empty() || !layer.target_shape.empty())))return RuntimeCapabilityLevel::Unsupported;
         return queryForwardCapability(layer.type_enum);
     }
@@ -718,7 +722,7 @@ RuntimeCapabilityLevel CudaRuntime::queryForwardOperationCapability(
         case LayerType::InstanceNorm2d:
         case LayerType::GroupNorm: {
             CudaOperationGeometry::Norm shape;
-            valid=config_.norm_enabled && count>=static_cast<size_t>(std::max(0,config_.norm_min_elements)) && shape.valid(layer,count);
+            valid=config_.norm_enabled && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(count,config_.norm_min_elements) && shape.valid(layer,count);
             break;
         }
         case LayerType::UpsampleNearest:
@@ -728,7 +732,7 @@ RuntimeCapabilityLevel CudaRuntime::queryForwardOperationCapability(
         }
         case LayerType::Softmax:
         case LayerType::LogSoftmax:
-            valid=config_.linear_enabled && count>=static_cast<size_t>(std::max(0,config_.linear_min_ops)); break;
+            valid=config_.linear_enabled && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(count,config_.linear_min_ops); break;
         case LayerType::Conv2d: {
             CudaOperationGeometry::Conv shape; valid=shape.valid(layer,count); break;
         }
@@ -1018,7 +1022,7 @@ bool CudaRuntime::forwardLayer(
                         const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
             // Fallback pour les chemins non encore couverts en backward GPU.
                         const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-                        if (ops >= std::max(0, config_.linear_min_ops) && x.size() == expected_in) {
+                        if (Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops) && x.size() == expected_in) {
                             const float* w = layer.getWeights();
                             if (w && layer.getWeightsSize() >= expected_total_w) {
                                 const float* b = layer.use_bias ? (w + expected_w) : nullptr;
@@ -1057,7 +1061,7 @@ bool CudaRuntime::forwardLayer(
 
             const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) *
                                   static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) break;
 
 #ifdef ENABLE_CUDA
             std::lock_guard<std::mutex> scratch_lock(impl_->linear_scratch_mutex);
@@ -1131,7 +1135,7 @@ bool CudaRuntime::forwardLayer(
 
             const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) *
                                   static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) break;
 
 #ifdef ENABLE_CUDA
             std::lock_guard<std::mutex> scratch_lock(impl_->linear_scratch_mutex);
@@ -1146,32 +1150,16 @@ bool CudaRuntime::forwardLayer(
 
             const float alpha = 1.0f;
             const float beta = 0.0f;
-            bool ok = true;
-            for (int bi = 0; bi < batches; ++bi) {
-                const float* a_ptr = reinterpret_cast<const float*>(d_a.ptr) + static_cast<size_t>(bi) * a_batch_elems;
-                const float* b_ptr = reinterpret_cast<const float*>(d_b.ptr) + static_cast<size_t>(bi) * b_batch_elems;
-                float* c_ptr = reinterpret_cast<float*>(d_c.ptr) + static_cast<size_t>(bi) * c_batch_elems;
-                if (cublasSgemm(
-                        impl_->handle,
-                        CUBLAS_OP_N,
-                        CUBLAS_OP_N,
-                        N,
-                        M,
-                        K,
-                        &alpha,
-                        b_ptr,
-                        N,
-                        a_ptr,
-                        K,
-                        &beta,
-                        c_ptr,
-                        N
-                    ) != CUBLAS_STATUS_SUCCESS) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (!ok) break;
+            // Row-major C = A B maps to column-major C^T = B^T A^T.
+            // A strided call exposes every independent batch to cuBLAS at once.
+            if (cublasSgemmStridedBatched(
+                    impl_->handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K,
+                    &alpha, reinterpret_cast<const float*>(d_b.ptr), N,
+                    static_cast<long long>(b_batch_elems),
+                    reinterpret_cast<const float*>(d_a.ptr), K,
+                    static_cast<long long>(a_batch_elems), &beta,
+                    reinterpret_cast<float*>(d_c.ptr), N,
+                    static_cast<long long>(c_batch_elems), batches) != CUBLAS_STATUS_SUCCESS) break;
 
             outputs.resize(1);
             outputs[0].resize(static_cast<size_t>(batches) * c_batch_elems);
@@ -1234,7 +1222,7 @@ bool CudaRuntime::forwardLayer(
             const int K  = C_in * k * k;
             const int HW = H_out * W_out;
             const long long ops = static_cast<long long>(C_out) * K * HW;
-            if (ops < static_cast<long long>(config_.conv_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.conv_min_ops)) return false;
             if (static_cast<int>(xc.size()) != C_in * H * W) return false;
 
             const size_t w_k = static_cast<size_t>(C_out) * K;
@@ -1304,7 +1292,7 @@ bool CudaRuntime::forwardLayer(
             const std::vector<float>& a = *inputs[0];
             const std::vector<float>& b = *inputs[1];
             if (a.empty() || a.size() != b.size()) break;
-            if (static_cast<long long>(a.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(a.size()),config_.linear_min_ops)) break;
 
             int op_code = 0;
             if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op_code)) break;
@@ -1331,7 +1319,7 @@ bool CudaRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& in = *inputs[0];
             if (in.empty()) break;
-            if (static_cast<long long>(in.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(in.size()),config_.linear_min_ops)) break;
 
             int op_code = 0;
             float alpha = 0.01f;
@@ -1579,34 +1567,17 @@ bool CudaRuntime::backwardLayer(
 
             const float alpha = 1.0f;
             const float beta = 0.0f;
-            for (int bi = 0; bi < batches; ++bi) {
-                const float* a_ptr = reinterpret_cast<const float*>(d_a.ptr) + static_cast<size_t>(bi) * a_batch;
-                const float* b_ptr = reinterpret_cast<const float*>(d_b.ptr) + static_cast<size_t>(bi) * b_batch;
-                const float* go_ptr = reinterpret_cast<const float*>(d_go.ptr) + static_cast<size_t>(bi) * c_batch;
-                float* ga_ptr = reinterpret_cast<float*>(d_ga.ptr) + static_cast<size_t>(bi) * a_batch;
-                float* gb_ptr = reinterpret_cast<float*>(d_gb.ptr) + static_cast<size_t>(bi) * b_batch;
-
-                // dA = dC * B^T
-                if (cublasSgemm(impl_->handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                        K, M, N, &alpha,
-                        b_ptr, N,
-                        go_ptr, N,
-                        &beta,
-                        ga_ptr, K) != CUBLAS_STATUS_SUCCESS) {
-                    return false;
-                }
-
-                // dB = A^T * dC
-                if (cublasSgemm(impl_->handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                        N, K, M, &alpha,
-                        go_ptr, N,
-                        a_ptr, K,
-                        &beta,
-                        gb_ptr, N) != CUBLAS_STATUS_SUCCESS) {
-                    return false;
-                }
-            }
-
+            // dA^T = B * dC^T; dB^T = dC^T * A.
+            if (cublasSgemmStridedBatched(impl_->handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                    K, M, N, &alpha, reinterpret_cast<const float*>(d_b.ptr), N,
+                    static_cast<long long>(b_batch), reinterpret_cast<const float*>(d_go.ptr), N,
+                    static_cast<long long>(c_batch), &beta, reinterpret_cast<float*>(d_ga.ptr), K,
+                    static_cast<long long>(a_batch), batches) != CUBLAS_STATUS_SUCCESS) return false;
+            if (cublasSgemmStridedBatched(impl_->handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                    N, K, M, &alpha, reinterpret_cast<const float*>(d_go.ptr), N,
+                    static_cast<long long>(c_batch), reinterpret_cast<const float*>(d_a.ptr), K,
+                    static_cast<long long>(a_batch), &beta, reinterpret_cast<float*>(d_gb.ptr), N,
+                    static_cast<long long>(b_batch), batches) != CUBLAS_STATUS_SUCCESS) return false;
 
             grad_inputs.resize(2);
             grad_inputs[0].resize(a_elems);
@@ -1773,5 +1744,60 @@ bool CudaRuntime::reconstructionLoss(const RuntimeLossGrad::Request& r,RuntimeLo
     return RuntimeLossGrad::unpack(r,memory,out);
 #else
     (void)r;(void)out;return false;
+#endif
+}
+
+RuntimeCapabilityLevel CudaRuntime::queryPointwiseFusionCapability(
+    const std::vector<const Layer*>& chain,bool,bool) const {
+#if defined(ENABLE_CUDA) && defined(__CUDACC__)
+    if(isInitialized() && !config_.disabled && config_.linear_enabled && Mimir::GpuFusion::supported(chain))
+        return RuntimeCapabilityLevel::NativeOptimized;
+#endif
+    (void)chain;return RuntimeCapabilityLevel::Unsupported;
+}
+
+bool CudaRuntime::pointwiseFusionForward(const std::vector<const Layer*>& chain,const std::vector<float>& input,
+    std::vector<std::vector<float>>& output,bool retain,bool training) {
+#if defined(ENABLE_CUDA) && defined(__CUDACC__)
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,false,training)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(input.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,input,retain))return false;
+    if(program.n) {
+        std::lock_guard<std::mutex> lock(impl_->linear_scratch_mutex);
+        auto& buffer=impl_->linear_scratch[0];
+        const size_t bytes=program.memory.size()*sizeof(float);
+        if(!buffer.alloc(bytes) || !buffer.copyFromHost(program.memory.data(),size_t(program.output)*sizeof(float)))return false;
+        auto* data=static_cast<float*>(buffer.ptr);
+        const int blocks=(program.n+255)/256;
+        pointwise_fusion_forward<<<blocks,256>>>(data+program.input,data+program.operations,data+program.output,program.n,program.stages,program.retain);
+        if(cudaGetLastError()!=cudaSuccess || cudaMemcpy(program.memory.data()+program.output,data+program.output,program.output_count*sizeof(float),cudaMemcpyDeviceToHost)!=cudaSuccess)return false;
+    }
+    program.forwardResult(output);return true;
+#else
+    (void)chain;(void)input;(void)output;(void)retain;(void)training;return false;
+#endif
+}
+
+bool CudaRuntime::pointwiseFusionBackward(const std::vector<const Layer*>& chain,
+    const std::vector<const std::vector<float>*>& inputs,const std::vector<float>& input,std::vector<float>& output) {
+#if defined(ENABLE_CUDA) && defined(__CUDACC__)
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,true,true)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(input.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,input,false,&inputs))return false;
+    if(program.n) {
+        std::lock_guard<std::mutex> lock(impl_->linear_scratch_mutex);
+        auto& buffer=impl_->linear_scratch[0];
+        const size_t bytes=program.memory.size()*sizeof(float);
+        if(!buffer.alloc(bytes) || !buffer.copyFromHost(program.memory.data(),size_t(program.output)*sizeof(float)))return false;
+        auto* data=static_cast<float*>(buffer.ptr);
+        const int blocks=(program.n+255)/256;
+        pointwise_fusion_backward<<<blocks,256>>>(data+program.input,data+program.snapshots,data+program.operations,data+program.output,program.n,program.stages);
+        if(cudaGetLastError()!=cudaSuccess || cudaMemcpy(program.memory.data()+program.output,data+program.output,program.output_count*sizeof(float),cudaMemcpyDeviceToHost)!=cudaSuccess)return false;
+    }
+    program.backwardResult(output);return true;
+#else
+    (void)chain;(void)input;(void)output;(void)inputs;return false;
 #endif
 }

@@ -28,7 +28,14 @@ function B.vector(v, expected)
   assert(type(v) == 'table' and #v > 0, 'sortie vide ou invalide')
   assert(not expected or #v == expected,
     'taille de sortie inattendue: ' .. #v .. ' (attendue: ' .. tostring(expected) .. ')')
-  for i, x in ipairs(v) do assert(B.finite(x), 'NaN/Inf à l’indice ' .. i) end
+  -- Same numeric/NaN/infinity checks as B.finite, without an extra Lua call
+  -- and math.abs for every scalar in multi-million-element gradient tables.
+  local value_type, positive_inf, negative_inf = type, math.huge, -math.huge
+  for i, x in ipairs(v) do
+    if value_type(x) ~= 'number' or x ~= x or x >= positive_inf or x <= negative_inf then
+      error('NaN/Inf à l’indice ' .. i)
+    end
+  end
   return v
 end
 function B.floats(n)
@@ -208,12 +215,23 @@ end
 function B.report(name)
   local path = B.value('--report', 'MIMIR_BENCH_REPORT', nil)
   if not path or path == '' then return end
+  local environment = {}
+  for _, key in ipairs({
+    'MIMIR_BIN', 'MIMIR_EXECUTABLE', 'MIMIR_RUNTIME_AUTOTUNE', 'MIMIR_ENABLE_PLANNER',
+    'MIMIR_PLANNER_MODE', 'MIMIR_PLANNER_COST_MODEL', 'MIMIR_PLANNER_AUTOTUNE',
+    'MIMIR_PLANNER_CALIBRATION_MAX_BYTES', 'MIMIR_DISABLE_VULKAN',
+    'MIMIR_DISABLE_OPENCL', 'MIMIR_DISABLE_CUDA', 'MIMIR_DISABLE_ROCM',
+    'RUSTICL_ENABLE', 'OMP_WAIT_POLICY', 'GOMP_SPINCOUNT', 'OMP_PROC_BIND', 'OMP_PLACES',
+    'GOMP_CPU_AFFINITY', 'MALLOC_ARENA_MAX',
+    'MIMIR_PLANNER_DEVICE_RESIDENCY', 'MIMIR_PLANNER_FUSION', 'MIMIR_ENABLE_FUSION_TRAIN',
+  }) do environment[key] = os.getenv(key) or '<unset>' end
   local report = {
     benchmark=name,
     started_at=B.started_at,
     finished_at=os.date('!%Y-%m-%dT%H:%M:%SZ'),
     clock='steady_clock',
     omp_threads=os.getenv('OMP_NUM_THREADS') or 'auto',
+    environment=environment,
     results=B.results,
   }
   local file, err = io.open(path, 'w')

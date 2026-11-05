@@ -1,6 +1,6 @@
 # État réel du projet
 
-Cette page est la carte de maturité du checkout Mímir 3.6.0 au 22 octobre 2026.
+Cette page est la carte de maturité du checkout Mímir 3.6.0 au 4 novembre 2026.
 Elle distingue ce qui est compilé et exploitable de ce qui est partiel, en test,
 prototype ou simple placeholder. Une entrée dans le registre, un fichier source
 ou un bouton d'interface ne constitue pas à lui seul une garantie de production.
@@ -62,9 +62,9 @@ disponibilité d'un GPU, de SFML, de FFmpeg ou d'un bridge externe.
 | --- | --- | --- | --- |
 | Graphe `Model` et layers | Actif, exploitable | Construction C++, forward/backward, paramètres nommés, routage nommé, entraînement ciblé. | La couverture backward dépend du type de layer et du runtime. |
 | Registry | Actif, exploitable | Création par nom, config par défaut, alias `sd3.5`, auto-enregistrement MPK. | « enregistré » ne veut pas dire « modèle complet ». |
-| Planner | Expérimental, en test | Plans legacy/static/cost, calibration bornée des opérations natives, réutilisation de buffers, fusion et inspection JSON selon variables. | Équivalence et coût sont testés sur des cas ciblés, pas sur tous les graphes. |
+| Planner | Expérimental, en test | Plans legacy/static/cost, calibration des opérations natives, politiques de travail, réutilisation de buffers, fusion et inspection JSON. | Parité et coût sont vérifiés sur des cas ciblés, pas sur tous les graphes ni toutes les charges. |
 | RuntimeRouter | Actif, en test | Classe les capacités en `Unsupported`, `HostFallback`, `Native`, `NativeOptimized`; planifie forward et backward. | Le fallback hôte peut masquer une absence de kernel GPU natif. |
-| CPU | Actif, exploitable | Référence générale, OpenMP, SIMD selon compilation, forward/backward étendus. | Certains chemins restent float32 internes ou coûtent beaucoup de mémoire. |
+| CPU | Actif, exploitable | Référence générale, OpenMP, SIMD selon compilation, parallélisme borné et kernels pointwise fusionnés en forward/backward. | Certains chemins restent float32 internes ou coûtent beaucoup de mémoire. |
 | Mémoire | Actif, exploitable | `MemoryGuard`, allocator dynamique, scratchpads, métriques et limites explicites. | Les politiques strictes doivent être dimensionnées pour la charge réelle. |
 | Sérialisation | Actif, exploitable | RawFolder, SafeTensors, DebugJson, vérification de formes/types/checksums selon format. | Un checkpoint externe doit correspondre à la topologie attendue. |
 | Tokenizer/Encoder | Actif, exploitable | Tokenizer natif, BPE, séquences, encodeur et assets de checkpoint. | La compatibilité d'un tokenizer externe doit être vérifiée, pas supposée. |
@@ -76,15 +76,15 @@ disponibilité d'un GPU, de SFML, de FFmpeg ou d'un bridge externe.
 
 ### Architectures natives enregistrées
 
-Le registre C++ contient 26 entrées natives :
+Le registre C++ contient 27 entrées natives :
 
 | Famille | Entrées | Statut utile |
 | --- | --- | --- |
 | Général | `basic_mlp` | Exploitable et adapté aux smoke tests. |
-| NLP | `transformer`, `causal_lm`, `vae_text`, `vae_text_decode` | Exploitables sur leurs contrats d'entrée respectifs; `causal_lm` est le chemin decoder-only natif. |
+| NLP | `transformer`, `causal_lm`, `t5`, `vae_text`, `vae_text_decode` | `t5` fournit un encodeur bidirectionnel et une tête de débruitage par tokens; ce n'est pas le pipeline T5 original avec décodeur text-to-text. |
 | Vision | `vit`, `vae`, `vae_conv`, `vae_conv_decode`, `resnet`, `unet`, `mobilenet`, `vgg16`, `vgg19`, `vgg16_feat`, `patch_discriminator` | Graphes exécutables; entraînement et géométrie varient selon l'architecture. |
 | Interopérabilité HF/SDXL | `hf_clip_text_encoder_1`, `hf_clip_text_encoder_2`, `hf_vae_decoder`, `hf_sdxl_transformer_block`, `external_safetensors_base` | Les quatre premiers construisent des composants exécutables; `external_safetensors_base` reflète des clés et n'est pas un modèle autonome. |
-| Génératif | `diffusion`, `cond_diffusion`, `gan_latent`, `lumen_diffusion` | Baselines natives exploitables; `lumen_diffusion` fournit le pipeline latent texte-vers-image avec VAE gelé. |
+| Génératif | `diffusion`, `cond_diffusion`, `gan_latent`, `lumen_diffusion` | Lumen fournit un pipeline latent texte-vers-image avec VAE gelé et conditionnement Transformer, VAEText ou T5 selon la configuration. |
 | Placeholder | `sd3_5` | Registre et squelette seulement; ne pas annoncer un pipeline SD3.5 complet. |
 
 ### Architectures MPK livrées
@@ -150,8 +150,19 @@ local opts = Args.parse(arg)
   universelle magique. Lisez leurs options avec `--help` avant un long run.
 - `train_vae_conv.lua` gère reconstruction, latent stochastique, KL/warmup,
   validation holdout, visualisation et reprise selon ses options actuelles.
-- Lumen possède des sources et scripts de travail, mais son modèle C++ n'est pas
-  encore enregistré ni ajouté au build principal : statut « en construction ».
+- `train_t5.lua` entraîne l'encodeur T5 depuis un corpus local; Lumen peut
+  charger ce checkpoint ou un checkpoint VAEText pour le conditionnement texte.
+- `lumen_text2img.lua` propose une génération interactive dans Viz quand un
+  backend graphique est disponible; `--headless`/`--no-viz` conserve une
+  génération ponctuelle en ligne de commande.
+- `train_lumen_diffusion.lua` consomme les contextes texte et les annotations
+  structurées documentées dans le guide des données.
+- Les scripts d'entraînement partagés utilisent un résolveur de reprise qui
+  compare les checkpoints `epoch_*`, `step_*`, `final` et racine quand leur
+  progression est disponible dans les métadonnées.
+- L'atelier Annoter sait importer les sidecars du composeur, associer les
+  fichiers de masques usuels à leurs images, préremplir les boîtes et classes,
+  et choisir un dossier à créer/ouvrir dans une boîte de sélection.
 - Un dataset n'est jamais téléchargé automatiquement. Les configs publiques
   utilisent des chemins relatifs sous `datasets/`, dossier ignoré par Git.
 - Les checkpoints, caches, CSV, snapshots et rapports sont des sorties locales
@@ -165,10 +176,10 @@ local opts = Args.parse(arg)
 Les éléments suivants sont utiles pour contribuer mais ne doivent pas être
 présentés comme stables :
 
-- modèle et scripts Lumen latent diffusion, non encore intégrés au registre/build ;
 - runtime FPGA iCESugar Pro, protocole et validation, non encore routés comme
   backend de graphe général ;
-- planner cost/static, fusion et résidence device, encore sous tests ciblés ;
+- planner cost/static, calibration, fusion et résidence device restent
+  expérimentaux ; les tests ciblés ne démontrent pas un gain universel ;
 - prototypes MPK de détection/segmentation ;
 - bridge WebSocket Lua et bridges de langages externes ;
 - `sd3_5` et `Mimir.Layers` standalone, qui sont des placeholders explicites.

@@ -138,12 +138,12 @@ Canonicalisation observée dans le registre C++ :
 
 ## Architectures disponibles
 
-Le registre C++ contient actuellement 26 entrées natives canoniques :
+Le registre C++ contient actuellement 27 entrées natives canoniques :
 
 | Famille | Architectures |
 | --- | --- |
 | Général | `basic_mlp` |
-| Texte | `causal_lm`, `transformer`, `vae_text`, `vae_text_decode`, `hf_clip_text_encoder_1`, `hf_clip_text_encoder_2` |
+| Texte | `causal_lm`, `transformer`, `t5`, `vae_text`, `vae_text_decode`, `hf_clip_text_encoder_1`, `hf_clip_text_encoder_2` |
 | Vision | `vit`, `vae`, `vae_conv`, `vae_conv_decode`, `resnet`, `unet`, `mobilenet`, `vgg16`, `vgg19`, `vgg16_feat`, `hf_vae_decoder` |
 | Diffusion/latent | `diffusion`, `cond_diffusion`, `lumen_diffusion`, `sd3_5`, `hf_sdxl_transformer_block`, `gan_latent` |
 | Discrimination/import | `patch_discriminator`, `external_safetensors_base` |
@@ -217,6 +217,13 @@ Config par défaut :
 }
 ```
 Sortie : `[logits(seq*vocab) || mu(latent_dim) || logvar(latent_dim) || img_proj || text_proj]`
+
+**`t5`** — encodeur T5 natif avec tête de débruitage par tokens.
+
+Le contrat de registre détaillé, les options, l'entraînement depuis un corpus et
+le conditionnement Lumen sont décrits dans le [guide T5](../02-User-Guide/16-T5.md).
+Cette implémentation ne fournit ni décodeur autorégressif text-to-text ni import
+de poids Hugging Face.
 
 ### Modèles Vision
 

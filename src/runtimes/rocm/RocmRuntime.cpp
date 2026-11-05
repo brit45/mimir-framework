@@ -1,3 +1,4 @@
+#include "runtimes/GpuPointwiseFusion.hpp"
 #include "runtimes/optimizers/RocmOptimizer.hpp"
 #include "runtimes/rocm/RocmRuntime.hpp"
 
@@ -6,6 +7,9 @@
 
 #ifdef ENABLE_ROCM
 #include <hip/hip_runtime.h>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#include "runtimes/PointwiseFusionKernels.cuh"
+#endif
 #include <rocblas/rocblas.h>
 #endif
 
@@ -679,7 +683,7 @@ bool RocmRuntime::forwardLayer(
                         const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
 
                         const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
-                        if (ops >= std::max(0, config_.linear_min_ops) && x.size() == expected_in) {
+                        if (Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops) && x.size() == expected_in) {
                             const float* w = layer.getWeights();
                             if (w && layer.getWeightsSize() >= expected_total_w) {
                                 const float* b = layer.use_bias ? (w + expected_w) : nullptr;
@@ -736,7 +740,7 @@ bool RocmRuntime::forwardLayer(
 
             const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) *
                                   static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) break;
 
 #ifdef ENABLE_ROCM
             Impl::DeviceBuf d_a, d_b, d_c;
@@ -750,32 +754,16 @@ bool RocmRuntime::forwardLayer(
             // C[M,N] = A[M,K] * B[K,N]  <=>  C_cm[N,M] = B_cm[N,K] * A_cm[K,M]
             const float alpha = 1.0f;
             const float beta = 0.0f;
-            bool ok = true;
-            for (int bi = 0; bi < batches; ++bi) {
-                const float* a_ptr = reinterpret_cast<const float*>(d_a.ptr) + static_cast<size_t>(bi) * a_batch_elems;
-                const float* b_ptr = reinterpret_cast<const float*>(d_b.ptr) + static_cast<size_t>(bi) * b_batch_elems;
-                float* c_ptr = reinterpret_cast<float*>(d_c.ptr) + static_cast<size_t>(bi) * c_batch_elems;
-                if (rocblas_sgemm(
-                        impl_->handle,
-                        rocblas_operation_none,
-                        rocblas_operation_none,
-                        N,
-                        M,
-                        K,
-                        &alpha,
-                        b_ptr,
-                        N,
-                        a_ptr,
-                        K,
-                        &beta,
-                        c_ptr,
-                        N
-                    ) != rocblas_status_success) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (!ok) break;
+            // Submit all independent matrices in one rocBLAS dispatch.
+            if (rocblas_sgemm_strided_batched(
+                    impl_->handle, rocblas_operation_none, rocblas_operation_none,
+                    N, M, K, &alpha,
+                    reinterpret_cast<const float*>(d_b.ptr), N,
+                    static_cast<rocblas_stride>(b_batch_elems),
+                    reinterpret_cast<const float*>(d_a.ptr), K,
+                    static_cast<rocblas_stride>(a_batch_elems), &beta,
+                    reinterpret_cast<float*>(d_c.ptr), N,
+                    static_cast<rocblas_stride>(c_batch_elems), batches) != rocblas_status_success) break;
             if (hipDeviceSynchronize() != hipSuccess) break;
 
             outputs.resize(1);
@@ -784,7 +772,11 @@ bool RocmRuntime::forwardLayer(
             return true;
 #endif
             } while (false);
+#ifdef ENABLE_ROCM
+            return false;
+#else
             break;
+#endif
         default:
             break;
     }
@@ -814,7 +806,7 @@ bool RocmRuntime::forwardLayer(
             const int K  = C_in * k * k;
             const int HW = H_out * W_out;
             const long long ops = static_cast<long long>(C_out) * K * HW;
-            if (ops < static_cast<long long>(config_.conv_min_ops)) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.conv_min_ops)) break;
             if (static_cast<int>(xc.size()) != C_in * H * W) break;
 
             const size_t w_k = static_cast<size_t>(C_out) * K;
@@ -876,7 +868,7 @@ bool RocmRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& xn = *inputs[0];
             const int N = static_cast<int>(xn.size());
-            if (N < config_.norm_min_elements) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(N,config_.norm_min_elements)) break;
 
             const int norm_sz = (layer.in_features > 0) ? layer.in_features : N;
             if (norm_sz <= 0 || N % norm_sz != 0) break;
@@ -980,7 +972,7 @@ bool RocmRuntime::forwardLayer(
             const std::vector<float>& a = *inputs[0];
             const std::vector<float>& b = *inputs[1];
             if (a.empty() || a.size() != b.size()) break;
-            if (static_cast<long long>(a.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(a.size()),config_.linear_min_ops)) break;
 
             int op_code = 0;
             if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op_code)) break;
@@ -1009,7 +1001,7 @@ bool RocmRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) break;
             const std::vector<float>& in = *inputs[0];
             if (in.empty()) break;
-            if (static_cast<long long>(in.size()) < static_cast<long long>(std::max(0, config_.linear_min_ops))) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(in.size()),config_.linear_min_ops)) break;
 
             int op_code = 0;
             float alpha = 0.01f;
@@ -1045,7 +1037,7 @@ bool RocmRuntime::forwardLayer(
             if (ed <= 0 || nh <= 0 || ed % nh != 0) break;
             const int hd = ed / nh;
             const long long attn_ops = 4LL * seq * ed * ed;
-            if (attn_ops < static_cast<long long>(config_.attention_min_ops)) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(attn_ops,config_.attention_min_ops)) break;
             if (static_cast<int>(xa.size()) != seq * ed) break;
 
             const float* wa = layer.getWeights();
@@ -1192,7 +1184,7 @@ bool RocmRuntime::forwardLayer(
             const int kvlen = static_cast<int>(kv_in.size()) / ed;
 
             const long long cattn_ops = 2LL * qlen * kvlen * ed;
-            if (cattn_ops < static_cast<long long>(config_.attention_min_ops)) break;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(cattn_ops,config_.attention_min_ops)) break;
 
             const float* wca = layer.getWeights();
             const int q_sz  = ed * ed;
@@ -1333,6 +1325,38 @@ bool RocmRuntime::backwardLayer(
     if (config_.disabled) return false;
     if (!supportsBackwardLayerType(layer.type_enum)) return false;
 
+#ifdef ENABLE_ROCM
+    if (layer.type_enum == LayerType::MatMul || layer.type_enum == LayerType::BatchMatMul) {
+        if (!config_.linear_enabled || !impl_->handle || inputs.size() < 2 || !inputs[0] || !inputs[1] ||
+            grad_outputs.empty() || !grad_outputs[0]) return false;
+        const int m=layer.in_features, k=layer.out_features, n=layer.embed_dim;
+        const int batches=layer.type_enum==LayerType::BatchMatMul?layer.seq_len:1;
+        if (m<=0 || k<=0 || n<=0 || batches<=0) return false;
+        const size_t as=static_cast<size_t>(m)*k, bs=static_cast<size_t>(k)*n, cs=static_cast<size_t>(m)*n;
+        const auto& a=*inputs[0]; const auto& b=*inputs[1]; const auto& dy=*grad_outputs[0];
+        if (a.size()!=as*batches || b.size()!=bs*batches || dy.size()!=cs*batches) return false;
+        Impl::DeviceBuf da,db,dg,dga,dgb;
+        if (!da.alloc(a.size()*sizeof(float)) || !db.alloc(b.size()*sizeof(float)) ||
+            !dg.alloc(dy.size()*sizeof(float)) || !dga.alloc(a.size()*sizeof(float)) ||
+            !dgb.alloc(b.size()*sizeof(float)) || !da.copyFromHost(a.data(),a.size()*sizeof(float)) ||
+            !db.copyFromHost(b.data(),b.size()*sizeof(float)) || !dg.copyFromHost(dy.data(),dy.size()*sizeof(float))) return false;
+        const float one=1.f,zero=0.f;
+        if (rocblas_sgemm_strided_batched(impl_->handle,rocblas_operation_transpose,rocblas_operation_none,
+                k,m,n,&one,reinterpret_cast<const float*>(db.ptr),n,static_cast<rocblas_stride>(bs),
+                reinterpret_cast<const float*>(dg.ptr),n,static_cast<rocblas_stride>(cs),&zero,
+                reinterpret_cast<float*>(dga.ptr),k,static_cast<rocblas_stride>(as),batches)!=rocblas_status_success) return false;
+        if (rocblas_sgemm_strided_batched(impl_->handle,rocblas_operation_none,rocblas_operation_transpose,
+                n,k,m,&one,reinterpret_cast<const float*>(dg.ptr),n,static_cast<rocblas_stride>(cs),
+                reinterpret_cast<const float*>(da.ptr),k,static_cast<rocblas_stride>(as),&zero,
+                reinterpret_cast<float*>(dgb.ptr),n,static_cast<rocblas_stride>(bs),batches)!=rocblas_status_success) return false;
+        std::vector<std::vector<float>> staged{std::vector<float>(a.size()),std::vector<float>(b.size())};
+        if (!dga.copyToHost(staged[0].data(),a.size()*sizeof(float)) ||
+            !dgb.copyToHost(staged[1].data(),b.size()*sizeof(float))) return false;
+        grad_inputs=std::move(staged);
+        return true;
+    }
+#endif
+
     switch (layer.type_enum) {
         case LayerType::Linear:
             if (!config_.linear_enabled) return false;
@@ -1418,5 +1442,60 @@ bool RocmRuntime::reconstructionLoss(const RuntimeLossGrad::Request& r,RuntimeLo
     return RuntimeLossGrad::unpack(r,memory,out);
 #else
     (void)r;(void)out;return false;
+#endif
+}
+
+RuntimeCapabilityLevel RocmRuntime::queryPointwiseFusionCapability(
+    const std::vector<const Layer*>& chain,bool,bool) const {
+#if defined(ENABLE_ROCM) && defined(__HIPCC__)
+    if(isInitialized() && !config_.disabled && config_.linear_enabled && Mimir::GpuFusion::supported(chain))
+        return RuntimeCapabilityLevel::NativeOptimized;
+#endif
+    (void)chain;return RuntimeCapabilityLevel::Unsupported;
+}
+
+bool RocmRuntime::pointwiseFusionForward(const std::vector<const Layer*>& chain,const std::vector<float>& input,
+    std::vector<std::vector<float>>& output,bool retain,bool training) {
+#if defined(ENABLE_ROCM) && defined(__HIPCC__)
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,false,training)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(input.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,input,retain))return false;
+    if(program.n) {
+        std::lock_guard<std::mutex> lock(impl_->linear_scratch_mutex);
+        auto& buffer=impl_->linear_scratch[0];
+        const size_t bytes=program.memory.size()*sizeof(float);
+        if(!buffer.alloc(bytes) || !buffer.copyFromHost(program.memory.data(),size_t(program.output)*sizeof(float)))return false;
+        auto* data=static_cast<float*>(buffer.ptr);
+        const int blocks=(program.n+255)/256;
+        hipLaunchKernelGGL(pointwise_fusion_forward,dim3(blocks),dim3(256),0,0,data+program.input,data+program.operations,data+program.output,program.n,program.stages,program.retain);
+        if(hipGetLastError()!=hipSuccess || hipMemcpy(program.memory.data()+program.output,data+program.output,program.output_count*sizeof(float),hipMemcpyDeviceToHost)!=hipSuccess)return false;
+    }
+    program.forwardResult(output);return true;
+#else
+    (void)chain;(void)input;(void)output;(void)retain;(void)training;return false;
+#endif
+}
+
+bool RocmRuntime::pointwiseFusionBackward(const std::vector<const Layer*>& chain,
+    const std::vector<const std::vector<float>*>& inputs,const std::vector<float>& input,std::vector<float>& output) {
+#if defined(ENABLE_ROCM) && defined(__HIPCC__)
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,true,true)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(input.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,input,false,&inputs))return false;
+    if(program.n) {
+        std::lock_guard<std::mutex> lock(impl_->linear_scratch_mutex);
+        auto& buffer=impl_->linear_scratch[0];
+        const size_t bytes=program.memory.size()*sizeof(float);
+        if(!buffer.alloc(bytes) || !buffer.copyFromHost(program.memory.data(),size_t(program.output)*sizeof(float)))return false;
+        auto* data=static_cast<float*>(buffer.ptr);
+        const int blocks=(program.n+255)/256;
+        hipLaunchKernelGGL(pointwise_fusion_backward,dim3(blocks),dim3(256),0,0,data+program.input,data+program.snapshots,data+program.operations,data+program.output,program.n,program.stages);
+        if(hipGetLastError()!=hipSuccess || hipMemcpy(program.memory.data()+program.output,data+program.output,program.output_count*sizeof(float),hipMemcpyDeviceToHost)!=hipSuccess)return false;
+    }
+    program.backwardResult(output);return true;
+#else
+    (void)chain;(void)input;(void)output;(void)inputs;return false;
 #endif
 }

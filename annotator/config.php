@@ -1,39 +1,66 @@
 <?php
+
 declare(strict_types=1);
 // Local-only tool: launch with php -S 127.0.0.1:8080 -t annotator.
 if (!in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1', '::1'], true)) {
-    http_response_code(403); exit('Accès local uniquement.');
+    http_response_code(403);
+    exit('Accès local uniquement.');
 }
 // Reject DNS rebinding: a remote hostname must not access the local filesystem API.
 if (!preg_match('/^(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$/i', $_SERVER['HTTP_HOST'] ?? '')) {
-    http_response_code(403); exit('Hôte local requis.');
+    http_response_code(403);
+    exit('Hôte local requis.');
 }
-session_name('lumen_annotator');
+session_name('mimir_annotator');
 session_start(['cookie_httponly' => true, 'cookie_samesite' => 'Strict']);
 $_SESSION['csrf'] ??= bin2hex(random_bytes(32));
-function fail(string $message, int $code = 400): void { http_response_code($code); throw new RuntimeException($message); }
-function respond(array $value): void { header('Content-Type: application/json; charset=utf-8'); echo json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR); }
-function request(): array {
+function fail(string $message, int $code = 400): void
+{
+    http_response_code($code);
+    throw new RuntimeException($message);
+}
+function respond(array $value): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+}
+function request(): array
+{
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') fail('POST requis.', 405);
     if (!hash_equals($_SESSION['csrf'], $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')) fail('Jeton de session invalide. Rechargez la page.', 403);
     $body = file_get_contents('php://input');
     if (strlen($body) > 4 * 1024 * 1024) fail('Annotation trop volumineuse.', 413);
     $data = json_decode($body, true, 128, JSON_THROW_ON_ERROR);
     if (!is_array($data)) fail('Objet JSON requis.');
-    if (basename($_SERVER['SCRIPT_NAME']) !== 'scan.php' && ($data['dataset_root'] ?? null) !== root()) fail('Le dataset actif a changé dans un autre onglet. Rouvrez votre dossier.', 409);
+    if (
+        !in_array(basename($_SERVER['SCRIPT_NAME']), ['scan.php', 'create.php', 'directories.php'], true) &&
+        ($data['dataset_root'] ?? null) !== root()
+    ) fail('Le dataset actif a changé dans un autre onglet. Rouvrez votre dossier.', 409);
     return $data;
 }
-function root(): string { $r = $_SESSION['dataset_root'] ?? null; if (!$r || !is_dir($r)) fail('Ouvrez un dossier de dataset.', 409); return $r; }
-function inside(string $path, string $r): bool { return str_starts_with($path, $r . DIRECTORY_SEPARATOR); }
-function image_path(string $relative): string {
+function root(): string
+{
+    $r = $_SESSION['dataset_root'] ?? null;
+    if (!$r || !is_dir($r)) fail('Ouvrez un dossier de dataset.', 409);
+    return $r;
+}
+function inside(string $path, string $r): bool
+{
+    return str_starts_with($path, $r . DIRECTORY_SEPARATOR);
+}
+function image_path(string $relative): string
+{
     $r = root();
     if ($relative === '' || str_contains($relative, '\\') || str_starts_with($relative, '/') || in_array('..', explode('/', $relative), true)) fail('Chemin interdit.', 403);
-    $lexical = $r . '/' . $relative; $real = realpath($lexical);
-    if (!$real || !inside($real, $r) || !is_file($real) || !in_array(strtolower(pathinfo($lexical, PATHINFO_EXTENSION)), ['jpg','jpeg','png','webp','bmp'], true)) fail('Image inaccessible.', 404);
-    $parent = realpath(dirname($lexical)); if (!$parent || !inside($parent . '/', $r)) fail('Dossier interdit.', 403);
+    $lexical = $r . '/' . $relative;
+    $real = realpath($lexical);
+    if (!$real || !inside($real, $r) || !is_file($real) || !in_array(strtolower(pathinfo($lexical, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png', 'webp', 'bmp'], true)) fail('Image inaccessible.', 404);
+    $parent = realpath(dirname($lexical));
+    if (!$parent || !inside($parent . '/', $r)) fail('Dossier interdit.', 403);
     return $lexical;
 }
-function sidecar(string $image): string {
+function sidecar(string $image): string
+{
     $path = substr($image, 0, strrpos($image, '.')) . '.json';
     if (is_link($path) || (file_exists($path) && !is_file($path))) fail('Le JSON cible doit être un fichier ordinaire.', 409);
     // Cache sibling stems per request so recursive scans stay linear.
@@ -42,7 +69,7 @@ function sidecar(string $image): string {
     if (!isset($stems[$directory])) {
         $stems[$directory] = [];
         foreach (new DirectoryIterator($directory) as $entry) {
-            if ($entry->isFile() && in_array(strtolower($entry->getExtension()), ['jpg','jpeg','png','webp','bmp'], true)) {
+            if ($entry->isFile() && in_array(strtolower($entry->getExtension()), ['jpg', 'jpeg', 'png', 'webp', 'bmp'], true)) {
                 $stem = pathinfo($entry->getFilename(), PATHINFO_FILENAME);
                 $stems[$directory][$stem] = ($stems[$directory][$stem] ?? 0) + 1;
             }
@@ -51,42 +78,192 @@ function sidecar(string $image): string {
     if (($stems[$directory][pathinfo($image, PATHINFO_FILENAME)] ?? 0) > 1) fail('Plusieurs images partagent ce nom sans extension. Renommez-les avant annotation.', 409);
     return $path;
 }
-function atomic_write(string $path, array $data): void {
+function mask_key(string $relative): string
+{
+    $parts = explode('/', strtolower(str_replace('\\', '/', $relative)));
+    $parts[count($parts) - 1] = preg_replace('/\.[^.]+$/', '', end($parts)) ?? end($parts);
+    $stem = array_pop($parts);
+    $stem = preg_replace('/(?:_mask|-mask|\.mask|_segmentation|-segmentation)$/i', '', $stem) ?? $stem;
+    $parts = array_values(array_filter($parts, static fn($part) =>
+        !in_array($part, ['image','images','mask','masks','segmentation','segmentations'], true)));
+    $parts[] = $stem;
+    return implode('/', $parts);
+}
+function is_mask_path(string $relative): bool
+{
+    $parts = explode('/', strtolower(str_replace('\\', '/', $relative)));
+    $filename = array_pop($parts);
+    $stem = pathinfo($filename, PATHINFO_FILENAME);
+    if (preg_match('/(?:_mask|-mask|\.mask|_segmentation|-segmentation)$/i', $stem)) return true;
+    return (bool)array_intersect($parts, ['mask','masks','segmentation','segmentations']);
+}
+function atomic_write(string $path, array $data): void
+{
     if (is_link($path)) fail('Lien symbolique de sortie interdit.', 409);
     $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
     $tmp = tempnam(dirname($path), '.annotation-tmp-');
     if (!$tmp) fail('Impossible de créer le fichier temporaire.', 500);
-    try { if (file_put_contents($tmp, $json, LOCK_EX) !== strlen($json) || !rename($tmp, $path)) fail('Écriture impossible. Vérifiez les permissions.', 500); }
-    finally { if (file_exists($tmp)) unlink($tmp); }
+    try {
+        if (file_put_contents($tmp, $json, LOCK_EX) !== strlen($json) || !rename($tmp, $path)) fail('Écriture impossible. Vérifiez les permissions.', 500);
+    } finally {
+        if (file_exists($tmp)) unlink($tmp);
+    }
 }
-function read_json(string $path): array {
+function read_json(string $path): array
+{
     $data = json_decode(file_get_contents($path), true, 128, JSON_THROW_ON_ERROR);
     if (!is_array($data)) fail('JSON existant invalide : ' . basename($path), 409);
     return $data;
 }
-function state_path(): string { $p = root() . '/.annotation_state.json'; if (is_link($p)) fail('Historique symbolique interdit.', 409); return $p; }
-function state_read(): array { $p = state_path(); return is_file($p) ? read_json($p) : []; }
-function with_lock(callable $fn) {
-    $p = root() . '/.annotation_state.lock'; if (is_link($p)) fail('Verrou symbolique interdit.', 409);
-    $h = fopen($p, 'c'); if (!$h || !flock($h, LOCK_EX)) fail('Verrou impossible.', 500);
-    try { return $fn(); } finally { flock($h, LOCK_UN); fclose($h); }
+function state_path(): string
+{
+    $p = root() . '/.annotation_state.json';
+    if (is_link($p)) fail('Historique symbolique interdit.', 409);
+    return $p;
 }
-function update_state(string $relative, bool $saved): array {
-    image_path($relative); $s = state_read(); $images = $_SESSION['images'] ?? [];
-    $index = array_search($relative, $images, true); if ($index === false) fail('Relancez le scan.', 409);
-    $s['dataset_root'] = root(); $s['last_image'] = $relative; $s['current_index'] = $index;
+function state_read(): array
+{
+    $p = state_path();
+    return is_file($p) ? read_json($p) : [];
+}
+function with_lock(callable $fn)
+{
+    $p = root() . '/.annotation_state.lock';
+    if (is_link($p)) fail('Verrou symbolique interdit.', 409);
+    $h = fopen($p, 'c');
+    if (!$h || !flock($h, LOCK_EX)) fail('Verrou impossible.', 500);
+    try {
+        return $fn();
+    } finally {
+        flock($h, LOCK_UN);
+        fclose($h);
+    }
+}
+function update_state(string $relative, bool $saved): array
+{
+    image_path($relative);
+    $s = state_read();
+    $images = $_SESSION['images'] ?? [];
+    $index = array_search($relative, $images, true);
+    if ($index === false) fail('Relancez le scan.', 409);
+    $s['dataset_root'] = root();
+    $s['last_image'] = $relative;
+    $s['current_index'] = $index;
     $s['annotated'] = array_values(array_intersect($images, $s['annotated'] ?? []));
-    if ($saved) { $s['annotated'] = array_values(array_unique(array_merge($s['annotated'], [$relative]))); $s['last_annotation'] = $relative; }
-    $s['updated_at'] = date(DATE_ATOM); atomic_write(state_path(), $s); return $s;
+    if ($saved) {
+        $s['annotated'] = array_values(array_unique(array_merge($s['annotated'], [$relative])));
+        $s['last_annotation'] = $relative;
+    }
+    $s['updated_at'] = date(DATE_ATOM);
+    atomic_write(state_path(), $s);
+    return $s;
 }
-function blank_annotation(string $image): array {
-    return ['image'=>basename($image),'captions'=>['primary'=>'','alternatives'=>[]], 'entities'=>[], 'attributes'=>[], 'relations'=>[],
-        'lighting'=>['description'=>'','source'=>'','target'=>''], 'composition'=>['description'=>''], 'quality'=>['caption_verified'=>false,'relations_verified'=>false]];
+function blank_annotation(string $image): array
+{
+    return [
+        'image' => basename($image),
+        'captions' => ['primary' => '', 'alternatives' => []],
+        'entities' => [],
+        'attributes' => [],
+        'relations' => [],
+        'lighting' => ['description' => '', 'source' => '', 'target' => ''],
+        'composition' => ['description' => ''],
+        'quality' => ['caption_verified' => false, 'relations_verified' => false]
+    ];
 }
-function validate_annotation(array $a, string $image): void {
+function is_composer_annotation(array $data): bool
+{
+    return !array_key_exists('captions', $data) &&
+        isset($data['boxes']) && is_array($data['boxes']) && array_is_list($data['boxes']) &&
+        array_key_exists('normalized', $data) && is_bool($data['normalized']);
+}
+function composer_class_names(): array
+{
+    $path = root() . '/composition.mimir-meta';
+    if (!file_exists($path)) return [];
+    if (is_link($path) || !is_file($path)) fail('Le résumé composition.mimir-meta doit être un fichier ordinaire.', 409);
+    $metadata = read_json($path);
+    $names = $metadata['class_names'] ?? [];
+    if (!is_array($names) || !array_is_list($names)) fail('Liste de classes invalide dans composition.mimir-meta.', 409);
+    foreach ($names as $name) if (!is_string($name) || trim($name) === '') fail('Nom de classe invalide dans composition.mimir-meta.', 409);
+    return $names;
+}
+function import_composer_annotation(array $source, string $image): array
+{
+    if (!is_composer_annotation($source)) fail('Format d’annotation non pris en charge.');
+    $classes = composer_class_names();
+    $width = $source['width'] ?? null;
+    $height = $source['height'] ?? null;
+    if (!$source['normalized'] && (!is_numeric($width) || !is_numeric($height) || $width <= 0 || $height <= 0)) {
+        $dimensions = @getimagesize($image);
+        if ($dimensions === false) fail('Dimensions de l’image importée introuvables.');
+        [$width, $height] = $dimensions;
+    }
+    $result = blank_annotation($image);
+    $result['normalized'] = true;
+    $result['boxes'] = $source['boxes'];
+    $result['width'] = $width;
+    $result['height'] = $height;
+    $result['negative'] = ($source['negative'] ?? false) === true;
+    $labels = [];
+    foreach ($source['boxes'] as $index => $box) {
+        if (!is_array($box)) fail('Boîte invalide dans l’annotation importée.', 409);
+        if (isset($box['x1'], $box['y1'], $box['x2'], $box['y2'])) {
+            $coords = [$box['x1'], $box['y1'], $box['x2'], $box['y2']];
+        } elseif (isset($box['x'], $box['y'], $box['w'], $box['h'])) {
+            $coords = [$box['x'], $box['y'], $box['x'] + $box['w'], $box['y'] + $box['h']];
+        } else fail('Coordonnées de boîte absentes dans l’annotation importée.', 409);
+        foreach ($coords as $number) if (!is_numeric($number) || !is_finite((float)$number)) fail('Coordonnée invalide dans l’annotation importée.', 409);
+        if (!$source['normalized']) {
+            $coords = [$coords[0] / $width, $coords[1] / $height, $coords[2] / $width, $coords[3] / $height];
+        }
+        if ($coords[0] < 0 || $coords[1] < 0 || $coords[2] > 1 || $coords[3] > 1 ||
+            $coords[0] >= $coords[2] || $coords[1] >= $coords[3]) fail('Boîte hors de l’image dans l’annotation importée.', 409);
+        $classId = $box['class_id'] ?? $box['class'] ?? 0;
+        if (!is_numeric($classId) || (int)$classId != $classId || $classId < 0 ||
+            ($classes && $classId >= count($classes))) fail('Identifiant de classe invalide dans l’annotation importée.', 409);
+        $label = is_string($box['label'] ?? null) && trim($box['label']) !== ''
+            ? trim($box['label'])
+            : ($classes[(int)$classId] ?? 'Classe ' . $classId);
+        $result['entities'][] = ['id'=>'class_' . (int)$classId . '_' . ($index + 1), 'phrase'=>$label,
+            'role'=>'object', 'bbox'=>array_map('floatval', $coords), 'class_id'=>(int)$classId];
+        if (!in_array($label, $labels, true)) $labels[] = $label;
+    }
+    $result['captions']['primary'] = $labels
+        ? 'Image annotée : ' . implode(', ', $labels) . '.'
+        : 'Image négative importée : aucune boîte de détection.';
+    foreach ($source as $key => $value) {
+        if (!array_key_exists($key, $result)) $result[$key] = $value;
+    }
+    return $result;
+}
+function sync_composer_boxes(array $annotation): array
+{
+    if (!array_key_exists('boxes', $annotation) || !is_array($annotation['entities'] ?? null)) return $annotation;
+    $classes = composer_class_names();
+    $boxes = [];
+    foreach ($annotation['entities'] as $entity) {
+        if (!isset($entity['bbox']) || !is_array($entity['bbox']) || count($entity['bbox']) !== 4) continue;
+        $classId = $entity['class_id'] ?? null;
+        if (!is_numeric($classId)) {
+            $classId = array_search($entity['phrase'] ?? '', $classes, true);
+            if ($classId === false) $classId = 0;
+        }
+        $classId = (int)$classId;
+        $box = $entity['bbox'];
+        $boxes[] = ['x1'=>$box[0], 'y1'=>$box[1], 'x2'=>$box[2], 'y2'=>$box[3],
+            'class_id'=>$classId, 'label'=>$entity['phrase'] ?? ($classes[$classId] ?? 'Classe ' . $classId)];
+    }
+    $annotation['normalized'] = true;
+    $annotation['boxes'] = $boxes;
+    $annotation['negative'] = !$boxes;
+    return $annotation;
+}
+function validate_annotation(array $a, string $image): void
+{
     if (($a['image'] ?? null) !== basename($image)) fail('Nom de l’image incompatible.');
     if (!is_string($a['captions']['primary'] ?? null) || trim($a['captions']['primary']) === '') fail('Une description naturelle principale est requise.');
-    foreach (['entities','attributes','relations'] as $key) if (!isset($a[$key]) || !is_array($a[$key]) || !array_is_list($a[$key])) fail('Liste invalide : ' . $key);
+    foreach (['entities', 'attributes', 'relations'] as $key) if (!isset($a[$key]) || !is_array($a[$key]) || !array_is_list($a[$key])) fail('Liste invalide : ' . $key);
     if (!is_array($a['captions']['alternatives'] ?? null) || !array_is_list($a['captions']['alternatives'])) fail('Alternatives invalides.');
     foreach ($a['captions']['alternatives'] as $v) if (!is_string($v)) fail('Alternative invalide.');
     $ids = [];
@@ -100,7 +277,7 @@ function validate_annotation(array $a, string $image): void {
             foreach ($s['points'] as $point) {
                 if (!is_array($point) || !is_string($point['name'] ?? null) || trim($point['name']) === '' || isset($names[$point['name']])) fail('Nom de point vide ou dupliqué.');
                 $names[$point['name']] = true;
-                if (array_key_exists('role', $point) && !in_array($point['role'], ['point','tête','support','saisie','articulation majeure','détail facial'], true)) fail('Nature de point invalide.');
+                if (array_key_exists('role', $point) && !in_array($point['role'], ['point', 'tête', 'support', 'saisie', 'articulation majeure', 'détail facial'], true)) fail('Nature de point invalide.');
                 if (!array_key_exists('position', $point)) fail('Position de point manquante.');
                 if ($point['position'] !== null) {
                     $pos = $point['position'];
@@ -118,9 +295,51 @@ function validate_annotation(array $a, string $image): void {
             foreach ($s['points'] as $point) if (isset($point['parent']) && (!isset($names[$point['parent']]) || $point['parent'] === $point['name'])) fail('Liaison de squelette inconnue ou vers soi-même.');
         }
         if (isset($e['bbox'])) {
-            $b = $e['bbox']; if (!is_array($b) || !array_is_list($b) || count($b) !== 4) fail('BBox invalide.');
+            $b = $e['bbox'];
+            if (!is_array($b) || !array_is_list($b) || count($b) !== 4) fail('BBox invalide.');
             foreach ($b as $n) if ((!is_int($n) && !is_float($n)) || !is_finite((float)$n) || $n < 0 || $n > 1) fail('BBox hors de [0,1].');
             if ($b[0] >= $b[2] || $b[1] >= $b[3]) fail('BBox vide ou inversée.');
+        }
+        if (array_key_exists('mask', $e)) {
+            $mask = $e['mask'];
+            if (
+                !is_array($mask) || ($mask['type'] ?? null) !== 'polygon' ||
+                !is_array($mask['points'] ?? null) || !array_is_list($mask['points']) || count($mask['points']) < 3
+            ) {
+                fail('Masque invalide : un polygone d’au moins trois points est requis.');
+            }
+            $twice_area = 0.0;
+            foreach ($mask['points'] as $i => $point) {
+                if (!is_array($point) || !array_is_list($point) || count($point) !== 2) fail('Point de masque invalide.');
+                foreach ($point as $n) if ((!is_int($n) && !is_float($n)) || !is_finite((float)$n) || $n < 0 || $n > 1) fail('Point de masque hors de [0,1].');
+                $x = (float)$point[0];
+                $y = (float)$point[1];
+                $next = $mask['points'][($i + 1) % count($mask['points'])];
+                if (!is_array($next) || count($next) !== 2) fail('Point de masque invalide.');
+                $twice_area += $x * (float)$next[1] - (float)$next[0] * $y;
+            }
+            if (!is_finite($twice_area) || abs($twice_area) <= 1e-10) fail('Le polygone du masque doit avoir une aire non nulle.');
+        }
+        if (array_key_exists('track', $e)) {
+            $track = $e['track'];
+            if (
+                !is_array($track) || !is_string($track['id'] ?? null) || trim($track['id']) === '' ||
+                !is_string($track['name'] ?? null) || trim($track['name']) === ''
+            ) {
+                fail('Identité suivie invalide : identifiant et nom explicites requis.');
+            }
+            if (!array_key_exists('mask', $e)) fail('Une entité suivie doit avoir un masque de traçage.');
+        }
+        if (array_key_exists('ocr', $e)) {
+            $ocr = $e['ocr'];
+            if (
+                !is_array($ocr) || !is_string($ocr['text'] ?? null) || trim($ocr['text']) === '' ||
+                !is_string($ocr['translation'] ?? null) || !is_string($ocr['source_language'] ?? null) ||
+                !is_string($ocr['target_language'] ?? null) || !is_array($ocr['tags'] ?? null) ||
+                !array_is_list($ocr['tags'])
+            ) fail('Annotation OCR invalide.');
+            foreach ($ocr['tags'] as $tag) if (!is_string($tag) || trim($tag) === '') fail('Tag OCR vide ou invalide.');
+            if (!array_key_exists('mask', $e)) fail('Une annotation OCR doit avoir un masque de zone.');
         }
     }
     foreach ($a['entities'] as $e) foreach ($e['skeleton']['points'] ?? [] as $point) {
@@ -134,11 +353,16 @@ function validate_annotation(array $a, string $image): void {
     }
     foreach ($a['attributes'] as $v) if (!isset($ids[$v['entity'] ?? '']) || !is_string($v['property'] ?? null) || !is_string($v['value'] ?? null)) fail('Attribut invalide.');
     foreach ($a['relations'] as $v) if (!isset($ids[$v['subject'] ?? ''], $ids[$v['object'] ?? '']) || !is_string($v['predicate'] ?? null) || trim($v['predicate']) === '') fail('Relation invalide.');
-    foreach (['description','source','target'] as $key) if (!is_string($a['lighting'][$key] ?? null)) fail('Éclairage invalide.');
+    foreach (['description', 'source', 'target'] as $key) if (!is_string($a['lighting'][$key] ?? null)) fail('Éclairage invalide.');
     if (!is_string($a['composition']['description'] ?? null)) fail('Composition invalide.');
-    foreach (['caption_verified','relations_verified'] as $key) if (!is_bool($a['quality'][$key] ?? null)) fail('Qualité invalide.');
+    foreach (['caption_verified', 'relations_verified'] as $key) if (!is_bool($a['quality'][$key] ?? null)) fail('Qualité invalide.');
 }
-function api(callable $fn): void {
-    try { respond($fn(request())); }
-    catch (Throwable $e) { if (http_response_code() < 400) http_response_code(400); respond(['error'=>$e->getMessage()]); }
+function api(callable $fn): void
+{
+    try {
+        respond($fn(request()));
+    } catch (Throwable $e) {
+        if (http_response_code() < 400) http_response_code(400);
+        respond(['error' => $e->getMessage()]);
+    }
 }

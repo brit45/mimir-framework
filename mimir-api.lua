@@ -225,6 +225,13 @@ function Mimir.Benchmark.now() end
 ---@field latent_tokens? int
 ---@field proj_dim? int
 ---@field stochastic_latent? bool
+---@field contextual_encoding? boolean @Positions apprises et objectif de contenu latent (défaut true)
+---@field encoder_causal? boolean @Attention causale de l'encodeur (défaut false), indépendante du décodeur
+---@field decoder_causal? boolean @Attention causale du décodeur
+---@field text_mask_ratio? number @Fraction de tokens masqués pendant l'entraînement, dans [0,1[ (0.15)
+---@field content_weight? number @Poids CE du contenu textuel prédit depuis mu (0.1)
+---@field text_context_version? integer @Version de topologie sérialisée : 1 historique, 2 contextuelle
+---@field content_dim? integer @Taille de la tête de contenu ; vocab_size en version 2
 ---@field dropout? float
 -- Training helper defaults (Model::trainStepVAEText)
 ---@field image_dim? int
@@ -1906,6 +1913,7 @@ function Mimir.Viz.backend() end
 ---panels: {id=0..6,x?,y?,w?,h?,title?,visible?}[]
 ---controls: {id=string,label?,x?,y?,w?,h?}[] (boutons, liste remplacée)
 ---help: texte d'aide du script. events: activer clavier/texte/pointeur.
+---capture_keys: avec events=true, réserve les touches au script pendant une saisie (N/C inclus).
 ---image_size: taille des aperçus Generated en pixels (32..1024, défaut 200).
 ---@param scene table
 ---@return boolean ok

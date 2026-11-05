@@ -1,6 +1,8 @@
 #include "OptimizerDispatch.hpp"
 #include "runtimes/RuntimeRouter.hpp"
 #include "Model.hpp"
+#include "Planning/ExecutionPolicy.hpp"
+#include "Planning/ExecutionCalibration.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -8,8 +10,10 @@
 #include <iostream>
 #include <map>
 #include <tuple>
+#include <optional>
 
 namespace {
+namespace Policy=Mimir::Planning::ExecutionPolicy;
 std::unordered_map<std::string,size_t>& optimizerCounts(){static thread_local std::unordered_map<std::string,size_t> counts;return counts;}
 struct Trial {
     RuntimeOptimizerRequest request;
@@ -31,7 +35,8 @@ struct Trial {
     }
 };
 bool cpu(const AbstractRuntime* runtime) { return std::strcmp(runtime->name(),"CPU")==0; }
-bool update(AbstractRuntime* runtime,const RuntimeOptimizerRequest& r) {
+bool update(AbstractRuntime* runtime,const RuntimeOptimizerRequest& r,int workers=1) {
+    Policy::CpuScope scope(workers);
     if(cpu(runtime))return runtime->optimizerStep(r);
     // Device failure must never partially commit parameters or moments.
     Trial trial(r);
@@ -40,17 +45,19 @@ bool update(AbstractRuntime* runtime,const RuntimeOptimizerRequest& r) {
     return true;
 }
 constexpr size_t maxRuntimes=6;
-constexpr size_t refreshUpdates=1024;
-using Identity=std::pair<uintptr_t,int>;
+constexpr size_t refreshUpdates=Policy::Limits::calibration_refresh;
+using Identity=std::pair<uintptr_t,size_t>;
 using Key=std::tuple<int,size_t,unsigned,unsigned>;
 struct Route {
     std::array<AbstractRuntime*,maxRuntimes> order{};
     size_t count=0,updates=0;
+    int cpu_workers=1;
 };
 struct Cache {
     uint64_t generation=0;
     std::array<Identity,maxRuntimes> available{};
     std::map<Key,Route> routes;
+    std::vector<int> cpu_candidates;
 };
 // Same algorithm variant, state transfer layout and exact block size share a route.
 unsigned variant(const Optimizer& o) {
@@ -63,35 +70,54 @@ unsigned variant(const Optimizer& o) {
 Route calibrate(const RuntimeOptimizerRequest& request,
                 const std::array<AbstractRuntime*,maxRuntimes>& candidates,size_t count) {
     Route route;
-    std::array<std::pair<double,AbstractRuntime*>,maxRuntimes> timings{};
-    size_t valid=0;
-    Trial destination(request);
-    for(size_t index=0;index<count;++index) {
-        AbstractRuntime* runtime=candidates[index];
-        // Warm compilation/context creation on disposable state, never on the model.
-        destination.reset(request);
-        if(!update(runtime,destination.request))continue;
-        std::array<double,5> samples{};
-        bool ok=true;
-        for(auto& sample:samples) {
-            destination.reset(request); // outside the timer, just like the model's input state
-            const auto start=std::chrono::steady_clock::now();
-            if(!update(runtime,destination.request)){ok=false;break;}
-            sample=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-        }
-        if(!ok)continue;
-        std::sort(samples.begin(),samples.end());
-        timings[valid++]={samples[samples.size()/2],runtime};
+    if(request.count>Policy::calibrationBudget()/(12*sizeof(float)) || !Mimir::Planning::Calibration::enabled()) {
+        // No unmeasured size preference: retain a safe serial CPU reference.
+        for(size_t i=0;i<count;++i)if(cpu(candidates[i]))route.order[route.count++]=candidates[i];
+        for(size_t i=0;i<count;++i)if(!cpu(candidates[i]))route.order[route.count++]=candidates[i];
+        return route;
     }
-    std::stable_sort(timings.begin(),timings.begin()+valid,
-        [](const auto& a,const auto& b){return a.first<b.first;});
-    route.count=valid;
-    for(size_t i=0;i<valid;++i)route.order[i]=timings[i].second;
-    if(valid) {
+    struct Timing {double seconds;AbstractRuntime* runtime;int workers;};
+    std::vector<Timing> timings;
+    Trial reference(request);bool have_reference=false;
+    for(size_t i=0;i<count;++i)if(cpu(candidates[i])) {
+        have_reference=update(candidates[i],reference.request,1);break;
+    }
+    const bool ordered=request.optimizer->type==OptimizerType::ADAFACTOR || request.optimizer->type==OptimizerType::LAMB;
+    Trial destination(request);
+    auto exact=[](const std::vector<float>& a,const std::vector<float>& b) {
+        return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(float))==0);
+    };
+    for(size_t index=0;index<count;++index) {
+        auto* runtime=candidates[index];std::optional<Timing> best;
+        for(int workers:cpu(runtime)?Policy::cpuCandidates(ordered):std::vector<int>{1}) {
+            bool ok=true;std::array<double,5> samples{};
+            for(int sample=0;sample<6;++sample) {
+                destination.reset(request);
+                const auto start=std::chrono::steady_clock::now();
+                if(!update(runtime,destination.request,workers)){ok=false;break;}
+                const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+                if(cpu(runtime) && have_reference && (!exact(destination.w,reference.w) ||
+                    !exact(destination.m,reference.m) || !exact(destination.v,reference.v))){ok=false;break;}
+                if(sample)samples[size_t(sample-1)]=elapsed;
+            }
+            if(ok) {
+                std::sort(samples.begin(),samples.end());Timing trial{samples[2],runtime,workers};
+                if(!best || trial.seconds<best->seconds)best=trial;
+            }
+        }
+        if(best)timings.push_back(*best);
+    }
+    std::stable_sort(timings.begin(),timings.end(),[](const auto& a,const auto& b){return a.seconds<b.seconds;});
+    route.count=timings.size();
+    for(size_t i=0;i<timings.size();++i) {
+        route.order[i]=timings[i].runtime;
+        if(cpu(timings[i].runtime))route.cpu_workers=timings[i].workers;
+    }
+    if(route.count) {
         std::cerr<<"[optimizer] backend="<<route.order[0]->name()<<" type="<<int(request.optimizer->type)
             <<" parameters="<<request.count<<" selection=median_host_roundtrip samples=5"
-            <<" refresh_updates="<<refreshUpdates<<" candidates_seconds=";
-        for(size_t i=0;i<valid;++i)std::cerr<<(i?",":"")<<timings[i].second->name()<<":"<<timings[i].first;
+            <<" cpu_workers="<<route.cpu_workers<<" refresh_updates="<<refreshUpdates<<" candidates_seconds=";
+        for(size_t i=0;i<timings.size();++i)std::cerr<<(i?",":"")<<timings[i].runtime->name()<<":"<<timings[i].seconds;
         std::cerr<<'\n';
     }
     return route;
@@ -109,14 +135,16 @@ bool RuntimeRouter::dispatchOptimizer(const RuntimeOptimizerRequest& request,Abs
         if(!runtime || !runtime->isInitialized() || runtime->config().disabled ||
            !runtime->supportsOptimizer() || (!cpu(runtime) && !optimizerDeviceSizeFits(request)))continue;
         if(std::find(candidates.begin(),candidates.begin()+count,runtime)!=candidates.begin()+count)continue;
-        candidates[count]=runtime;identities[count++]={reinterpret_cast<uintptr_t>(runtime),runtime->config().device_index};
+        candidates[count]=runtime;identities[count++]={reinterpret_cast<uintptr_t>(runtime),Mimir::Planning::Calibration::configuration(*runtime)};
     }
     static thread_local Cache cache;
-    if(cache.generation!=optimizer_routing_generation_ || cache.available!=identities) {
-        cache.routes.clear();cache.generation=optimizer_routing_generation_;cache.available=identities;
+    const auto cpu_candidates=Policy::cpuCandidates();
+    if(cache.generation!=optimizer_routing_generation_ || cache.available!=identities || cache.cpu_candidates!=cpu_candidates) {
+        cache.routes.clear();cache.generation=optimizer_routing_generation_;cache.available=identities;cache.cpu_candidates=cpu_candidates;
     }
     if(!count)return false;
-    if(count==1) {
+    const bool ordered=request.optimizer->type==OptimizerType::ADAFACTOR || request.optimizer->type==OptimizerType::LAMB;
+    if(count==1 && (!cpu(candidates[0]) || Policy::cpuCandidates(ordered).size()==1)) {
         if(!update(candidates[0],request))return false;
         ++optimizerCounts()[candidates[0]->name()];
         if(selected)*selected=candidates[0];
@@ -136,7 +164,7 @@ bool RuntimeRouter::dispatchOptimizer(const RuntimeOptimizerRequest& request,Abs
     bool failed=false;
     for(size_t i=0;i<route.count;++i) {
         auto* runtime=route.order[i];
-        if(!update(runtime,request)){failed=true;continue;}
+        if(!update(runtime,request,cpu(runtime)?route.cpu_workers:1)){failed=true;continue;}
         ++optimizerCounts()[runtime->name()];
         if(selected)*selected=runtime;
         // A transient failure must not permanently pin the model to its fallback.

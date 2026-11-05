@@ -77,7 +77,11 @@ Notes sur les colonnes allocator (quand `MIMIR_ALLOCATOR_LOG=1`) :
 
 ## 2) Configuration par backend (CPU/CUDA/ROCM)
 
-Ces variables sont lues via `RuntimeConfig::fromEnv("CPU"|"CUDA"|"ROCM")`.
+Les suffixes sont lus via `RuntimeConfig::fromEnv("CPU"|"CUDA"|"ROCM")`.
+Les défauts d’activation indiqués dans cette table sont ceux appliqués par
+l’initialisation de `Model` : une construction directe de `RuntimeConfig` ou
+un appel isolé à `fromEnv()` laisse les flags de fast-path à `false` si les
+variables correspondantes sont absentes.
 
 ### Suffixes supportés
 
@@ -128,17 +132,49 @@ Notes Vulkan SPIR-V:
 
 ## 4) Planner et fusion
 
-| Variable | Type | Défaut | Effet |
+Les défauts ci-dessous sont ceux du moteur C++ lorsque les variables sont
+absentes. `run_mimir.sh` fournit ses propres valeurs ; elles sont précisées
+séparément pour permettre des comparaisons reproductibles.
+
+| Variable | Type | Défaut moteur | Effet |
 | --- | --- | --- | --- |
-| `MIMIR_ENABLE_PLANNER` | bool | `1` | Active la planification statique d'exécution. |
-| `MIMIR_ENABLE_FUSION` | bool | `1` | Active les chemins de fusion lorsqu'un plan est utilisé. |
-| `MIMIR_ENABLE_FUSION_TRAIN` | bool | `0` | Autorise la fusion `Conv2d+ReLU` en mode `training=true` (opt-in). Les fusions génériques restent inférence-only. |
-| `MIMIR_PLANNER_DUMP` | bool | `0` | Émet un dump de stats planner au premier forward. |
-| `MIMIR_PLANNER_MODE` | texte | `cost` | `legacy`, `static` ou `cost`. Le mode cost peut utiliser les mesures de l’aller-retour hôte. |
-| `MIMIR_PLANNER_COST_MODEL` | bool | `1` | Autorise le modèle de coût et la calibration ; `0` les désactive. |
-| `MIMIR_PLANNER_BUFFER_REUSE` | bool | `1` en mode cost | Autorise la réutilisation des buffers selon les durées de vie du plan. |
-| `MIMIR_PLANNER_AUTOTUNE` | bool | `1` | Calibre les opérations rejouables lorsqu’au moins deux runtimes natifs sont disponibles. `0` désactive les essais. |
-| `MIMIR_PLANNER_CALIBRATION_MAX_BYTES` | octets | `67108864` | Budget estimé maximal des copies temporaires de calibration, aussi soumis au MemoryGuard. |
+| `MIMIR_ENABLE_PLANNER` | bool | `1` | Active le plan de graphe. La calibration runtime reste indépendante. |
+| `MIMIR_PLANNER_FUSION` | bool | valeur de `MIMIR_ENABLE_FUSION`, sinon `1` | Active les fusions du plan, y compris les candidats pointwise natifs. Prioritaire sur l’ancien nom. |
+| `MIMIR_ENABLE_FUSION` | bool | `1` | Alias de compatibilité utilisé si `MIMIR_PLANNER_FUSION` est absent. |
+| `MIMIR_ENABLE_FUSION_TRAIN` | bool | `1` | Autorise les fusions en entraînement avec conservation du contexte backward. `0` les désactive en entraînement. |
+| `MIMIR_PLANNER_DUMP` | bool | `0` | Émet un dump lorsque le plan doit être publié. |
+| `MIMIR_PLANNER_MODE` | texte | `cost` | `legacy`, `static` ou `cost`. Le mode `cost` utilise le modèle de coût s’il est actif. |
+| `MIMIR_PLANNER_COST_MODEL` | bool | `1` | Autorise le mode `cost` ; avec `0`, une demande `cost` est traitée comme `legacy`. N’arrête pas l’autotuning des opérations. |
+| `MIMIR_PLANNER_BUFFER_REUSE` | bool | `1` en mode `cost`, sinon `0` | Autorise la réutilisation de buffers lorsque le chemin runtime peut appliquer le plan. |
+| `MIMIR_RUNTIME_AUTOTUNE` | bool | `1` | Mesure les choix d’exécution natifs et les fusions rejouables. Peut comparer plusieurs configurations CPU même avec un seul backend. La valeur exacte `0` désactive les mesures. |
+| `MIMIR_PLANNER_AUTOTUNE` | bool | `1` | Ancien réglage lu uniquement si `MIMIR_RUNTIME_AUTOTUNE` est absent. Même convention de désactivation par `0`. |
+| `MIMIR_PLANNER_CALIBRATION_MAX_BYTES` | octets | mémoire disponible | Plafond explicite des temporaires de calibration, aussi soumis à la mémoire disponible et au `MemoryGuard`. `0` interdit une nouvelle mesure nécessitant des copies. |
+| `MIMIR_PLANNER_SCRATCH_BYTES` | octets | cache L2 détecté | Budget de tuilage de la convolution pointwise CPU, également limité par le `MemoryGuard`. |
+| `MIMIR_PLANNER_JSON` | path | non défini | Fichier JSON du plan écrit lorsqu’un dump est émis ; le dossier doit être accessible en écriture. |
+| `MIMIR_PLANNER_STDOUT` | bool | `0` | Envoie le dump au terminal plutôt qu’au seul fichier de logs. |
+| `MIMIR_PLANNER_TERMINAL` | bool | `0` | Alias de `MIMIR_PLANNER_STDOUT`, utilisé lorsque ce dernier est absent. |
+
+Le lanceur `run_mimir.sh` initialise les valeurs suivantes si elles ne sont pas
+fournies dans son environnement :
+
+| Variable | Défaut du lanceur |
+| --- | --- |
+| `MIMIR_PLANNER_MODE` | `static` |
+| `MIMIR_PLANNER_COST_MODEL` | `0` |
+| `MIMIR_PLANNER_FUSION`, `MIMIR_ENABLE_FUSION_TRAIN` | `1` |
+| `MIMIR_RUNTIME_AUTOTUNE`, `MIMIR_PLANNER_BUFFER_REUSE` | `1` |
+| `MIMIR_PLANNER_DUMP` | `1` |
+| `MIMIR_PLANNER_JSON` | `.mimir-spill/execution-plan.json` |
+
+Le lanceur renseigne donc `MIMIR_RUNTIME_AUTOTUNE` et `MIMIR_PLANNER_FUSION`
+même si seuls les anciens noms ont été exportés. Avec ce lanceur, utiliser les
+noms prioritaires pour désactiver ces fonctions.
+
+La fusion pointwise GPU respecte aussi le réglage `_LINEAR` du backend et
+`_LINEAR_MIN_OPS`, comparé ici au nombre d’éléments de la chaîne. Elle reste
+soumise aux contrôles de formes, au budget de staging et à la calibration.
+Aucun réglage n’impose la sélection d’un kernel fusionné plus lent ou non
+conforme. Voir [Planificateur d’exécution](../04-Architecture-Internals/22-Planning.md).
 
 ## 4.1) Verbose runtime et cartographie planner
 
@@ -266,6 +302,10 @@ mémoire et ne lit aucun dataset.
 
 - `src/runtimes/AbstractRuntime.cpp`
 - `src/Model.cpp`
+- `src/Planning/ExecutionCalibration.cpp`
+- `src/Planning/FusionCalibration.cpp`
+- `src/Planning/ExecutionPolicy.cpp`
+- `run_mimir.sh`
 - `src/runtimes/vulkan/VulkanCompute.hpp`
 - `src/scriptings/ScriptingBridgeCommon.hpp`
 - `src/scriptings/ScriptingBridgeCommon.cpp`

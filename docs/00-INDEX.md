@@ -76,6 +76,7 @@ cmake --build build -j"$(nproc)"
 
 - [Concepts essentiels](02-User-Guide/01-Core-Concepts.md)
 - [Données et datasets](02-User-Guide/03-Data.md)
+- [Atelier d’annotation de datasets](../annotator/README.md)
 - [Entraînement](02-User-Guide/04-Training.md)
 - [Inférence](02-User-Guide/05-Inference.md)
 - [Scripting Lua](02-User-Guide/06-Lua-Scripting.md)
@@ -91,6 +92,7 @@ cmake --build build -j"$(nproc)"
 
 - [Registre des architectures](03-API-Reference/11-Architectures.md)
 - [VAE texte](02-User-Guide/11-VAEText.md)
+- [Encodeur T5 pour Lumen](02-User-Guide/16-T5.md)
 - [Transformer et GPT](02-User-Guide/12-Transformer-GPT.md)
 - [Modèles de diffusion](02-User-Guide/13-Diffusion.md)
 - [VAE convolutionnel](02-User-Guide/14-VAEConv.md)

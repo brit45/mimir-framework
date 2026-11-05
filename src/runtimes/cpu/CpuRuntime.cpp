@@ -1,3 +1,4 @@
+#include "PointwiseFusion.hpp"
 #include "runtimes/cpu/CpuRuntime.hpp"
 
 #include "SIMD_Ops.hpp"
@@ -148,4 +149,25 @@ bool CpuRuntime::mergeBranches(const std::vector<float>& left,
     if (!initialized_) return false;
     RuntimeLayerOps::branchMerge(left, right, output, layer.merge_op, true);
     return true;
+}
+
+RuntimeCapabilityLevel CpuRuntime::queryPointwiseFusionCapability(
+    const std::vector<const Layer*>& chain,bool,bool) const {
+    if(!initialized_ || chain.empty())return RuntimeCapabilityLevel::Unsupported;
+    for(const auto* layer:chain)
+        if(!layer || !Mimir::CpuFusion::supports(layer->type_enum) || layer->getWeightsSize()!=0 ||
+            (!layer->inputs.empty() && layer->inputs.size()!=1))return RuntimeCapabilityLevel::Unsupported;
+    return RuntimeCapabilityLevel::NativeOptimized;
+}
+bool CpuRuntime::pointwiseFusionForward(const std::vector<const Layer*>& chain,const std::vector<float>& input,
+    std::vector<std::vector<float>>& output,bool retain,bool training) {
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,false,training)))return false;
+    Mimir::CpuFusion::forwardChain(chain,input,output,retain);return true;
+}
+bool CpuRuntime::pointwiseFusionBackward(const std::vector<const Layer*>& chain,
+    const std::vector<const std::vector<float>*>& inputs,const std::vector<float>& grad,std::vector<float>& output) {
+    if(chain.size()!=inputs.size() || !runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,true,true)))return false;
+    for(size_t i=0;i<chain.size();++i)
+        if(chain[i]->type_enum!=LayerType::Identity && (!inputs[i] || inputs[i]->size()!=grad.size()))return false;
+    Mimir::CpuFusion::backwardChain(chain,inputs,grad,output);return true;
 }

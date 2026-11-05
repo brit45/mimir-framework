@@ -1,288 +1,234 @@
 # Planificateur d’exécution
 
-Comprendre le fonctionnement interne exact des composants runtime.
+Le planner prépare le graphe, puis choisit les chemins d’exécution selon les
+capacités natives et les latences mesurées. La construction du graphe, le
+placement des opérations et la sélection d’un kernel fusionné sont des étapes
+distinctes.
 
-**Public concerné :** Développeur avancé qui modifie le moteur C/C++.
+**Public concerné :** développeurs du moteur C++ et utilisateurs qui analysent
+les performances d’un modèle.
 
-> **Prérequis**
->
-> Connaître les bases C++ et la structure du dépôt.
+Sources de vérité :
 
-Cette page explique le système de planification statique du graphe d'exécution, avec une lecture orientée compréhension progressive.
-
-Source de vérité : `src/Planning/Planner.hpp`.
-
-Intégration runtime : `src/Model.cpp` (forward) et `Model::static_plan_` dans `src/Model.hpp`.
-
----
+- `src/Planning/Planner.hpp` : graphe, durées de vie, groupes de fusion, placement et scratchpads ;
+- `src/Planning/ExecutionCalibration.cpp` : classement des runtimes par opération ;
+- `src/Planning/FusionCalibration.cpp` : comparaison des chaînes ordinaires et fusionnées ;
+- `src/Planning/ExecutionPolicy.hpp` et `.cpp` : choix CPU et budgets de protection ;
+- `src/runtimes/RuntimeRouter.cpp` : dispatch et repli après refus ou échec ;
+- `src/Model.cpp`, `src/Model.hpp` : intégration au modèle et cache `static_plan_`.
 
 ## Sur cette page
 
-- [Lecture rapide (5 minutes)](#lecture-rapide-5-minutes)
-- [Rôle](#rôle)
-- [Vue mentale : ce qui se passe réellement](#vue-mentale-ce-qui-se-passe-réellement)
-- [Ce que fait le planner au lancement](#ce-que-fait-le-planner-au-lancement)
-- [1) Analyse des durées de vie (TensorLifetime)](#1-analyse-des-durées-de-vie-tensorlifetime)
-- [2) Fusions de layers (FusionKind)](#2-fusions-de-layers-fusionkind)
-- [3) Plan d'exécution (ExecutionPlan)](#3-plan-dexécution-executionplan)
-- [4) Scratchpad pour Conv2d (Conv2dScratchPlan)](#4-scratchpad-pour-conv2d-conv2dscratchplan)
-- [Exemple guidé](#exemple-guidé)
-- [5) Intégration avec le runtime](#5-intégration-avec-le-runtime)
+- [Lecture rapide](#lecture-rapide)
+- [1) Durées de vie et buffers](#1-durées-de-vie-et-buffers)
+- [2) Fusion de graphe et fusion de kernels](#2-fusion-de-graphe-et-fusion-de-kernels)
+- [3) Calibration des runtimes](#3-calibration-des-runtimes)
+- [4) Cache et exécution à chaud](#4-cache-et-exécution-à-chaud)
+- [5) Configuration et lancement](#5-configuration-et-lancement)
 - [Déboguer efficacement le planner](#déboguer-efficacement-le-planner)
-- [Étapes suivantes](#étapes-suivantes)
-
-## Lecture rapide (5 minutes)
-
-Si vous devez comprendre vite, retiens ceci :
-
-1. Le planner construit un plan au premier `forward`.
-2. Ce plan contient les durées de vie, les fusions et les règles de skip.
-3. Le plan est mis en cache et réutilisé tant que le graphe et le mode (`training`) ne changent pas.
-4. En `training`, les fusions génériques restent désactivées par sécurité.
-5. Le planner améliore surtout la stabilité d'exécution et la mémoire, pas seulement la vitesse brute.
-
-## Rôle
-
-Le `Planner` analyse la liste des layers **avant** l'exécution pour :
-
-1. Calculer les durées de vie des tenseurs (quand chaque tenseur est créé/consommé en dernière fois)
-2. Identifier les fusions de layers possibles (Conv2d+ReLU et fusions génériques)
-3. Pré-calculer les tailles de buffers scratch nécessaires pour Conv2d
-
-Ces informations permettent de :
-
-- Allouer des activations de façon optimale (réutilisation mémoire)
-- Éviter des passes intermédiaires (fusions)
-
-En pratique, le planner est le composant qui transforme la liste brute des layers en un plan exécutable stable et réutilisable entre forwards.
-
----
-
-## Vue mentale : ce qui se passe réellement
-
-Cycle simplifié d'un run :
-
-1. Le modèle reçoit un `forward`.
-2. Le runtime vérifie si un plan valide existe déjà.
-3. Si non, il calcule un plan statique.
-4. Il exécute la boucle de layers en appliquant les règles du plan.
-5. Les passes suivantes réutilisent ce plan.
-
-Le gain principal vient du fait que les décisions coûteuses sont déplacées vers une phase de préparation unique.
-
----
-
-## Ce que fait le planner au lancement
-
-Au démarrage du process, aucun plan n'est encore calculé. Le planner intervient au **premier forward** (ou au premier forward qui invalide le cache plan) :
-
-1. Lecture des toggles runtime (`MIMIR_ENABLE_PLANNER`, `MIMIR_ENABLE_FUSION`, `MIMIR_ENABLE_FUSION_TRAIN`).
-2. Vérification du cache `static_plan_` (présence + compatibilité avec le mode `training` + taille des layers inchangée).
-3. Si invalide ou absent : construction du plan statique (lifetimes, fusions, skip map, scratch Conv2d).
-4. Optionnel : dump de diagnostic si `MIMIR_PLANNER_DUMP=1`.
-5. Exécution du forward avec application du plan (skip des layers fusionnés et réutilisation du plan sur les passes suivantes).
-
-Cette phase remplace une partie du coût "décisionnel" à chaque layer par un coût de préparation unique, puis des exécutions plus régulières.
-
----
-
-## 1) Analyse des durées de vie (`TensorLifetime`)
-
-```cpp
-struct TensorLifetime {
-    int first_def;          // Index du layer qui crée le tenseur
-    int last_use;           // Index du layer qui le consomme en dernier
-    std::string dtype;      // Type de données
-    std::vector<int> shape; // Forme du tenseur
-};
-
-std::unordered_map<std::string, TensorLifetime>
-analyze_tensor_lifetimes(const std::vector<Layer>& layers);
-```
-
-Utilisation : déterminer quels buffers peuvent être aliasés/réutilisés.
-
-Lecture pratique : plus le `last_use` d'un tenseur est tôt, plus tôt son buffer peut être recyclé.
-
----
-
-## 2) Fusions de layers (`FusionKind`)
-
-```cpp
-enum class FusionKind : uint8_t {
-    NONE = 0,
-    CONV2D_RELU = 1,
-    GENERIC_ACTIVATION = 2,
-    GENERIC_SPLIT = 3,
-    GENERIC_CHUNK = 4,
-    GENERIC_ACTIVATION_SPLIT = 5,
-    GENERIC_ACTIVATION_CHUNK = 6,
-    GENERIC_UNARY_SHAPE = 7,
-};
-```
-
-Fusions actuellement implémentées (inférence uniquement, pas en training) :
-
-- Conv2d + ReLU
-- Producer + activation standalone (ReLU/SiLU/GELU/...)
-- Producer + unary shape (`Flatten`, `Reshape`, `View`, `Transpose`, `Permute`, `Squeeze`, `Unsqueeze`, `Identity`)
-- Producer + `Split`/`Chunk`
-- Producer + activation + `Split`/`Chunk`
-- Chaînes répétées adjacentes automatiquement: `producer -> activation* -> unary_shape*` (et terminaison optionnelle par `Split`/`Chunk`)
-
-Lecture pratique : la fusion en chaîne évite les matérialisations intermédiaires répétitives (exemple typique : `Add -> ReLU -> ReLU -> View`).
-
----
-
-## 3) Plan d'exécution (`ExecutionPlan`)
-
-```cpp
-struct PlannedOp {
-    int       layer_index;  // Index dans la liste des layers
-    FusionKind fusion;      // Fusion applicable (ou NONE)
-};
-
-struct ExecutionPlan {
-    std::vector<PlannedOp>  ops;
-    std::vector<uint8_t>    skip_layer;
-    std::vector<uint8_t>    fuse_relu_for_conv2d;
-    std::vector<int>        fuse_activation_consumer;
-    std::vector<int>        fuse_unary_consumer;
-    std::vector<int>        fuse_split_consumer;
-    std::vector<uint8_t>    fuse_split_kind; // 0=none, 1=Split, 2=Chunk
-    std::vector<int>        fuse_chain_next;  // edges producer->consumer pour fusions en chaîne
-};
-
-ExecutionPlan build_execution_plan_static(
-    const std::vector<Layer>& layers,
-    bool training);
-```
-
-`build_execution_plan_static(...)` est conservateur : en mode `training=true`, les fusions sont désactivées.
-
-`skip_layer` marque les consommateurs fusionnés qui ne doivent plus être exécutés comme ops indépendantes dans la boucle de forward.
-
-`fuse_chain_next` relie les couches enchaînées qui sont absorbées dans une même exécution logique.
-
----
-
-## 4) Scratchpad pour Conv2d (`Conv2dScratchPlan`)
-
-```cpp
-struct Conv2dScratchPlan {
-    size_t wT_bytes;   // Taille du buffer transpose de poids W^T
-    size_t xcol_bytes; // Taille du buffer im2col
-    size_t c_bytes;    // Taille du buffer de sortie
-};
-
-Conv2dScratchPlan plan_conv2d_fastpath_scratch(
-    const std::vector<Layer>& layers);
-```
-
-Retourne la taille maximale nécessaire sur l'ensemble des layers Conv2d du modèle. Permet de pré-allouer un scratchpad unique réutilisé sur tous les Conv2d, évitant les allocations dynamiques pendant le forward.
-
----
-
-## Exemple guidé
-
-Supposons ce sous-graphe :
-
-1. `conv0` (`Conv2d`)
-2. `relu0` (`ReLU`)
-3. `relu1` (`ReLU`)
-4. `view0` (`View`)
-5. `split0` (`Split`)
-
-Ce que le planner peut produire en inférence :
-
-1. `conv0 + relu0` fusionnés (`CONV2D_RELU`)
-2. `relu1`, `view0`, `split0` absorbés via la chaîne de fusion générique
-3. `skip_layer=1` pour les consommateurs déjà fusionnés
-
-Résultat attendu : moins de passages intermédiaires, moins de copies, boucle de forward plus régulière.
-
----
-
-## 5) Intégration avec le runtime
-
-Le plan est géré via un cache `static_plan_` dans `Model`.
-
-Pendant le forward :
-
-- `MIMIR_ENABLE_PLANNER` (défaut `1`) active la planification statique.
-- `MIMIR_ENABLE_FUSION` (défaut `1`) active l'application des fusions issues du plan.
-- `MIMIR_ENABLE_FUSION_TRAIN` (défaut `0`) autorise uniquement `Conv2d+ReLU` en mode `training=true` (opt-in). Les fusions génériques restent inférence-only.
-- Le plan est (re)construit si nécessaire s'il n'a jamais été construit, si le mode `training` change, ou si le nombre d'ops planifiées ne correspond plus au nombre de layers.
-- `MIMIR_PLANNER_DUMP=1` déclenche un dump des stats planner (durées de vie, fusions, scratch Conv2d).
-
-Résumé opérationnel au lancement d'un run :
-
-- lancement process : pas de plan calculé,
-- premier forward : build du plan si planner activé,
-- forwards suivants : réutilisation du plan tant que les invariants ne changent pas.
-
-Exemple prêt à copier/coller :
-
-```bash
-export MIMIR_ENABLE_PLANNER=1
-export MIMIR_ENABLE_FUSION=1
-export MIMIR_ENABLE_FUSION_TRAIN=1
-export MIMIR_PLANNER_DUMP=1
-```
-
-Le forward utilise ensuite le plan pour :
-
-- sauter les layers marqués `skip_layer`,
-- appliquer les fusions au moment du traitement de l'output,
-- garder un chemin d'exécution stable entre passes tant que les conditions ci-dessus ne changent pas.
-
-En pratique, la reconstruction n'est pas liée à un appel `build()` explicite : elle est pilotée par les invariants vérifiés dans le forward.
-
----
+- [Validation](#validation)
+
+## Lecture rapide
+
+1. Le premier forward construit le plan si son cache est absent ou invalide.
+2. Le plan décrit les tenseurs, leurs utilisations, les groupes de fusion et les buffers.
+3. Les fusions peuvent fonctionner en inférence **et en entraînement** ; les
+   valeurs intermédiaires nécessaires au backward sont conservées.
+4. Les runtimes natifs et les configurations CPU sont comparés sur des
+   opérations rejouables, avec contrôle numérique avant sélection.
+5. Une fusion de kernels n’est sélectionnée que si elle est bit à bit conforme
+   à la chaîne ordinaire mesurée et suffisamment plus rapide.
+6. Une décision en cache reste soumise aux changements de configuration,
+   aux échecs d’exécution et à la recalibration périodique.
+
+## 1) Durées de vie et buffers
+
+`analyze_tensor_lifetimes()` fournit la vue historique par nom de tenseur.
+Le plan global, construit par `build_execution_plan_global()`, représente aussi
+les versions des valeurs : réécrire `x` ne signifie pas que toutes ses versions
+ont simultanément plusieurs consommateurs.
+
+Le plan contient notamment `layers`, `tensors`, `fusion_groups`, `transfers` et
+`regions`, ainsi que les tableaux de compatibilité `skip_layer` et
+`fuse_chain_next`. `plan_host_buffer_reuse()` prépare la réutilisation des
+buffers ; leur emploi effectif reste soumis aux conditions du chemin runtime.
+La présence d’un emplacement réutilisable dans le plan ne prouve donc pas que
+chaque forward ou backward l’emploie.
+
+`plan_conv2d_fastpath_scratch()` et `apply_global_scratch_plan()` préparent les
+besoins de scratch Conv2d. Les choix CPU et les limites des kernels portables
+sont centralisés dans `ExecutionPolicy`. Les budgets de protection évitent un
+travail ou un staging excessif ; ils ne constituent pas des seuils de vitesse
+qui favoriseraient automatiquement un accélérateur.
+
+## 2) Fusion de graphe et fusion de kernels
+
+### Regroupement logique
+
+`FusionKind` couvre `CONV2D_RELU`, les activations, les transformations de forme,
+`Split`/`Chunk` et `GENERIC_LAYER`. Les groupes sont composés à partir des
+liaisons du graphe et de leurs consommateurs. Les extrémités de branches
+historiques forment des frontières ; les chaînes indépendantes autour de ces
+branches peuvent rester fusionnables.
+
+Un consommateur marqué `skip_layer` est exécuté dans le parcours de son
+producteur. Ce regroupement peut encore appeler plusieurs opérations runtime :
+il ne prouve pas qu’un seul kernel device a été lancé.
+
+L’appel bas niveau `build_execution_plan_static(layers, training)` conserve un
+défaut conservateur, `allow_training_fusion=false`. Le plan global utilisé par
+`Model` autorise les fusions d’entraînement lorsque les variables de fusion du
+modèle le permettent.
+
+### Chaînes pointwise natives
+
+Les kernels de fusion prennent en charge les chaînes d’activations suivantes :
+
+`Identity`, `ReLU`, `LeakyReLU`, `GELU`, `SiLU`, `Tanh`, `Sigmoid`, `Softplus`,
+`Mish`, `HardSigmoid` et `HardSwish`.
+
+Les opérations doivent être sans poids et unaires. Les réductions telles que
+`Softmax`, les changements de forme et les opérations stochastiques ne font pas
+partie de ce programme pointwise ; elles peuvent conserver leur regroupement
+logique ou leur dispatch ordinaire.
+
+| Backend | Exécution de la fusion |
+| --- | --- |
+| CPU | Traitement par tuiles SIMD ; deux activations adjacentes sont abaissées dans une même boucle, en forward et backward. |
+| Vulkan | Un dispatch compute parcourt toute la chaîne, à partir du SPIR-V généré. |
+| OpenCL | Un lancement de kernel parcourt toute la chaîne, à partir du source généré. |
+| CUDA | Kernel natif partagé, compilé par le compilateur CUDA. |
+| ROCm | Même source de kernel, compilée en HIP. |
+
+Avec `retain=true`, chaque sortie intermédiaire est restituée. Le backward
+consomme les snapshots d’entrée de chaque étape et propage le gradient dans
+l’ordre inverse. En inférence, les noms intermédiaires observables restent
+préservés ; lorsque les sorties utilisent le même nom et que les conditions du
+modèle le permettent, seule la sortie finale est restituée.
+
+Ces programmes utilisent les hooks `queryPointwiseFusionCapability()`,
+`pointwiseFusionForward()` et `pointwiseFusionBackward()` d’`AbstractRuntime`.
+Les détails device et les limites de validation figurent dans
+[Runtimes GPU](21-GPU-Runtimes.md#fusion-native-des-chaînes-pointwise).
+
+### Sélection d’une fusion
+
+`FusionCalibration` compare la chaîne ordinaire routée aux candidats natifs :
+
+1. Une exécution de préparation précède cinq mesures ; la médiane est retenue.
+2. Les résultats doivent être finis, de même forme et **bit à bit identiques**
+   à ceux de la chaîne ordinaire de référence.
+3. Le meilleur candidat fusionné doit satisfaire
+   `fused_seconds < unfused_seconds * 0.98`.
+4. Si la chaîne ordinaire est plus rapide, si la parité échoue ou si la mesure
+   est refusée, le parcours ordinaire reste disponible.
+
+La référence de fusion est la chaîne routée, qui peut elle-même sélectionner
+plusieurs backends. Une comparaison numérique tolérante avec le CPU dans un
+test GPU direct ne remplace pas ce contrôle exact de sélection.
+
+## 3) Calibration des runtimes
+
+`ExecutionCalibration::rank()` classe les runtimes dont la capacité pour
+l’opération réelle est `Native` ou `NativeOptimized`. `HostFallback` ne prouve
+pas une exécution GPU et n’est pas un candidat natif.
+
+La comparaison peut porter sur plusieurs backends, mais aussi sur plusieurs
+configurations d’un seul CPU : nombres de workers OpenMP et, lorsque disponible,
+algorithme de convolution pointwise. Un candidat unique sans choix d’exécution
+supplémentaire n’est pas rejoué pour une mesure inutile. Sans choix mesuré, le
+chemin CPU de référence est sériel ; le scope CPU sélectionné ne fuit pas vers
+l’opération suivante et les équipes OpenMP imbriquées sont évitées.
+
+Chaque probe reçoit une copie jetable du layer pour isoler les gradients du
+modèle. Une préparation précède cinq mesures. La durée mesurée inclut le calcul
+et les transferts/synchronisations nécessaires au retour hôte. Les choix CPU
+sont comparés exactement ; les autres backends utilisent le contrôle numérique
+prévu par cette calibration. NMS conserve une comparaison exacte de ses indices.
+Les opérations aléatoires ou à état non rejouable ne sont pas mesurées de cette
+manière.
+
+Le budget provient de la mémoire disponible et de `MemoryGuard`, éventuellement
+plafonné par `MIMIR_PLANNER_CALIBRATION_MAX_BYTES`. Il n’existe plus de plafond
+fixe implicite de 64 Mio. Si la mémoire disponible ne peut pas être établie,
+un budget explicite ou un `MemoryGuard` est nécessaire. Une mesure refusée
+donne priorité à la référence CPU sérielle si elle est éligible ; ce choix
+n’est pas présenté comme un résultat de performance mesuré.
+
+La calibration runtime est indépendante du mode du graphe :
+`MIMIR_ENABLE_PLANNER=0`, `MIMIR_PLANNER_MODE=legacy` ou
+`MIMIR_PLANNER_COST_MODEL=0` ne désactivent pas les mesures de dispatch.
+`MIMIR_RUNTIME_AUTOTUNE=0` est le réglage prévu pour les désactiver.
+
+## 4) Cache et exécution à chaud
+
+Les clés tiennent compte des formes, modes forward/backward et
+entraînement/inférence, dtype, paramètres pertinents de l’opération,
+génération de routage, runtimes/configurations disponibles et contexte OpenMP.
+Les clés de fusion incluent aussi la rétention des intermédiaires et les
+configurations de workers candidates. Le cache de calibration est local au
+thread, borné à 2 048 entrées, avec un intervalle de rafraîchissement de
+1 024 utilisations par décision.
+
+Sur un hit de fusion, `FusionCalibration::lookup()` utilise les métadonnées des
+candidats sans construire leurs callbacks de mesure. Les diagnostics inchangés
+ne sont pas recopiés à chaque hit. Les routes classées sont utilisées directement
+pendant le dispatch et le contrôle des entrées finies emploie le chemin SIMD
+lorsqu’il est disponible.
+
+Un échec de kernel invalide sa décision. La recalibration ou l’invalidation
+rafraîchit également les diagnostics des autres layers partageant la même clé.
+Vider les profils d’affichage ne supprime pas les décisions réutilisables : les
+profils sont republiés au prochain hit.
+
+Ces optimisations réduisent le coût des appels déjà calibrés. Elles ne
+suppriment pas le coût du premier appel ni ne garantissent un gain global sur
+tous les modèles, tailles ou backends.
+
+## 5) Configuration et lancement
+
+Le moteur choisit `cost` si `MIMIR_PLANNER_MODE` est absent et si le modèle de
+coût est actif. `run_mimir.sh` fournit par défaut `static`, active la fusion et
+la réutilisation de buffers, laisse l’autotuning actif et fixe
+`MIMIR_PLANNER_COST_MODEL=0`. Il faut donc conserver le lanceur et son
+environnement lors des comparaisons.
+
+`MIMIR_PLANNER_FUSION` est le nom prioritaire ; `MIMIR_ENABLE_FUSION` reste son
+alias de compatibilité. `MIMIR_ENABLE_FUSION_TRAIN=0` désactive la fusion pendant
+l’entraînement. Les valeurs détaillées du moteur et du lanceur figurent dans
+[Variables d’environnement](../03-API-Reference/22-Environment-Variables.md#4-planner-et-fusion).
 
 ## Déboguer efficacement le planner
 
-Checklist terrain :
+- Utiliser `MIMIR_ACCEL_VERBOSE=1` pour les décisions et
+  `MIMIR_RUNTIME_TRACE=1` pour le backend et le chemin d’exécution réels.
+- Lire `graph_fused` et `kernel_fused` séparément. Dans le snapshot Viz,
+  `fusion_forward_decision` et `fusion_backward_decision` exposent le runtime,
+  la raison, les alternatives mesurées et leurs contrôles `bit_exact`.
+- Distinguer `cost_basis=measured_host_roundtrip` d’un coût estimé.
+- Comparer fusion active/inactive avec `MIMIR_PLANNER_FUSION`, en gardant
+  `MIMIR_RUNTIME_AUTOTUNE` et les autres réglages identiques.
+- Utiliser `MIMIR_PLANNER_STDOUT=1` pour afficher le dump dans le terminal ;
+  `MIMIR_PLANNER_JSON` désigne le fichier JSON écrit lors d’un dump.
 
-1. Activer `MIMIR_PLANNER_DUMP=1`.
-2. Vérifier que le nombre d'ops planifiées correspond au graphe.
-3. Vérifier que les `skip_layer` correspondent bien aux consommateurs fusionnés.
-4. Refaire un run en `MIMIR_ENABLE_FUSION=0` pour comparer le comportement.
-5. En cas d'écart training/inférence, vérifier `MIMIR_ENABLE_FUSION_TRAIN`.
+## Validation
 
-Erreurs fréquentes :
+Les commandes suivantes exécutent les tests ciblés dans un build existant
+configuré avec `MIMIR_ENABLE_TESTS=ON` et `BUILD_TESTING=ON` :
 
-1. Oublier qu'un changement de mode `training` invalide le cache plan.
-2. Interpréter un `skip_layer` comme un layer perdu alors qu'il est exécuté dans la fusion.
-3. Ajouter une nouvelle fusion sans mettre à jour la logique de consommation d'output.
+```bash
+cmake --build build --target RuntimeTest.Fusion PlannerTest.FusionCalibration FrameworkTest.ExecutionCalibration PlannerTest.ExecutionPolicy -j4
+ctest --test-dir build --output-on-failure -R '^(RuntimeTest.Fusion|RuntimeTest.VAEConvTrainingFusion|PlannerTest.FusionCalibration|FrameworkTest.ExecutionCalibration|PlannerTest.ExecutionPolicy)$'
+```
+
+Ces tests passent dans le checkout validé le 28 octobre 2026. Ils couvrent les
+121 couples d’activations CPU, les chaînes de longueur 1 à 7, les sorties et
+gradients, les branches VAEConv, l’isolation des probes, la parité stricte,
+les clés de cache, les profils partagés et la recalibration périodique.
+Les validations GPU sont détaillées dans [Runtimes GPU](21-GPU-Runtimes.md#validation-de-la-fusion-au-28-octobre-2026).
 
 ## Étapes suivantes
 
-- [Page précédente : Internals : GPU Runtimes — CUDA & ROCm (C++)](21-GPU-Runtimes.md)
+- [Runtimes GPU](21-GPU-Runtimes.md)
+- [Développer un runtime](../07-Devs/04-Runtime-Development.md)
 - [Index de la documentation](../00-INDEX.md)
-- [Revenir à la documentation](../00-INDEX.md)
-
-
-## Calibration des runtimes en 3.6.0
-
-`src/Planning/ExecutionCalibration.cpp` classe les runtimes natifs éligibles
-pour une opération forward ou backward rejouable. Le probe utilise une copie
-jetable du layer : les gradients et poids du modèle ne sont pas mis à jour par
-les essais. Une passe de préparation précède cinq mesures ; leur médiane inclut
-l’exécution et les transferts nécessaires au retour hôte. Une comparaison
-numérique élimine les candidats non conformes à la référence disponible.
-
-La calibration exige au moins deux candidats natifs. Les opérations aléatoires
-ou à état non explicitement rejouable gardent leur route normale. Le budget
-estimé est limité à 64 Mio par défaut et respecte le MemoryGuard ; dépasser ce
-budget conserve la route existante. Les clés de cache tiennent compte des
-formes, paramètres, modes, runtimes et configurations. La route est réévaluée
-après 1 024 utilisations et invalidée après un échec de dispatch.
-
-Le plan distingue `cost_basis=measured_host_roundtrip` d’un coût estimé. Il ne
-faut pas interpréter une estimation comme une mesure GPU. Le mode cost est le
-défaut ; `MIMIR_PLANNER_AUTOTUNE=0` désactive la calibration et
-`MIMIR_PLANNER_MODE=legacy` permet de comparer le parcours historique.
-
-Voir les [variables de configuration](../03-API-Reference/22-Environment-Variables.md)
-et la [validation de version](../06-Contributing/08-Release-Validation.md).

@@ -265,6 +265,11 @@ struct VisualizerEventTestAccess {
         TASSERT_TRUE(v.show_feature_probe_);
         TASSERT_TRUE(v.last_picker_text_.find("Section similaire : 256 cellules")!=std::string::npos);
         TASSERT_TRUE(v.last_picker_text_.find("Canal 0 : 1")!=std::string::npos);
+        TASSERT_TRUE(v.show_picker_tooltip_ && !v.last_picker_text_.empty());
+        key(vizgfx::Keyboard::Key::I);v.renderZoomOverlay();
+        TASSERT_TRUE(!v.show_picker_tooltip_ && v.last_picker_text_.empty());
+        key(vizgfx::Keyboard::Key::I);v.renderZoomOverlay();
+        TASSERT_TRUE(v.show_picker_tooltip_ && !v.last_picker_text_.empty());
         TASSERT_TRUE(v.last_block_frames_[0].tensor_values==feature.tensor_values);
         const auto section=FeatureProbe::analyze(feature.tensor_values,32,16,2,8,8);
         TASSERT_TRUE(section.cells.size()==256 && section.channels[0].first==0);
@@ -352,7 +357,11 @@ struct VisualizerEventTestAccess {
             std::numeric_limits<float>::infinity(),-2.f,4.f},{0,0,1,2,3,4},3,2,1,-20,-20,20,20);
         TASSERT_TRUE(exceptional.values.size()==5 && exceptional.finite==3 && exceptional.zeros==1);
         TASSERT_TRUE(exceptional.nan==1 && exceptional.inf==1);
+        TASSERT_TRUE(exceptional.positive==1 && exceptional.negative==1);
         TASSERT_NEAR(exceptional.mean,2.0/3.0,1e-6f);
+        const auto strongest=TensorSelection::strongest(exceptional,2);
+        TASSERT_TRUE(strongest.size()==2 && strongest[0].first==4 && strongest[0].second==4.f);
+        TASSERT_TRUE(strongest[1].first==3 && strongest[1].second==-2.f);
         TASSERT_TRUE(TensorSelection::analyze({}, {},0,0,0,0,0,1,1).values.empty());
         MetricsRecord old{};old.loss=3.5f;MetricsRecord next{};next.loss=0.25f;
         v.setMetricsHistory({old,next});TASSERT_TRUE(v.full_loss_history.size()==2 && v.loss_history.size()==2);
@@ -545,6 +554,22 @@ struct VisualizerEventTestAccess {
         v.configureScript({{"controls",{{{"id","under"},{"x",10},{"y",10}},{{"id","above"},{"x",10},{"y",10}}}}});
         click(vizgfx::FloatRect{{10,10},{150,36}});
         const auto log=v.pollScriptEvents();TASSERT_TRUE(!log.empty() && log.back().value("id",std::string())=="above");
+        // Typing a prompt must not open the global graph/config/help views.
+        v.configureScript({{"events",true},{"capture_keys",true}});
+        key(vizgfx::Keyboard::Key::N);
+        key(vizgfx::Keyboard::Key::C);
+        key(vizgfx::Keyboard::Key::H);
+        events->events.emplace_back(vizgfx::Event::TextEntered{233});
+        v.processEvents();
+        TASSERT_TRUE(!v.show_model_graph_ && !v.config_editor_.visible && !v.show_help_overlay_);
+        int captured_keys=0,captured_text=0;
+        for(const auto& event:v.pollScriptEvents()) {
+            captured_keys+=event.value("type",std::string())=="key";
+            captured_text+=event.value("type",std::string())=="text" && event.value("unicode",0)==233;
+        }
+        TASSERT_TRUE(captured_keys==3 && captured_text==1);
+        v.configureScript({{"events",false},{"capture_keys",false}});
+        v.processEvents();v.pollScriptEvents();
         // Help keeps fixed readable text, adapts columns and captures its input.
         key(vizgfx::Keyboard::Key::H);TASSERT_TRUE(v.show_help_overlay_);
         v.renderHelpOverlay();TASSERT_TRUE(v.help_columns_==2 && !v.help_row_rects_.empty());
@@ -589,6 +614,8 @@ struct VisualizerEventTestAccess {
         second["depth"]=1;second["inputs"]=json::array({"y"});second["output"]="z";
         graph_sample["nodes"].push_back(second);
         graph_sample["edges"].push_back(json{{"from",0},{"to",1},{"tensor","y"}});
+        graph_sample["fusion_groups"]=json::array({json{{"id",0},{"producer",0},
+            {"layers",json::array({0,1})},{"children",json::array()},{"parent",nullptr}}});
         graph_config->publishModelGraph(std::move(graph_sample));
         key(vizgfx::Keyboard::Key::N);
         TASSERT_TRUE(v.show_model_graph_ && graph_config->modelGraphRequested());
@@ -603,11 +630,16 @@ struct VisualizerEventTestAccess {
         v.model_graph_png_requested_=false;events->display();
         TASSERT_TRUE(v.saveModelGraphPng());
         const auto graph_layout=Mimir::Viz::modelGraphTree(*graph_config->modelGraph());
+        TASSERT_TRUE(graph_layout.fusion_blocks.size()==1);
         vizgfx::Image graph_image;
         TASSERT_TRUE(graph_image.loadFromFile(v.last_model_graph_path_));
         TASSERT_TRUE(graph_image.getSize().x>=graph_layout.width()+32.f);
         TASSERT_TRUE(graph_image.getSize().y>=graph_layout.height()+112.f);
         TASSERT_TRUE(graph_image.getSize().x>events->getSize().x);
+        const auto fusion_block=graph_layout.fusion_blocks.front();
+        const auto fusion_pixel=graph_image.getPixel({unsigned(fusion_block.x+4.f),
+            unsigned(fusion_block.y+104.f)});
+        TASSERT_TRUE(fusion_pixel.r!=16 || fusion_pixel.g!=23 || fusion_pixel.b!=32);
         json large_graph=*graph_config->modelGraph();
         large_graph["nodes"]=json::array();
         large_graph["edges"]=json::array();

@@ -433,6 +433,31 @@ if(ENABLE_ROCM)
 
     if(HIP_INCLUDE_DIR AND HIP_LIBRARY AND ROCBLAS_INCLUDE_DIR AND ROCBLAS_LIBRARY)
         message(STATUS "ROCm found: HIP=${HIP_LIBRARY} rocblas=${ROCBLAS_LIBRARY}")
+        # Native kernels require a HIP compiler; ordinary C++ silently leaves
+        # __HIPCC__ paths disabled even when the HIP libraries were found.
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.21")
+            include(CheckLanguage)
+            check_language(HIP)
+            if(CMAKE_HIP_COMPILER)
+                enable_language(HIP)
+                set(CMAKE_HIP_STANDARD 17)
+                set(CMAKE_HIP_STANDARD_REQUIRED ON)
+                set_source_files_properties(src/runtimes/rocm/RocmRuntime.cpp PROPERTIES LANGUAGE HIP)
+                if(ENABLE_SIMD)
+                    foreach(flag AVX2 FMA F16C BMI2)
+                        if(COMPILER_SUPPORTS_${flag})
+                            string(TOLOWER "${flag}" hip_simd_flag)
+                            add_compile_options("$<$<COMPILE_LANGUAGE:HIP>:-m${hip_simd_flag}>")
+                        endif()
+                    endforeach()
+                endif()
+            else()
+                message(WARNING "HIP compiler unavailable: native ROCm pointwise fusion disabled")
+            endif()
+        else()
+            message(WARNING "CMake >= 3.21 is required to compile native ROCm kernels with the HIP language")
+        endif()
+
     else()
         message(WARNING "ROCm/HIP not found - ROCm compute disabled")
         set(ENABLE_ROCM OFF)
@@ -483,7 +508,9 @@ set(MIMIR_SOURCES
     src/Helpers.cpp
     src/stb_image_impl.cpp
     src/runtimes/portable/PortableRuntime.cpp
+    src/Planning/ExecutionPolicy.cpp
     src/Planning/ExecutionCalibration.cpp
+    src/Planning/FusionCalibration.cpp
     src/runtimes/portable/PortableDevice.cpp
     src/runtimes/AbstractRuntime.cpp
     src/runtimes/Autograd.cpp
@@ -501,6 +528,7 @@ set(MIMIR_SOURCES
     src/Models/NLP/HFCLIPTextEncoder2Model.cpp
     src/Models/Vision/HFVaeDecoderModel.cpp
     src/Models/NLP/TransformerModel.cpp
+    src/Models/NLP/T5Model.cpp
     src/Models/NLP/CausalLMModel.cpp
     src/Models/NLP/VAETextModel.cpp
     src/Models/Vision/ViTModel.cpp

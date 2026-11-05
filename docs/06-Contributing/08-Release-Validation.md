@@ -28,8 +28,14 @@ elles sont déjà installées.
   --enable ENABLE_SCRIPTING_CSHARP \
   --disable ENABLE_VULKAN --disable ENABLE_OPENCL
 cmake --build build_ci_linux --parallel 2
-ctest --test-dir build_ci_linux --output-on-failure --timeout 120
+ctest --test-dir build_ci_linux --output-on-failure --timeout 120 \
+  -LE 'TPU|COLAB|JAX'
 ```
+
+Le workflow exclut les labels `TPU`, `COLAB` et `JAX` du job CTest Linux
+général : leurs dépendances et plateformes optionnelles sont validées
+séparément. Pour les exécuter localement, configurer explicitement leur
+environnement et sélectionner ces labels sans `-LE`.
 
 ### Windows depuis Linux
 

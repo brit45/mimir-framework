@@ -5,6 +5,7 @@
 #include "Models/NLP/HFCLIPTextEncoder2Model.hpp"
 #include "Models/NLP/TransformerModel.hpp"
 #include "Models/NLP/CausalLMModel.hpp"
+#include "Models/NLP/T5Model.hpp"
 #include "Models/NLP/VAETextModel.hpp"
 #include "Models/External/ExternalSafeTensorsModel.hpp"
 #include "Models/Vision/HFVaeDecoderModel.hpp"
@@ -245,6 +246,26 @@ static json transformerDefaultConfigJson() {
     return json{{"seq_len", d.seq_len}, {"d_model", d.d_model}, {"vocab_size", d.vocab_size}, {"padding_idx", d.padding_idx}, {"num_layers", d.num_layers}, {"num_heads", d.num_heads}, {"mlp_hidden", d.mlp_hidden}, {"output_dim", d.output_dim}, {"causal", d.causal}};
 }
 
+static T5Model::Config t5CfgFromJson(const json& cfg) {
+    T5Model::Config out;
+    out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
+    out.seq_len = jget<int>(cfg, "seq_len", out.seq_len);
+    out.d_model = jget<int>(cfg, "d_model", out.d_model);
+    out.num_layers = jget<int>(cfg, "num_layers", out.num_layers);
+    out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
+    out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+    out.padding_idx = jget<int>(cfg, "padding_idx", out.padding_idx);
+    out.relative_attention_num_buckets = jget<int>(cfg, "relative_attention_num_buckets", out.relative_attention_num_buckets);
+    out.relative_attention_max_distance = jget<int>(cfg, "relative_attention_max_distance", out.relative_attention_max_distance);
+    out.norm_eps = jget<float>(cfg, "norm_eps", out.norm_eps);
+    out.encoder_only = jget<bool>(cfg, "encoder_only", out.encoder_only);
+    return out;
+}
+static json t5DefaultConfigJson() {
+    T5Model::Config d;
+    return json{{"vocab_size", d.vocab_size},{"seq_len", d.seq_len},{"d_model", d.d_model},{"num_layers", d.num_layers},{"num_heads", d.num_heads},{"mlp_hidden", d.mlp_hidden},{"padding_idx", d.padding_idx},{"relative_attention_num_buckets", d.relative_attention_num_buckets},{"relative_attention_max_distance", d.relative_attention_max_distance},{"norm_eps", d.norm_eps},{"encoder_only", d.encoder_only}};
+}
+
 static CausalLMModel::Config causalLMCfgFromJson(const json& cfg) {
     CausalLMModel::Config out;
     out.vocab_size = jget<int>(cfg, "vocab_size", out.vocab_size);
@@ -286,6 +307,8 @@ static VAETextModel::Config vaeTextCfgFromJson(const json& cfg) {
     out.latent_tokens = jget<int>(cfg, "latent_tokens", out.latent_tokens);
     out.proj_dim = jget<int>(cfg, "proj_dim", out.proj_dim);
     out.decoder_causal = jget<bool>(cfg, "decoder_causal", out.decoder_causal);
+    out.contextual_encoding = jget<bool>(cfg, "contextual_encoding", out.contextual_encoding);
+    out.encoder_causal = jget<bool>(cfg, "encoder_causal", out.encoder_causal);
     out.tokenizer_integrated = jget<bool>(cfg, "tokenizer_integrated", out.tokenizer_integrated);
     out.enable_conditional_encoder = jget<bool>(cfg, "enable_conditional_encoder", out.enable_conditional_encoder);
     out.enable_context_heads = jget<bool>(cfg, "enable_context_heads", out.enable_context_heads);
@@ -304,7 +327,7 @@ static json vaeTextDefaultConfigJson() {
     const int sem_dim = d.enable_context_heads ? std::max(1, d.context_semantic_dim) : 0;
     const int them_dim = d.enable_context_heads ? std::max(1, d.context_thematic_dim) : 0;
     const int dialog_dim = d.enable_context_heads ? std::max(1, d.context_dialog_dim) : 0;
-    const int output_dim = logits_dim + 2 * latent_dim + 2 * std::max(1, d.proj_dim) + sem_dim + them_dim + dialog_dim;
+    const int output_dim = logits_dim + 2 * latent_dim + 2 * std::max(1, d.proj_dim) + sem_dim + them_dim + dialog_dim + d.vocab_size;
     return json{
         {"vocab_size", d.vocab_size},
         {"padding_idx", d.padding_idx},
@@ -317,6 +340,9 @@ static json vaeTextDefaultConfigJson() {
         {"latent_dim", latent_dim},
         {"proj_dim", d.proj_dim},
         {"decoder_causal", d.decoder_causal},
+        {"contextual_encoding", true}, {"encoder_causal", false},
+        {"text_context_version", 2}, {"content_dim", d.vocab_size},
+        {"content_weight", 0.1}, {"text_mask_ratio", 0.15},
         {"tokenizer_integrated", d.tokenizer_integrated},
         {"enable_conditional_encoder", d.enable_conditional_encoder},
         {"enable_context_heads", d.enable_context_heads},
@@ -745,6 +771,8 @@ static LumenLatentDiffusionModel::Config lumenCfgFromJson(const json& cfg) {
     out.vae_resnet_max_tokens = jget<int>(cfg, "vae_resnet_max_tokens", out.vae_resnet_max_tokens);
     out.vae_scale = jget<float>(cfg, "vae_scale", out.vae_scale);
     out.vae_shift = jget<float>(cfg, "vae_shift", out.vae_shift);
+    out.text_t5_checkpoint = jget<std::string>(cfg, "text_t5_checkpoint", out.text_t5_checkpoint);
+    out.text_vae_checkpoint = jget<std::string>(cfg, "text_vae_checkpoint", out.text_vae_checkpoint);
     out.vae_checkpoint = jget<std::string>(cfg, "vae_checkpoint", out.vae_checkpoint);
     out.patch_size = jget<int>(cfg, "patch_size", out.patch_size);
     out.hidden_size = jget<int>(cfg, "hidden_size", out.hidden_size);
@@ -785,7 +813,7 @@ static json lumenDefaultConfigJson() {
         {"vae_attn_max_tokens", d.vae_attn_max_tokens},
         {"vae_resnet_max_tokens", d.vae_resnet_max_tokens},
         {"vae_scale", d.vae_scale}, {"vae_shift", d.vae_shift},
-        {"vae_checkpoint", d.vae_checkpoint}, {"patch_size", d.patch_size},
+        {"text_t5_checkpoint", d.text_t5_checkpoint}, {"text_vae_checkpoint", d.text_vae_checkpoint}, {"vae_checkpoint", d.vae_checkpoint}, {"patch_size", d.patch_size},
         {"hidden_size", d.hidden_size}, {"depth", d.depth},
         {"mlp_ratio", d.mlp_ratio}, {"vocab_size", d.vocab_size},
         {"text_seq_len", d.text_seq_len}, {"dynamic_text_seq_len", d.dynamic_text_seq_len}, {"text_layers", d.text_layers},
@@ -959,6 +987,14 @@ std::shared_ptr<Model> Registry::create(const std::string& name, const json& con
         mergeInto(cfg, config);
     }
 
+    // A serialized legacy VAEText must keep its original topology.
+    if (key == "vae_text" && config.is_object() && config.value("type", std::string()) == "vae_text" &&
+        !config.contains("text_context_version")) {
+        cfg["contextual_encoding"] = false;
+        cfg["text_mask_ratio"] = 0.0;
+        cfg["content_weight"] = 0.0;
+    }
+
     // Standardize metadata for serialization/rebuild.
     if (!cfg.is_object()) cfg = json::object();
     cfg["type"] = key;
@@ -1018,6 +1054,11 @@ void Registry::ensureBuiltinsRegistered() const {
                 },
             }
         );
+
+        entries_.emplace("t5", Entry{"t5", "Native T5 encoder and tied denoising head", t5DefaultConfigJson(),
+            [](const json& cfg) -> std::shared_ptr<Model> {
+                auto m = std::make_shared<T5Model>(); m->buildFromConfig(t5CfgFromJson(cfg)); return m;
+            }});
 
         entries_.emplace(
             "causal_lm",

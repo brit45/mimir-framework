@@ -66,6 +66,20 @@ int main() {
         })}, {"edges",json::array({{{"from","hand"},{"to","head"},{"label","custom joint"}}})}
     };
     TASSERT_TRUE(datasetAnnotationCaption(a,"photo.ppm")==primary);
+    json mask_document=a;
+    mask_document["entities"].push_back({{"id","decor_floor"},{"phrase","sol en pierre"},{"role","background"},
+        {"mask",{{"type","polygon"},{"points",json::array({{0.,0.8},{1.,0.8},{1.,1.},{0.,1.}})}}}});
+    const auto parsed_mask=parseDatasetAnnotation(mask_document,"photo.ppm");
+    TASSERT_TRUE(parsed_mask["entities"][2]["bbox"]==json::array({0.,0.8,1.,1.}));
+    TASSERT_TRUE(parsed_mask["captions"]["primary"]==primary);
+    TASSERT_TRUE(BBoxSupervision::groundedPrompt(primary,&parsed_mask).find("mask polygon vertices 4")!=std::string::npos);
+    for (int kind=0;kind<3;++kind) {
+        json invalid_mask=mask_document;
+        if(kind==0)invalid_mask["entities"][2]["mask"]["type"]="bitmap";
+        if(kind==1)invalid_mask["entities"][2]["mask"]["points"][1]={1.1,0.8};
+        if(kind==2)invalid_mask["entities"][2]["mask"]["points"]={{0.,0.5},{0.5,0.5},{1.,0.5}};
+        TASSERT_TRUE(rejects(invalid_mask,"photo.ppm"));
+    }
     const auto skeleton_prompt=BBoxSupervision::groundedPrompt(primary,&a);
     TASSERT_TRUE(skeleton_prompt.find("head at 0.200,0.300 linked to une fenêtre")!=std::string::npos);
     TASSERT_TRUE(skeleton_prompt.find("custom joint connected to head")!=std::string::npos);
@@ -526,6 +540,35 @@ int main() {
     TASSERT_TRUE(coco_old.size()==1 && coco_old[0].annotation_file.empty() && coco_old[0].loadText());
     TASSERT_TRUE(json::parse(*coco_old[0].text)["text"]=="Historical COCO caption.");
     coco_old[0].unload();
+
+    const auto mask_root=root/"mask_loader";
+    fs::create_directories(mask_root);
+    json mask_sidecar={{"image","scene.ppm"},{"captions",{{"primary","Personne sur le sol."}}},
+        {"entities",json::array({
+            {{"id","person"},{"phrase","personne"},{"role","primary_subject"},{"bbox",{0.2,0.1,0.5,0.8}}},
+            {{"id","floor"},{"phrase","sol en pierre"},{"role","background"},
+             {"mask",{{"type","polygon"},{"points",json::array({{0.,0.75},{1.,0.75},{1.,1.},{0.,1.}})}}}}
+        })},{"attributes",json::array()},{"relations",json::array({{{"subject","person"},{"predicate","on"},{"object","floor"}}})}};
+    json rich_sidecar=mask_sidecar;
+    rich_sidecar["entities"][0]["mask"]={{"type","polygon"},{"points",json::array({{0.2,0.1},{0.5,0.1},{0.35,0.8}})}};
+    rich_sidecar["entities"][0]["track"]={{"id","chapter-asha"},{"name","Asha"}};
+    rich_sidecar["entities"][0]["ocr"]={{"text","こんにちは"},{"translation","Bonjour"},{"source_language","ja"},{"target_language","fr"},{"tags",json::array({"dialogue","greeting"})}};
+    const auto rich_parsed=parseDatasetAnnotation(rich_sidecar,"scene.ppm");
+    TASSERT_TRUE(rich_parsed["entities"][0]["track"]["id"]=="chapter-asha");
+    TASSERT_TRUE(rich_parsed["entities"][0]["ocr"]["translation"]=="Bonjour");
+    auto invalid_track=rich_sidecar;invalid_track["entities"][0].erase("mask");
+    bool rejected_track=false;try{(void)parseDatasetAnnotation(invalid_track,"scene.ppm");}catch(const std::runtime_error&){rejected_track=true;}
+    TASSERT_TRUE(rejected_track);
+    auto invalid_ocr=rich_sidecar;invalid_ocr["entities"][0]["ocr"]["tags"]="dialogue";
+    bool rejected_ocr=false;try{(void)parseDatasetAnnotation(invalid_ocr,"scene.ppm");}catch(const std::runtime_error&){rejected_ocr=true;}
+    TASSERT_TRUE(rejected_ocr);
+    writeImage(mask_root/"scene.ppm");writeText(mask_root/"scene.json",mask_sidecar.dump(2));
+    auto mask_items=loadDataset(mask_root.string(),8,4,2);
+    TASSERT_TRUE(mask_items.size()==1 && mask_items[0].loadText());
+    TASSERT_TRUE(mask_items[0].annotation && (*mask_items[0].annotation)["entities"][1]["bbox"]==json::array({0.,0.75,1.,1.}));
+    const auto mask_item_weights=BBoxSupervision::makeWeights(&*mask_items[0].annotation,8,4,1,BBoxSupervision::Layout::HWC);
+    TASSERT_TRUE(mask_item_weights.bbox_count==2 && mask_item_weights.relation_count==1);
+    mask_items[0].unload();
 
     // Release context-owned tensors before static tensor registries are destroyed.
     LuaContext::getInstance().currentModel.reset();

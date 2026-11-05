@@ -1297,8 +1297,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
         // -----------------------------------------------------------------
         // Resume epoch offset (UX): si on reprend depuis checkpoint_dir/epoch_XXXX,
-        // afficher/nommer les epochs à partir de l'epoch précédente.
-        // Exemple: reprise à 3 => UI affiche 3 (pas 1) et autosave écrit epoch_0003+.
+        // afficher/nommer les epochs après la dernière epoch terminée.
+        // Exemple: reprise après 3 => UI affiche 4 et autosave écrit epoch_0004+.
         // Active uniquement si un optimizer a été chargé via Serialization.load().
         // -----------------------------------------------------------------
         int epoch_offset = 0;          // Ajouté à epoch_1based (boucle) pour affichage + checkpoints
@@ -1322,10 +1322,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
                 }
                 if (best > 0) {
-                    epoch_offset = best - 1;
+                    epoch_offset = best;
                 }
             } catch (...) {
                 // best-effort: pas de resume epoch détectée => offset=0
+            }
+        }
+        if (resume_optimizer_loaded) {
+            const auto& config = ctx.currentModel->modelConfig;
+            if (config.contains("training_state") && config["training_state"].is_object()) {
+                epoch_offset = config["training_state"].value("completed_epochs", epoch_offset);
             }
         }
         const int total_epochs_display = epoch_offset + epochs;
@@ -1358,6 +1364,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 Optimizer opt_snapshot = opt;
                 ctx.currentModel->setSerializedOptimizer(std::move(opt_snapshot));
             }
+
+            // Persist the loop position with the weights, rather than guessing
+            // it from whichever epoch folders happen to exist on the next run.
+            auto& loop = ctx.currentModel->modelConfig["training_state"];
+            if (!loop.is_object()) loop = json::object();
+            loop["completed_epochs"] = suffix.empty() ? epoch_abs : epoch_abs - 1;
+            loop["global_step"] = opt.step;
 
             SaveOptions so;
             so.format = CheckpointFormat::RawFolder;
@@ -1396,7 +1409,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             return t;
         };
 
-        int global_step = 0;
+        int global_step = resume_optimizer_loaded ? opt.step : 0;
 
         // -----------------------------------------------------------------
         // Live tuning via Viz (thread UI -> training thread)
@@ -1672,6 +1685,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                        " kl=" + std::to_string(train_metric(st, "kl")) +
                        " beta_eff=" + std::to_string(train_metric(st, "kl_beta_effective")) +
                        " grad_norm=" + std::to_string(st.grad_norm));
+            if (st.metrics.count("content_ce")) {
+                ctx.addLog("[vae_text/contexte] contenu_ce=" + std::to_string(train_metric(st, "content_ce")) +
+                           " tokens_masqués=" + std::to_string(train_metric(st, "masked_tokens")));
+            }
         };
 
         auto monitor_step = [&](int epoch_1based, int batch_1based, int total_batches, const Model::TrainStepResult& st) {
@@ -2269,7 +2286,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 #endif
 
             const int use_n = (int)train_indices.size();
-            opt.total_steps = std::max(1, epochs * std::max(1, use_n));
+            if (!resume_optimizer_loaded || opt.total_steps <= 0) opt.total_steps = std::max(1, epochs * std::max(1, use_n));
 
             const size_t expected_u8 = (size_t)image_w * (size_t)image_h * (size_t)image_c;
             std::vector<float> x;
@@ -3095,7 +3112,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             if (max_items > 0 && (int)indices.size() > max_items) indices.resize((size_t)max_items);
 
             const int use_n = (int)indices.size();
-            opt.total_steps = std::max(1, epochs * std::max(1, use_n));
+            if (!resume_optimizer_loaded || opt.total_steps <= 0) opt.total_steps = std::max(1, epochs * std::max(1, use_n));
 
             const size_t expected_u8 = (size_t)image_w * (size_t)image_h * (size_t)image_c;
             std::vector<float> x;
@@ -3612,7 +3629,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 return stats;
             };
 
-            opt.total_steps = std::max(1, epochs * std::max(1, (int)samples.size()));
+            if (!resume_optimizer_loaded || opt.total_steps <= 0) opt.total_steps = std::max(1, epochs * std::max(1, (int)samples.size()));
             double running_loss = 0.0;
             int running_steps = 0;
             bool stopped_by_ui = false;
@@ -4018,7 +4035,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             const int use_n = (int)train_indices.size();
 
-            opt.total_steps = std::max(1, epochs * std::max(1, use_n));
+            if (!resume_optimizer_loaded || opt.total_steps <= 0) opt.total_steps = std::max(1, epochs * std::max(1, use_n));
             const size_t expected_u8 = (size_t)image_w * (size_t)image_h * (size_t)image_c;
             std::vector<float> x_chw;
             x_chw.resize(expected_u8);
@@ -4519,7 +4536,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             if (max_items > 0 && (int)indices.size() > max_items) indices.resize((size_t)max_items);
 
             const int use_n = (int)indices.size();
-            opt.total_steps = std::max(1, epochs * use_n);
+            if (!resume_optimizer_loaded || opt.total_steps <= 0) opt.total_steps = std::max(1, epochs * use_n);
 
             int seq_len = 256;
             int pad_id = ctx.currentTokenizer->getPadId();
@@ -4531,6 +4548,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             std::vector<float> empty_x;
 
+            const int text_viz_every_steps = std::max(1, ctx.modelConfig.value("viz_taps_every_steps",
+                ctx.modelConfig.value("viz_every_steps", log_every)));
+            bool text_viz_published = false;
             bool stopped_by_ui = false;
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(indices.begin(), indices.end(), rng);
@@ -4549,7 +4569,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                     std::vector<int> ids = ctx.currentTokenizer->tokenize(item.text.value());
                     if ((int)ids.size() < seq_len) ids.resize((size_t)seq_len, pad_id);
-                    else if ((int)ids.size() > seq_len) ids.resize((size_t)seq_len);
+                    else if ((int)ids.size() > seq_len) {
+                        if (ctx.modelConfig.value("natural_context_windows", true)) {
+                            std::uniform_int_distribution<size_t> offset(0, ids.size() - size_t(seq_len));
+                            const size_t begin = offset(rng);
+                            ids = std::vector<int>(ids.begin() + begin, ids.begin() + begin + seq_len);
+                        } else ids.resize((size_t)seq_len);
+                    }
 
                     poll_viz_live_params();
                     Model::TrainStepRequest request;
@@ -4573,6 +4599,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                     }
 
                     global_step += 1;
+                    if (viz_active && (!text_viz_published || global_step % text_viz_every_steps == 0)) {
+                        if (ctx.modelConfig.value("viz_taps_force_inference", false)) {
+                            (void)ctx.currentModel->forwardPassNamedView({}, {{"text_ids", ids}}, false);
+                        }
+                        const auto text = VizTextPayload::buildDatasetTextPayload(
+                            ctx.currentModel.get(), ctx.currentTokenizer.get(), item.text.value(), &ids, pad_id);
+                        ctx.asyncMonitor->setDatasetText(text.prompt, text.tags, text.tokens, text.encoding);
+                        _mimir_publish_viz_taps(ctx, false);
+                        text_viz_published = true;
+                    }
                     log_step(global_step, st, "[vae_text]");
                     monitor_step(epoch + 1, k + 1, use_n, st);
 

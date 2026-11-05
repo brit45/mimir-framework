@@ -31,6 +31,57 @@ int main() {
     CHECK(branch["nodes"][4]["depth"]==3 && branch["edges"].size()==4);
     auto empty=Mimir::Viz::modelGraphSnapshot({},nullptr,"en attente",false,false,false);
     CHECK(empty["nodes"].empty() && empty["edges"].empty());
+    // An existing fusion can be consumed by another fusion, recursively.
+    std::vector<Layer> nested;
+    nested.emplace_back("conv", "Conv2d", 0);
+    nested[0].activation=ActivationType::RELU;
+    nested[0].inputs={"input"}; nested[0].output="conv_out";
+    for(const char* type:{"Tanh","Identity","Sigmoid"}) {
+        const auto previous=nested.back().output;
+        nested.emplace_back(type,type,0);
+        nested.back().inputs={previous};nested.back().output=std::string(type)+"_out";
+    }
+    for(bool training:{false,true}) {
+        auto fused=Mimir::Planning::build_execution_plan_global(nested,training);
+        auto snapshot=Mimir::Viz::modelGraphSnapshot(nested,&fused,"static",training,true,false);
+        const auto& groups=snapshot["fusion_groups"];
+        CHECK(groups.size()==4);
+        CHECK(groups[0]["layers"]==nlohmann::json::array({0}));
+        CHECK(groups[0]["parent"]==1);
+        CHECK(groups[3]["parent"].is_null());
+        CHECK(groups[3]["children"]==nlohmann::json::array({2}));
+        CHECK(snapshot["nodes"][3]["fused_into"]==0);
+        CHECK(snapshot["nodes"][0]["graph_fused"]==true);
+        CHECK(snapshot["nodes"][0]["kernel_fused"]==false);
+        std::vector<size_t> visits(nested.size());
+        for(size_t id=0;id<groups.size();++id) {
+            for(const auto& member:groups[id]["layers"]) ++visits[member.get<size_t>()];
+            for(const auto& child:groups[id]["children"]) CHECK(child.get<size_t>()<id);
+        }
+        CHECK(visits==std::vector<size_t>(nested.size(),1));
+        auto disabled=Mimir::Planning::build_execution_plan_global(nested,training,
+            Mimir::Planning::PlannerMode::Static,false);
+        CHECK(disabled.fusion_groups.empty());
+    }
+    // A live side consumer prevents fusing across the shared tensor edge.
+    auto side=nested;
+    side.emplace_back("side","Identity",0);
+    side.back().inputs={"conv_out"};side.back().output="side_out";
+    auto side_plan=Mimir::Planning::build_execution_plan_global(side,true);
+    CHECK(side_plan.fuse_chain_next[0]==-1);
+
+    // Deep compositions store each layer once and avoid recursive stack growth.
+    std::vector<Layer> deep;
+    for(size_t i=0;i<512;++i) {
+        deep.emplace_back(std::to_string(i),"Identity",0);
+        deep.back().inputs={i?std::to_string(i-1):"input"};
+        deep.back().output=std::to_string(i);
+    }
+    auto deep_plan=Mimir::Planning::build_execution_plan_global(deep,true);
+    CHECK(deep_plan.fusion_groups.size()==511);
+    size_t direct_members=0;
+    for(const auto& group:deep_plan.fusion_groups) direct_members+=group.layers.size();
+    CHECK(direct_members==deep.size());
     LiveModelConfig config;config.publishModelGraph(graph);auto old=config.modelGraph();
     config.publishModelGraph(legacy);CHECK((*old)["mode"]=="static");
     CHECK((*config.modelGraph())["mode"]=="legacy");

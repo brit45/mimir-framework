@@ -83,6 +83,7 @@ enum class FusionKind : uint8_t {
     GENERIC_ACTIVATION_SPLIT = 5,
     GENERIC_ACTIVATION_CHUNK = 6,
     GENERIC_UNARY_SHAPE = 7,
+    GENERIC_LAYER = 8,
 };
 
 enum class PlannerMode : uint8_t { Legacy, Static, Cost };
@@ -102,7 +103,7 @@ struct ExecutionPlan {
     // Per-layer fusion flags for cheap hot-path checks
     std::vector<uint8_t> fuse_relu_for_conv2d;
 
-    // Generic inference-time fusions.
+    // Generic forward fusions; training retains per-layer backward snapshots.
     std::vector<int> fuse_activation_consumer;
     std::vector<int> fuse_unary_consumer;
     std::vector<int> fuse_split_consumer;
@@ -179,7 +180,12 @@ struct ExecutionPlan {
     };
     struct PlannedFusionGroup {
         size_t producer = 0;
+        // Direct layer members; child groups compose recursively without
+        // copying each prefix of a long chain. Children precede their parent.
         std::vector<size_t> layers;
+        std::vector<size_t> children;
+        std::optional<size_t> parent;
+        FusionKind kind = FusionKind::NONE;
         bool graph_fused = false;
         bool kernel_fused = false;
     };
@@ -263,6 +269,16 @@ inline bool is_fusible_unary_shape_layer(const Layer& layer) {
     }
 }
 
+// All registered operations can be producers. Consumers with special integer
+// input hydration or opaque side effects remain explicit execution boundaries.
+inline bool is_fusible_layer(const Layer& layer) {
+    switch(layer.type_enum) {
+    case LayerType::Constant: case LayerType::Embedding: case LayerType::EmbeddingBag:
+    case LayerType::Lambda: case LayerType::UNKNOWN: return false;
+    default: return !is_fusible_split_layer(layer);
+    }
+}
+
 inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layers, bool training,
                                                   bool allow_training_fusion = false,
                                                   bool fusion_enabled = true) {
@@ -276,16 +292,36 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
     plan.fuse_split_kind.assign(layers.size(), 0);
     plan.fuse_chain_next.assign(layers.size(), -1);
 
-    std::unordered_map<std::string, int> tensor_use_count;
-    for (const auto& layer : layers) {
-        for (const auto& in : planner_inputs_for(layer)) {
-            ++tensor_use_count[in];
+    // Count uses of tensor VERSIONS. Repeated in-place names (x -> x) are
+    // independent values; a name-wide count incorrectly prevents most fusions.
+    std::vector<size_t> output_uses(layers.size(),0);
+    std::unordered_map<std::string,size_t> producers;
+    for(size_t i=0;i<layers.size();++i) {
+        for(const auto& input:planner_inputs_for(layers[i])) {
+            const auto found=producers.find(input);
+            if(found!=producers.end())++output_uses[found->second];
+        }
+        const auto output=planner_output_name_for(layers[i]);
+        producers[output]=i;
+        if(is_fusible_split_layer(layers[i])) {
+            const size_t count=layers[i].type_enum==LayerType::Split?
+                (layers[i].split_sizes.empty()?size_t(std::max(0,layers[i].num_splits)):layers[i].split_sizes.size()):
+                size_t(std::max(0,layers[i].num_chunks));
+            for(size_t j=0;j<count;++j)producers[output+"_"+std::to_string(j)]=i;
         }
     }
-
-    auto consumes_single_tensor = [](const Layer& consumer, const std::string& expected_input) -> bool {
-        const auto& inputs = planner_inputs_for(consumer);
-        return inputs.size() == 1 && inputs[0] == expected_input;
+    // Legacy branches merge after dispatch and may read physical layer outputs
+    // outside named tensor edges. Keep only those endpoints outside chains;
+    // independent regions of the same training graph remain fusible.
+    std::vector<uint8_t> branch_boundary(layers.size(),0);
+    if(training)for(size_t i=0;i<layers.size();++i) {
+        if(layers[i].requiresBranchComputation())branch_boundary[i]=1;
+        for(int source:layers[i].branch_sources)
+            if(source>=0 && static_cast<size_t>(source)<layers.size())branch_boundary[size_t(source)]=1;
+    }
+    auto consumes_tensor = [](const Layer& consumer,const std::string& expected) {
+        const auto& inputs=planner_inputs_for(consumer);
+        return std::count(inputs.begin(),inputs.end(),expected)==1;
     };
 
     for (size_t i = 0; i < layers.size(); ++i) {
@@ -301,7 +337,7 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
         }
 
         const bool can_fuse_conv_relu = fusion_enabled && ((!training) || allow_training_fusion);
-        const bool can_fuse_generic = fusion_enabled && !training;
+        const bool can_fuse_generic = fusion_enabled && (!training || allow_training_fusion) && !branch_boundary[i];
 
         // Conservative by default: in training, fusions are disabled unless explicitly enabled.
         if (can_fuse_conv_relu && layer.type_enum == LayerType::Conv2d && layer.activation == ActivationType::RELU) {
@@ -311,7 +347,7 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
 
         if (can_fuse_generic) {
             const std::string producer_out = planner_output_name_for(layer);
-            const bool producer_has_single_consumer = tensor_use_count[producer_out] == 1;
+            const bool producer_has_single_consumer = output_uses[i] == 1;
 
             auto maybe_mark_split = [&](size_t producer_idx, size_t consumer_idx, bool after_activation) {
                 const Layer& split_layer = layers[consumer_idx];
@@ -340,8 +376,9 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
                     if (next_idx >= layers.size()) break;
 
                     const Layer& next = layers[next_idx];
-                    if (!consumes_single_tensor(next, chain_output)) break;
-                    if (tensor_use_count[chain_output] != 1) break;
+                    if (branch_boundary[next_idx]) break;
+                    if (!consumes_tensor(next, chain_output)) break;
+                    if (output_uses[static_cast<size_t>(chain_cursor)] != 1) break;
 
                     if (is_fusible_activation_layer(next)) {
                         plan.skip_layer[next_idx] = 1;
@@ -358,13 +395,13 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
                         continue;
                     }
 
-                    if (is_fusible_unary_shape_layer(next)) {
+                    if (is_fusible_layer(next)) {
                         plan.skip_layer[next_idx] = 1;
                         plan.fuse_chain_next[static_cast<size_t>(chain_cursor)] = static_cast<int>(next_idx);
                         if (first_in_chain) {
                             plan.fuse_unary_consumer[i] = static_cast<int>(next_idx);
                             if (op.fusion == FusionKind::NONE) {
-                                op.fusion = FusionKind::GENERIC_UNARY_SHAPE;
+                                op.fusion = is_fusible_unary_shape_layer(next) ? FusionKind::GENERIC_UNARY_SHAPE : FusionKind::GENERIC_LAYER;
                             }
                         }
                         chain_cursor = static_cast<int>(next_idx);
@@ -391,6 +428,37 @@ inline ExecutionPlan build_execution_plan_static(const std::vector<Layer>& layer
         plan.ops.push_back(op);
     }
 
+    // Compose fusions bottom-up. The chain is the ordered lowering of this
+    // tree: grouping an already fused producer must never reassociate arithmetic.
+    for (size_t root = 0; root < layers.size(); ++root) {
+        if (plan.skip_layer[root]) continue;
+        std::optional<size_t> child;
+        auto append = [&](std::vector<size_t> members, FusionKind kind) {
+            ExecutionPlan::PlannedFusionGroup group;
+            group.producer = root;
+            group.layers = std::move(members);
+            group.kind = kind;
+            group.graph_fused = true;
+            const size_t id = plan.fusion_groups.size();
+            if (child) {
+                group.children.push_back(*child);
+                plan.fusion_groups[*child].parent = id;
+            }
+            plan.fusion_groups.push_back(std::move(group));
+            child = id;
+        };
+        if (plan.fuse_relu_for_conv2d[root]) append({root}, FusionKind::CONV2D_RELU);
+        size_t cursor = root;
+        while (plan.fuse_chain_next[cursor] >= 0) {
+            const size_t next = static_cast<size_t>(plan.fuse_chain_next[cursor]);
+            const auto kind = is_fusible_activation_layer(layers[next]) ? FusionKind::GENERIC_ACTIVATION :
+                is_fusible_unary_shape_layer(layers[next]) ? FusionKind::GENERIC_UNARY_SHAPE :
+                layers[next].type_enum == LayerType::Split ? FusionKind::GENERIC_SPLIT :
+                layers[next].type_enum == LayerType::Chunk ? FusionKind::GENERIC_CHUNK : FusionKind::GENERIC_LAYER;
+            append(child ? std::vector<size_t>{next} : std::vector<size_t>{root, next}, kind);
+            cursor = next;
+        }
+    }
     return plan;
 }
 
@@ -438,10 +506,13 @@ inline ExecutionPlan build_execution_plan_global(
     const bool fusion_enabled = true,
     const bool buffer_reuse = true
 ) {
-    ExecutionPlan plan = build_execution_plan_static(graph, training, false, fusion_enabled);
+    ExecutionPlan plan = build_execution_plan_static(graph, training, training, fusion_enabled);
     plan.training = training;
     plan.mode = mode;
     plan.layers.reserve(graph.size());
+    std::vector<std::optional<size_t>> fusion_owners(graph.size());
+    for (const auto& group : plan.fusion_groups)
+        for (size_t member : group.layers) fusion_owners[member] = group.producer;
 
     std::unordered_map<std::string, TensorId> current;
     std::unordered_map<std::string, size_t> next_generation;
@@ -469,8 +540,9 @@ inline ExecutionPlan build_execution_plan_global(
         planned.layer_name = layer.name;
         planned.layer_type = layer.type_enum;
         planned.skip = index < plan.skip_layer.size() && plan.skip_layer[index] != 0;
-        planned.graph_fused = planned.skip ||
+        planned.graph_fused = planned.skip || plan.fuse_relu_for_conv2d[index] ||
             (index < plan.fuse_chain_next.size() && plan.fuse_chain_next[index] >= 0);
+        if (planned.skip) planned.fused_into = fusion_owners[index];
 
         for (const std::string& input_name : planner_inputs_for(layer)) {
             const TensorId input = ensure_input(input_name);
@@ -752,6 +824,20 @@ inline std::string dump_execution_plan_json(const ExecutionPlan& plan) {
             << ",\"measured_host_roundtrip\":" << (layer.measured_host_roundtrip?"true":"false")
             << ",\"estimated_compute_cost\":" << std::setprecision(17) << layer.estimated_compute_cost
             << ",\"estimated_transfer_cost\":" << layer.estimated_transfer_cost << '}';
+    }
+    out << "],\"fusion_groups\":[";
+    for (size_t id = 0; id < plan.fusion_groups.size(); ++id) {
+        if (id) out << ',';
+        const auto& group = plan.fusion_groups[id];
+        out << "{\"id\":" << id << ",\"producer\":" << group.producer
+            << ",\"kind\":" << static_cast<int>(group.kind) << ",\"parent\":";
+        if (group.parent) out << *group.parent; else out << "null";
+        out << ",\"graph_fused\":" << (group.graph_fused ? "true" : "false")
+            << ",\"kernel_fused\":" << (group.kernel_fused ? "true" : "false") << ",\"layers\":[";
+        for (size_t i=0; i<group.layers.size(); ++i) { if (i) out << ','; out << group.layers[i]; }
+        out << "],\"children\":[";
+        for (size_t i=0; i<group.children.size(); ++i) { if (i) out << ','; out << group.children[i]; }
+        out << "]}";
     }
     out << "],\"tensors\":[";
     std::vector<const PlannedTensor*> tensors;

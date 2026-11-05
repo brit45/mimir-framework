@@ -22,6 +22,25 @@ int main() {
     const auto tiny=makeWeights(&a,4,2,1,Layout::CHW);
     TASSERT_NEAR(tiny.values[0],4.5f,1e-6f);
     TASSERT_NEAR(std::accumulate(tiny.values.begin(),tiny.values.end(),0.f),8.f,1e-6f);
+    json mask_annotation={{"entities",json::array({{{"id","floor"},{"phrase","floor"},{"role","background"},
+        {"mask",{{"type","polygon"},{"points",json::array({{0.,0.},{1.,0.},{0.,1.}})}}}}})}};
+    const auto mask_weights=makeWeights(&mask_annotation,4,4,1,Layout::HWC);
+    TASSERT_TRUE(mask_weights.bbox_count==1 && mask_weights.values[0]>mask_weights.values[15]);
+    TASSERT_NEAR(std::accumulate(mask_weights.values.begin(),mask_weights.values.end(),0.f),16.f,1e-4f);
+    const auto mask_prompt=groundedPrompt("caption",&mask_annotation);
+    TASSERT_TRUE(mask_prompt.find("entity floor floor role background bbox 0.000,0.000,1.000,1.000 mask polygon vertices 3.")!=std::string::npos);
+    json rich_prompt={{"entities",json::array({{{"id","asha"},{"phrase","Asha"},{"role","primary_subject"},
+        {"mask",{{"type","polygon"},{"points",json::array({{0.1,0.1},{0.5,0.1},{0.3,0.8}})}}},
+        {"track",{{"id","chapter-asha"},{"name","Asha"}}},
+        {"ocr",{{"text","こんにちは"},{"translation","Bonjour"},{"source_language","ja"},{"target_language","fr"},{"tags",json::array({"dialogue","greeting"})}}}}})}};
+    const auto rich_context=groundedPrompt("caption",&rich_prompt);
+    TASSERT_TRUE(rich_context.find("tracked_identity chapter-asha name Asha")!=std::string::npos);
+    TASSERT_TRUE(rich_context.find("ocr_text こんにちは translation Bonjour source_language ja target_language fr ocr_tag dialogue ocr_tag greeting")!=std::string::npos);
+    json masked_relation={{"entities",json::array({
+        {{"id","person"},{"phrase","person"},{"bbox",{0.1,0.1,0.4,0.9}}},
+        {{"id","floor"},{"phrase","floor"},{"mask",{{"type","polygon"},{"points",json::array({{0.,0.8},{1.,0.8},{1.,1.},{0.,1.}})}}}}
+    })},{"relations",json::array({{{"subject","person"},{"predicate","on"},{"object","floor"}}})}};
+    TASSERT_TRUE(makeWeights(&masked_relation,4,4,1,Layout::HWC).relations.size()==1);
     a["entities"]=json::array({{{"bbox",{0.,0.,0.25,1.}}},{{"bbox",{0.5,0.,1.,1.}}}});
     const auto unequal=makeWeights(&a,4,2,1,Layout::CHW);
     TASSERT_NEAR(unequal.values[0],1.5f,1e-6f);

@@ -2,8 +2,12 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
-static void require(bool value) { if(!value) throw std::runtime_error("convolution scratch regression"); }
+static void require_at(bool value, int line) {
+    if(!value) throw std::runtime_error("convolution scratch regression at line " + std::to_string(line));
+}
+#define require(value) require_at((value), __LINE__)
 static void near(float a,float b) { require(std::abs(a-b)<3e-5f*std::max(1.0f,std::abs(b))); }
 static void check(int h,int width,int in,int out,int kernel,int stride,int pad,int dilation,bool bias) {
     auto& guard=MemoryGuard::instance();
@@ -30,7 +34,13 @@ static void check(int h,int width,int in,int out,int kernel,int stride,int pad,i
         reference[oi]=sum;
     }
     std::vector<float> y,dx;
-    CpuConvolution::forward(x,y,layer.getWeights(),bias?layer.getWeights()+size_t(out)*k:nullptr,h,width,in,out,kernel,stride,pad,dilation);
+    if(kernel==1&&stride==1&&pad==0) {
+        Mimir::Planning::ExecutionPolicy::CpuScope pointwise(
+            1,Mimir::Planning::ExecutionPolicy::CpuAlgorithm::PointwiseConvolution);
+        CpuConvolution::forward(x,y,layer.getWeights(),bias?layer.getWeights()+size_t(out)*k:nullptr,h,width,in,out,kernel,stride,pad,dilation);
+    } else {
+        CpuConvolution::forward(x,y,layer.getWeights(),bias?layer.getWeights()+size_t(out)*k:nullptr,h,width,in,out,kernel,stride,pad,dilation);
+    }
     require(y.size()==reference.size());for(size_t i=0;i<y.size();++i)near(y[i],reference[i]);
     if(kernel==1&&stride==1&&pad==0)require(guard.getAllocationsCount()==0);
     layer.grad_weights.assign(layer.weights.size(),.125f);layer.grad_bias.assign(bias?out:0,.25f);

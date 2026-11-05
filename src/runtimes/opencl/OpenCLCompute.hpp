@@ -226,11 +226,12 @@ public:
     if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
 
         constexpr size_t kTile = 16;
+        const bool skinny = M < 16 || N < 16;
         const size_t global[2] = {
-            ((static_cast<size_t>(M) + kTile - 1) / kTile) * kTile,
-            ((static_cast<size_t>(N) + kTile - 1) / kTile) * kTile
+            skinny ? ((static_cast<size_t>(M) * N + 255) / 256) * 256 : ((static_cast<size_t>(M) + kTile - 1) / kTile) * kTile,
+            skinny ? 1 : ((static_cast<size_t>(N) + kTile - 1) / kTile) * kTile
         };
-        const size_t local[2] = { kTile, kTile };
+        const size_t local[2] = { skinny ? 256u : kTile, skinny ? 1u : kTile };
         err = clEnqueueNDRangeKernel(queue_, kernel_matmul_, 2, nullptr, global, local, 0, nullptr, nullptr);
     if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
 
@@ -287,12 +288,13 @@ public:
         if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
 
         constexpr size_t kTile = 16;
+        const bool skinny = M < 16 || N < 16;
         const size_t global[3] = {
             static_cast<size_t>(B),
-            ((static_cast<size_t>(M) + kTile - 1) / kTile) * kTile,
-            ((static_cast<size_t>(N) + kTile - 1) / kTile) * kTile
+            skinny ? ((static_cast<size_t>(M) * N + 255) / 256) * 256 : ((static_cast<size_t>(M) + kTile - 1) / kTile) * kTile,
+            skinny ? 1 : ((static_cast<size_t>(N) + kTile - 1) / kTile) * kTile
         };
-        const size_t local[3] = { 1, kTile, kTile };
+        const size_t local[3] = { 1, skinny ? 256u : kTile, skinny ? 1u : kTile };
         err = clEnqueueNDRangeKernel(queue_, kernel_batch_matmul_, 3, nullptr, global, local, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) { if (buf_a) clReleaseMemObject(buf_a); if (buf_b) clReleaseMemObject(buf_b); if (buf_c) clReleaseMemObject(buf_c); return false; }
 
@@ -463,6 +465,15 @@ __kernel void matmul_forward(
     int N
 ) {
 #define TILE 16
+    if (M < 16 || N < 16) {
+        const size_t index = get_global_id(0);
+        if (index >= (size_t)M * N) return;
+        const size_t row = index / N, col = index % N;
+        float sum = 0.0f;
+        for (int k = 0; k < K; ++k) sum += A[row * K + k] * B[(size_t)k * N + col];
+        C[index] = sum;
+        return;
+    }
     const int m = (int)get_global_id(0);
     const int n = (int)get_global_id(1);
     const int lm = (int)get_local_id(0);
@@ -505,6 +516,16 @@ __kernel void batch_matmul_forward(
     int N
 ) {
     const int b = (int)get_global_id(0);
+    if (M < 16 || N < 16) {
+        const size_t index = get_global_id(1);
+        if (b >= batches || index >= (size_t)M * N) return;
+        const size_t row = index / N, col = index % N;
+        float sum = 0.0f;
+        for (int k = 0; k < K; ++k)
+            sum += A[((size_t)b * M + row) * K + k] * Bm[((size_t)b * K + k) * N + col];
+        C[(size_t)b * M * N + index] = sum;
+        return;
+    }
     const int m = (int)get_global_id(1);
     const int n = (int)get_global_id(2);
     const int lm = (int)get_local_id(1);

@@ -1,6 +1,9 @@
 #include "test_utils.hpp"
 
 #include "Model.hpp"
+#include "RngContext.hpp"
+#include <cstdlib>
+#include <cstring>
 
 #include <algorithm>
 #include <cmath>
@@ -46,19 +49,34 @@ static std::vector<float> run_one_layer(
     void (*init_weights)(Layer&)
 ) {
     Model m;
+    m.push("fusion_input","Identity",0);
     m.push("t0", type, 0);
 
     auto& layers = m.getMutableLayers();
-    require_or_throw(layers.size() == 1, "run_one_layer: expected exactly 1 layer");
-    Layer& L = layers[0];
-
-    L.inputs = input_names;
+    require_or_throw(layers.size() == 2, "run_one_layer: expected exactly 2 layers");
+    Layer& L = layers[1];
+    layers[0].inputs={input_names.at(0)};layers[0].output="fusion_input";
+    L.inputs = input_names;L.inputs[0]="fusion_input";
     if (configure) configure(L);
     m.allocateParams();
     if (init_weights) init_weights(L);
 
     std::unordered_map<std::string, std::vector<int>> iin;
-    return m.forwardPassNamed(fin, iin, training);
+    std::vector<float> reference;
+    for(bool enabled:{false,true}) {
+#ifdef _WIN32
+        _putenv_s("MIMIR_PLANNER_FUSION",enabled?"1":"0");
+#else
+        setenv("MIMIR_PLANNER_FUSION",enabled?"1":"0",1);
+#endif
+        MimirRng::ScopedSeed seed(123);
+        auto output=m.forwardPassNamed(fin,iin,training);
+        if(!enabled)reference=output;
+        else require_or_throw(output.size()==reference.size() &&
+            (output.empty() || std::memcmp(output.data(),reference.data(),output.size()*sizeof(float))==0),
+            (type+": fused/unfused mismatch").c_str());
+    }
+    return reference;
 }
 
 static void noop(Layer&) {}

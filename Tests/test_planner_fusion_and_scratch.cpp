@@ -1,4 +1,6 @@
 #include "test_utils.hpp"
+#include "Model.hpp"
+#include <cstdlib>
 
 #include "Layers.hpp"
 #include "Planning/Planner.hpp"
@@ -88,17 +90,16 @@ int main() {
         TASSERT_TRUE(plan.skip_layer[2] == 1);
         TASSERT_TRUE(plan.ops[0].fusion == Mimir::Planning::FusionKind::GENERIC_ACTIVATION_CHUNK);
 
-        // Training even with opt-in must keep generic fusions disabled
-        // to preserve intermediate tensors required by backward paths.
+        // Training also preserves split snapshots and secondary outputs.
         auto train_plan = Mimir::Planning::build_execution_plan_static(
             generic_layers,
             /*training=*/true,
             /*allow_training_fusion=*/true
         );
-        TASSERT_TRUE(train_plan.fuse_activation_consumer[0] == -1);
-        TASSERT_TRUE(train_plan.fuse_split_consumer[0] == -1);
-        TASSERT_TRUE(train_plan.skip_layer[1] == 0);
-        TASSERT_TRUE(train_plan.skip_layer[2] == 0);
+        TASSERT_TRUE(train_plan.fuse_activation_consumer[0] == 1);
+        TASSERT_TRUE(train_plan.fuse_split_consumer[0] == 2);
+        TASSERT_TRUE(train_plan.skip_layer[1] == 1);
+        TASSERT_TRUE(train_plan.skip_layer[2] == 1);
     }
 
     // Generic producer -> unary shape/no-op should also be fused in inference.
@@ -128,8 +129,8 @@ int main() {
             /*training=*/true,
             /*allow_training_fusion=*/true
         );
-        TASSERT_TRUE(train_plan_opt_in.fuse_unary_consumer[0] == -1);
-        TASSERT_TRUE(train_plan_opt_in.skip_layer[1] == 0);
+        TASSERT_TRUE(train_plan_opt_in.fuse_unary_consumer[0] == 1);
+        TASSERT_TRUE(train_plan_opt_in.skip_layer[1] == 1);
     }
 
     // Generic producer -> activations répétées -> unary shape répétés
@@ -172,6 +173,69 @@ int main() {
         TASSERT_TRUE(train_plan.skip_layer[2] == 0);
         TASSERT_TRUE(train_plan.skip_layer[3] == 0);
         TASSERT_TRUE(train_plan.skip_layer[4] == 0);
+    }
+
+    // Every fused logical edge must retain the unfused arithmetic and backward state.
+    for (const char* dtype : {"float32", "float16"}) for (const char* producer : {"Linear", "Conv2d"}) {
+        Model model;
+        model.setDefaultDType(dtype);
+        model.push("producer", producer, 6);
+        for (const char* type : {"ReLU", "Tanh", "Sigmoid", "Identity"}) model.push(type, type, 0);
+        auto& ls = model.getMutableLayers();
+        ls[0].in_features = 2; ls[0].out_features = 2; ls[0].use_bias = true;
+        if (std::string(producer)=="Conv2d") {
+            ls[0].in_channels=2; ls[0].out_channels=2;
+            ls[0].kernel_size=1; ls[0].stride=1; ls[0].padding=0;
+            ls[0].input_width=1; ls[0].input_height=1;
+            ls[0].output_width=1; ls[0].output_height=1;
+            ls[0].activation=ActivationType::RELU;
+        }
+        for (size_t i=0; i<ls.size(); ++i) {
+            ls[i].inputs = {i == 0 ? "__input__" : "edge" + std::to_string(i-1)};
+            ls[i].output = i+1 == ls.size() ? "x" : "edge" + std::to_string(i);
+        }
+        model.allocateParams();
+        const std::vector<float> initial{.37f,-.21f,.43f,.15f,.22f,.07f};
+        std::copy(initial.begin(),initial.end(),ls[0].getWeights());
+        auto plan = Mimir::Planning::build_execution_plan_global(ls, true);
+        TASSERT_TRUE(plan.skip_layer[1] == 1 && plan.skip_layer[4] == 1);
+        TASSERT_TRUE(plan.fusion_groups.size() >= 4);
+        TASSERT_TRUE(!plan.fusion_groups.back().children.empty());
+        TASSERT_TRUE(!plan.fusion_groups.back().parent.has_value());
+        auto set_fusion = [](const char* value) {
+#ifdef _WIN32
+            _putenv_s("MIMIR_PLANNER_FUSION", value);
+#else
+            setenv("MIMIR_PLANNER_FUSION", value, 1);
+#endif
+        };
+        std::vector<float> reference_output, reference_input_grad, reference_grad, reference_weights;
+        for (const char* fusion : {"0", "1"}) {
+            set_fusion(fusion);
+            std::copy(initial.begin(),initial.end(),ls[0].getWeights());
+            Optimizer optimizer; optimizer.type=OptimizerType::ADAM;
+            for (int step=0; step<3; ++step) {
+                model.zeroGradients();
+                const auto output=model.forwardPass(std::vector<float>{-.31f,.83f},true);
+                model.backwardPass({.4f,-.7f});
+                if (step==0) {
+                    if (*fusion=='0') {
+                        reference_output=output;
+                        reference_input_grad=model.getLastInputGradient();
+                        reference_grad=ls[0].grad_weights;
+                    } else {
+                        TASSERT_TRUE(output==reference_output);
+                        TASSERT_TRUE(model.getLastInputGradient()==reference_input_grad);
+                        TASSERT_TRUE(ls[0].grad_weights==reference_grad);
+                    }
+                }
+                model.optimizerStep(optimizer,.01f);
+            }
+            std::vector<float> weights(ls[0].getWeights(),ls[0].getWeights()+6);
+            if (*fusion=='0') reference_weights=weights;
+            else TASSERT_TRUE(weights==reference_weights);
+        }
+        set_fusion("1");
     }
 
     // Scratch planner: should request non-zero buffers

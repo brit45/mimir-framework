@@ -5,12 +5,12 @@
 namespace PortableConstantOps {
 inline bool fits(const Layer& layer) {
     const size_t weights=layer.getWeightsSize(),output=SequenceConstant::outputSize(layer);
-    constexpr size_t maxElements=8*1024*1024;
+    constexpr size_t maxElements=Mimir::Planning::ExecutionPolicy::Limits::portable_staged_elements;
     if (!layer.getWeights() || !weights || !output ||
         weights>=maxElements) return false;
     if (!SequenceConstant::enabled(layer)) return true;
     const size_t rows=static_cast<size_t>(layer.seq_len);
-    return rows<=65536 && output<maxElements-weights &&
+    return rows<=Mimir::Planning::ExecutionPolicy::Limits::portable_serial_elements && output<maxElements-weights &&
         2*rows<maxElements-weights-output;
 }
 inline bool execute(const Layer& layer,std::vector<float>& output,const std::vector<float>* gradient=nullptr) {

@@ -42,7 +42,7 @@ inline void pack(const float* x,float* col,int start,int count,int h,int w,int c
     }
 }
 inline int tile_size(int k,int out_c,int spatial) {
-    return std::max(1,std::min(spatial,static_cast<int>(std::min<size_t>(1024, (4u<<20)/(sizeof(float)*(static_cast<size_t>(k)+out_c))))));
+    return Mimir::Planning::ExecutionPolicy::convolutionTileRows(size_t(k),size_t(out_c),spatial);
 }
 inline void forward(const std::vector<float>& x,std::vector<float>& y,const float* weights,const float* bias,
                     int h,int w,int in_c,int out_c,int kernel,int stride,int pad,int dilation) {
@@ -51,8 +51,9 @@ inline void forward(const std::vector<float>& x,std::vector<float>& y,const floa
     if(oh<=0||ow<=0) throw std::invalid_argument("Conv2d: invalid output dimensions");
     const int spatial=oh*ow,k=in_c*kernel*kernel,tile=tile_size(k,out_c,spatial);
     // CHW 1x1 is already a matrix: no im2col, temporary rows or layout copy.
-    // Wide, long rows keep the packed path to avoid strided cache conflicts.
-    if(kernel==1 && stride==1 && pad==0 && (in_c<=32 || spatial<1024)) {
+    // The planner compares this variant against the packed reference; shape
+    // eligibility is mathematical, not a size-based performance preference.
+    if(kernel==1 && stride==1 && pad==0 && (Mimir::Planning::ExecutionPolicy::cpuChoice().algorithm==Mimir::Planning::ExecutionPolicy::CpuAlgorithm::PointwiseConvolution)) {
         y.resize(static_cast<size_t>(out_c)*spatial);
         multiply(y.data(),weights,x.data(),out_c,spatial,in_c,false);
         if(bias) for(int c=0;c<out_c;++c) {

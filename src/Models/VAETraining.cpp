@@ -13,6 +13,7 @@
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
+#include <random>
 
 namespace {
 
@@ -696,6 +697,24 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
     if (mode == Model::TrainStepMode::Optimize) model.zeroGradients();
     std::unordered_map<std::string, std::vector<float>> float_inputs{{"__input__", input}};
     std::unordered_map<std::string, std::vector<int>> int_inputs{{"text_ids", text_ids}};
+    const float mask_ratio = model.modelConfig.value("text_mask_ratio", 0.0f);
+    const float content_weight = model.modelConfig.value("content_weight", 0.0f);
+    if (!std::isfinite(mask_ratio) || mask_ratio < 0 || mask_ratio >= 1 ||
+        !std::isfinite(content_weight) || content_weight < 0)
+        throw std::invalid_argument("VAEText: invalid text_mask_ratio/content_weight");
+    size_t masked_tokens = 0;
+    if (reconstruction_is_ce && mask_ratio > 0 && model.modelConfig.value("contextual_encoding", false)) {
+        std::seed_seq seed{uint32_t(model.modelConfig.value("seed", 1337)), uint32_t(optimizer.step), uint32_t(uint64_t(optimizer.step) >> 32), uint32_t(0x564145)};
+        std::mt19937 random(seed);
+        std::bernoulli_distribution mask(mask_ratio);
+        const int unknown_id = std::max(0, model.getTokenizer().getUnkId());
+        auto& encoded_ids = int_inputs["text_ids"];
+        size_t valid = 0;
+        for (int id : text_ids) valid += id != padding_id;
+        for (int& id : encoded_ids) {
+            if (id != padding_id && valid > 1 && mask(random)) { id = unknown_id; ++masked_tokens; --valid; }
+        }
+    }
     const std::vector<float>& prediction = model.forwardPassNamedView(float_inputs, int_inputs, true);
     const int output_dim = static_cast<int>(prediction.size());
 
@@ -727,7 +746,8 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
     }
 
     const int base_dim = image_dim + 2 * latent_dim + 2 * projection_dim;
-    const int extra_tail = std::max(0, output_dim - base_dim);
+    const int content_dim = model.modelConfig.value("content_dim", 0);
+    const int extra_tail = std::max(0, output_dim - base_dim - content_dim);
     if (semantic_dim + thematic_dim + dialog_dim <= 0 && extra_tail > 0) semantic_dim = extra_tail;
     const int requested_extra = semantic_dim + thematic_dim + dialog_dim;
     if (requested_extra > extra_tail) {
@@ -807,6 +827,33 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
     const float cosine = dot_f(prediction, image_projection_offset, prediction, text_projection_offset, projection_dim) / (image_norm * text_norm);
     const float alignment = align_weight > 0.0f ? align_weight * (1.0f - cosine) : 0.0f;
 
+    const size_t content_offset = dialog_offset + size_t(dialog_dim);
+    double content_loss = 0;
+    std::vector<float> content_gradient;
+    if (content_dim > 0 && content_weight > 0) {
+        if (content_dim != vocab_size || content_offset + size_t(content_dim) != prediction.size())
+            throw std::runtime_error("VAEText: invalid content head dimensions");
+        std::vector<float> frequencies(size_t(content_dim), 0.0f);
+        float count = 0;
+        for (int id : text_ids) if (id != padding_id && id >= 0 && id < content_dim) {
+            frequencies[size_t(id)] += 1; ++count;
+        }
+        content_gradient.assign(size_t(content_dim), 0);
+        if (count > 0) {
+            const auto begin = prediction.begin() + content_offset;
+            const float maximum = *std::max_element(begin, begin + content_dim);
+            double sum = 0;
+            for (int i=0; i<content_dim; ++i) sum += std::exp(double(begin[i] - maximum));
+            const double log_sum = std::log(sum);
+            for (int i=0; i<content_dim; ++i) {
+                const double log_probability = double(begin[i] - maximum) - log_sum;
+                const float expected = frequencies[size_t(i)] / count;
+                content_loss -= expected * log_probability;
+                content_gradient[size_t(i)] = content_weight * (float(std::exp(log_probability)) - expected);
+            }
+        }
+    }
+
     const auto semantic_target = make_text_hash_target_unigram(text_ids, padding_id, semantic_dim, 0x9e3779b97f4a7c15ULL);
     const auto thematic_target = make_text_hash_target_bigram(text_ids, padding_id, thematic_dim, 0xbf58476d1ce4e5b9ULL);
     const auto dialog_target = make_text_hash_target_unigram(text_ids, padding_id, dialog_dim, 0x94d049bb133111ebULL);
@@ -866,10 +913,15 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
     write_context_gradient(thematic_offset, thematic_dim, thematic_target, thematic_weight);
     write_context_gradient(dialog_offset, dialog_dim, dialog_target, dialog_weight);
 
+    for (size_t i=0; i<content_gradient.size(); ++i) packed_gradient[content_offset+i] = content_gradient[i];
     apply_accumulation_scale(packed_gradient, mode, grad_scale);
     model.backwardPass(packed_gradient);
 
     Model::TrainStepResult result;
+    result.metrics["content_ce"] = float(content_loss);
+    result.metrics["masked_tokens"] = float(masked_tokens);
+    result.metrics["context_semantic_hash_mse"] = float(semantic_loss);
+    result.metrics["context_bigram_hash_mse"] = float(thematic_loss);
     result.metrics["kl_mu_beta_effective"] = beta_effective * mu_weight;
     result.metrics["kl_logvar_beta_effective"] = beta_effective * logvar_weight;
     result.metrics["kl_weighted"] = static_cast<float>(weighted_kl);
@@ -879,7 +931,7 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
                                      static_cast<double>(beta_effective) * weighted_kl + alignment +
                                      static_cast<double>(semantic_weight) * semantic_loss +
                                      static_cast<double>(thematic_weight) * thematic_loss +
-                                     static_cast<double>(dialog_weight) * dialog_loss);
+                                     static_cast<double>(dialog_weight) * dialog_loss + content_weight * content_loss);
     gradient_diagnostics(model, result.grad_norm, result.grad_max_abs);
     if (mode == Model::TrainStepMode::Optimize) model.optimizerStep(optimizer, learning_rate);
     const float timestep = std::clamp(static_cast<float>(optimizer.step + 1) / static_cast<float>(std::max(1, optimizer.total_steps)), 0.0f, 1.0f);

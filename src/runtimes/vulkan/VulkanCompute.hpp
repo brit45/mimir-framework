@@ -10,6 +10,7 @@
 #include <optional>
 #include <filesystem>
 #include <mutex>
+#include "runtimes/portable/PortableStaging.hpp"
 
 namespace VulkanCompute {
 
@@ -627,62 +628,41 @@ public:
         return true;
     }
 
-    // MatMul: C[M,N] = A[M,K] @ B[K,N]
-    // Implémentation pragmatique: réutilise linearForward en transposant B -> [N,K]
-    // et en injectant un biais nul.
-    bool matmulForward(
-        const float* a,
-        const float* b,
-        float* c,
-        int M,
-        int K,
-        int N
-    ) {
-        std::lock_guard<std::recursive_mutex> lk(linear_mutex_);
-        if (!initialized) return false;
-        if (!a || !b || !c) return false;
-        if (M <= 0 || K <= 0 || N <= 0) return false;
-
-        std::vector<float> b_t(static_cast<size_t>(N) * static_cast<size_t>(K), 0.0f);
-        for (int k = 0; k < K; ++k) {
-            for (int n = 0; n < N; ++n) {
-                b_t[static_cast<size_t>(n) * static_cast<size_t>(K) + static_cast<size_t>(k)] =
-                    b[static_cast<size_t>(k) * static_cast<size_t>(N) + static_cast<size_t>(n)];
-            }
-        }
-
-        std::vector<float> zero_bias(static_cast<size_t>(N), 0.0f);
-        return linearForward(a, b_t.data(), zero_bias.data(), c, M, K, N);
+    // Matrix products use the shared Vulkan GEMM shader without a host transpose.
+    bool matmulForward(const float* a, const float* b, float* c, int M, int K, int N) {
+        return batchMatMulForward(a, b, c, 1, M, K, N);
     }
 
-    // BatchMatMul: C[B,M,N] = A[B,M,K] @ Bm[B,K,N]
-    bool batchMatMulForward(
-        const float* a,
-        const float* b,
-        float* c,
-        int B,
-        int M,
-        int K,
-        int N
-    ) {
+    bool batchMatMulForward(const float* a, const float* b, float* c,
+                            int B, int M, int K, int N) {
         std::lock_guard<std::recursive_mutex> lk(linear_mutex_);
-        if (!initialized) return false;
-        if (!a || !b || !c) return false;
-        if (B <= 0 || M <= 0 || K <= 0 || N <= 0) return false;
-
-        const size_t a_stride = static_cast<size_t>(M) * static_cast<size_t>(K);
-        const size_t b_stride = static_cast<size_t>(K) * static_cast<size_t>(N);
-        const size_t c_stride = static_cast<size_t>(M) * static_cast<size_t>(N);
-
-        for (int bi = 0; bi < B; ++bi) {
-            const float* a_ptr = a + static_cast<size_t>(bi) * a_stride;
-            const float* b_ptr = b + static_cast<size_t>(bi) * b_stride;
-            float* c_ptr = c + static_cast<size_t>(bi) * c_stride;
-            if (!matmulForward(a_ptr, b_ptr, c_ptr, M, K, N)) {
-                return false;
-            }
+        if (!initialized || !a || !b || !c || B <= 0 || M <= 0 || K <= 0 || N <= 0) return false;
+        using namespace PortableStaging;
+        DeviceScope scope("VULKAN");
+        struct StagedBuffer {
+            float* data = nullptr;
+            ~StagedBuffer() { if (data) cudaFree(data); }
+        } da, db, dc;
+        const size_t as = static_cast<size_t>(M) * K;
+        const size_t bs = static_cast<size_t>(K) * N;
+        const size_t cs = static_cast<size_t>(M) * N;
+        // Staging offsets are signed 32-bit float indices.
+        const size_t limit = 64 * 1024 * 1024 - 1;
+        if (as > limit / B || bs > limit / B || cs > limit / B ||
+            as * B + bs * B + cs * B > limit) return false;
+        if (cudaMalloc(&da.data, as * B * sizeof(float)) != cudaSuccess ||
+            cudaMalloc(&db.data, bs * B * sizeof(float)) != cudaSuccess ||
+            cudaMalloc(&dc.data, cs * B * sizeof(float)) != cudaSuccess ||
+            cudaMemcpy(da.data, a, as * B * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(db.data, b, bs * B * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        const float one = 1.f, zero = 0.f;
+        for (int batch = 0; batch < B; ++batch) {
+            if (cublasSgemm(nullptr, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K,
+                    &one, db.data + batch * bs, N, da.data + batch * as, K,
+                    &zero, dc.data + batch * cs, N) != CUBLAS_STATUS_SUCCESS) return false;
         }
-        return true;
+        // Download flushes the full command batch in one device submission.
+        return cudaMemcpy(c, dc.data, cs * B * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
     }
 
     bool binaryForward(const float* a, const float* b, float* out, int n, int op, float alpha = 0.01f) {

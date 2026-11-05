@@ -1,4 +1,11 @@
 {
+  "env": {
+    "MIMIR_ENABLE_PLANNER": 1,
+    "MIMIR_PLANNER_MODE": "cost",
+    "MIMIR_PLANNER_FUSION": 1,
+    "MIMIR_ENABLE_FUSION_TRAIN": 1,
+    "MIMIR_RUNTIME_AUTOTUNE": 1
+  },
   "$schema": "./conf.schema.json",
   "description": "Lumen v5: VAEConv latents, per-block time-conditioned Diffusion Transformer, variable-length prompts and DDIM",
   "architecture": "lumen_diffusion",

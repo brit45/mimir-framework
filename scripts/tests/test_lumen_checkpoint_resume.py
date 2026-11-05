@@ -64,7 +64,7 @@ assert(Mimir.Serialization.save(Args.get_str(Args.parse(arg),"out",""), "raw_fol
               "text_seq_len": 4, "text_layers": 1, "num_heads": 2, "diffusion_steps": 4},
               "training": {"save_every": 1, "warmup_steps": 2}, "tokenizer": {"max_vocab": 32}}
     (root / "config.json").write_text(json.dumps(config))
-    common = ["--config", root / "config.json", "--dataset", dataset,
+    common = ["--text-conditioning", "transformer", "--config", root / "config.json", "--dataset", dataset,
               "--tokenizer", root / "tokenizer.json", "--validation-items", "0",
               "--vae-calibration-items", "1", "--seed", "42"]
     script = ROOT / "scripts/training/train_lumen_diffusion.lua"
@@ -101,7 +101,7 @@ assert(Mimir.Tokenizer.save(Args.get_str(Args.parse(arg),"out","")))
     config["lumen_diffusion"]["image_h"]=16
     config["tokenizer"]["max_vocab"]=8
     (root/"config.json").write_text(json.dumps(config))
-    growth_common=["--config",root/"config.json","--dataset",dataset,"--tokenizer",base_path,
+    growth_common=["--text-conditioning", "transformer", "--config",root/"config.json","--dataset",dataset,"--tokenizer",base_path,
                    "--validation-items","0","--vae-calibration-items","1","--seed","42"]
     run(script,*growth_common,"--out",root/"grown","--epochs","1")
     grown=json.loads((root/"grown/final/tokenizer/tokenizer.json").read_text())

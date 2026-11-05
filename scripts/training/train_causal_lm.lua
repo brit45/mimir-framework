@@ -1,4 +1,7 @@
 #!/usr/bin/env lua
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_causal_lm.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 -- Native Mimir next-token training for the "causal_lm" architecture.
 -- Run with the configuration driver:
 --   ./run_mimir.sh --conf configs/causal_lm.json

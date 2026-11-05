@@ -1217,8 +1217,132 @@ void portable_sequence_constant_backward(int source,int rows,int result,int widt
  int row=i/width,c=i%width,a=(int)(memory[rows+(2*row)]),b=a+1<base_rows?a+1:base_rows-1;
  float t=memory[rows+(2*row+1)];atomicAdd(result+a*width+c,(1.0f-t)*memory[source+(i)],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);atomicAdd(result+b*width+c,t*memory[source+(i)],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
 }
+float fusion_value(float x,int op,float alpha,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    switch (op) {
+        case 0:
+            return x > 0.0f ? x : 0.0f;
+        case 1:
+            return x > 0.0f ? x : alpha * x;
+        case 2:
+            return 1.0f / (1.0f + exp(-x));
+        case 3:
+            return tanh(x);
+        case 4: {
+            float s = 1.0f / (1.0f + exp(-x));
+            return x * s;
+        }
+        case 5: {
+            float c = 0.7978845608f;
+            float x3 = x * x * x;
+            return 0.5f * x * (1.0f + tanh(c * (x + 0.044715f * x3)));
+        }
+        case 6:
+            return x > 20.0f ? x : log1pf(exp(x),memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+        case 7: {
+            float sp = x > 20.0f ? x : log1pf(exp(x),memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+            return x * tanh(sp);
+        }
+        case 8: {
+            float hs = (x + 3.0f) / 6.0f;
+            return min(1.0f, max(0.0f, hs));
+        }
+        case 9: {
+            float hs = min(1.0f, max(0.0f, (x + 3.0f) / 6.0f));
+            return x * hs;
+        }
+        default:
+            return x;
+    }
+}
+float fusion_derivative(float x,int op,float alpha,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    float d = 1.0f;
+
+    switch (op) {
+        case 0:
+            d = x > 0.0f ? 1.0f : 0.0f;
+            break;
+        case 1:
+            d = x > 0.0f ? 1.0f : alpha;
+            break;
+        case 2: {
+            float s = 1.0f / (1.0f + exp(-x));
+            d = s * (1.0f - s);
+            break;
+        }
+        case 3: {
+            float t = tanh(x);
+            d = 1.0f - t * t;
+            break;
+        }
+        case 4: {
+            float s = 1.0f / (1.0f + exp(-x));
+            d = s + x * s * (1.0f - s);
+            break;
+        }
+        case 5: {
+            float c = 0.7978845608f;
+            float x2 = x * x;
+            float x3 = x2 * x;
+            float u = c * (x + 0.044715f * x3);
+            float t = tanh(u);
+            float sech2 = 1.0f - t * t;
+            float du = c * (1.0f + 0.134145f * x2);
+            d = 0.5f * (1.0f + t) + 0.5f * x * sech2 * du;
+            break;
+        }
+        case 6:
+            d = 1.0f / (1.0f + exp(-x));
+            break;
+        case 7: {
+            float sp = x > 20.0f ? x : log1pf(exp(x),memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+            float t = tanh(sp);
+            float s = 1.0f / (1.0f + exp(-x));
+            d = t + x * s * (1.0f - t * t);
+            break;
+        }
+        case 8:
+            d = (x > -3.0f && x < 3.0f) ? (1.0f / 6.0f) : 0.0f;
+            break;
+        case 9:
+            if (x <= -3.0f) d = 0.0f;
+            else if (x >= 3.0f) d = 1.0f;
+            else d = x / 3.0f + 0.5f;
+            break;
+        default:
+            d = 1.0f;
+            break;
+    }
+
+    return d;
+}
+void pointwise_fusion_forward(int input_value,int program,int output_value,int n,int stages,bool retain,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int i=blockIdx_x*blockDim_x+threadIdx_x;
+    if(i>=n)return;
+    float value=memory[input_value+(i)];
+    for(int j=0;j<stages;++j) {
+        value=fusion_value(value,(int)(memory[program+(2*j)]),memory[program+(2*j+1)],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+        if(truth(retain))memory[output_value+(j*n+i)]=value;
+    }
+    if(!truth(retain))memory[output_value+(i)]=value;
+}
+void pointwise_fusion_backward(int gradient,int snapshots,int program,int output_value,int n,int stages,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int i=blockIdx_x*blockDim_x+threadIdx_x;
+    if(i>=n)return;
+    float value=memory[gradient+(i)];
+    for(int j=stages-1;j>=0;--j) {
+        float d=fusion_derivative(memory[snapshots+(j*n+i)],(int)(memory[program+(2*j)]),memory[program+(2*j+1)],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+        value=value*d;
+    }
+    memory[output_value+(i)]=value;
+}
 void tiled_gemm(int a,int b,int c,int m,int n,int k,int lda,int ldb,int ldc,bool ta,bool tb,float alpha,float beta,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
  int local_value=(int)(get_local_id(0)),group=(int)(get_group_id(0));
+ if(m<16 || n<16){
+  int index=group*256+local_value;if(index>=m*n)return;
+  int row=index%m,col=index/m;float sum=0.f;
+  for(int f=0;f<k;++f)sum+=memory[a+(ta?f+row*lda:row+f*lda)]*memory[b+(tb?col+f*ldb:f+col*ldb)];
+  memory[c+row+col*ldc]=alpha*sum+(beta==0.f?0.f:beta*memory[c+row+col*ldc]);return;
+ }
  int tiles=(m+15)/16,r=local_value%16,d=local_value/16,row=(group%tiles)*16+r,col=(group/tiles)*16+d;
  float sum=0;
  for(int base=0;base<k;base+=16){
@@ -1236,7 +1360,7 @@ int invocation_id(__global float* memory,int threadIdx_x,int blockIdx_x,int bloc
 __kernel void reference(__global float* memory,__global const int* arguments){__local float normScratch[512];int threadIdx_x=0,blockIdx_x=0,blockDim_x=1,gridDim_x=1;
  blockDim_x=arguments[1];gridDim_x=arguments[2];
  int selected=specializedOperation>=0?specializedOperation:arguments[0];if(selected==0){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));norm_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],as_float(arguments[11]),arguments[12]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==1){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));norm_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==2){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));channel_gradient(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==7){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));softmax_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==10){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));row_norm_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],as_float(arguments[9]),arguments[10]!=0,arguments[11]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==15){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GPool g=(GPool){arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13],arguments[14],arguments[15],arguments[16],arguments[17],arguments[18]!=0,arguments[19]!=0};pool_kernel(arguments[3],arguments[4],arguments[5],arguments[6],g,arguments[20],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==21){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GBatchNorm g=(GBatchNorm){arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,arguments[14]!=0};batch_norm_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],g,as_float(arguments[15]),arguments[16]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==24){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GAttention g=(GAttention){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11]!=0,arguments[12]!=0,arguments[13],arguments[14],arguments[15],arguments[16]};attention_probabilities(arguments[3],arguments[4],arguments[5],g,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==27){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GAttention g=(GAttention){arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,arguments[14],arguments[15],arguments[16],arguments[17]};attention_score_grad(arguments[3],arguments[4],arguments[5],arguments[6],g,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==39){tiled_gemm(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,as_float(arguments[14]),as_float(arguments[15]),memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}
- int id=selected;bool parallel=(id>=0 && id<=42 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch):0;if(!parallel && invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch)!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){
+ int id=selected;bool parallel=(id>=0 && id<=44 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch):0;if(!parallel && invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch)!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){
 case 0: {norm_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],as_float(arguments[11]),arguments[12]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 1: {norm_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 2: {channel_gradient(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
@@ -1280,4 +1404,6 @@ case 39: {portable_gemm(arguments[3],arguments[4],arguments[5],arguments[6],argu
 case 40: {portable_ger(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],as_float(arguments[11]),memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 41: {portable_sequence_constant_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 42: {portable_sequence_constant_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 43: {pointwise_fusion_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 44: {pointwise_fusion_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 default:break;}}}

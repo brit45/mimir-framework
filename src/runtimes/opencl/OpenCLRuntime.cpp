@@ -1,3 +1,4 @@
+#include "runtimes/portable/PortablePointwiseFusion.hpp"
 #include "runtimes/optimizers/PortableOptimizer.hpp"
 #include "runtimes/opencl/OpenCLRuntime.hpp"
 
@@ -16,6 +17,7 @@
 #include <vector>
 
 struct OpenCLRuntime::Impl {
+    Mimir::GpuFusion::PortableExecutor fusion;
     PortableRuntime reference{"OPENCL"};
 #ifdef ENABLE_OPENCL
     OpenCLCompute::ComputeEngine engine;
@@ -208,7 +210,7 @@ bool OpenCLRuntime::forwardLayer(
             const size_t expected_total_w = expected_w + (layer.use_bias ? static_cast<size_t>(out_f) : 0ULL);
             const long long ops = static_cast<long long>(batch) * static_cast<long long>(in_f) * static_cast<long long>(out_f);
 
-            if (ops < std::max(0, config_.linear_min_ops) || x.size() != expected_in) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops) || x.size() != expected_in) return false;
             const float* w = layer.getWeights();
             if (!w || layer.getWeightsSize() < expected_total_w) return false;
 
@@ -232,7 +234,7 @@ bool OpenCLRuntime::forwardLayer(
             if (B.size() != static_cast<size_t>(K) * static_cast<size_t>(N)) return false;
 
             const long long ops = static_cast<long long>(M) * static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) return false;
 
             outputs.resize(1);
             outputs[0].assign(static_cast<size_t>(M) * static_cast<size_t>(N), 0.0f);
@@ -254,7 +256,7 @@ bool OpenCLRuntime::forwardLayer(
             if (B.size() != static_cast<size_t>(batches) * static_cast<size_t>(K) * static_cast<size_t>(N)) return false;
 
             const long long ops = static_cast<long long>(batches) * static_cast<long long>(M) * static_cast<long long>(K) * static_cast<long long>(N);
-            if (ops < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(ops,config_.linear_min_ops)) return false;
 
             outputs.resize(1);
             outputs[0].assign(static_cast<size_t>(batches) * static_cast<size_t>(M) * static_cast<size_t>(N), 0.0f);
@@ -269,7 +271,7 @@ bool OpenCLRuntime::forwardLayer(
             const std::vector<float>& A = *inputs[0];
             const std::vector<float>& B = *inputs[1];
             if (A.empty() || A.size() != B.size()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
 
             int op = 0;
             if (!RuntimeLayerOps::resolveBinaryOp(layer.type_enum, op)) return false;
@@ -293,7 +295,7 @@ bool OpenCLRuntime::forwardLayer(
             if (inputs.empty() || !inputs[0]) return false;
             const std::vector<float>& A = *inputs[0];
             if (A.empty()) return false;
-            if (static_cast<long long>(A.size()) < std::max(0, config_.linear_min_ops)) return false;
+            if (!Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(A.size()),config_.linear_min_ops)) return false;
 
             int op = 0;
             float alpha = 0.01f;
@@ -345,4 +347,30 @@ bool OpenCLRuntime::optimizerStep(const RuntimeOptimizerRequest& request) {
 #include "runtimes/losses/LossDispatch.hpp"
 bool OpenCLRuntime::reconstructionLoss(const RuntimeLossGrad::Request& r,RuntimeLossGrad::LossWithGrad& out) {
     return supportsReconstructionLoss() && RuntimeLossGrad::portable(r,out,name(),config_.device_index);
+}
+
+RuntimeCapabilityLevel OpenCLRuntime::queryPointwiseFusionCapability(
+    const std::vector<const Layer*>& chain,bool,bool) const {
+#if defined(ENABLE_OPENCL)
+    if(isInitialized() && !config_.disabled && config_.linear_enabled && Mimir::GpuFusion::supported(chain))
+        return RuntimeCapabilityLevel::NativeOptimized;
+#endif
+    (void)chain;return RuntimeCapabilityLevel::Unsupported;
+}
+
+bool OpenCLRuntime::pointwiseFusionForward(const std::vector<const Layer*>& chain,const std::vector<float>& input,
+    std::vector<std::vector<float>>& output,bool retain,bool training) {
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,false,training)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(input.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,input,retain) || !impl_->fusion.run(program,name(),config_.device_index))return false;
+    program.forwardResult(output);return true;
+}
+bool OpenCLRuntime::pointwiseFusionBackward(const std::vector<const Layer*>& chain,
+    const std::vector<const std::vector<float>*>& inputs,const std::vector<float>& grad,std::vector<float>& output) {
+    if(!runtimeCapabilityIsNative(queryPointwiseFusionCapability(chain,true,true)) ||
+       !Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(grad.size(),config_.linear_min_ops))return false;
+    Mimir::GpuFusion::Program program;
+    if(!program.prepare(chain,grad,false,&inputs) || !impl_->fusion.run(program,name(),config_.device_index))return false;
+    program.backwardResult(output);return true;
 }

@@ -38,6 +38,8 @@ public:
         float vae_scale = 0.0f;
         float vae_shift = 0.0f;
         std::string vae_checkpoint;
+        std::string text_vae_checkpoint;
+        std::string text_t5_checkpoint;
         int patch_size = 4;
         int hidden_size = 384;
         int depth = 8;

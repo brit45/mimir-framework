@@ -226,3 +226,5 @@ vgcore.*
 /outputs/
 /resultat.png
 /exports/inspect-architectures.dtxt
+# dossier d\'archives du projet
+.archives

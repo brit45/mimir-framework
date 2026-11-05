@@ -848,9 +848,18 @@ public:
     // AsyncMonitor owns the persistent history, independently of either UI.
     void configureMetricsCsv(const std::string& filepath, bool enabled = true) {
         flushMetricsCsv();
+        std::string resolved = filepath;
+        if (!resolved.empty()) {
+            std::error_code error;
+            const std::filesystem::path path(resolved);
+            if (std::filesystem::is_directory(path, error) || resolved.back() == '/' || resolved.back() == '\\') {
+                resolved = (path / "loss_history.csv").string();
+                std::cerr << "[monitor] Metrics CSV directory resolved to: " << resolved << std::endl;
+            }
+        }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!filepath.empty() && filepath != metrics_csv_file_) {
-            metrics_csv_file_ = filepath;
+        if (!resolved.empty() && resolved != metrics_csv_file_) {
+            metrics_csv_file_ = resolved;
             history_loaded_ = false;
         }
         metrics_csv_enabled_ = enabled;

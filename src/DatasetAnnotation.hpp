@@ -2,11 +2,46 @@
 
 #include "include/json.hpp"
 #include "training/SkeletonAnnotation.hpp"
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+
+inline std::array<double, 4> datasetAnnotationMaskBounds(const nlohmann::json& mask) {
+    auto require = [](bool condition, const std::string& reason) {
+        if (!condition) throw std::runtime_error("Dataset annotation: mask " + reason);
+    };
+    require(mask.is_object() && mask.value("type", std::string()) == "polygon",
+            "type must be polygon");
+    require(mask.contains("points") && mask["points"].is_array() && mask["points"].size() >= 3,
+            "requires at least three points");
+    std::array<double, 4> bounds{
+        std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+    double twice_area = 0.0;
+    const auto& points = mask["points"];
+    for (size_t i = 0; i < points.size(); ++i) {
+        const auto& point = points[i];
+        require(point.is_array() && point.size() == 2 && point[0].is_number() && point[1].is_number(),
+                "point must be [x,y]");
+        const double x = point[0].get<double>(), y = point[1].get<double>();
+        require(std::isfinite(x) && std::isfinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1,
+                "point outside [0,1]");
+        bounds[0] = std::min(bounds[0], x); bounds[1] = std::min(bounds[1], y);
+        bounds[2] = std::max(bounds[2], x); bounds[3] = std::max(bounds[3], y);
+        const auto& next = points[(i + 1) % points.size()];
+        require(next.is_array() && next.size() == 2 && next[0].is_number() && next[1].is_number(),
+                "point must be [x,y]");
+        twice_area += x * next[1].get<double>() - next[0].get<double>() * y;
+    }
+    require(std::isfinite(twice_area) && std::abs(twice_area) > 1e-10,
+            "polygon must have non-zero area");
+    return bounds;
+}
 
 // Editor bookkeeping is never a training modality (nor a cache input).
 inline bool isDatasetInternalFile(const std::filesystem::path& path) {
@@ -54,6 +89,29 @@ inline std::string datasetAnnotationCaption(const nlohmann::json& a,
             }
             require(b[0].get<double>() < b[2].get<double>() && b[1].get<double>() < b[3].get<double>(), "empty or inverted bbox");
         }
+        if (e.contains("mask")) (void)datasetAnnotationMaskBounds(e["mask"]);
+        if (e.contains("track")) {
+            const auto& track=e["track"];
+            require(track.is_object() && track.contains("id") && track["id"].is_string() &&
+                    track["id"].get<std::string>().find_first_not_of(" \t\r\n")!=std::string::npos && track.contains("name") &&
+                    track["name"].is_string() && track["name"].get<std::string>().find_first_not_of(" \t\r\n")!=std::string::npos,
+                    "invalid tracked identity");
+            require(e.contains("mask"), "tracked identity requires a tracing mask");
+        }
+        if (e.contains("ocr")) {
+            const auto& ocr=e["ocr"];
+            require(ocr.is_object() && ocr.contains("text") && ocr["text"].is_string() &&
+                    ocr["text"].get<std::string>().find_first_not_of(" \t\r\n")!=std::string::npos &&
+                    ocr.contains("translation") && ocr["translation"].is_string() &&
+                    ocr.contains("source_language") && ocr["source_language"].is_string() &&
+                    ocr.contains("target_language") && ocr["target_language"].is_string() &&
+                    ocr.contains("tags") && ocr["tags"].is_array(),
+                    "invalid OCR annotation");
+            for(const auto& tag:ocr["tags"])
+                require(tag.is_string() && tag.get<std::string>().find_first_not_of(" \t\r\n")!=std::string::npos,
+                        "invalid OCR tag");
+            require(e.contains("mask"), "OCR annotation requires a region mask");
+        }
     }
     auto stringField = [&](const nlohmann::json& v, const char* key) {
         require(v.is_object() && v.contains(key) && v[key].is_string(), std::string("invalid ") + key);
@@ -78,4 +136,17 @@ inline std::string datasetAnnotationCaption(const nlohmann::json& a,
     }
     SkeletonAnnotation::validate(a, true);
     return primary;
+}
+
+// Keep masks as first-class entities while adding their derived bounds for
+// consumers that still use box-based relations or rendering.
+inline nlohmann::json parseDatasetAnnotation(const nlohmann::json& document,
+                                             const std::string& image_file) {
+    (void)datasetAnnotationCaption(document, image_file);
+    nlohmann::json parsed = document;
+    if (parsed.contains("entities")) for (auto& entity : parsed["entities"]) {
+        if (entity.contains("mask"))
+            entity["bbox"] = datasetAnnotationMaskBounds(entity["mask"]);
+    }
+    return parsed;
 }

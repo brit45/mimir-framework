@@ -25,6 +25,8 @@ mimir_add_test(FrameworkTest.MemoryGuard          test_memory_guard.cpp)
 mimir_add_test(FrameworkTest.OverrideParsing      test_override_parsing.cpp)
 mimir_add_test(RegistryTest.Aliases               test_registry_aliases.cpp)
 mimir_add_test(LuaTest.ApiBasics                  test_lua_api_basics.cpp)
+mimir_add_test(LuaTest.Gradients                  test_lua_gradients.cpp)
+set_tests_properties(LuaTest.Gradients PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(LuaTest.ApiBasics PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
@@ -113,16 +115,23 @@ mimir_add_test(AutogradTest.RuntimeDispatch test_runtime_autograd_dispatch.cpp)
 mimir_add_test(ModelTest.ReconLosses      test_recon_losses.cpp)
 mimir_add_test(ModelTest.VAEConvContract  test_vae_conv_contract.cpp)
 mimir_add_test(ModelTest.VAEKLControls test_vae_kl_controls.cpp)
+mimir_add_test(ModelTest.VAETextContext test_vae_text_context.cpp)
 mimir_add_test(ModelTest.VAEConvLatentContext test_vae_conv_latent.cpp)
 mimir_add_test(ModelTest.LumenDiffusionStructure test_lumen_diffusion_structure.cpp)
+set_tests_properties(
+    ModelTest.VAEConvLatentContext
+    ModelTest.LumenDiffusionStructure
+    PROPERTIES TIMEOUT 120)
 mimir_add_test(VizTest.TextPayload             test_viz_text_payload.cpp)
 mimir_add_test(MetricsTest.AsyncHistory test_async_monitor_history.cpp)
+mimir_add_test(LuaTest.VAETextVizBridge test_lua_vae_text_viz.cpp)
 mimir_add_test(MetricsTest.GradientDiagnostics test_gradient_diagnostics.cpp)
 mimir_add_test(MetricsTest.HtopCsv             test_htop_metrics_csv.cpp)
 if(NOT MIMIR_VIZ_BACKEND STREQUAL "NONE")
     mimir_add_test(VizTest.MetricsCsv          test_viz_metrics_csv.cpp)
 endif()
 mimir_add_test(ModelTest.VGG16FeatEncNorm test_vgg16_feat_enc_norm.cpp)
+set_tests_properties(ModelTest.VGG16FeatEncNorm PROPERTIES TIMEOUT 120)
 add_executable(VizTest.AnnotationFeatureBounds test_annotation_feature_bounds.cpp)
 target_include_directories(VizTest.AnnotationFeatureBounds PRIVATE ../src ../src/include)
 add_test(NAME VizTest.AnnotationFeatureBounds COMMAND VizTest.AnnotationFeatureBounds)
@@ -244,14 +253,28 @@ add_test(NAME VizTest.KLControls COMMAND VizTest.ButtonEvents --kl-only)
 set_tests_properties(VizTest.KLControls PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
 set_tests_properties(VizTest.ButtonEvents PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
 
+# Matrix launch geometry and batch strides must execute on the selected GPU.
+if(ENABLE_CUDA OR ENABLE_ROCM OR ENABLE_OPENCL OR ENABLE_VULKAN)
+    add_executable(RuntimeTest.GpuParallelMatMul test_gpu_parallel_matmul.cpp test_log_stub.cpp)
+    target_compile_features(RuntimeTest.GpuParallelMatMul PRIVATE cxx_std_17)
+    target_link_libraries(RuntimeTest.GpuParallelMatMul PRIVATE mimir_core)
+    foreach(backend CUDA ROCM OPENCL VULKAN)
+        if(ENABLE_${backend})
+            add_test(NAME RuntimeTest.${backend}ParallelMatMul COMMAND RuntimeTest.GpuParallelMatMul ${backend})
+            set_tests_properties(RuntimeTest.${backend}ParallelMatMul PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180 LABELS "GPU;${backend}")
+        endif()
+    endforeach()
+endif()
+
 # Native CUDA parity must execute on a CUDA device; CPU fallback is not a pass.
 if(ENABLE_CUDA AND CUDAToolkit_FOUND)
     mimir_add_test(RuntimeTest.CudaNativeOps test_cuda_native_ops.cpp)
     set_tests_properties(RuntimeTest.CudaNativeOps PROPERTIES TIMEOUT 120 LABELS "CUDA;GPU")
 endif()
 
+mimir_add_test(RuntimeTest.PortableWorkBudget test_portable_work_budget.cpp)
 if(ENABLE_OPENCL OR ENABLE_VULKAN)
-    mimir_add_test(RuntimeTest.PortableWorkBudget test_portable_work_budget.cpp)
     add_executable(PortableNativeOps test_portable_native_ops.cpp test_log_stub.cpp)
     target_compile_features(PortableNativeOps PRIVATE cxx_std_17)
     target_link_libraries(PortableNativeOps PRIVATE mimir_core)
@@ -290,27 +313,32 @@ if(Python3_Interpreter_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 # Reference fixture has no dependency on JAX. Its output is also consumed by the
-# optional Python differential test and the real-TPU runtime test in Colab.
+# optional Python differential test and the optional TPU runtime test.
 mimir_add_test(RuntimeTest.TpuCpuFixture test_tpu_cpu_fixture.cpp)
 set_tests_properties(RuntimeTest.TpuCpuFixture PROPERTIES TIMEOUT 60)
 set(MIMIR_TPU_TEST_PYTHON "" CACHE FILEPATH "Python with JAX for TPU reference differential tests")
-if(MIMIR_TPU_TEST_PYTHON)
+if(MIMIR_TPU_TEST_PYTHON AND EXISTS "${MIMIR_TPU_TEST_PYTHON}")
     add_test(NAME RuntimeTest.ReconstructionJaxReference
         COMMAND "${MIMIR_TPU_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/test_reconstruction_tpu_reference.py"
                 $<TARGET_FILE:RuntimeTest.ReconstructionLoss>)
-    set_tests_properties(RuntimeTest.ReconstructionJaxReference PROPERTIES TIMEOUT 180 ENVIRONMENT "OMP_NUM_THREADS=1;JAX_PLATFORMS=cpu")
+    set_tests_properties(RuntimeTest.ReconstructionJaxReference PROPERTIES
+        TIMEOUT 180 ENVIRONMENT "OMP_NUM_THREADS=1;JAX_PLATFORMS=cpu" LABELS "JAX")
     add_test(NAME RuntimeTest.OptimizerJaxReference
         COMMAND "${MIMIR_TPU_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/test_optimizer_tpu_reference.py"
                 $<TARGET_FILE:RuntimeTest.OptimizerDispatch>)
-    set_tests_properties(RuntimeTest.OptimizerJaxReference PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;JAX_PLATFORMS=cpu")
+    set_tests_properties(RuntimeTest.OptimizerJaxReference PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;JAX_PLATFORMS=cpu" LABELS "JAX")
     add_test(NAME RuntimeTest.TpuReference
         COMMAND "${MIMIR_TPU_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/test_tpu_reference.py"
                 $<TARGET_FILE:RuntimeTest.TpuCpuFixture>)
-    set_tests_properties(RuntimeTest.TpuReference PROPERTIES TIMEOUT 300 ENVIRONMENT "OMP_NUM_THREADS=1")
+    set_tests_properties(RuntimeTest.TpuReference PROPERTIES
+        TIMEOUT 300 ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "TPU;COLAB")
+elseif(MIMIR_TPU_TEST_PYTHON)
+    message(WARNING "MIMIR_TPU_TEST_PYTHON does not point to an existing file; optional TPU reference tests are disabled.")
 endif()
 mimir_add_test(RuntimeTest.TpuLifecycle test_tpu_lifecycle.cpp)
 mimir_add_test(RuntimeTest.TpuModelTrain test_tpu_model_train.cpp)
-set_tests_properties(RuntimeTest.TpuModelTrain PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+set_tests_properties(RuntimeTest.TpuModelTrain PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS "TPU")
 
 # Odd feature sizes, batched reductions and accumulated packed gradients.
 mimir_add_test(RuntimeTest.LinearBackwardTiled test_linear_backward_tiled.cpp)
@@ -362,3 +390,50 @@ if(OpenMP_CXX_FOUND)
 endif()
 add_test(NAME RuntimeTest.SoftwareFP16 COMMAND RuntimeTest.SoftwareFP16)
 set_tests_properties(RuntimeTest.SoftwareFP16 PROPERTIES TIMEOUT 15)
+
+add_test(NAME LuaTest.CheckpointResumeResolver
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_checkpoint_resume.lua)
+add_test(NAME LuaTest.TrainingResume
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_training_resume.lua)
+set_tests_properties(LuaTest.CheckpointResumeResolver LuaTest.TrainingResume PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+
+mimir_add_test(RuntimeTest.Fusion test_runtime_fusion.cpp)
+set_tests_properties(RuntimeTest.Fusion PROPERTIES TIMEOUT 120 ENVIRONMENT
+    "OMP_NUM_THREADS=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1")
+add_test(NAME RuntimeTest.VAEConvTrainingFusion
+    COMMAND ${CMAKE_COMMAND} -DMIMIR_FUSION_TEST=$<TARGET_FILE:RuntimeTest.Fusion>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/test_vae_fusion_parity.cmake)
+set_tests_properties(RuntimeTest.VAEConvTrainingFusion PROPERTIES TIMEOUT 240)
+
+
+mimir_add_test(PlannerTest.FusionCalibration test_fusion_calibration.cpp)
+set_tests_properties(PlannerTest.FusionCalibration PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+
+mimir_add_test(PlannerTest.ExecutionPolicy test_execution_policy.cpp)
+set_tests_properties(PlannerTest.ExecutionPolicy PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+
+add_executable(RuntimeTest.GpuPointwiseFusion test_gpu_pointwise_fusion.cpp test_log_stub.cpp)
+target_compile_features(RuntimeTest.GpuPointwiseFusion PRIVATE cxx_std_17)
+target_link_libraries(RuntimeTest.GpuPointwiseFusion PRIVATE mimir_core)
+foreach(backend VULKAN OPENCL CUDA ROCM)
+    add_test(NAME RuntimeTest.${backend}PointwiseFusion COMMAND RuntimeTest.GpuPointwiseFusion ${backend})
+    set_tests_properties(RuntimeTest.${backend}PointwiseFusion PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 180 LABELS "GPU;${backend}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_RUNTIME_AUTOTUNE=1")
+endforeach()
+
+add_test(NAME RuntimeTest.GpuFusionPacking COMMAND RuntimeTest.GpuPointwiseFusion --packing)
+set_tests_properties(RuntimeTest.GpuFusionPacking PROPERTIES TIMEOUT 15)
+
+add_test(NAME LuaTest.LumenInferenceUI
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_lumen_inference_ui.lua)
+add_test(NAME LuaTest.LumenInferenceScript
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_lumen_inference_script.lua)
+set_tests_properties(LuaTest.LumenInferenceUI LuaTest.LumenInferenceScript PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)
+
+mimir_add_test(ModelTest.T5 test_t5.cpp)
+set_tests_properties(ModelTest.T5 PROPERTIES TIMEOUT 60)
+add_test(NAME LuaTest.T5 COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_t5.lua)
+set_tests_properties(LuaTest.T5 PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)

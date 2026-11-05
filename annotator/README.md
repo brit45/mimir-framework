@@ -14,6 +14,18 @@ php -S 127.0.0.1:8080 -t annotator
 
 Ouvrir **http://127.0.0.1:8080**, saisir le chemin du dataset et cliquer sur **Ouvrir / rescanner**. Le serveur doit pouvoir lire les images et écrire dans leurs dossiers et à la racine du dataset. L’application est prévue pour le serveur local PHP ; les requêtes provenant d’une adresse ou d’un hôte distant sont refusées.
 
+## Créer un dataset depuis l’interface
+
+Déplier **Créer un dataset et importer des images**, cliquer sur **Parcourir…** pour choisir le dossier parent dans la boîte de sélection, puis donner un nom au nouveau dataset. Sélectionner des fichiers images ou un dossier entier : les sous-dossiers sont conservés à l’import. Les annotations JSON et le résumé `composition.mimir-meta` produits par Mímir Dataset Composer sont également copiés. Pour ces annotations, les classes, boîtes et libellés existants préremplissent les entités dans Annoter ; la phrase principale est initialisée avec les classes détectées. Cliquer sur **Créer et importer** crée le nouveau dossier, copie les fichiers sélectionnés, rescane le dataset et ouvre la première image pour l’annotation.
+
+Pour charger ou modifier un dataset existant, cliquer sur **Choisir un dossier…** sous le champ du dataset. Naviguer jusqu’au dossier voulu puis choisir **Ouvrir / modifier ce dataset** ; Annoter le rescane et ouvre une image. Le chemin peut aussi être saisi directement.
+
+Les sidecars de détection conservent leurs boîtes `boxes` et leurs classes. Lorsqu’une annotation est sauvegardée depuis Annoter, ces boîtes sont synchronisées avec les entités éditées afin que le dataset reste exploitable par le composeur.
+
+Les masques image sont associés à leur image par nom relatif, en ignorant les dossiers `images/`, `masks/`, `segmentations/` et les suffixes `_mask`, `-mask`, `.mask`, `_segmentation` ou `-segmentation`. Ils ne sont pas listés comme images à annoter. À l’ouverture, Annoter calcule leur boîte englobante à partir des pixels de premier plan et ajoute une entité à sauvegarder avec l’image correspondante.
+
+Les formats acceptés sont JPG/JPEG, PNG, WebP et BMP. Une image identique déjà présente au même chemin est ignorée; une image différente n’est jamais écrasée. Si une partie de l’import échoue, l’interface affiche les erreurs et conserve le dossier créé. Réessayer la même sélection reprend les transferts : les fichiers déjà importés sont détectés et ignorés. La taille maximale dépend des limites `upload_max_filesize` et `post_max_size` de PHP.
+
 ## Annoter
 
 1. Rédiger une phrase humaine dans la description principale. Les alternatives se saisissent une par ligne.
@@ -22,6 +34,37 @@ Ouvrir **http://127.0.0.1:8080**, saisir le chemin du dataset et cliquer sur **O
 4. Pour remplacer la boîte d’une entité, utiliser **Sélectionner / dessiner** sur sa fiche. Pour dessiner un nouvel objet dans une boîte existante, utiliser **Dessiner une nouvelle boîte**.
 5. Ajouter les attributs et les relations avec les sélecteurs d’entités, puis renseigner l’éclairage, la composition et les vérifications.
 6. Cliquer sur **Sauvegarder** ou **Sauvegarder et suivante**. La sauvegarde requiert une description principale non vide et des références valides.
+
+Pour annoter le décor, cliquer sur **Tracer un masque de décor**, puis dessiner son contour en glissant sur l’image. Le masque devient une entité `background` nommée `decor_N`; préciser sa phrase, puis lier les pieds ou d’autres points du squelette à cette entité. Les masques existants peuvent être redessinés depuis leur fiche. La simulation des attaches mesure la distance à la forme polygonale réelle, et non à sa seule boîte englobante.
+
+Le JSON conserve un polygone normalisé sur l’image dans `entities[].mask`; son enveloppe `bbox` est calculée pour rester compatible avec les consommateurs de boîtes :
+
+```json
+{"id":"decor_floor","phrase":"sol en pierre","role":"background",
+ "mask":{"type":"polygon","points":[[0,0.78],[1,0.74],[1,1],[0,1]]}}
+```
+
+Le chargeur natif valide le polygone, calcule sa boîte englobante lors du chargement paresseux et garde le masque dans `item.annotation`. La pondération spatiale exploite les pixels couverts par le polygone; les relations existantes peuvent référencer l’entité par identifiant.
+
+### OCR et suivi d’identités
+
+**Annoter une zone OCR** permet de tracer le contour d’un texte, puis de saisir sa transcription exacte, sa traduction facultative, les langues source/cible (par exemple `ja` et `fr`) et des tags séparés par des virgules. Une zone OCR requiert une transcription non vide et un masque; les langues, la traduction et les tags peuvent rester vides.
+
+Pour suivre une personne dans les images d’un chapitre, tracer d’abord son masque d’occurrence puis donner à son entité un **ID de suivi** stable et un **nom** lisible. Réutiliser cet ID et ce nom dans chaque image où le personnage apparaît. Après sauvegarde, un rescannage liste les identités déjà trouvées, le nombre d’images concernées et les éventuels noms divergents. **Tracer une occurrence** crée rapidement une nouvelle entité masquée à partir d’une identité choisie. Les IDs sont uniques par convention dans le dataset; le validateur signale une identité incomplète ou sans masque. Le nommage est explicite et ne constitue pas une reconnaissance automatique du personnage.
+
+Exemples des données ajoutées aux entités :
+
+```json
+{"id":"ocr_1","phrase":"texte dans l’image","role":"text",
+ "mask":{"type":"polygon","points":[[0.2,0.1],[0.8,0.1],[0.8,0.2],[0.2,0.2]]},
+ "ocr":{"text":"こんにちは","translation":"Bonjour","source_language":"ja","target_language":"fr","tags":["dialogue"]}}
+```
+
+```json
+{"id":"person_1","phrase":"Asha","role":"primary_subject",
+ "mask":{"type":"polygon","points":[[0.2,0.1],[0.5,0.1],[0.5,0.9],[0.2,0.9]]},
+ "track":{"id":"chapter-asha","name":"Asha"}}
+```
 
 **Suppr** ou **Retour arrière**, quand le canvas a le focus, supprime uniquement la boîte sélectionnée. **Supprimer l’entité** supprime aussi ses attributs et ses relations, après confirmation. Renommer un identifiant met à jour ses références.
 
@@ -51,7 +94,7 @@ node --check annotator/assets/app.js
 python3 annotator/tests/smoke.py
 ```
 
-Le test démarre son propre serveur PHP sur un port libre et crée uniquement un dataset temporaire, supprimé à la fin. Il couvre le scan récursif, les chemins Unicode, les sauvegardes et le rechargement, la reprise entre sessions, les révisions concurrentes, les références et boîtes invalides, les JSON étrangers, les collisions de noms, les liens symboliques, les traversées, les jetons CSRF, les hôtes distants et la conservation des images. `PHP_BIN` permet de sélectionner un autre binaire ; `PHP_ARGS` accepte ses options supplémentaires.
+Le test démarre son propre serveur PHP sur un port libre et crée uniquement un dataset temporaire, supprimé à la fin. Il couvre le scan récursif, les chemins Unicode, les sauvegardes et le rechargement, la découverte des identités suivies, les annotations OCR, la reprise entre sessions, les révisions concurrentes, les références et boîtes invalides, les JSON étrangers, les collisions de noms, les liens symboliques, les traversées, les jetons CSRF, les hôtes distants et la conservation des images. `PHP_BIN` permet de sélectionner un autre binaire ; `PHP_ARGS` accepte ses options supplémentaires.
 
 ## Squelettes nommés
 

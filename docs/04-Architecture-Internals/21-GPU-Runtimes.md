@@ -1,4 +1,4 @@
-# Runtimes GPU : CUDA et ROCm
+# Runtimes GPU : Vulkan, OpenCL, CUDA et ROCm
 
 Comprendre le fonctionnement interne exact des composants runtime.
 
@@ -16,6 +16,10 @@ Sources de vérité :
 - `src/runtimes/cuda/CudaRuntime.hpp` / `.cpp` — CUDA (cuBLAS)
 - `src/runtimes/rocm/RocmRuntime.hpp` / `.cpp` — ROCm (rocBLAS)
 - `src/runtimes/cpu/CpuRuntime.hpp` / `.cpp` — CPU référence
+- `src/runtimes/vulkan/VulkanRuntime.hpp` / `.cpp` — Vulkan
+- `src/runtimes/opencl/OpenCLRuntime.hpp` / `.cpp` — OpenCL
+- `src/runtimes/PointwiseFusionKernels.cuh` — kernels pointwise partagés
+- `src/runtimes/portable/PortablePointwiseFusion.hpp` — soumission fusionnée Vulkan/OpenCL
 
 Guide utilisateur associé : [docs/05-Advanced/05-GPU-Acceleration.md](../05-Advanced/05-GPU-Acceleration.md).
 
@@ -24,13 +28,15 @@ Guide utilisateur associé : [docs/05-Advanced/05-GPU-Acceleration.md](../05-Adv
 ## Sur cette page
 
 - [1) Interface commune (AbstractRuntime)](#1-interface-commune-abstractruntime)
-- [2) RuntimeConfig — paramètres et parsing](#2-runtimeconfig-paramètres-et-parsing)
+- [2) RuntimeConfig — paramètres et parsing](#2-runtimeconfig--paramètres-et-parsing)
 - [3) CudaRuntime — implémentation](#3-cudaruntime-implémentation)
 - [4) Fast-paths détaillés](#4-fast-paths-détaillés)
 - [5) ROCm Runtime — différences avec CUDA](#5-rocm-runtime-différences-avec-cuda)
-- [6) Vulkan Runtime — kernels compute réels (SPIR-V)](#6-vulkan-runtime-kernels-compute-réels-spir-v)
+- [6) Vulkan Runtime — kernels compute réels (SPIR-V)](#6-vulkan-runtime--kernels-compute-réels-spir-v)
 - [7) Invariants et gotchas](#7-invariants-et-gotchas)
 - [8) Ajouter un nouveau fast-path GPU](#8-ajouter-un-nouveau-fast-path-gpu)
+- [Fusion native des chaînes pointwise](#fusion-native-des-chaînes-pointwise)
+- [Validation de la fusion au 28 octobre 2026](#validation-de-la-fusion-au-28-octobre-2026)
 - [Étapes suivantes](#étapes-suivantes)
 
 ## 1) Interface commune (`AbstractRuntime`)
@@ -73,99 +79,37 @@ Le dispatch `forwardLayer(...)` est utilisé dans le forward principal pour Line
 
 ## 2) `RuntimeConfig` — paramètres et parsing
 
-### Structure
+`RuntimeConfig` porte les flags `linear_enabled`, `conv_enabled`,
+`norm_enabled`, `attention_enabled`, leurs minima de travail, `disabled`,
+`verbose` et `device_index`. Les minima valent `0` par défaut : la politique
+centrale compare les latences, sans seuil de vitesse implicite par backend.
+Les limites de protection des kernels restent applicables.
 
-```cpp
-struct RuntimeConfig {
-    std::string backend;   // "CUDA" ou "ROCM"
-    bool disabled         = false;
-    bool verbose          = false;
+`RuntimeConfig::fromEnv("CUDA")` lit notamment `MIMIR_DISABLE_CUDA`,
+`MIMIR_ACCEL_VERBOSE`, `MIMIR_CUDA_DEVICE`, `MIMIR_CUDA_LINEAR` et
+`MIMIR_CUDA_LINEAR_MIN_OPS`. Les mêmes suffixes existent pour les autres
+backends. Il n’existe pas de kill-switch global `MIMIR_CUDA=0`.
 
-    bool linear_enabled   = false;
-    int  linear_min_ops   = 1 << 20;
-
-    bool conv_enabled     = false;
-    int  conv_min_ops     = 1 << 18;
-
-    bool norm_enabled         = false;
-    int  norm_min_elements    = 1 << 12;
-
-    bool attention_enabled  = false;
-    int  attention_min_ops  = 1 << 18;
-
-    int device_index = 0;
-};
-```
-
-### Parsing depuis l'environnement
-
-```cpp
-RuntimeConfig RuntimeConfig::fromEnv(const char* backend_upper) {
-    RuntimeConfig cfg;
-    cfg.backend = backend_upper;
-    // Préfixe : "MIMIR_CUDA_" ou "MIMIR_ROCM_"
-    std::string pfx = std::string("MIMIR_") + backend_upper + "_";
-
-    auto get_bool = [&](const char* key, bool def) -> bool { ... };
-    auto get_int  = [&](const char* key, int  def) -> int  { ... };
-
-    cfg.disabled    = !get_bool("", true);     // MIMIR_CUDA=0 → disabled
-    cfg.verbose     = get_bool("VERBOSE", false);
-    cfg.device_index = get_int("DEVICE", 0);
-
-    cfg.linear_enabled    = get_bool("LINEAR",    false);
-    cfg.linear_min_ops    = get_int ("LINEAR_MIN_OPS", 1 << 20);
-    cfg.conv_enabled      = get_bool("CONV",      false);
-    cfg.conv_min_ops      = get_int ("CONV_MIN_OPS",  1 << 18);
-    cfg.norm_enabled      = get_bool("NORM",      false);
-    cfg.norm_min_elements = get_int ("NORM_MIN_ELEMS", 1 << 12);
-    cfg.attention_enabled = get_bool("ATTENTION", false);
-    cfg.attention_min_ops = get_int ("ATTENTION_MIN_OPS", 1 << 18);
-    return cfg;
-}
-```
+Les flags sont initialement `false` dans une configuration construite directement
+et dans `fromEnv()` en l’absence de variable correspondante. L’initialisation
+des runtimes par `Model` applique ensuite ses valeurs par défaut, notamment
+l’activation des fast-paths CUDA/ROCm. Le lanceur peut aussi désactiver un backend.
+Consulter la [référence des variables](../03-API-Reference/22-Environment-Variables.md)
+pour distinguer ces niveaux.
 
 ---
 
 ## 3) CudaRuntime — implémentation
 
-### Structure interne
+L’état backend est défini dans `CudaRuntime.cpp`, derrière le pointeur
+`Impl*` du header. Il conserve le handle cuBLAS, six buffers `linear_scratch`,
+deux buffers de training et les mutex correspondants. `DeviceBuf::alloc()`
+réutilise la capacité disponible, et ne réalloue que lorsqu’elle est insuffisante.
+La configuration est stockée dans `AbstractRuntime::config_`.
 
-```cpp
-class CudaRuntime final : public AbstractRuntime {
-    struct Impl {
-        cublasHandle_t handle = nullptr;
-        RuntimeConfig  config;
-
-        // Buffers temporaires réutilisables (arène simple)
-        struct DeviceBuf {
-            void*  ptr   = nullptr;
-            size_t bytes = 0;
-            bool alloc(size_t n);
-            bool copyFromHost(const void* src, size_t n);
-            bool copyToHost(void* dst, size_t n) const;
-            ~DeviceBuf();
-        };
-
-        DeviceBuf d_A, d_B, d_C, d_bias, d_col, d_scratch;
-    };
-    Impl* impl_ = nullptr;
-};
-```
-
-### Initialisation
-
-```cpp
-bool CudaRuntime::initialize(const RuntimeConfig& cfg) {
-    impl_ = new Impl{};
-    impl_->config = cfg;
-    if (cfg.disabled) return false;
-    cudaError_t err = cudaSetDevice(cfg.device_index);
-    if (err != cudaSuccess) { /* log, return false */ }
-    cublasStatus_t st = cublasCreate(&impl_->handle);
-    return st == CUBLAS_STATUS_SUCCESS;
-}
-```
+L’initialisation vérifie le device CUDA et crée le handle cuBLAS. Les entrées et
+les poids sont réuploadés selon l’opération ; la réutilisation d’une allocation
+ne signifie pas que son contenu reste valable après une mise à jour des poids.
 
 ---
 
@@ -175,49 +119,17 @@ bool CudaRuntime::initialize(const RuntimeConfig& cfg) {
 
 ### 4.1 Pattern commun
 
-Chaque fast-path dans `CudaRuntime::forwardLayer` suit ce squelette :
+Un chemin natif valide son état, ses flags et sa géométrie, réserve ses
+buffers, charge les données requises, lance les kernels ou les opérations BLAS,
+puis restitue le résultat à l’hôte. Les copies D2H bloquantes des buffers CUDA
+complètent les kernels précédents du flux par défaut ; elles évitent une
+synchronisation globale supplémentaire sur ces chemins.
 
-```cpp
-case LayerType::Linear:
-{
-    if (!impl_->config.linear_enabled) break;
-    int M = batch, K = in_f, N = out_f;
-    long long ops = (long long)M * K * N * 2;
-    if (ops < impl_->config.linear_min_ops) break;
-
-    // 1. Allouer device
-    if (!impl_->d_A.alloc(M*K*sizeof(float))) break;
-    if (!impl_->d_B.alloc(K*N*sizeof(float))) break;
-    if (!impl_->d_C.alloc(M*N*sizeof(float))) break;
-
-    // 2. Upload
-    if (!impl_->d_A.copyFromHost(input.data(), M*K*sizeof(float))) break;
-    if (!impl_->d_B.copyFromHost(weights, K*N*sizeof(float))) break;
-
-    // 3. SGEMM
-    float alpha=1.f, beta=0.f;
-    auto st = cublasSgemm(impl_->handle,
-        CUBLAS_OP_N, CUBLAS_OP_N,
-        N, M, K,
-        &alpha,
-        (float*)impl_->d_B.ptr, N,
-        (float*)impl_->d_A.ptr, K,
-        &beta,
-        (float*)impl_->d_C.ptr, N);
-    if (st != CUBLAS_STATUS_SUCCESS) break;
-
-    // 4. Biais (optionnel)
-    if (bias && out_f > 0) { /* cublasSaxpy par ligne */ }
-
-    // 5. Sync + download
-    if (cudaDeviceSynchronize() != cudaSuccess) break;
-    if (!impl_->d_C.copyToHost(output.data(), M*N*sizeof(float))) break;
-
-    return true; // ← succès
-}
-while(false); // break → fallback CPU
-return false;
-```
+Un retour `false` permet au routeur d’essayer une autre exécution. La présence
+d’un backend en tête de priorité ne force pas sa sélection :
+`ExecutionCalibration` compare les candidats natifs pour les opérations
+rejouables. Les refus de géométrie et les échecs ne sont pas attribués à une
+exécution GPU réussie.
 
 ### 4.2 Convolutions et normalisations natives
 
@@ -292,7 +204,7 @@ Shaders associés (compilés au build):
 Pipeline technique:
 
 1. CMake compile les `.comp` en `.spv` via `glslangValidator`.
-2. Les `.spv` sont copiés dans `bin/shaders`.
+2. Les `.spv` sont produits dans le dossier `shaders` du build ; le runtime cherche aussi les emplacements compatibles tels que `bin/shaders`.
 3. `VulkanCompute.hpp` charge les SPIR-V, crée pipeline/layout/descriptor pool.
 4. `VulkanRuntime::forwardLayer` route les layers compatibles vers ces kernels.
 5. Les autres opérations et le backward passent par `PortableRuntime`, décrit ci-dessous.
@@ -302,21 +214,27 @@ Pipeline technique:
 
 ## 7) Invariants et gotchas
 
-### Aucun état persistent entre les couches
+### Buffers réutilisables et contenu à jour
 
-Les `DeviceBuf` sont alloués/libérés à chaque appel de fast-path. Il n'y a pas de pool de buffers GPU. C'est délibéré : simplicité d'implémentation. L'overhead d'allocation est limité car `cudaMalloc` est relativement rapide pour des buffers de même taille (le driver CUDA met en cache).
+Les runtimes CUDA/ROCm réutilisent des buffers de scratch protégés par mutex.
+Le staging portable garde aussi des allocations device réutilisables. Les
+résultats et paramètres sont transférés selon le contrat de chaque opération ;
+un cache d’allocation ne constitue pas un cache immuable des poids.
 
-**`training=true` et dispatch réel**
+### Forward, backward et contexte sauvegardé
 
-Le dispatch runtime est disponible en entraînement comme en inférence pour les fast-paths activés (`Linear`, `MatMul/BatchMatMul`, `Conv2d`, normes, attentions) côté CUDA/ROCm.
-
-Le backward n'est pas déporté vers ces runtimes dans ces fast-paths : l'accélération concerne la passe forward des layers.
+Les backends exposent des capacités forward et backward distinctes. La fusion
+pointwise dispose de kernels pour les deux directions. Pour les autres
+opérations, vérifier `queryBackwardOperationCapability()` et le runtime
+réellement sélectionné : la couverture CUDA n’implique pas une couverture ROCm
+identique. L’entraînement conserve les snapshots et masques nécessaires aux
+opérations qui les utilisent.
 
 ### Pas de mixed precision
 
 Tous les fast-paths travaillent en `float32`. Les types `F16`/`BF16` du modèle ne sont pas utilisés ici (la conversion est faite ailleurs, si applicable).
 
-### Masque causal sur host
+### Masque causal sur le device
 
 Les kernels d'attention de référence appliquent le masque causal sur le device.
 Le coût du staging et des kernels séquentiels doit être mesuré pour les longues
@@ -364,10 +282,12 @@ upsampling, dropout et reparamétrisation. Les configurations, formes de tenseur
 et limites du device restent vérifiées ; cette couverture par type ne garantit
 pas que toute forme soit acceptée.
 
-Les nouveaux kernels de référence OpenCL/Vulkan exécutent leur calcul sur le
-device avec une invocation qui traite le travail logique séquentiellement.
-Ils privilégient la conformité numérique ; leur couverture ne garantit pas des
-performances supérieures au CPU. Le staging des tenseurs et l'accumulation des
+Les kernels OpenCL/Vulkan à sorties indépendantes utilisent une grille
+parallèle, et les réductions prises en charge utilisent des groupes coopératifs.
+Les algorithmes intrinsèquement séquentiels conservent un chemin de référence
+borné. `PortableWorkBudget.hpp` vérifie séparément les limites de travail et de
+staging. La couverture numérique ne garantit pas des performances supérieures
+au CPU. Le staging des tenseurs et l'accumulation des
 gradients de paramètres retournés restent sur l'hôte. Les calculs forward et
 backward ne sont pas remplacés par un appel arithmétique CPU caché.
 
@@ -393,8 +313,9 @@ pas d'un toolkit CUDA.
 
 ### Validation
 
-Recette CMake/CTest pour un build avec tests (adapter le dossier de build ;
-les validations matérielles locales sont précisées ci-dessous) :
+Recette CMake/CTest pour un nouveau build avec tests (à adapter ; commandes
+non rejouées sous le nom `build-gpu-tests` pour cette mise à jour). Les preuves
+matérielles locales sont précisées ci-dessous :
 
 ```bash
 cmake -S . -B build-gpu-tests -DENABLE_OPENCL=ON -DENABLE_VULKAN=ON -DMIMIR_ENABLE_TESTS=ON -DBUILD_TESTING=ON
@@ -432,3 +353,80 @@ dans son processus et sous son identité. Le profil portable partage les mêmes
 formes entre tous les concurrents ; les budgets de sécurité restent actifs.
 Voir [Benchmarks Colab](../05-Advanced/07-Colab-Benchmarks.md) pour les profils,
 la provenance, le RSS et le dépannage des anciennes cellules.
+
+
+## Fusion native des chaînes pointwise
+
+Les quatre backends implémentent les hooks `queryPointwiseFusionCapability()`,
+`pointwiseFusionForward()` et `pointwiseFusionBackward()` d’`AbstractRuntime`.
+La fusion porte sur `Identity`, `ReLU`, `LeakyReLU`, `GELU`, `SiLU`, `Tanh`,
+`Sigmoid`, `Softplus`, `Mish`, `HardSigmoid` et `HardSwish`, dans des chaînes
+unaires sans poids d’au moins deux étapes. Un backend non initialisé, désactivé
+ou sans compilation native appropriée refuse la capacité.
+
+`Mimir::GpuFusion::Program` prépare une arène bornée contenant les données,
+les opcodes/paramètres, les snapshots backward et les sorties. La chaîne entière
+est traitée dans une invocation par élément, avec un seul lancement de kernel
+par direction. `retain=true` conserve les sorties de toutes les étapes ; sinon
+seule la sortie finale est restituée. Les transferts nécessaires au résultat
+hôte restent présents : ce mécanisme ne rend pas automatiquement tout le modèle
+résident sur le GPU.
+
+| Backend | Source et soumission |
+| --- | --- |
+| Vulkan | `PointwiseFusionKernels.cuh` traduit en SPIR-V ; `PortableExecutor` soumet un seul dispatch. |
+| OpenCL | Même source traduite en OpenCL ; `PortableExecutor` soumet un seul kernel. |
+| CUDA | Source partagée compilée avec CUDA ; lancement natif et buffers de scratch réutilisés. |
+| ROCm | Source partagée compilée avec HIP ; lancement natif et buffers de scratch réutilisés. |
+
+Les flags `linear_enabled` et `linear_min_ops` du backend s’appliquent aussi à
+ces programmes, avec le nombre d’éléments comme travail pour ce contrôle. La
+calibration reste nécessaire : elle impose la parité exacte avec la chaîne
+ordinaire et un gain mesuré supérieur à la marge de sélection. Les 121 couples
+d’activations disponibles ne seront donc pas tous systématiquement sélectionnés
+sur GPU. Voir [le planner](22-Planning.md#sélection-dune-fusion).
+
+### Compilation CUDA et HIP
+
+CUDA nécessite un toolkit avec compilateur CUDA ; détecter uniquement les
+bibliothèques ne suffit pas. CMake compile `CudaRuntime.cpp` avec le langage
+CUDA lorsque ce backend est disponible.
+
+Pour ROCm, `ENABLE_ROCM=ON` recherche HIP et rocBLAS. Avec CMake 3.21 ou plus et
+un compilateur HIP détecté, `RocmRuntime.cpp` est compilé en langage HIP, en
+C++17. Sans ce compilateur, la fusion native ROCm n’est pas annoncée comme
+supportée. `CMAKE_HIP_ARCHITECTURES` permet de cibler l’architecture de compilation
+sans constituer une preuve d’exécution sur ce matériel.
+
+### Validation de la fusion au 28 octobre 2026
+
+| Backend | Preuve locale dans ce checkout |
+| --- | --- |
+| CPU | 121 couples, chaînes de longueur 1 à 7, parité bit à bit des sorties et gradients, branches VAEConv et tests du cache. |
+| Vulkan | Fusion exécutée sur AMD Radeon Graphics via RADV RENOIR ; 121 couples, forward/backward, rétention/final seul et tailles irrégulières. |
+| OpenCL | Même couverture exécutée sur AMD Radeon Graphics via Rusticl/radeonsi. |
+| ROCm | Runtime compilé en HIP, y compris via CMake pour `gfx90c` ; aucune exécution ROCm pour cette validation. |
+| CUDA | Implémentation présente ; compilation et exécution non vérifiées ici, `nvcc` absent. |
+
+Les tests directs GPU comparent leurs résultats au CPU avec une tolérance
+numérique ; la sélection d’une fusion par le planner conserve son exigence
+bit à bit avec la chaîne routée. Les tests de routage vérifient que le candidat
+GPU est évalué, mais autorisent le CPU ou la chaîne non fusionnée à gagner.
+Sur les cas de calibration locaux, ces chemins ordinaires/CPU ont été retenus.
+Aucun gain de vitesse GPU global n’est déduit de ces validations.
+
+Recette pour un nouveau dossier de build (à adapter ; cette forme de commande
+n’a pas été rejouée sous le nom `build-gpu-tests` lors de la validation locale) :
+
+```bash
+cmake -S . -B build-gpu-tests -DENABLE_OPENCL=ON -DENABLE_VULKAN=ON -DMIMIR_ENABLE_TESTS=ON -DBUILD_TESTING=ON
+cmake --build build-gpu-tests --target RuntimeTest.GpuPointwiseFusion -j4
+ctest --test-dir build-gpu-tests --output-on-failure -R '^RuntimeTest.(VULKAN|OPENCL)PointwiseFusion$'
+```
+
+`RuntimeTest.CUDAPointwiseFusion` et `RuntimeTest.ROCMPointwiseFusion` utilisent
+le même exécutable avec le backend demandé. Un backend non compilé ou un device
+indisponible donne le code de skip `77` ; ce résultat ne vaut pas validation
+matérielle. Les tests `RuntimeTest.GpuFusionPacking`,
+`PlannerTest.FusionCalibration` et `PlannerTest.ExecutionPolicy` couvrent les
+budgets, les décisions, l’isolation, l’invalidation et les choix CPU.

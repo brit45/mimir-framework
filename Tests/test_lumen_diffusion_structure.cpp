@@ -4,6 +4,7 @@
 #include "Models/Diffusion/LumenLatentDiffusionModel.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Models/Vision/VAEConvModel.hpp"
+#include "Models/NLP/VAETextModel.hpp"
 #include "Serialization/Serialization.hpp"
 #include "runtimes/ops_sequence_constant.hpp"
 #include "runtimes/RuntimeRouter.hpp"
@@ -650,6 +651,45 @@ int main() {
     TASSERT_TRUE(raw_adaptive_lumen.getConfig().patch_size == 2);
     TASSERT_TRUE(raw_adaptive_lumen.modelConfig["input_dim"].get<int>() == 2 * 2 * 2);
     std::filesystem::remove_all(raw_vae_checkpoint);
+
+
+    // The deterministic posterior mean from a pretrained textual VAE conditions DiT.
+    const auto text_checkpoint = std::filesystem::temp_directory_path() / "mimir_lumen_text_vae";
+    std::filesystem::remove_all(text_checkpoint);
+    VAETextModel text_vae;
+    VAETextModel::Config text_cfg;
+    text_cfg.vocab_size = 32; text_cfg.seq_len = 4; text_cfg.d_model = 8;
+    text_cfg.num_layers = 1; text_cfg.num_heads = 2; text_cfg.mlp_hidden = 16;
+    text_cfg.latent_tokens = 2; text_cfg.proj_dim = 8;
+    text_vae.buildFromConfig(text_cfg);
+    text_vae.allocateParams(); text_vae.initializeWeights("xavier", 42);
+    TASSERT_TRUE(Mimir::Serialization::save_checkpoint(
+        text_vae, text_checkpoint.string(), save_options, &save_error));
+    LumenLatentDiffusionModel::Config conditioned_cfg;
+    conditioned_cfg.image_w = conditioned_cfg.image_h = 4;
+    conditioned_cfg.latent_w = conditioned_cfg.latent_h = 4;
+    conditioned_cfg.latent_c = 2; conditioned_cfg.patch_size = 2;
+    conditioned_cfg.hidden_size = 8; conditioned_cfg.depth = 1;
+    conditioned_cfg.vocab_size = 32; conditioned_cfg.text_seq_len = 4;
+    conditioned_cfg.num_heads = 2;
+    conditioned_cfg.text_vae_checkpoint = text_checkpoint.string();
+    LumenLatentDiffusionModel conditioned;
+    conditioned.buildFromConfig(conditioned_cfg);
+    conditioned.allocateParams(); conditioned.initializeWeights("xavier", 7);
+    const auto* imported = conditioned.getLayerByName("lumen/text_vae/vae_text/mu");
+    const auto* original_text_mu = text_vae.getLayerByName("vae_text/mu");
+    TASSERT_TRUE(imported && original_text_mu);
+    TASSERT_TRUE(std::equal(original_text_mu->getWeights(), original_text_mu->getWeights()+original_text_mu->getWeightsSize(), imported->getWeights()));
+    TASSERT_TRUE(!conditioned.getLayerByName("lumen/text/token_embedding"));
+    const auto first = conditioned.forwardPassNamedView(
+        {{"__input__", std::vector<float>(32, 0.1f)}, {"timestep", std::vector<float>(8, 0.2f)}},
+        {{"text_ids", {1, 2, 3, 4}}}, false);
+    const auto second = conditioned.forwardPassNamedView(
+        {{"__input__", std::vector<float>(32, 0.1f)}, {"timestep", std::vector<float>(8, 0.2f)}},
+        {{"text_ids", {4, 3, 2, 1}}}, false);
+    TASSERT_TRUE(first.size() == second.size() && first != second);
+    for (float value : second) TASSERT_TRUE(std::isfinite(value));
+    std::filesystem::remove_all(text_checkpoint);
 
     return 0;
 }

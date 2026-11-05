@@ -1,9 +1,12 @@
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_vae_texte.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 ---@diagnostic disable: undefined-global, undefined-field, inject-field
 
 -- Train VAEText (vae_text) sur un dataset de textes (text_file).
 --
 -- Usage:
---   ./bin/mimir --lua scripts/training/train_vae_texte.lua -- \
+--   ./run_mimir.sh --lua scripts/training/train_vae_texte.lua -- \
 --     --dataset-root ../dataset_2 \
 --     --out-dir checkpoint/vae_text_trained \
 --     --epochs 5 --lr 1e-4 \
@@ -92,7 +95,7 @@ if Mimir and Mimir.Model and Mimir.Model.set_hardware then
   pcall(Mimir.Model.set_hardware, hw_enabled)
 end
 
-local dataset_root = opt_str("dataset-root", "./dataset_2")
+local dataset_root = opt_str("context-dir", opt_str("dataset-root", "./dataset_text"))
 local arch = opt_str("arch", opt_str("model", opt_str("model-type", "vae_text")))
 if arch ~= "vae_text" then
   error("Unknown --arch: " .. tostring(arch) .. " (expected: vae_text)")
@@ -120,6 +123,12 @@ cfg.num_heads = opt_int("heads", opt_int("num-heads", opt_int("num_heads", cfg.n
 cfg.mlp_hidden = opt_int("mlp-hidden", opt_int("mlp_hidden", cfg.mlp_hidden or 1024))
 cfg.latent_tokens = opt_int("latent-tokens", opt_int("latent_tokens", cfg.latent_tokens or 32))
 cfg.proj_dim = opt_int("proj-dim", opt_int("proj_dim", cfg.proj_dim or 256))
+cfg.contextual_encoding = opt_bool("contextual-encoding", cfg.contextual_encoding ~= false)
+cfg.encoder_causal = opt_bool("encoder-causal", cfg.encoder_causal == true)
+cfg.text_mask_ratio = opt_num("text-mask-ratio", cfg.text_mask_ratio or 0.15)
+cfg.content_weight = opt_num("content-weight", cfg.content_weight or 0.1)
+assert(cfg.text_mask_ratio >= 0 and cfg.text_mask_ratio < 1, "--text-mask-ratio doit être dans [0,1[")
+assert(cfg.content_weight >= 0 and cfg.content_weight < math.huge, "--content-weight doit être fini et positif ou nul")
 cfg.decoder_causal = opt_bool("decoder-causal", opt_bool("decoder_causal", cfg.decoder_causal ~= false))
 cfg.enable_conditional_encoder = opt_bool("enable-conditional-encoder", opt_bool("enable_conditional_encoder", cfg.enable_conditional_encoder ~= false))
 cfg.enable_context_heads = opt_bool("enable-context-heads", opt_bool("enable_context_heads", cfg.enable_context_heads ~= false))
@@ -163,9 +172,11 @@ Args.apply_validation_config(cfg, opts, {
 
 -- IMPORTANT: utilisé côté C++ pour le shuffle/ordre dataset.
 cfg.seed = seed
+cfg.natural_context_windows = opt_bool("natural-context-windows", true)
 
 -- Viz taps (consommés côté C++ si viz active)
-cfg.viz_taps_max_frames = opt_int("viz-taps-max-frames", cfg.viz_taps_max_frames or 12)
+cfg.viz_taps_max_frames = opt_int("viz-taps-max-frames", cfg.viz_taps_max_frames or 64)
+cfg.viz_registered_tips_only = opt_bool("viz-registered-tips-only", cfg.viz_registered_tips_only ~= false)
 cfg.viz_taps_max_side = opt_int("viz-taps-max-side", cfg.viz_taps_max_side or 64)
 cfg.viz_taps_force_inference = opt_bool("viz-taps-force-inference", opt_bool("viz_taps_force_inference", cfg.viz_taps_force_inference or false))
 
@@ -194,6 +205,29 @@ cfg.padding_idx = BaseTok.pad_id and BaseTok.pad_id() or (cfg.padding_idx or 0)
 -- Checkpoint dir (utilisé pour interrupt checkpoints côté C++)
 cfg.checkpoint_dir = save_out_dir
 
+-- La topologie du checkpoint reste l'autorité lors d'une reprise.
+if RESUME then
+  local resume_dir = Ckpt.resolve_dir(out_dir)
+  if resume_dir then
+    local architecture = read_json(FS.join(resume_dir, "model", "architecture.json"))
+    local saved = type(architecture) == "table" and architecture.model_config
+    if type(saved) == "table" then
+      assert(saved.type == "vae_text", "Checkpoint de reprise incompatible avec VAEText")
+      for _, key in ipairs({"vocab_size", "padding_idx", "seq_len", "d_model", "num_layers",
+          "num_heads", "mlp_hidden", "latent_tokens", "proj_dim", "decoder_causal",
+          "tokenizer_integrated", "enable_conditional_encoder", "enable_context_heads",
+          "context_semantic_dim", "context_thematic_dim", "context_dialog_dim",
+          "stochastic_latent", "dropout"}) do
+        if saved[key] ~= nil then cfg[key] = saved[key] end
+      end
+      cfg.contextual_encoding = saved.contextual_encoding == true
+      cfg.encoder_causal = saved.encoder_causal == true
+      cfg.text_mask_ratio = saved.text_mask_ratio or 0
+      cfg.content_weight = saved.content_weight or 0
+    end
+  end
+end
+
 log("VAEText train")
 log(string.format("  arch=%s", arch))
 log(string.format("  dataset_root=%s", dataset_root))
@@ -203,6 +237,8 @@ log(string.format("  seq_len=%d d_model=%d latent_tokens=%d proj_dim=%d", cfg.se
 log(string.format("  layers=%d heads=%d mlp_hidden=%d", cfg.num_layers, cfg.num_heads, cfg.mlp_hidden))
 log(string.format("  decoder_causal=%s cond_encoder=%s context_heads=%s", tostring(cfg.decoder_causal), tostring(cfg.enable_conditional_encoder), tostring(cfg.enable_context_heads)))
 log(string.format("  context_dims: semantic=%d thematic=%d dialog=%d", cfg.context_semantic_dim, cfg.context_thematic_dim, cfg.context_dialog_dim))
+log(string.format("  contextual_encoding=%s encoder_causal=%s text_mask_ratio=%g content_weight=%g",
+  tostring(cfg.contextual_encoding), tostring(cfg.encoder_causal), cfg.text_mask_ratio, cfg.content_weight))
 log(string.format("  epochs=%d lr=%g kl_beta=%g", epochs, lr, cfg.kl_beta))
 log(string.format("  recon_loss=%s align_weight=%g", tostring(cfg.recon_loss), tonumber(cfg.align_weight or 0.0) or 0.0))
 log(string.format("  context_weights: semantic=%g thematic=%g dialog=%g", cfg.context_semantic_weight, cfg.context_thematic_weight, cfg.context_dialog_weight))
@@ -280,7 +316,7 @@ if ok_train == false and tostring(err_train) == "STOP_REQUESTED" then
   if not last_dir and Ckpt and Ckpt.resolve_dir then
     last_dir = Ckpt.resolve_dir(save_out_dir)
   end
-  if not last_dir then last_dir = save_out_dir end
+  if not last_dir then last_dir = FS.join(save_out_dir, "final") end
 
   FS.mkdir_p(last_dir)
   local ok_save_stop, err_save_stop = Mimir.Serialization.save(last_dir, "raw_folder", {
@@ -301,8 +337,9 @@ end
 assert_ok(ok_train, err_train, "Model.train failed")
 
 -- Sauvegarde
-FS.mkdir_p(save_out_dir)
-local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
+local final_dir = FS.join(save_out_dir, "final")
+FS.mkdir_p(final_dir)
+local ok_save, err_save = Mimir.Serialization.save(final_dir, "raw_folder", {
   save_optimizer = true,
   save_tokenizer = true,
   save_encoder = true,
@@ -315,4 +352,4 @@ local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
 })
 assert_ok(ok_save, err_save, "Serialization.save failed")
 
-log("✓ Checkpoint VAEText écrit: " .. save_out_dir)
+log("✓ Checkpoint VAEText écrit: " .. final_dir)

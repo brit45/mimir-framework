@@ -1,10 +1,53 @@
 #include "OptimizerDispatch.hpp"
 #include "Model.hpp"
+#include "runtimes/cpu/Parallel.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <climits>
 #include <stdexcept>
+namespace {
+template<class Function>
+void optimizerForEach(size_t count, int workers, const Function& update) {
+    if (workers == 1) {
+        #pragma omp simd
+        for (size_t i=0; i<count; ++i) update(i);
+    } else {
+        #pragma omp parallel for simd num_threads(workers) schedule(static)
+        for (size_t i=0; i<count; ++i) update(i);
+    }
+}
+#ifdef __AVX2__
+template<bool WeightDecay>
+size_t adamVectorStep(const RuntimeOptimizerRequest& r, int workers,
+                     float beta1, float beta2, float correction1, float correction2) {
+    const size_t blocks = r.count / 8;
+    const __m256 b1=_mm256_set1_ps(beta1), b2=_mm256_set1_ps(beta2);
+    const __m256 one_b1=_mm256_set1_ps(1.f-beta1), one_b2=_mm256_set1_ps(1.f-beta2);
+    const __m256 c1=_mm256_set1_ps(correction1), c2=_mm256_set1_ps(correction2);
+    const __m256 epsilon=_mm256_set1_ps(r.optimizer->eps), lr=_mm256_set1_ps(r.learning_rate);
+    const __m256 decay=_mm256_set1_ps(r.optimizer->weight_decay);
+    optimizerForEach(blocks, workers, [&](size_t block) {
+        const size_t i=block*8;
+        const __m256 g=_mm256_loadu_ps(r.gradients+i);
+        const __m256 m=_mm256_add_ps(_mm256_mul_ps(b1,_mm256_loadu_ps(r.first_moment+i)),
+                                    _mm256_mul_ps(one_b1,g));
+        const __m256 v=_mm256_add_ps(_mm256_mul_ps(b2,_mm256_loadu_ps(r.second_moment+i)),
+                                    _mm256_mul_ps(_mm256_mul_ps(one_b2,g),g));
+        _mm256_storeu_ps(r.first_moment+i,m);
+        _mm256_storeu_ps(r.second_moment+i,v);
+        const __m256 denominator=_mm256_add_ps(_mm256_sqrt_ps(_mm256_div_ps(v,c2)),epsilon);
+        const __m256 update=_mm256_mul_ps(lr,_mm256_div_ps(_mm256_div_ps(m,c1),denominator));
+        const __m256 current=_mm256_loadu_ps(r.weights+i);
+        __m256 next=_mm256_sub_ps(current,update);
+        if constexpr(WeightDecay)
+            next=_mm256_sub_ps(next,_mm256_mul_ps(lr,_mm256_mul_ps(decay,current)));
+        _mm256_storeu_ps(r.weights+i,next);
+    });
+    return blocks*8;
+}
+#endif
+}
 bool optimizerRequestValid(const RuntimeOptimizerRequest& r) {
     if(!r.optimizer || !r.weights || !r.gradients || !r.count)return false;
     const auto& o=*r.optimizer;
@@ -15,16 +58,16 @@ bool optimizerRequestValid(const RuntimeOptimizerRequest& r) {
 void optimizerHostStep(const RuntimeOptimizerRequest& r) {
     auto& opt=*r.optimizer;auto* weights=r.weights;const auto n=r.count;
     const float effective_lr=r.learning_rate;
+    const int workers = RuntimeParallel::workers(n);
     struct Moments {float* m;float* v;} state{r.first_moment,r.second_moment};
     auto* moments=&state;
         switch (opt.type) {
             case OptimizerType::SGD: {
                 // SGD simple
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                optimizerForEach(n, workers, [&](size_t i) {
                     float grad = r.gradients[i];
                     weights[i] -= effective_lr * grad;
-                }
+                });
                 break;
             }
             
@@ -35,9 +78,12 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 float bias_correction2 = 1.0f - std::pow(b2, static_cast<float>(opt.step));
                 if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
                 if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
-                
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                size_t offset=0;
+                #ifdef __AVX2__
+                offset=adamVectorStep<false>(r,workers,b1,b2,bias_correction1,bias_correction2);
+                #endif
+                optimizerForEach(n-offset, offset ? 1 : workers, [&](size_t tail) {
+                    const size_t i=offset+tail;
                     float grad = r.gradients[i];
 
                     float& mi = (*moments).m[i];
@@ -50,7 +96,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                     
                     float denom = std::sqrt(v_hat) + opt.eps;
                     weights[i] -= effective_lr * (m_hat / denom);
-                }
+                });
                 break;
             }
             
@@ -61,9 +107,12 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 float bias_correction2 = 1.0f - std::pow(b2, static_cast<float>(opt.step));
                 if (bias_correction1 <= 0.0f) bias_correction1 = 1e-8f;
                 if (bias_correction2 <= 0.0f) bias_correction2 = 1e-8f;
-                
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                size_t offset=0;
+                #ifdef __AVX2__
+                offset=adamVectorStep<true>(r,workers,b1,b2,bias_correction1,bias_correction2);
+                #endif
+                optimizerForEach(n-offset, offset ? 1 : workers, [&](size_t tail) {
+                    const size_t i=offset+tail;
                     float grad = r.gradients[i];
                     float current = weights[i];
 
@@ -80,22 +129,21 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                     float adam_update = effective_lr * (m_hat / denom);
 
                     weights[i] = current - adam_update - effective_lr * weight_decay_term;
-                }
+                });
                 break;
             }
 
             case OptimizerType::LION: {
                 const float b1 = std::clamp(opt.beta1, 0.0f, 1.0f);
                 const float b2 = std::clamp(opt.beta2, 0.0f, 1.0f);
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                optimizerForEach(n, workers, [&](size_t i) {
                     const float grad = r.gradients[i];
                     float& mi = moments->m[i];
                     const float update = b1 * mi + (1.0f - b1) * grad;
                     const float direction = (update > 0.0f) - (update < 0.0f);
                     weights[i] -= effective_lr * (direction + opt.weight_decay * weights[i]);
                     mi = b2 * mi + (1.0f - b2) * grad;
-                }
+                });
                 break;
             }
 
@@ -105,6 +153,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                     0.0f, 1.0f);
                 double update_sq_sum = 0.0;
                 double param_sq_sum = 0.0;
+                #pragma omp parallel for simd if(workers>1) num_threads(workers) schedule(static) reduction(+:update_sq_sum,param_sq_sum)
                 for (size_t i = 0; i < n; ++i) {
                     const float grad = r.gradients[i];
                     float& vi = moments->v[i];
@@ -122,8 +171,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 const float relative_lr = opt.adafactor_relative_step
                     ? std::min(1e-2f, 1.0f / std::sqrt(static_cast<float>(opt.step)))
                     : effective_lr;
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                optimizerForEach(n, workers, [&](size_t i) {
                     float update = clip_scale * r.gradients[i]
                         / std::sqrt(moments->v[i] + std::max(1e-30f, opt.eps));
                     if (opt.adafactor_beta1 > 0.0f) {
@@ -133,7 +181,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                         update = momentum;
                     }
                     weights[i] -= relative_lr * param_scale * update;
-                }
+                });
                 break;
             }
 
@@ -150,8 +198,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                     ? std::sqrt(((rho - 4.0f) * (rho - 2.0f) * rho_inf)
                                 / ((rho_inf - 4.0f) * (rho_inf - 2.0f) * rho))
                     : 1.0f;
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                optimizerForEach(n, workers, [&](size_t i) {
                     const float grad = r.gradients[i];
                     float& mi = moments->m[i];
                     float& vi = moments->v[i];
@@ -162,7 +209,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                         ? rectification * m_hat / (std::sqrt(vi / std::max(1e-8f, 1.0f - b2_power)) + opt.eps)
                         : m_hat;
                     weights[i] -= effective_lr * update;
-                }
+                });
                 break;
             }
 
@@ -171,8 +218,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 const float b2 = std::clamp(opt.beta2, 0.0f, 1.0f);
                 const float bc1 = std::max(1e-8f, 1.0f - std::pow(b1, static_cast<float>(opt.step)));
                 const float bc2 = std::max(1e-8f, 1.0f - std::pow(b2, static_cast<float>(opt.step)));
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                optimizerForEach(n, workers, [&](size_t i) {
                     const float grad = r.gradients[i];
                     float& mi = moments->m[i];
                     float& vi = moments->v[i];
@@ -180,19 +226,18 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                     vi = b2 * vi + (1.0f - b2) * grad * grad;
                     const float nesterov = b1 * (mi / bc1) + (1.0f - b1) * grad / bc1;
                     weights[i] -= effective_lr * nesterov / (std::sqrt(vi / bc2) + opt.eps);
-                }
+                });
                 break;
             }
 
             case OptimizerType::RMSPROP: {
                 const float alpha = std::clamp(opt.rmsprop_alpha, 0.0f, 1.0f);
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                optimizerForEach(n, workers, [&](size_t i) {
                     const float grad = r.gradients[i];
                     float& vi = moments->v[i];
                     vi = alpha * vi + (1.0f - alpha) * grad * grad;
                     weights[i] -= effective_lr * grad / (std::sqrt(vi) + opt.eps);
-                }
+                });
                 break;
             }
 
@@ -203,6 +248,7 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 const float bc2 = std::max(1e-8f, 1.0f - std::pow(b2, static_cast<float>(opt.step)));
                 double weight_norm_sq = 0.0;
                 double update_norm_sq = 0.0;
+                #pragma omp parallel for simd if(workers>1) num_threads(workers) schedule(static) reduction(+:weight_norm_sq,update_norm_sq)
                 for (size_t i = 0; i < n; ++i) {
                     const float grad = r.gradients[i];
                     float& mi = moments->m[i];
@@ -218,13 +264,12 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 const float update_norm = static_cast<float>(std::sqrt(update_norm_sq));
                 const float trust_ratio = weight_norm > 0.0f && update_norm > 0.0f
                     ? weight_norm / update_norm : 1.0f;
-                #pragma omp simd
-                for (size_t i = 0; i < n; ++i) {
+                optimizerForEach(n, workers, [&](size_t i) {
                     const float update = (moments->m[i] / bc1)
                         / (std::sqrt(moments->v[i] / bc2) + opt.eps)
                         + opt.weight_decay * weights[i];
                     weights[i] -= effective_lr * trust_ratio * update;
-                }
+                });
                 break;
             }
         }

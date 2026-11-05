@@ -441,11 +441,17 @@ Objectifs:
 
 Le planner de graphes prend en charge:
 
-- fusion d'opérations,
+- regroupement de graphe et fusion native des chaînes d’activations en forward/backward (CPU, Vulkan, OpenCL, CUDA et ROCm),
 - optimisation des durées de vie des tenseurs,
 - planification d'allocation des buffers,
 - réutilisation mémoire,
-- préparation du runtime.
+- sélection des runtimes et configurations CPU par calibration de latence,
+- réutilisation des décisions en cache avec invalidation et recalibration périodique.
+
+Une fusion native est sélectionnée après contrôle de parité exacte et gain
+mesuré. Les capacités implémentées et les validations matérielles sont
+distinguées dans les pages [Planner](./docs/04-Architecture-Internals/22-Planning.md)
+et [Runtimes GPU](./docs/04-Architecture-Internals/21-GPU-Runtimes.md#validation-de-la-fusion-au-28-octobre-2026).
 
 Schémas internes (SVG):
 

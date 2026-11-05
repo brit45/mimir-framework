@@ -139,10 +139,17 @@ mais `set_enabled(true)` ne le redémarre pas : utiliser `create()`.
 - `E` : ouvre la boîte de sélection du snapshot PNG.
 - `Tab`, `F1..F5`, `←/→` : navigation focus/éléments.
 - `Z`/`Entrée` : zoom, `Esc` : quitter zoom.
+- `I` dans le zoom : afficher ou masquer l’info-bulle du picker.
 - Survol d’un tip zoomé : bulle des valeurs brutes et des indices du tenseur,
   jusqu’à 16 canaux échantillonnés. Les coordonnées suivent le redimensionnement
   de la vignette ; la valeur affichée précède la colorisation. Si le tip ne
   fournit pas de valeurs brutes, la bulle indique explicitement les pixels uint8.
+- Dans le zoom, glisser sur l’image fige une sélection inspectable dans le panneau
+  latéral ; la molette parcourt les valeurs et `Esc` / clic droit efface la sélection.
+  Le panneau affiche les métadonnées du tensor, les statistiques signées et les
+  activations les plus fortes avec leurs indices source. Une grille `/vec` est une
+  projection de preview d’un vecteur : l’indice identifie une dimension apprise,
+  pas à lui seul un concept ou un label sémantique.
 - Bouton `PAUSE training` / `PLAY / Reprendre` dans Metrics : suspend/reprend
   le calcul entre étapes, tout en laissant les interfaces actives. Fermer la
   Viz pendant la pause libère l’entraînement ; `STOP` reste disponible.
@@ -342,8 +349,10 @@ optionnelle de 0 à 1000 ms. Types : `configured`, `click` (`id`, `x`, `y`),
 `close`, `resize` (`width`, `height`). Avec `events=true`, s'ajoutent `key`
 (`code` enum clavier Viz, `control`, `shift`, `alt`), `text` (`unicode`),
 `pointer_move`, `pointer_down`, `pointer_up` (`x`, `y`, et `button` pour les deux
-derniers). Les événements bruts observent les entrées sans désactiver les
-raccourcis intégrés. La file est bornée à 256 entrées : les plus anciennes sont
+derniers). Avec `events=true`, les événements bruts permettent d’observer les entrées,
+mais les raccourcis intégrés gardent leur priorité. Pendant une saisie,
+`capture_keys=true` réserve le clavier au script : notamment `N` et `C` ne
+doivent pas ouvrir le graphe ou la configuration au milieu d’un prompt. La file est bornée à 256 entrées : les plus anciennes sont
 supprimées en cas de saturation. Les clics ne rejouent pas automatiquement un
 callback ; `viz_ui.lua` les distribue pendant `dispatch`, sur le thread Lua.
 Les erreurs des callbacks remontent au script.
@@ -390,3 +399,36 @@ remplacés à chaque enregistrement.
 sans interface. `--help` détaille les options sans charger de modèle. Le script
 vérifie la présence et la taille des poids requis avant de charger le décodeur
 partiel ; il ne modifie ni les poids ni le checkpoint.
+
+
+### Préparer une inférence Lumen dans Viz
+
+Le script `scripts/inferences/lumen_text2img.lua` ouvre automatiquement un panneau
+de génération si un backend Viz utilisable est disponible. Le checkpoint Lumen,
+son tokenizer et son VAE sont chargés avant l’ouverture de ce panneau. Les
+options `--prompt`, `--seed`, `--steps`, `--guidance` et `--out` préremplissent
+les champs ; aucune inférence n’est lancée avant un clic sur **Générer**.
+
+Cliquer sur un champ pour saisir sa valeur. Le texte est initialement sélectionné :
+la saisie le remplace. `Ctrl+A` sélectionne tout, les flèches déplacent le curseur,
+`Backspace` efface un caractère UTF-8, `Entrée` valide, `Tab` passe au champ suivant
+et `Échap` annule l’édition du champ. Hors édition, `H` rappelle l’aide, `Tab`
+ouvre le premier champ et `Échap` ferme le panneau. La seed et les étapes doivent être des
+entiers compatibles avec le runtime ; les étapes sont positives et la guidance
+est finie et positive ou nulle. Le runtime plafonne les étapes effectives à la
+taille du scheduler enregistré. Un prompt vide permet le conditionnement vide.
+
+Chaque clic sur **Générer** prend un snapshot des réglages validés, génère
+l’image et écrit le PPM au chemin choisi. L’aperçu et les réglages restent
+ouverts après le calcul pour permettre un nouvel essai. Le même chemin de sortie
+est remplacé lors des générations suivantes. **Réinitialiser** restaure les
+réglages de lancement ; **Fermer**, avant la première génération, quitte sans
+inférence ni écriture d’image. Une erreur de génération est affichée et laisse
+le panneau utilisable.
+
+Le checkpoint, le tokenizer et la géométrie restent ceux chargés au lancement.
+Les réglages modifiés s’appliquent à la prochaine génération, pas à un calcul en
+cours. Sans Viz utilisable, ou avec `--headless` / `--no-viz`, le script conserve
+sa génération unique en ligne de commande. Le panneau utilise
+la scène et les événements communs de l’API Viz, sans dépendance à des widgets
+propres à Qt ou GTK.

@@ -21,6 +21,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <limits>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -747,16 +748,28 @@ int LuaScripting::lua_getGradients(lua_State* L) {
     }
     
     try {
-        Gradients grads = ctx.currentModel->getGradients();
-        
-        // Retourner les gradients comme table (ordonnée par index)
-        lua_newtable(L);
-        size_t lua_idx = 1;
-        
-        // Parcourir tous les indices dans l'ordre
-        for (const auto& [param_idx, grad_value] : grads.param_grads) {
-            lua_pushnumber(L, grad_value);
-            lua_rawseti(L, -2, lua_idx++);
+        // Match Model::getGradients' parameter indices directly, without
+        // allocating a hash node per scalar or exposing hash iteration order.
+        const auto& layers = ctx.currentModel->getLayers();
+        size_t count = 0;
+        const size_t max_count = static_cast<size_t>(std::numeric_limits<lua_Integer>::max());
+        for (const auto& layer : layers) {
+            for (const auto* values : {&layer.grad_weights, &layer.grad_bias}) {
+                if (values->size() > max_count - count)
+                    throw std::length_error("Trop de gradients pour une table Lua");
+                count += values->size();
+            }
+        }
+        lua_createtable(L, static_cast<int>(std::min(count,
+            static_cast<size_t>(std::numeric_limits<int>::max()))), 0);
+        lua_Integer lua_idx = 0;
+        for (const auto& layer : layers) {
+            for (const auto* values : {&layer.grad_weights, &layer.grad_bias}) {
+                for (float value : *values) {
+                    lua_pushnumber(L, value);
+                    lua_rawseti(L, -2, ++lua_idx);
+                }
+            }
         }
         
         return 1;

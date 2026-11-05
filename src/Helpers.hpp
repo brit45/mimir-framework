@@ -1316,10 +1316,11 @@ struct DatasetItem {
                 std::ifstream f(annotation_file);
                 if (!f) throw std::runtime_error("Cannot open annotation: " + annotation_file);
                 json document; f >> document;
-                loaded = sanitize_utf8(datasetAnnotationCaption(document, image_file));
-                annotation_bytes = document.dump().size() + sizeof(json);
+                auto parsed = parseDatasetAnnotation(document, image_file);
+                loaded = sanitize_utf8(parsed["captions"]["primary"].get<std::string>());
+                annotation_bytes = parsed.dump().size() + sizeof(json);
                 if (!mgr.canAllocate(annotation_bytes + loaded.size())) return false;
-                loaded_annotation = std::move(document);
+                loaded_annotation = std::move(parsed);
             } else if (!text_inline.empty()) {
                 loaded = sanitize_utf8(text_inline);
             } else {

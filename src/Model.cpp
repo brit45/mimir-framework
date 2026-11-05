@@ -1,3 +1,4 @@
+#include "Planning/FusionCalibration.hpp"
 #include "runtimes/tpu/TpuRuntime.hpp"
 #include "runtimes/fpga/FpgaSession.hpp"
 #include "runtimes/fpga/FpgaRuntime.hpp"
@@ -39,6 +40,7 @@
 #include <fstream>
 #include <iomanip>
 #include <ctime>
+#include <chrono>
 #include <iostream>
 #include <array>
 #include <cmath>
@@ -65,22 +67,6 @@ static thread_local Model* g_viz_capture_root = nullptr;
 #endif
 
 
-namespace {
-static inline long long omp_work_threshold() {
-#ifdef _OPENMP
-    // Seuil adaptatif modéré: on amortit le runtime OpenMP sans basculer trop vite en séquentiel.
-    const int nt = std::max(1, omp_get_max_threads());
-    const long long base = 262144LL;
-    long long factor = 1LL;
-    if (nt >= 4) factor = 2LL;
-    if (nt >= 12) factor = 3LL;
-    if (nt >= 24) factor = 4LL;
-    return base * factor;
-#else
-    return 262144LL;
-#endif
-}
-} // namespace
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
@@ -434,7 +420,6 @@ bool Model::initializeCpuComputeEngine() {
     // CPU est le fallback de base; on active Linear par défaut.
     RuntimeConfig cfg = cfg_from_env;
     cfg.linear_enabled = env_flag_true("MIMIR_CPU_LINEAR", true);
-    cfg.linear_min_ops = env_int("MIMIR_CPU_LINEAR_MIN_OPS", 0);
 
     try {
         g_cpu_engine = std::make_unique<CpuRuntime>();
@@ -497,9 +482,7 @@ bool Model::initializeComputeEngine() {
 
     RuntimeConfig cfg = RuntimeConfig::fromEnv("VULKAN");
     cfg.linear_enabled = env_flag_true("MIMIR_VULKAN_LINEAR", true);
-    cfg.linear_min_ops = env_int("MIMIR_VULKAN_LINEAR_MIN_OPS", 0);
     cfg.conv_enabled = env_flag_true("MIMIR_VULKAN_CONV", true);
-    cfg.conv_min_ops = env_int("MIMIR_VULKAN_CONV_MIN_OPS", 0);
     if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
         g_compute_available = false;
         g_compute_engine.reset();
@@ -569,7 +552,6 @@ bool Model::initializeOpenCLComputeEngine() {
 
     RuntimeConfig cfg = RuntimeConfig::fromEnv("OPENCL");
     cfg.linear_enabled = env_flag_true("MIMIR_OPENCL_LINEAR", true);
-    cfg.linear_min_ops = env_int("MIMIR_OPENCL_LINEAR_MIN_OPS", 0);
     if (cfg.disabled || !cfg.linear_enabled) {
         g_opencl_available = false;
         g_opencl_engine.reset();
@@ -613,13 +595,9 @@ bool Model::initializeCudaComputeEngine() {
 
     RuntimeConfig cfg = RuntimeConfig::fromEnv("CUDA");
     cfg.linear_enabled = env_flag_true("MIMIR_CUDA_LINEAR", true);
-    cfg.linear_min_ops = env_int("MIMIR_CUDA_LINEAR_MIN_OPS", 0);
     cfg.conv_enabled = env_flag_true("MIMIR_CUDA_CONV", true);
-    cfg.conv_min_ops = env_int("MIMIR_CUDA_CONV_MIN_OPS", 0);
     cfg.norm_enabled = env_flag_true("MIMIR_CUDA_NORM", true);
-    cfg.norm_min_elements = env_int("MIMIR_CUDA_NORM_MIN_ELEMS", 0);
     cfg.attention_enabled = env_flag_true("MIMIR_CUDA_ATTENTION", true);
-    cfg.attention_min_ops = env_int("MIMIR_CUDA_ATTENTION_MIN_OPS", 0);
 
     if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
         g_cuda_available = false;
@@ -675,13 +653,9 @@ bool Model::initializeRocmComputeEngine() {
 
     RuntimeConfig cfg = RuntimeConfig::fromEnv("ROCM");
     cfg.linear_enabled = env_flag_true("MIMIR_ROCM_LINEAR", true);
-    cfg.linear_min_ops = env_int("MIMIR_ROCM_LINEAR_MIN_OPS", 0);
     cfg.conv_enabled = env_flag_true("MIMIR_ROCM_CONV", true);
-    cfg.conv_min_ops = env_int("MIMIR_ROCM_CONV_MIN_OPS", 0);
     cfg.norm_enabled = env_flag_true("MIMIR_ROCM_NORM", true);
-    cfg.norm_min_elements = env_int("MIMIR_ROCM_NORM_MIN_ELEMS", 0);
     cfg.attention_enabled = env_flag_true("MIMIR_ROCM_ATTENTION", true);
-    cfg.attention_min_ops = env_int("MIMIR_ROCM_ATTENTION_MIN_OPS", 0);
 
     if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
         g_rocm_available = false;
@@ -1399,23 +1373,6 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
     std::mt19937 gen(seed == 0 ? std::random_device{}() : seed);
     
     std::cerr << "🎲 Initializing weights using " << method << " method (bloc par layer)..." << std::endl;
-#ifdef _OPENMP
-    std::cerr << "🧵 OpenMP: initialisation des poids jusqu'à " << omp_get_max_threads() << " threads" << std::endl;
-#endif
-
-    auto mix_seed = [](unsigned int base_seed, size_t layer_idx, unsigned int stream) -> unsigned int {
-        // SplitMix64-like mixing to derive independent deterministic seeds.
-        uint64_t x = (static_cast<uint64_t>(base_seed) << 1) ^ 0x9E3779B97F4A7C15ull;
-        x ^= (static_cast<uint64_t>(layer_idx) + 0xD1B54A32D192ED03ull) * 0xBF58476D1CE4E5B9ull;
-        x ^= (static_cast<uint64_t>(stream) + 0x94D049BB133111EBull) * 0x94D049BB133111EBull;
-        x ^= (x >> 30);
-        x *= 0xBF58476D1CE4E5B9ull;
-        x ^= (x >> 27);
-        x *= 0x94D049BB133111EBull;
-        x ^= (x >> 31);
-        return static_cast<unsigned int>(x & 0xFFFFFFFFu);
-    };
-    
     auto frozen_prefixes = [&]() -> std::vector<std::string> {
         std::vector<std::string> out;
         if (modelConfig.contains("frozen_layer_prefixes") && modelConfig["frozen_layer_prefixes"].is_array()) {
@@ -1500,29 +1457,7 @@ void Model::initializeWeights(const std::string &method, unsigned int seed) {
         float* weights_data = layer.weight_block->getData();
         if (!weights_data) continue;
 
-#ifdef _OPENMP
-        // Paralléliser uniquement quand c'est suffisamment gros pour amortir l'overhead.
-        const bool use_parallel = (num_pure_weights >= 1u << 16);
-        if (use_parallel) {
-            const unsigned int base_seed = (seed == 0 ? 0xC0FFEEu : seed);
-            #pragma omp parallel
-            {
-                const unsigned int tid = static_cast<unsigned int>(omp_get_thread_num());
-                std::mt19937 gen_local(mix_seed(base_seed, layer_idx, tid));
-                std::normal_distribution<float> dist_local(0.0f, std_dev);
-
-                #pragma omp for schedule(static)
-                for (size_t i = 0; i < num_weights; ++i) {
-                    float value = (i >= num_pure_weights) ? 0.0f : dist_local(gen_local);
-                    value = std::clamp(value, -3.0f, 3.0f);
-                    weights_data[i] = value;
-                }
-            }
-            continue;
-        }
-#endif
-
-        // Fallback séquentiel (préserve la séquence actuelle basée sur `gen`).
+        // Keep the RNG stream independent of tensor size and worker count.
         std::normal_distribution<float> dist(0.0f, std_dev);
         for (size_t i = 0; i < num_weights; ++i) {
             float value = (i >= num_pure_weights) ? 0.0f : dist(gen);
@@ -2423,9 +2358,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // STATIC SCHEDULING + PLANNERS (framework)
     // ========================================================================
     const bool planner_enabled = env_flag_true("MIMIR_ENABLE_PLANNER", true);
-    const bool fusion_enabled = env_flag_true(
+    const bool fusion_in_training = env_flag_true("MIMIR_ENABLE_FUSION_TRAIN", true);
+    const bool fusion_enabled = (!training || fusion_in_training) && env_flag_true(
         "MIMIR_PLANNER_FUSION", env_flag_true("MIMIR_ENABLE_FUSION", true));
-    const bool fusion_in_training = env_flag_true("MIMIR_ENABLE_FUSION_TRAIN", false);
     const bool planner_cost_model = env_flag_true("MIMIR_PLANNER_COST_MODEL", true);
     const std::string planner_mode_value = [] {
         const char* value = std::getenv("MIMIR_PLANNER_MODE");
@@ -2538,6 +2473,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         static_plan_.built = false;
     }
 
+    if(graph_plan_changed)Mimir::Planning::FusionCalibration::clearProfiles();
+
     // Keep the last built plan available even if the UI opens after inference.
     // Otherwise refresh metadata at most twice per second while inspected.
     const auto graph_now=std::chrono::steady_clock::now();
@@ -2576,6 +2513,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_SPLIT: return "GENERIC_ACTIVATION_SPLIT";
                 case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_CHUNK: return "GENERIC_ACTIVATION_CHUNK";
                 case Mimir::Planning::FusionKind::GENERIC_UNARY_SHAPE: return "GENERIC_UNARY_SHAPE";
+                case Mimir::Planning::FusionKind::GENERIC_LAYER: return "GENERIC_LAYER";
                 default: return "UNKNOWN";
             }
         };
@@ -2739,7 +2677,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
     std::vector<std::vector<float>> all_layer_outputs;
     if (training && has_branches) {
-        all_layer_outputs.reserve(layers.size());
+        // Preserve physical layer indices when fused consumers skip the main loop.
+        all_layer_outputs.resize(layers.size());
     }
     
     // Conservation pour backward (à migrer vers TensorStore)
@@ -2801,16 +2740,60 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     int viz_last_w = 0;
     int viz_last_h = 0;
 
-    auto apply_fused_layer = [&](std::vector<float>& data, const Layer& fused_layer) {
-        std::vector<const std::vector<float>*> inputs{&data};
-        std::vector<std::vector<float>> outputs;
-        if (!RuntimeRouter::instance().dispatchForwardLayer(inputs, outputs, fused_layer, training))
-            throw std::runtime_error("Runtime fused layer failed: " + fused_layer.name);
-        if (fused_layer.type_enum == LayerType::Split || fused_layer.type_enum == LayerType::Chunk) {
-            const std::string base = fused_layer.output.empty() ? "x" : fused_layer.output;
-            for (size_t i = 0; i < outputs.size(); ++i) storeTensor(base + "_" + std::to_string(i), outputs[i]);
+    auto record_fused_inputs = [&](const Layer& layer,const std::vector<const std::vector<float>*>& inputs,
+        std::vector<float>* movable=nullptr) {
+        if(!training)return;
+        forward_state.layer_input_names.push_back(Mimir::Planning::planner_inputs_for(layer));
+        std::vector<size_t> sizes;
+        std::vector<std::vector<float>> snapshots;
+        for(const auto* input:inputs) {
+            sizes.push_back(input->size());
+            if(needs_input_value_snapshot(layer)) {
+                if(input==movable)snapshots.push_back(std::move(*movable));
+                else snapshots.push_back(*input);
+            }
         }
-        data = std::move(outputs.at(0));
+        forward_state.layer_input_sizes_multi.push_back(std::move(sizes));
+        forward_state.layer_inputs_multi.push_back(std::move(snapshots));
+        forward_state.layer_outputs.emplace_back();
+        forward_state.layer_output_masks.emplace_back();
+    };
+    auto apply_fused_layer = [&](std::vector<float>& data, Layer& fused_layer,const std::string& data_name) {
+        if(!fused_layer.shared_weights_from.empty()) {
+            Layer* owner=getLayerByName(fused_layer.shared_weights_from);
+            if(!owner || !owner->weight_block)throw std::runtime_error("Shared weight source unavailable: "+fused_layer.name);
+            fused_layer.weight_block=owner->weight_block;
+        }
+        std::vector<const std::vector<float>*> inputs;
+        for(const auto& name:Mimir::Planning::planner_inputs_for(fused_layer))
+            inputs.push_back(name==data_name?&data:&getTensor(name));
+        record_fused_inputs(fused_layer,inputs);
+        RuntimeForwardContext context;
+        context.skip_connections_enabled=skip_connections_enabled;
+        if(fused_layer.type_enum==LayerType::Reparameterize) {
+            if(modelConfig.contains("stochastic_latent"))context.stochastic_latent=modelConfig["stochastic_latent"].get<bool>();
+            else if(modelConfig.contains("vae_stochastic_latent"))context.stochastic_latent=modelConfig["vae_stochastic_latent"].get<bool>();
+        }
+        if(training)context.output_mask=&forward_state.layer_output_masks.back();
+        std::vector<std::vector<float>> outputs;
+        if(!RuntimeRouter::instance().dispatchForwardLayer(inputs,outputs,fused_layer,training,nullptr,context))
+            throw std::runtime_error("Runtime fused layer failed: "+fused_layer.name);
+        // Materialize exactly once per logical edge, matching the unfused
+        // TensorStore and dtype semantics without copying data back out again.
+        if(Mimir::Planning::planner_output_name_for(fused_layer)!=data_name)
+            storeTensor(data_name,std::move(data));
+        if(Mimir::Planning::is_fusible_split_layer(fused_layer)) {
+            const auto base=Mimir::Planning::planner_output_name_for(fused_layer);
+            for(size_t i=0;i<outputs.size();++i)storeTensor(base+"_"+std::to_string(i),outputs[i]);
+        }
+        data=std::move(outputs.at(0));
+        if(training) {
+            if(needs_output_mask(fused_layer) && forward_state.layer_output_masks.back().empty()) {
+                auto& mask=forward_state.layer_output_masks.back();mask.resize(data.size());
+                for(size_t i=0;i<data.size();++i)mask[i]=data[i]!=0.f;
+            }
+            if(needs_output_snapshot(fused_layer))forward_state.layer_outputs.back()=data;
+        }
     };
 
     const bool exhaustive_model_viz = viz_taps_enabled_ && viz_taps_max_frames_ > 0;
@@ -2831,8 +2814,6 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     std::unordered_map<size_t, std::vector<float>> planned_host_buffer_pool;
     size_t actual_buffer_reuse_count = 0;
     size_t actual_buffer_reuse_bytes = 0;
-    const bool planner_device_residency = env_flag_true("MIMIR_PLANNER_DEVICE_RESIDENCY", false);
-    std::vector<uint8_t> resident_chain_skip(layers.size(), 0);
 
     std::string forward_output_name = modelConfig.is_object()
         ? modelConfig.value("forward_output_tensor", std::string("x")) : "x";
@@ -2853,8 +2834,9 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
     }
 
+    if(static_plan_.built)
+        for(auto& planned:static_plan_.execution.layers)planned.kernel_fused=false;
     for (size_t layer_idx = 0; layer_idx < forward_layer_limit; ++layer_idx) {
-        if (resident_chain_skip[layer_idx] != 0) continue;
         // Une fusion retire les consumers du parcours. En mode VIZ exhaustif,
         // executer chaque noeud garantit une vignette (L) par layer.
         if (!exhaustive_model_viz && planner_enabled && static_plan_.built &&
@@ -2974,58 +2956,50 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         bool resident_chain_executed = false;
         std::string resident_final_output_name;
 
-#ifdef ENABLE_VULKAN
-        if (planner_device_residency && planner_enabled && static_plan_.built && !training &&
-            !exhaustive_model_viz && g_compute_engine && g_compute_engine->isInitialized() &&
-            g_compute_engine->config().linear_enabled &&
-            layer_idx < static_plan_.execution.layers.size() &&
-            static_plan_.execution.layers[layer_idx].runtime == RuntimeKind::Vulkan &&
-            static_cast<long long>(x.size()) >= std::max(0, g_compute_engine->config().linear_min_ops)) {
-            auto resident_unary = [](const LayerType type) {
-                return type == LayerType::ReLU || type == LayerType::SiLU ||
-                       type == LayerType::GELU || type == LayerType::Sigmoid ||
-                       type == LayerType::Tanh;
-            };
-            if (resident_unary(layer.type_enum)) {
-                std::vector<LayerType> operations;
-                size_t chain_end = layer_idx;
-                std::string expected_input = input_names.empty() ? std::string() : input_names.front();
-                for (size_t candidate = layer_idx; candidate < layers.size(); ++candidate) {
-                    const Layer& chain_layer = layers[candidate];
-                    if (!resident_unary(chain_layer.type_enum) ||
-                        candidate >= static_plan_.execution.layers.size() ||
-                        static_plan_.execution.layers[candidate].runtime != RuntimeKind::Vulkan) break;
-                    const auto& chain_inputs = Mimir::Planning::planner_inputs_for(chain_layer);
-                    if (chain_inputs.size() != 1 || chain_inputs.front() != expected_input) break;
-                    if (candidate > layer_idx) {
-                        const auto& previous_planned = static_plan_.execution.layers[candidate - 1];
-                        const auto tensor_it = static_plan_.execution.tensors.find(previous_planned.output);
-                        if (tensor_it == static_plan_.execution.tensors.end() ||
-                            tensor_it->second.persistent || tensor_it->second.graph_output ||
-                            tensor_it->second.last_use != candidate) break;
-                    }
-                    operations.push_back(chain_layer.type_enum);
-                    chain_end = candidate;
-                    expected_input = Mimir::Planning::planner_output_name_for(chain_layer);
-                }
-                if (operations.size() >= 2) {
-                    layer_output.assign(x.size(), 0.0f);
-                    if (g_compute_engine->unaryChainForwardResident(
-                            x.data(), layer_output.data(), static_cast<int>(x.size()), operations)) {
-                        resident_chain_executed = true;
-                        resident_final_output_name = Mimir::Planning::planner_output_name_for(layers[chain_end]);
-                        for (size_t skipped = layer_idx + 1; skipped <= chain_end; ++skipped) {
-                            resident_chain_skip[skipped] = 1;
-                        }
-                        executed_backend = "VULKAN";
-                        executed_call = "vulkan.unaryChainForwardResident";
-                    } else {
-                        layer_output.clear();
+        if(planner_enabled && fusion_enabled && static_plan_.built && !exhaustive_model_viz &&
+            Mimir::Planning::FusionCalibration::pointwiseCandidate(layer.type_enum)) {
+            const auto& plan=static_plan_.execution;
+            std::vector<const Layer*> chain;
+            size_t cursor=layer_idx;
+            int next=-1;
+            while(cursor<forward_layer_limit && Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[cursor].type_enum) &&
+                Mimir::Planning::planner_inputs_for(layers[cursor]).size()==1 && layers[cursor].getWeightsSize()==0) {
+                chain.push_back(&layers[cursor]);
+                next=plan.fuse_chain_next[cursor];
+                if(next<0 || static_cast<size_t>(next)>=forward_layer_limit)break;
+                cursor=static_cast<size_t>(next);
+            }
+            const auto final_name=chain.empty()?std::string():Mimir::Planning::planner_output_name_for(*chain.back());
+            const bool aliases=std::all_of(chain.begin(),chain.end(),[&](const Layer* operation) {
+                return Mimir::Planning::planner_output_name_for(*operation)==final_name;
+            });
+            std::vector<std::vector<float>> values;
+            AbstractRuntime* fused_runtime=nullptr;
+            if(chain.size()>=2 && (next<0 || static_cast<size_t>(next)>=forward_layer_limit) &&
+                RuntimeRouter::instance().dispatchPointwiseForward(chain,x,values,training || !aliases,&fused_runtime,
+                    training,Mimir::parse_dtype(default_dtype_))) {
+                if(!training && aliases)layer_output=std::move(values[0]);
+                else {
+                    layer_output=std::move(values[0]);
+                    std::string name=Mimir::Planning::planner_output_name_for(layer);
+                    for(size_t j=1;j<chain.size();++j) {
+                        record_fused_inputs(*chain[j],{&layer_output},aliases?&layer_output:nullptr);
+                        if(!aliases)storeTensor(name,std::move(layer_output));
+                        layer_output=std::move(values[j]);
+                        name=Mimir::Planning::planner_output_name_for(*chain[j]);
                     }
                 }
+                if(fused_runtime)for(const auto* operation:chain) {
+                    auto& planned=static_plan_.execution.layers[static_cast<size_t>(operation-layers.data())];
+                    planned.kernel_fused=true;planned.runtime=Mimir::Planning::runtime_kind_from_name(fused_runtime->name());
+                    planned.capability=RuntimeCapabilityLevel::NativeOptimized;
+                }
+                resident_chain_executed=true;resident_final_output_name=final_name;
+                executed_backend=fused_runtime?fused_runtime->name():"ROUTED";
+                executed_call=fused_runtime?"planner.native_pointwise_fusion":"planner.ordinary_pointwise_program";
             }
         }
-#endif
+
 
         // Dispatch runtime générique (CUDA/ROCm) pour les layers supportés via forwardLayer().
         // Retourne true si un runtime a produit une sortie valide (outputs[0]).
@@ -3913,58 +3887,6 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             ? resident_final_output_name
             : (layer.output.empty() ? "x" : layer.output);
 
-        if (!resident_chain_executed && !exhaustive_model_viz && fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
-            const auto& plan = static_plan_.execution;
-            if (layer_idx < plan.fuse_chain_next.size()) {
-                int chain_idx = plan.fuse_chain_next[layer_idx];
-                while (chain_idx >= 0) {
-                    const size_t fused_idx = static_cast<size_t>(chain_idx);
-                    if (fused_idx >= layers.size()) break;
-
-                    const Layer& fused_layer = layers[fused_idx];
-                    if (Mimir::Planning::is_fusible_activation_layer(fused_layer)) {
-                        apply_fused_layer(layer_output, fused_layer);
-                    } else if (Mimir::Planning::is_fusible_unary_shape_layer(fused_layer)) {
-                        apply_fused_layer(layer_output, fused_layer);
-                    } else if (Mimir::Planning::is_fusible_split_layer(fused_layer)) {
-                        apply_fused_layer(layer_output, fused_layer);
-                    } else {
-                        break;
-                    }
-
-                    output_name = fused_layer.output.empty() ? "x" : fused_layer.output;
-
-                    if (fused_idx >= plan.fuse_chain_next.size()) break;
-                    chain_idx = plan.fuse_chain_next[fused_idx];
-                }
-            } else {
-                if (layer_idx < plan.fuse_activation_consumer.size()) {
-                    const int activation_idx = plan.fuse_activation_consumer[layer_idx];
-                    if (activation_idx >= 0) {
-                        const Layer& activation_layer = layers[static_cast<size_t>(activation_idx)];
-                        apply_fused_layer(layer_output, activation_layer);
-                        output_name = activation_layer.output.empty() ? "x" : activation_layer.output;
-                    }
-                }
-                if (layer_idx < plan.fuse_unary_consumer.size()) {
-                    const int unary_idx = plan.fuse_unary_consumer[layer_idx];
-                    if (unary_idx >= 0) {
-                        const Layer& unary_layer = layers[static_cast<size_t>(unary_idx)];
-                        apply_fused_layer(layer_output, unary_layer);
-                        output_name = unary_layer.output.empty() ? "x" : unary_layer.output;
-                    }
-                }
-                if (layer_idx < plan.fuse_split_consumer.size()) {
-                    const int split_idx = plan.fuse_split_consumer[layer_idx];
-                    if (split_idx >= 0) {
-                        const Layer& split_layer = layers[static_cast<size_t>(split_idx)];
-                        apply_fused_layer(layer_output, split_layer);
-                        output_name = split_layer.output.empty() ? "x" : split_layer.output;
-                    }
-                }
-            }
-        }
-
         // Masque (ReLU/Dropout) ou snapshot output (Reparameterize) selon besoins.
         if (training) {
             if (needs_output_mask(layer) && forward_state.layer_output_masks.back().empty()) {
@@ -3982,7 +3904,58 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             }
         }
 
-        if (planned_host_reuse_enabled && layer_idx < static_plan_.execution.layers.size()) {
+        if (!resident_chain_executed && !exhaustive_model_viz && planner_enabled && fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
+            const auto& plan = static_plan_.execution;
+            int chain_idx=layer_idx<plan.fuse_chain_next.size()?plan.fuse_chain_next[layer_idx]:-1;
+            while(chain_idx>=0 && static_cast<size_t>(chain_idx)<forward_layer_limit) {
+                const size_t fused_idx=static_cast<size_t>(chain_idx);
+                std::vector<const Layer*> pointwise;
+                size_t cursor=fused_idx;
+                while(cursor<forward_layer_limit && Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[cursor].type_enum) &&
+                    Mimir::Planning::planner_inputs_for(layers[cursor]).size()==1 && layers[cursor].getWeightsSize()==0) {
+                    pointwise.push_back(&layers[cursor]);
+                    const int next=plan.fuse_chain_next[cursor];
+                    if(next<0)break;
+                    cursor=static_cast<size_t>(next);
+                }
+                const bool aliases=!pointwise.empty() && std::all_of(pointwise.begin(),pointwise.end(),[&](const Layer* operation) {
+                    return Mimir::Planning::planner_output_name_for(*operation)==output_name;
+                });
+                std::vector<std::vector<float>> values;
+                AbstractRuntime* suffix_runtime=nullptr;
+                if(!pointwise.empty() && RuntimeRouter::instance().dispatchPointwiseForward(
+                    pointwise,layer_output,values,training || !aliases,&suffix_runtime,training,Mimir::parse_dtype(default_dtype_))) {
+                    if(!training && aliases) {
+                        layer_output=std::move(values[0]);
+                        if(suffix_runtime)for(const auto* operation:pointwise) {
+                            auto& planned=static_plan_.execution.layers[static_cast<size_t>(operation-layers.data())];
+                            planned.kernel_fused=true;planned.runtime=Mimir::Planning::runtime_kind_from_name(suffix_runtime->name());
+                            planned.capability=RuntimeCapabilityLevel::NativeOptimized;
+                        }
+                    } else for(size_t j=0;j<pointwise.size();++j) {
+                        record_fused_inputs(*pointwise[j],{&layer_output},aliases?&layer_output:nullptr);
+                        if(!aliases)storeTensor(output_name,std::move(layer_output));
+                        layer_output=std::move(values[j]);
+                        output_name=Mimir::Planning::planner_output_name_for(*pointwise[j]);
+                        if(suffix_runtime) {
+                            auto& planned=static_plan_.execution.layers[static_cast<size_t>(pointwise[j]-layers.data())];
+                            planned.kernel_fused=true;planned.runtime=Mimir::Planning::runtime_kind_from_name(suffix_runtime->name());
+                            planned.capability=RuntimeCapabilityLevel::NativeOptimized;
+                        }
+                    }
+                    const size_t last=static_cast<size_t>(pointwise.back()-layers.data());
+                    chain_idx=plan.fuse_chain_next[last];
+                } else {
+                    auto& fused_layer=layers[fused_idx];
+                    apply_fused_layer(layer_output,fused_layer,output_name);
+                    output_name=Mimir::Planning::planner_output_name_for(fused_layer);
+                    chain_idx=plan.fuse_chain_next[fused_idx];
+                }
+            }
+        }
+
+
+        if (planned_host_reuse_enabled && !resident_chain_executed && layer_idx < static_plan_.execution.layers.size()) {
             const auto& planned_layer = static_plan_.execution.layers[layer_idx];
             // Inputs whose last logical use is this layer can be returned to
             // their planned physical slot before the output is materialized.
@@ -4040,7 +4013,7 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
 
         if (training && has_branches) {
-            all_layer_outputs.push_back(layer_out_view);
+            all_layer_outputs[layer_idx] = layer_out_view;
         }
 
         if (runtime_trace) {
@@ -4242,6 +4215,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         }
     }
 
+    if(static_plan_.built) {
+        for(auto& group:static_plan_.execution.fusion_groups) {
+            group.kernel_fused=!group.layers.empty();
+            for(size_t member:group.layers)group.kernel_fused &= static_plan_.execution.layers[member].kernel_fused;
+            for(size_t child:group.children)group.kernel_fused &= static_plan_.execution.fusion_groups[child].kernel_fused;
+        }
+    }
     return getTensor(forward_output_name);
 }
 
@@ -4297,6 +4277,31 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
             layer.weight_block = owner->weight_block;
         }
         const std::string output = layer.output.empty() ? "x" : layer.output;
+        if(static_plan_.built && static_plan_.built_for_training && static_plan_.built_with_fusion &&
+            Mimir::Planning::FusionCalibration::pointwiseCandidate(layer.type_enum) && grad_store.count(output)) {
+            size_t begin=index;
+            while(begin>0 && static_plan_.execution.fuse_chain_next[begin-1]==static_cast<int>(begin) &&
+                Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[begin-1].type_enum) && layers[begin-1].getWeightsSize()==0) --begin;
+            if(begin<index) {
+                std::vector<const Layer*> chain;
+                std::vector<const std::vector<float>*> snapshots;
+                for(size_t j=begin;j<=index;++j) {
+                    chain.push_back(&layers[j]);
+                    const auto& values=forward_state.layer_inputs_multi.at(j);
+                    snapshots.push_back(values.empty()?nullptr:&values[0]);
+                }
+                std::vector<float> dx;
+                if(RuntimeRouter::instance().dispatchPointwiseBackward(chain,snapshots,grad_store.at(output),dx,nullptr,model_dtype)) {
+                    grad_store.erase(output);
+                    const auto& names=forward_state.layer_input_names.at(begin);
+                    if(names.size()!=1)throw std::runtime_error("Pointwise fusion input count mismatch");
+                    accumulate_grad(grad_store[names[0]],dx);
+                    for(size_t j=begin;j<=index;++j) {layers[j].grad_weights.clear();layers[j].grad_bias.clear();}
+                    index=begin;
+                    continue;
+                }
+            }
+        }
         const bool split = layer.type_enum == LayerType::Split || layer.type_enum == LayerType::Chunk;
         std::vector<std::vector<float>> owned_grad_outputs;
         std::vector<std::string> consumed_outputs;

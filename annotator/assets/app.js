@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
-let dataset = null, index = -1, annotation = null, revision = null, selected = -1, dirty = false, busy = false, gesture = null, forceDraw = false, skeletonTarget = null;
+let dataset = null, index = -1, annotation = null, revision = null, selected = -1, dirty = false, busy = false, gesture = null, forceDraw = false, skeletonTarget = null, forceMask = null, pendingCreation = null, importedMasks = {};
 let linkResults = [], focusedLink = null, linkResultsSignature = '';
 const canvas = $('canvas'), ctx = canvas.getContext('2d'), img = $('image');
 function message(text = '', error = false) { $('message').textContent = text; $('message').className = error ? 'error' : ''; }
@@ -20,7 +20,36 @@ function progress() {
   $('progress').value = percent; $('prev').disabled = index <= 0; $('next').disabled = index >= total - 1;
   $('last').disabled = !dataset.state.last_annotation;
 }
-async function run(fn) { if (busy) return; busy = true; document.body.setAttribute('aria-busy','true'); document.querySelector('.editor').inert = true; document.querySelector('nav').inert = true; $('open').inert = true; try { await fn(); } catch (e) { message(e.message, true); } finally { busy = false; document.body.removeAttribute('aria-busy'); document.querySelector('.editor').inert = false; document.querySelector('nav').inert = false; $('open').inert = false; } }
+async function prepareMaskBoxes(next) {
+  const found={};
+  for(const [image, masks] of Object.entries(next.mask_links || {})) {
+    found[image]=[];
+    for(const source of masks) {
+      const url=`api/image.php?image=${encodeURIComponent(source)}&dataset_root=${encodeURIComponent(next.root)}`;
+      const bitmap=await createImageBitmap(await (await fetch(url)).blob());
+      const width=bitmap.width,height=bitmap.height;
+      const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+      const context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(bitmap,0,0);
+      const pixels=context.getImageData(0,0,width,height).data;
+      bitmap.close();
+      const corners=[0,(width-1)*4,((height-1)*width)*4,(height*width-1)*4];
+      const colorAt=offset=>[pixels[offset],pixels[offset+1],pixels[offset+2],pixels[offset+3]].join(',');
+      const cornerColors=corners.map(colorAt);
+      const background=cornerColors.find(color=>cornerColors.filter(value=>value===color).length>=2);
+      let minX=width,minY=height,maxX=-1,maxY=-1;
+      for(let y=0;y<height;y++)for(let x=0;x<width;x++) {
+        const offset=(y*width+x)*4;
+        const color=colorAt(offset);
+        const foreground=background ? color!==background : pixels[offset+3]>0 &&
+          (pixels[offset]!==0 || pixels[offset+1]!==0 || pixels[offset+2]!==0);
+        if(foreground && pixels[offset+3]>0) {minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);}
+      }
+      if(maxX>=minX && maxY>=minY)found[image].push({source,bbox:[minX/width,minY/height,(maxX+1)/width,(maxY+1)/height]});
+    }
+  }
+  importedMasks=found;
+}
+async function run(fn) { if (busy) return; busy = true; document.body.setAttribute('aria-busy','true'); document.querySelector('.editor').inert = true; document.querySelector('nav').inert = true; $('open').inert = true; $('create-form').inert = true; try { await fn(); } catch (e) { message(e.message, true); } finally { busy = false; document.body.removeAttribute('aria-busy'); document.querySelector('.editor').inert = false; document.querySelector('nav').inert = false; $('open').inert = false; $('create-form').inert = false; } }
 function input(value, onInput, placeholder = '') { const el = document.createElement('input'); el.value = value; el.placeholder = placeholder; el.setAttribute('aria-label', placeholder); el.oninput = () => { onInput(el.value); changed(); }; return el; }
 function button(text, action) { const el = document.createElement('button'); el.type = 'button'; el.textContent = text; el.onclick = event => { event.stopPropagation(); action(); }; return el; }
 function select(value, values, onChange, label) {
@@ -29,7 +58,36 @@ function select(value, values, onChange, label) {
   el.value = value; el.onchange = () => { onChange(el.value); changed(); }; return el;
 }
 function label(text, el) { const wrapper = document.createElement('label'); wrapper.append(document.createTextNode(text), el); return wrapper; }
-function newEntity(box) { let n = 1; while (annotation.entities.some(e => e.id === `entity_${n}`)) n++; const entity = {id:`entity_${n}`,phrase:'',role:'object'}; if (box) entity.bbox = box; annotation.entities.push(entity); selected = annotation.entities.length - 1; changed(); renderEntities(); renderRecords(); draw(); }
+function newEntity(box) { let n = 1; while (annotation.entities.some(e => e.id === `entity_${n}`)) n++; const entity = {id:`entity_${n}`,phrase:'',role:'object'}; if (box) entity.bbox = box; annotation.entities.push(entity); selected = annotation.entities.length - 1; changed(); renderEntities(); renderRecords(); draw(); return entity; }
+function maskBounds(points) {
+  return [Math.min(...points.map(p=>p[0])),Math.min(...points.map(p=>p[1])),Math.max(...points.map(p=>p[0])),Math.max(...points.map(p=>p[1]))];
+}
+function polygonArea(points) {
+  return Math.abs(points.reduce((sum,p,i)=>sum+p[0]*points[(i+1)%points.length][1]-points[(i+1)%points.length][0]*p[1],0))/2;
+}
+function pointInPolygon(p, points) {
+  let inside=false;
+  for(let i=0,j=points.length-1;i<points.length;j=i++) {
+    const [x,y]=points[i],[xx,yy]=points[j];
+    if((y>p[1])!==(yy>p[1]) && p[0]<(xx-x)*(p[1]-y)/(yy-y)+x)inside=!inside;
+  }
+  return inside;
+}
+function setMask(points, target, kind = 'decor') {
+  if(points.length<3 || polygonArea(points)<=1e-8) { message('Masque ignoré : tracez une forme fermée avec une aire visible.',true);return; }
+  let entity;
+  if(target>=0) entity=annotation.entities[target];
+  else {
+    const prefix=kind==='ocr'?'ocr':'decor';let n=1;while(annotation.entities.some(e=>e.id===`${prefix}_${n}`))n++;
+    entity=kind==='ocr'?{id:`${prefix}_${n}`,phrase:'texte dans l’image',role:'text'}:{id:`${prefix}_${n}`,phrase:'décor',role:'background'};
+    annotation.entities.push(entity);target=annotation.entities.length-1;
+  }
+  entity.mask={type:'polygon',points};
+  entity.bbox=maskBounds(points);
+  if(kind==='ocr')entity.ocr ||= {text:'',translation:'',source_language:'',target_language:'',tags:[]};
+  selected=target;changed();renderEntities();renderRecords();draw();
+  message(kind==='ocr'?'Zone OCR créée. Saisissez le texte, sa traduction, les langues et les tags dans sa fiche.':kind==='track'?'Masque de l’occurrence suivie enregistré.':'Masque enregistré comme entité de décor. Décrivez-le et liez-y les points du personnage.');
+}
 function renameEntity(entity, next) {
   const prev = entity.id; entity.id = next;
   for (const a of annotation.attributes) if (a.entity === prev) a.entity = next;
@@ -45,12 +103,146 @@ function renderEntities() {
     const row = document.createElement('div'); row.className = 'mini-row';
     row.append(label('Identifiant', input(entity.id, v => renameEntity(entity, v), 'Identifiant')), label('Rôle', select(entity.role, ['primary_subject','secondary_subject','object','background'], v => { entity.role = v; }, 'Rôle')));
     card.append(row, label('Description de l’entité', input(entity.phrase, v => { entity.phrase = v; }, 'Une femme aux cheveux noirs')));
-    const coordinates = document.createElement('small'); coordinates.textContent = entity.bbox ? `BBox : ${entity.bbox.map(v => v.toFixed(3)).join(', ')}` : 'Sans boîte · sélectionnez cette entité et dessinez sur une zone libre.';
+    const trackRow=document.createElement('div');trackRow.className='mini-row';
+    const trackId=input(entity.track?.id || '',()=>syncTrack(), 'ex. personnage-asha');trackId.setAttribute('list','track-identities');
+    const trackName=input(entity.track?.name || '',()=>syncTrack(), 'Nom explicite du personnage');
+    function syncTrack() {
+      if(trackId.value.trim() || trackName.value.trim()) entity.track={id:trackId.value.trim(),name:trackName.value.trim()};
+      else delete entity.track;
+    }
+    trackId.addEventListener('change',()=>{
+      const known=dataset?.identities?.find(item=>item.id===trackId.value);
+      if(known) trackName.value=known.name;
+      syncTrack();renderIdentityChoices();changed();
+    });
+    trackRow.append(label('ID de suivi (partagé entre images)',trackId),label('Nom de suivi',trackName));
+    const trackHint=document.createElement('small');trackHint.className='wide';trackHint.textContent=entity.track
+      ? `Suivi : ${entity.track.name || 'nom à compléter'} · identifiant ${entity.track.id || 'à compléter'}`
+      : 'Pour suivre cette entité dans d’autres images, tracez son masque puis renseignez le même ID et le même nom.';
+    card.append(trackRow,trackHint);
+    if(entity.ocr) {
+      const ocr=document.createElement('div');ocr.className='ocr-fields';
+      const ocrText=document.createElement('textarea');ocrText.rows=2;ocrText.value=entity.ocr.text || '';ocrText.placeholder='Texte exact reconnu dans la zone';ocrText.setAttribute('aria-label','Texte OCR source');
+      ocrText.oninput=()=>{entity.ocr.text=ocrText.value;changed();};
+      const translation=document.createElement('textarea');translation.rows=2;translation.value=entity.ocr.translation || '';translation.placeholder='Traduction facultative';translation.setAttribute('aria-label','Traduction OCR');
+      translation.oninput=()=>{entity.ocr.translation=translation.value;changed();};
+      const sourceLanguage=input(entity.ocr.source_language || '',v=>{entity.ocr.source_language=v;},'ja');
+      const targetLanguage=input(entity.ocr.target_language || '',v=>{entity.ocr.target_language=v;},'fr');
+      const tags=input((entity.ocr.tags || []).join(', '),v=>{entity.ocr.tags=v.split(',').map(tag=>tag.trim()).filter(Boolean);},'dialogue, enseigne, SFX');
+      ocr.append(label('Texte source',ocrText),label('Traduction',translation));
+      const languages=document.createElement('div');languages.className='mini-row';languages.append(label('Langue source',sourceLanguage),label('Langue cible',targetLanguage));ocr.append(languages,label('Tags OCR (séparés par des virgules)',tags));
+      card.append(ocr);
+    }
+    const coordinates = document.createElement('small'); coordinates.textContent = entity.mask
+      ? `Masque polygonal · ${entity.mask.points.length} sommets · boîte englobante : ${(entity.bbox || maskBounds(entity.mask.points)).map(v => v.toFixed(3)).join(', ')}`
+      : entity.bbox ? `BBox : ${entity.bbox.map(v => v.toFixed(3)).join(', ')}` : 'Sans boîte · sélectionnez cette entité et dessinez sur une zone libre.';
     renderSkeleton(entity, card);
-    card.append(coordinates, document.createElement('br'), button('Sélectionner / dessiner', () => { selected = i; forceDraw = true; skeletonTarget = null; renderEntities(); draw(); message('Glissez sur l’image pour dessiner la boîte de cette entité.'); }), button('Supprimer l’entité', () => {
+    const drawBox=button('Sélectionner / dessiner', () => { selected = i; forceDraw = true; skeletonTarget = null; renderEntities(); draw(); message('Glissez sur l’image pour dessiner la boîte de cette entité.'); });
+    drawBox.disabled=Boolean(entity.mask);
+    card.append(coordinates, document.createElement('br'), button(entity.mask?'Redessiner le masque':'Tracer un masque', () => { selected=i;forceMask={target:i,kind:entity.ocr?'ocr':'decor'};forceDraw=false;skeletonTarget=null;renderEntities();draw();message('Glissez sur l’image pour tracer le masque de cette entité.'); }), drawBox, button('Supprimer l’entité', () => {
       if (!confirm(`Supprimer ${entity.id}, ses attributs et ses relations ?`)) return;
       annotation.entities.splice(i,1); for(const e of annotation.entities) for(const p of e.skeleton?.points || []) if(p.entities) p.entities=p.entities.filter(id=>id!==entity.id); skeletonTarget=null; annotation.attributes = annotation.attributes.filter(a => a.entity !== entity.id); annotation.relations = annotation.relations.filter(r => r.subject !== entity.id && r.object !== entity.id); selected = -1; changed(); renderEntities(); renderRecords(); draw();
     })); $('entities').append(card);
+  });
+  renderIdentityChoices();
+}
+function renderIdentityChoices() {
+  const choices=$('track-identity');if(!choices)return;
+  const current=choices.value;choices.replaceChildren(new Option('Choisir une identité suivie',''));
+  for(const identity of dataset?.identities || []) {
+    const option=new Option(`${identity.name} · ${identity.id} · ${identity.images.length} image(s)`,identity.id);
+    if(identity.conflicting_names?.length)option.textContent+=` · noms divergents : ${identity.conflicting_names.join(', ')}`;
+    choices.append(option);
+  }
+  choices.value=(dataset?.identities || []).some(item=>item.id===current)?current:'';
+  const datalist=$('track-identities');datalist.replaceChildren();
+  for(const identity of dataset?.identities || []) {
+    const option=document.createElement('option');option.value=identity.id;option.label=`${identity.name} (${identity.images.length} image(s))`;datalist.append(option);
+  }
+}
+async function uploadImage(file, relativePath, root) {
+  const body=new FormData();body.append('file',file,file.name);body.append('relative_path',relativePath);body.append('dataset_root',root);
+  const response=await fetch('api/upload.php',{method:'POST',headers:{'X-CSRF-Token':csrf},body});
+  const result=await response.json();
+  if(!response.ok || result.error)throw new Error(result.error || `Erreur ${response.status}`);
+  return result;
+}
+function selectedImportFiles() {
+  const files=[...$('import-files').files,...$('import-folder').files];
+  return files.map(file=>({file,path:file.webkitRelativePath || file.name}));
+}
+function importPathForFile(path) {
+  return path.split('/').filter(Boolean).map(part=>part.normalize('NFC')).join('/');
+}
+let directoryBrowserPath='', directoryPickerMode='parent';
+async function showDirectory(path) {
+  const result=await api('directories',{path});directoryBrowserPath=result.path;
+  $('directory-current').textContent=result.path;
+  $('directory-up').disabled=!result.parent;
+  $('directory-up').onclick=()=>{if(result.parent)showDirectory(result.parent).catch(error=>message(error.message,true));};
+  const list=$('directory-list');list.replaceChildren();
+  if(!result.directories.length) {
+    const empty=document.createElement('p');empty.textContent='Aucun sous-dossier accessible.';list.append(empty);
+  }
+  for(const entry of result.directories) {
+    const item=document.createElement('button');item.type='button';item.textContent=`Dossier : ${entry.name}`;
+    item.onclick=()=>showDirectory(entry.path).catch(error=>message(error.message,true));list.append(item);
+  }
+}
+async function openDirectoryPicker(path, mode) {
+  directoryPickerMode=mode;
+  $('directory-title').textContent=mode==='parent'
+    ? 'Choisir le dossier parent du nouveau dataset'
+    : 'Choisir le dataset à ouvrir ou modifier';
+  $('directory-select').textContent=mode==='parent'?'Choisir ce dossier parent':'Ouvrir / modifier ce dataset';
+  await showDirectory(path || '/');
+  $('directory-dialog').showModal();
+}
+async function createDataset(event) {
+  event.preventDefault();
+  run(async()=>{
+    if(!discard())return;
+    const parent=$('dataset-parent').value.trim(),name=$('dataset-name').value.trim();
+    const files=selectedImportFiles();
+    if(!parent || !name)throw new Error('Choisissez un dossier parent et un nom de dataset.');
+    if(!files.length)throw new Error('Sélectionnez au moins une image ou un dossier d’images à importer.');
+    const accepted=files.filter(({file,path})=>/\.(jpe?g|png|webp|bmp|json|mimir-meta)$/i.test(path || file.name));
+    if(!accepted.some(({file,path})=>/\.(jpe?g|png|webp|bmp)$/i.test(path || file.name)))throw new Error('Aucune image JPG, PNG, WebP ou BMP dans la sélection.');
+    let root;
+    if(pendingCreation?.parent===parent && pendingCreation.name===name) root=pendingCreation.root;
+    else {
+      const created=await api('create',{parent,name});
+      root=created.root;pendingCreation={parent,name,root};
+    }
+    $('root').value=root;
+    const failures=[];let imported=0,skipped=0,metadataImported=0;
+    $('import-progress').hidden=false;$('import-progress').max=accepted.length;$('import-progress').value=0;
+    $('create-submit').disabled=true;
+    try {
+      for(let i=0;i<accepted.length;i++) {
+        const {file,path}=accepted[i];$('import-status').textContent=`Import ${i+1}/${accepted.length} · ${path}`;
+        try {
+          const result=await uploadImage(file,importPathForFile(path),root);
+          if(/\.(jpe?g|png|webp|bmp)$/i.test(path)) {
+            if(result.skipped)skipped++;else imported++;
+          } else if(!result.skipped)metadataImported++;
+        } catch(error) { failures.push(`${path} : ${error.message}`); }
+        $('import-progress').value=i+1;
+      }
+    } finally { $('create-submit').disabled=false; }
+    const next=await api('scan',{root});dataset=next;index=-1;annotation=null;dirty=false;
+    await prepareMaskBoxes(next);
+    $('workspace').hidden=true;img.removeAttribute('src');
+    $('warnings').hidden=!next.warnings.length;$('warnings').querySelector('pre').textContent=next.warnings.join('\n');
+    if(next.images.length)await load(next.resume_index);
+    if(!failures.length) {
+      pendingCreation=null;$('import-files').value='';$('import-folder').value='';
+    }
+    const summary=`Dataset créé · ${imported} image(s) importée(s)${metadataImported?` · ${metadataImported} fichier(s) de métadonnées importé(s)`:''}${skipped?` · ${skipped} image(s) déjà identique(s) ignorée(s)`:''} · ${next.images.length} image(s) prête(s).`;
+    $('import-status').textContent=failures.length?`${failures.length} échec(s)`:summary;
+    message(failures.length?`${summary}\n${failures.join('\n')}`:summary,failures.length>0);
+    status(next.images.length?'Dataset prêt':'Aucune image importée');
+    if(next.images.length)progress();
   });
 }
 function renderRecords() {
@@ -77,16 +269,40 @@ function renderForm() {
 async function load(i) {
   if (i < 0 || i >= dataset.images.length) return;
   const relative = dataset.images[i], result = await api('load', {image:relative});
-  index = i; annotation = result.annotation; revision = result.revision; dirty = false; selected = -1; forceDraw = false; skeletonTarget = null; focusedLink = null; gesture = null;
-  $('workspace').hidden = false; $('filename').textContent = relative; message(); renderForm(); progress(); status(result.exists ? 'Annotation existante' : 'Nouvelle annotation');
+  index = i; annotation = result.annotation; revision = result.revision; dirty = false; selected = -1; forceDraw = false; forceMask = null; skeletonTarget = null; focusedLink = null; gesture = null;
+  for(const mask of importedMasks[relative] || []) {
+    if(annotation.entities.some(entity=>entity.mask_source===mask.source))continue;
+    let n=1;while(annotation.entities.some(entity=>entity.id===`mask_${n}`))n++;
+    const label=dataset.class_names?.[0] || 'Masque';
+    annotation.entities.push({id:`mask_${n}`,phrase:label,role:'object',bbox:mask.bbox,class_id:0,mask_source:mask.source});
+    if(!annotation.captions.primary.trim())annotation.captions.primary=`Zone annotée : ${label}.`;
+    dirty=true;
+  }
+  for(const entity of annotation.entities)if(entity.mask?.type==='polygon' && Array.isArray(entity.mask.points) && entity.mask.points.length>=3)entity.bbox=maskBounds(entity.mask.points);
+  $('workspace').hidden = false; $('filename').textContent = relative; message(); renderForm(); progress(); status(dirty ? 'Masques importés · non sauvegardés' : result.exists ? 'Annotation existante' : 'Nouvelle annotation');
   img.src = `api/image.php?image=${encodeURIComponent(relative)}&dataset_root=${encodeURIComponent(dataset.root)}`;
   try { dataset.state = (await api('state', {image:relative})).state; progress(); } catch (e) { message(`Image chargée ; historique non enregistré : ${e.message}`,true); }
 }
 async function save() {
   if (!annotation) return;
-  const result = await api('save', {image:dataset.images[index], annotation, revision}); revision = result.revision; if (result.state) dataset.state = result.state;
-  if (!dataset.annotated.includes(dataset.images[index])) dataset.annotated.push(dataset.images[index]);
-  dirty = false; status('Annotation sauvegardée'); message(result.warning || 'JSON enregistré à côté de l’image.', Boolean(result.warning)); progress();
+  const savedImage=dataset.images[index];
+  const result = await api('save', {image:savedImage, annotation, revision});
+  revision = result.revision;
+  if (result.state) dataset.state = result.state;
+  if (!dataset.annotated.includes(savedImage)) dataset.annotated.push(savedImage);
+  dirty = false; status('Annotation sauvegardée'); progress();
+  let warning=result.warning || '';
+  try {
+    const refreshed=await api('scan',{root:dataset.root});
+    const savedIndex=refreshed.images.indexOf(savedImage);
+    if(savedIndex<0) throw new Error('L’image sauvegardée ne figure plus dans le dataset.');
+    dataset=refreshed;index=savedIndex;
+  } catch(e) {
+    warning=[warning,`Liste des identités non actualisée : ${e.message}`].filter(Boolean).join('\n');
+  }
+  renderIdentityChoices();
+  message(warning || 'JSON enregistré à côté de l’image.', Boolean(warning));
+  progress();
 }
 function navigate(i) { run(async () => { if (discard()) await load(i); }); }
 $('open').onsubmit = event => { event.preventDefault(); run(async () => {
@@ -94,19 +310,51 @@ $('open').onsubmit = event => { event.preventDefault(); run(async () => {
   const next = await api('scan', {root:$('root').value}); dataset = next; index = -1; annotation = null; dirty = false; $('workspace').hidden = true; img.removeAttribute('src');
   try { localStorage.setItem('lumen-annotation-root', next.root); } catch (_) { /* Storage may be disabled. */ }
   $('root').value = next.root; $('warnings').hidden = !next.warnings.length; $('warnings').querySelector('pre').textContent = next.warnings.join('\n');
+  await prepareMaskBoxes(next);
   if (!next.images.length) { status('Aucune image'); message('Aucune image supportée dans ce dossier.'); return; }
   await load(next.resume_index);
 }); };
+$('create-form').onsubmit=createDataset;
+$('browse-parent').onclick=()=>{
+  const fallback=dataset?.root?.split('/').slice(0,-1).join('/') || '/';
+  openDirectoryPicker($('dataset-parent').value.trim() || fallback,'parent')
+    .catch(error=>message(error.message,true));
+};
+$('browse-root').onclick=()=>{
+  openDirectoryPicker($('root').value.trim() || dataset?.root || '/','open')
+    .catch(error=>message(error.message,true));
+};
+$('directory-select').onclick=()=>{
+  const selectedPath=directoryBrowserPath;
+  const mode=directoryPickerMode;
+  $('directory-dialog').close();
+  if(mode==='parent'){$('dataset-parent').value=selectedPath;return;}
+  $('root').value=selectedPath;
+  $('open').requestSubmit();
+};
+$('directory-cancel').onclick=()=>$('directory-dialog').close();
+$('import-files').onchange=()=>{$('import-folder').value='';$('import-status').textContent=`${$('import-files').files.length} fichier(s) sélectionné(s)`;};
+$('import-folder').onchange=()=>{$('import-files').value='';$('import-status').textContent=`${$('import-folder').files.length} fichier(s) sélectionné(s)`;};
 try { $('root').value = localStorage.getItem('lumen-annotation-root') || ''; } catch (_) { /* Optional convenience. */ }
 $('prev').onclick = () => navigate(index-1); $('next').onclick = () => navigate(index+1);
 $('save').onclick = () => run(save); $('save-next').onclick = () => run(async () => { await save(); if (index+1 < dataset.images.length) await load(index+1); });
 $('unannotated').onclick = () => { for (let n=1; n <= dataset.images.length; n++) { const i=(index+n)%dataset.images.length; if (!dataset.annotated.includes(dataset.images[i])) { navigate(i); return; } } message('Toutes les images sont annotées.'); };
 $('last').onclick = () => { const i = dataset.images.indexOf(dataset.state.last_annotation); if (i >= 0) navigate(i); else message('Dernière annotation absente du dossier.',true); };
 $('add-entity').onclick = () => { if (!busy) newEntity(); };
+$('draw-track-occurrence').onclick = () => {
+  if(busy)return;
+  const identity=dataset?.identities.find(item=>item.id===$('track-identity').value);
+  if(!identity){message('Choisissez une identité déjà annotée dans le dataset.',true);return;}
+  const entity=newEntity();entity.phrase=identity.name;entity.role='primary_subject';entity.track={id:identity.id,name:identity.name};
+  forceMask={target:selected,kind:'track'};forceDraw=false;skeletonTarget=null;renderEntities();draw();
+  message(`Tracez le masque de ${identity.name} (${identity.id}) dans cette image.`);
+};
 $('add-attribute').onclick = () => { if (busy) return; annotation.attributes.push({entity:annotation.entities[selected]?.id || annotation.entities[0]?.id || '',property:'',value:''}); changed(); renderRecords(); };
 $('add-relation').onclick = () => { if (busy) return; annotation.relations.push({subject:annotation.entities[0]?.id || '',predicate:'',object:annotation.entities[1]?.id || annotation.entities[0]?.id || ''}); changed(); renderRecords(); };
-$('draw').onclick = () => { skeletonTarget = null; forceDraw = true; selected = -1; renderEntities(); draw(); message('Glissez sur l’image pour créer une nouvelle entité.'); };
-function removeBox() { if (!busy && annotation?.entities[selected]?.bbox) { delete annotation.entities[selected].bbox; changed(); renderEntities(); draw(); } }
+$('draw').onclick = () => { skeletonTarget = null;forceMask=null;forceDraw = true; selected = -1; renderEntities(); draw(); message('Glissez sur l’image pour créer une nouvelle entité.'); };
+$('draw-mask').onclick = () => { skeletonTarget=null;forceDraw=false;forceMask={target:-1,kind:'decor'};selected=-1;renderEntities();draw();message('Glissez librement sur le décor pour tracer un nouveau masque polygonal.'); };
+$('draw-ocr').onclick = () => { skeletonTarget=null;forceDraw=false;forceMask={target:-1,kind:'ocr'};selected=-1;renderEntities();draw();message('Glissez autour du texte à transcrire et traduire.'); };
+function removeBox() { const entity=annotation?.entities[selected];if(!busy && entity?.bbox) { delete entity.bbox;delete entity.mask;if(entity.ocr)delete entity.ocr;if(entity.track)delete entity.track;changed();renderEntities();draw(); } }
 $('remove-box').onclick = removeBox;
 window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue=''; } });
 canvas.addEventListener('keydown', e => { if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeBox(); } });
@@ -164,7 +412,16 @@ function draw() {
   const dpr=window.devicePixelRatio || 1; const width=Math.round(canvas.clientWidth*dpr), height=Math.round(canvas.clientHeight*dpr);
   if(canvas.width!==width || canvas.height!==height) {canvas.width=width;canvas.height=height;}
   ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight); const r=rect(); if (!r || !annotation) return;
-  annotation.entities.forEach((entity,i) => { if (!entity.bbox) return; const b=entity.bbox, x=r.x+b[0]*r.w, y=r.y+b[1]*r.h;
+  annotation.entities.forEach((entity,i) => {
+    if(entity.mask?.type==='polygon' && Array.isArray(entity.mask.points) && entity.mask.points.length>=3) {
+      const points=entity.mask.points,b=entity.bbox || maskBounds(points), x=r.x+b[0]*r.w, y=r.y+b[1]*r.h;
+      ctx.beginPath();points.forEach((p,j)=>j?ctx.lineTo(r.x+p[0]*r.w,r.y+p[1]*r.h):ctx.moveTo(r.x+p[0]*r.w,r.y+p[1]*r.h));ctx.closePath();
+      ctx.fillStyle=i===selected?'#ffd58a44':'#f0a45b33';ctx.strokeStyle=i===selected?'#ffd58a':'#f0a45b';ctx.lineWidth=i===selected?3:2;ctx.fill();ctx.stroke();
+      ctx.font='13px system-ui';const text=entity.id,tw=ctx.measureText(text).width+10;ctx.fillStyle='#101820';ctx.fillRect(x,Math.max(r.y,y-21),tw,21);ctx.fillStyle='#e7edf3';ctx.fillText(text,x+5,Math.max(r.y,y-21)+15);
+      if(i===selected)for(const p of points){ctx.beginPath();ctx.arc(r.x+p[0]*r.w,r.y+p[1]*r.h,3,0,Math.PI*2);ctx.fillStyle='#fff0c2';ctx.fill();}
+      return;
+    }
+    if (!entity.bbox) return; const b=entity.bbox, x=r.x+b[0]*r.w, y=r.y+b[1]*r.h;
     ctx.strokeStyle=i===selected?'#7ce1ba':'#91bafa'; ctx.fillStyle=i===selected?'#7ce1ba22':'#91bafa15'; ctx.lineWidth=i===selected?2.5:1.5; ctx.fillRect(x,y,(b[2]-b[0])*r.w,(b[3]-b[1])*r.h); ctx.strokeRect(x,y,(b[2]-b[0])*r.w,(b[3]-b[1])*r.h);
     ctx.font='13px system-ui'; const text=entity.id, tw=ctx.measureText(text).width+10; ctx.fillStyle='#101820'; ctx.fillRect(x,Math.max(r.y,y-21),tw,21); ctx.fillStyle='#e7edf3'; ctx.fillText(text,x+5,Math.max(r.y,y-21)+15);
     if(i===selected) {ctx.fillStyle='#7ce1ba'; for(const [hx,hy] of handles(b)) ctx.fillRect(r.x+hx*r.w-4,r.y+hy*r.h-4,8,8);}
@@ -189,6 +446,7 @@ function draw() {
   });
   drawLinkSimulation(r);
   if (gesture?.type==='new') { const [x,y]=gesture.start, [xx,yy]=gesture.end; ctx.strokeStyle='#ffd58a'; ctx.strokeRect(r.x+x*r.w,r.y+y*r.h,(xx-x)*r.w,(yy-y)*r.h); }
+  if (gesture?.type==='mask') { ctx.beginPath();gesture.points.forEach((p,i)=>i?ctx.lineTo(r.x+p[0]*r.w,r.y+p[1]*r.h):ctx.moveTo(r.x+p[0]*r.w,r.y+p[1]*r.h));ctx.strokeStyle='#ffd58a';ctx.fillStyle='#ffd58a33';ctx.lineWidth=2;ctx.closePath();ctx.fill();ctx.stroke(); }
 }
 img.onload = () => { $('dimensions').textContent=`${img.naturalWidth} × ${img.naturalHeight}`; draw(); };
 img.onerror = () => { $('dimensions').textContent=''; ctx.clearRect(0,0,canvas.width,canvas.height); message('Image illisible ou format non affichable par ce navigateur.',true); };
@@ -196,6 +454,7 @@ new ResizeObserver(draw).observe($('stage'));
 canvas.onpointerdown = e => {
   if (busy || !annotation || e.button!==0) return; const p=point(e,false), r=rect(); if(!p) return;
   canvas.focus();
+  if(forceMask) { canvas.setPointerCapture(e.pointerId);gesture={type:'mask',points:[p],target:forceMask.target,kind:forceMask.kind};forceMask=null;draw();return; }
   if (skeletonTarget) {
     const {entity, joint, face} = skeletonTarget;
     if (face) {
@@ -208,14 +467,18 @@ canvas.onpointerdown = e => {
   for (let i=annotation.entities.length-1; i>=0 && !forceDraw; i--) {
     const entity=annotation.entities[i];
     const joint=entity.skeleton?.points.find(j => j.position && Math.hypot((j.position[0]-p[0])*r.w,(j.position[1]-p[1])*r.h)<9);
-    if(joint) { selected=i; gesture={type:'joint',joint,initial:[...joint.position]}; canvas.setPointerCapture(e.pointerId); renderEntities(); draw(); return; }
+    if(joint) { selected=i;gesture={type:'joint',joint,initial:[...joint.position]}; canvas.setPointerCapture(e.pointerId); renderEntities(); draw(); return; }
+  }
+  for(let i=annotation.entities.length-1;i>=0 && !forceDraw;i--) {
+    const entity=annotation.entities[i];
+    if(entity.mask?.type==='polygon' && pointInPolygon(p,entity.mask.points)) { selected=i;renderEntities();draw();return; }
   }
   canvas.setPointerCapture(e.pointerId);
   let hit=-1, handle=-1;
-  if (!forceDraw && annotation.entities[selected]?.bbox) handle=handles(annotation.entities[selected].bbox).findIndex(h=>Math.abs(h[0]-p[0])*r.w<9 && Math.abs(h[1]-p[1])*r.h<9);
+  if (!forceDraw && annotation.entities[selected]?.bbox && !annotation.entities[selected]?.mask) handle=handles(annotation.entities[selected].bbox).findIndex(h=>Math.abs(h[0]-p[0])*r.w<9 && Math.abs(h[1]-p[1])*r.h<9);
   if(handle>=0) gesture={type:'resize',start:p,initial:[...annotation.entities[selected].bbox],handle};
   else {
-    if(!forceDraw) for(let i=annotation.entities.length-1;i>=0;i--) { const b=annotation.entities[i].bbox; if(b && p[0]>=b[0] && p[0]<=b[2] && p[1]>=b[1] && p[1]<=b[3]) {hit=i;break;} }
+    if(!forceDraw) for(let i=annotation.entities.length-1;i>=0;i--) { const e=annotation.entities[i],b=e.bbox; if(!e.mask && b && p[0]>=b[0] && p[0]<=b[2] && p[1]>=b[1] && p[1]<=b[3]) {hit=i;break;} }
     if(hit>=0) { selected=hit;gesture={type:'move',start:p,initial:[...annotation.entities[hit].bbox]};renderEntities(); }
     else gesture={type:'new',start:p,end:p,target:selected};
   } draw();
@@ -223,6 +486,10 @@ canvas.onpointerdown = e => {
 canvas.onpointermove = e => {
   if(!gesture) return; const p=point(e); if(!p) return;
   if(gesture.type==='joint') gesture.joint.position=p;
+  else if(gesture.type==='mask') {
+    const last=gesture.points[gesture.points.length-1],r=rect();
+    if(Math.hypot((p[0]-last[0])*r.w,(p[1]-last[1])*r.h)>=3)gesture.points.push(p);
+  }
   else if(gesture.type==='new') gesture.end=p;
   else {
     const b=[...gesture.initial];
@@ -231,9 +498,14 @@ canvas.onpointermove = e => {
     annotation.entities[selected].bbox=b;
   } draw();
 };
-canvas.onpointerup = () => {
+canvas.onpointerup = e => {
   if(!gesture) return; const g=gesture; gesture=null;
   if(g.type==='joint') { if(JSON.stringify(g.initial)!==JSON.stringify(g.joint.position)) changed(); renderEntities(); }
+  else if(g.type==='mask') {
+    const p=point(e),last=g.points[g.points.length-1],r=rect();
+    if(p && Math.hypot((p[0]-last[0])*r.w,(p[1]-last[1])*r.h)>=1)g.points.push(p);
+    setMask(g.points,g.target,g.kind);
+  }
   else if(g.type==='new') {
     const [x,y]=g.start,[xx,yy]=g.end, r=rect();
     if(Math.abs(xx-x)*r.w>=4 && Math.abs(yy-y)*r.h>=4) { const box=[Math.min(x,xx),Math.min(y,yy),Math.max(x,xx),Math.max(y,yy)]; if(g.target>=0) {annotation.entities[g.target].bbox=box;changed();renderEntities();} else newEntity(box); }
@@ -241,7 +513,7 @@ canvas.onpointerup = () => {
   } else if(JSON.stringify(g.initial)!==JSON.stringify(annotation.entities[selected].bbox)) {changed();renderEntities();}
   draw();
 };
-canvas.onpointercancel = () => { if(gesture?.type==='joint') gesture.joint.position=gesture.initial; else if(gesture && gesture.type!=='new') annotation.entities[selected].bbox=gesture.initial; gesture=null;draw(); };
+canvas.onpointercancel = () => { if(gesture?.type==='joint') gesture.joint.position=gesture.initial; else if(gesture && gesture.type!=='new' && gesture.type!=='mask') annotation.entities[selected].bbox=gesture.initial; gesture=null;draw(); };
 
 function addTail(entity) {
   const skeleton = entity.skeleton ||= {name:'personnalisé',points:[]};

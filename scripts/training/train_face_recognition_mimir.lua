@@ -1,3 +1,6 @@
+-- Fusions train/inference et calibration activées par défaut via le lanceur :
+--   ./run_mimir.sh --lua scripts/training/train_face_recognition_mimir.lua -- <options>
+-- Désactivation : MIMIR_PLANNER_FUSION=0 ./run_mimir.sh ...
 -- Entraînement d'un modèle de reconnaissance faciale avec Mimir (vgg16/vgg19).
 --
 -- Objectif:
@@ -10,14 +13,14 @@
 --   (si la ligne contient des points, seul le segment avant le 1er point est gardé)
 --
 -- Exemple:
---   ./bin/mimir --lua scripts/training/train_face_recognition_mimir.lua -- \
+--   ./run_mimir.sh --lua scripts/training/train_face_recognition_mimir.lua -- \
 --     --dataset-root dataset_faces \
 --     --out-dir checkpoint/face_id_vgg16 \
 --     --image-w 160 --image-h 160 \
 --     --epochs 20 --lr 1e-4
 --
 -- Inférence (image visage recadrée):
---   ./bin/mimir --lua scripts/examples/classify_vgg16_feat.lua -- \
+--   ./run_mimir.sh --lua scripts/examples/classify_vgg16_feat.lua -- \
 --     --ckpt-dir checkpoint/face_id_vgg16/final \
 --     --labels-file checkpoint/face_id_vgg16/labels.txt \
 --     --image /tmp/face_crop.png \

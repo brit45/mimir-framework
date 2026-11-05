@@ -45,6 +45,15 @@ cd "$REPO_ROOT"
 MIMIR_BIN="${MIMIR_BIN:-./run_mimir.sh}"
 LUA_SCRIPT="${LUA_SCRIPT:-scripts/training/pretrain_vgg16_feat.lua}"
 
+# Also enable measured training fusions when MIMIR_BIN selects the binary directly.
+# Explicit environment overrides remain authoritative.
+export MIMIR_ENABLE_PLANNER="${MIMIR_ENABLE_PLANNER:-1}"
+export MIMIR_PLANNER_MODE="${MIMIR_PLANNER_MODE:-cost}"
+export MIMIR_PLANNER_FUSION="${MIMIR_PLANNER_FUSION:-1}"
+export MIMIR_ENABLE_FUSION_TRAIN="${MIMIR_ENABLE_FUSION_TRAIN:-1}"
+export MIMIR_RUNTIME_AUTOTUNE="${MIMIR_RUNTIME_AUTOTUNE:-1}"
+
+
 # ----------------------------------------------------------------------------
 #  Données
 # ----------------------------------------------------------------------------

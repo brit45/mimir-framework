@@ -121,5 +121,57 @@ int main(int argc,char** argv) {
     for(unsigned y=90;y<710;++y)for(unsigned x=10;x<unsigned(layout.labelsX()-10);++x){const auto c=image.getPixel({x,y});if(c.g>70 || c.r>70)++colorful;}
     require(colorful>1000,"offscreen rails and junctions must be rendered");
     if(argc>1)require(image.saveToFile(argv[1]),"save preview");
+    Json nested={{"nodes",Json::array()}, {"edges",Json::array()},
+        {"fusion_groups",Json::array({
+            Json{{"id",0},{"layers",Json::array({0,1})},{"children",Json::array()},{"parent",1}},
+            Json{{"id",1},{"layers",Json::array({2})},{"children",Json::array({0})},{"parent",2}},
+            Json{{"id",2},{"layers",Json::array({3})},{"children",Json::array({1})},{"parent",nullptr}}})}};
+    for(size_t i=0;i<4;++i) {
+        nested["nodes"].push_back({{"name",std::string("Layer ")+std::to_string(i)},
+            {"depth",i},{"lane",0}});
+        if(i) nested["edges"].push_back({{"from",i-1},{"to",i}});
+    }
+    const auto nested_layout=modelGraphTree(nested);
+    require(nested_layout.fusion_blocks.size()==3,"nested blocks are present");
+    for(size_t i=0;i<3;++i) {
+        const auto& block=nested_layout.fusion_blocks[i];
+        require(block.x>=0 && block.y>=0,"blocks stay inside the viewport extent");
+        require(block.x+block.width<nested_layout.width() &&
+            block.y+block.height<nested_layout.height(),"export includes the full blocks");
+        if(i) {
+            const auto& child=nested_layout.fusion_blocks[i-1];
+            require(block.x<child.x && block.y<child.y &&
+                block.x+block.width>child.x+child.width &&
+                block.y+block.height>child.y+child.height,"parent surrounds child fusion");
+            require(block.y+22.f<child.y,"nested fusion labels do not overlap");
+        }
+    }
+    require(nested_layout.fusion_blocks.back().count==4,"recursive layer count");
+    vizgfx::RenderTexture fusion_canvas({unsigned(nested_layout.width()),unsigned(nested_layout.height())});
+    fusion_canvas.clear(vizgfx::Color(16,23,32));
+    size_t labels_drawn=0;
+    drawModelGraphFusionBlocks(fusion_canvas,nested_layout,
+        [&](float x,float y,const std::string& value,vizgfx::Color color,unsigned size) {
+            ++labels_drawn;vizgfx::Text label(font);label.setString(value);label.setCharacterSize(size);
+            label.setPosition({x,y});label.setFillColor(color);fusion_canvas.draw(label);
+        });
+    drawModelGraphTreeEdges(fusion_canvas,nested_layout,std::numeric_limits<size_t>::max());
+    for(size_t i=0;i<4;++i) {
+        const auto p=nested_layout.position(i);
+        vizgfx::RectangleShape card({nested_layout.card_width,nested_layout.card_height});
+        card.setPosition({p.x-nested_layout.card_width*.5f,p.y-nested_layout.card_height*.5f});
+        card.setFillColor(vizgfx::Color(24,33,46));card.setOutlineColor(graphLaneColor(i));
+        card.setOutlineThickness(1.f);fusion_canvas.draw(card);
+        vizgfx::Text label(font);label.setString(nested["nodes"][i]["name"].get<std::string>());
+        label.setCharacterSize(13);label.setPosition({p.x-nested_layout.card_width*.5f+8.f,p.y-12.f});
+        label.setFillColor(vizgfx::Color(230,240,246));fusion_canvas.draw(label);
+    }
+    fusion_canvas.display();
+    require(labels_drawn==3,"each fusion block is labelled");
+    const auto fusion_image=fusion_canvas.getTexture().copyToImage();
+    const auto outer=nested_layout.fusion_blocks.back();
+    const auto inside=fusion_image.getPixel({unsigned(outer.x+3),unsigned(outer.y+3)});
+    require(inside.r!=16 || inside.g!=23 || inside.b!=32,"fusion fill is visible");
+    if(argc>1)require(fusion_image.saveToFile(std::string(argv[1])+".fusions.png"),"fusion preview saved");
     std::cout<<"MODEL_GRAPH_LANES_OK: fork, merge, reserved skip rails and offscreen render\n";
 }

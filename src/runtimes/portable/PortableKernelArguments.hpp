@@ -49,6 +49,8 @@ if(name=="portable_gemm")return 39;
 if(name=="portable_ger")return 40;
 if(name=="portable_sequence_constant_forward")return 41;
 if(name=="portable_sequence_constant_backward")return 42;
+if(name=="pointwise_fusion_forward")return 43;
+if(name=="pointwise_fusion_backward")return 44;
 return -1;}
 inline std::vector<int> kernelWriteArguments(int id){switch(id){
 case 0:return {5,6,7};
@@ -94,4 +96,6 @@ case 39:return {5};
 case 40:return {5};
 case 41:return {5};
 case 42:return {5};
+case 43:return {5};
+case 44:return {6};
 default:return {};}}

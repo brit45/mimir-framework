@@ -134,6 +134,32 @@ Lecture metier :
 2. Si les shapes ne matchent pas, il refuse proprement.
 3. En succes, il produit une sortie complete et deterministic.
 
+### Programmes de fusion pointwise
+
+Pour ajouter ou modifier une fusion, implémenter dans le runtime les hooks
+`queryPointwiseFusionCapability()`, `pointwiseFusionForward()` et
+`pointwiseFusionBackward()`. Déclarer `NativeOptimized` uniquement lorsque le
+kernel correspondant est compilé, que le runtime est initialisé et que la
+chaîne est supportée ; le défaut d’`AbstractRuntime` est `Unsupported`.
+
+Le forward peut restituer tous les intermédiaires avec `retain=true`.
+Le backward utilise les entrées sauvegardées de chaque étape. Un refus de
+programme ou de snapshot doit laisser les buffers de sortie du demandeur
+inchangés. Les contrôles du routeur et la calibration de fusion comparent la
+chaîne complète au chemin ordinaire, avec parité exacte et mesure de latence.
+
+Les kernels GPU partagés résident dans `src/runtimes/PointwiseFusionKernels.cuh` ;
+les adaptateurs Vulkan/OpenCL utilisent `PortablePointwiseFusion.hpp`. Toute
+modification du source partagé doit être suivie de la régénération portable et
+de la validation SPIR-V. Une bibliothèque HIP détectée sans compilation HIP ne
+suffit pas à annoncer une fusion native ROCm.
+
+Les tests directs sont regroupés dans `Tests/test_gpu_pointwise_fusion.cpp` ;
+les décisions et leur cache sont vérifiés par `Tests/test_fusion_calibration.cpp`.
+Les états `graph_fused` et `kernel_fused` ont des sens différents : voir
+[le planner](../04-Architecture-Internals/22-Planning.md) et
+[les capacités et validations GPU](../04-Architecture-Internals/21-GPU-Runtimes.md#fusion-native-des-chaînes-pointwise).
+
 ## 9. Demo metier - toggles runtime pour rollout progressif
 
 ```bash

@@ -17,7 +17,7 @@
       "./bin/mimir --conf configs/vae_conv-config.json --run train --override model.base_channels=16"
     ],
     "sections": {
-      "env": "Variables d'environnement à passer au shell AVANT le lancement (non appliquées par mimir). Servent de documentation / rappel.",
+      "env": "Variables appliquées avant les scripts, prioritaires sur le shell. Désactivation des fusions : --override env.MIMIR_PLANNER_FUSION=0.",
       "lua": "Section par défaut: liste de scripts Lua exécutés séquentiellement sans --run.",
       "tasks": "Tâches nommées. Chacune contient son propre bloc 'lua'. Sélectionnée via --run <name>.",
       "model": "Configuration de l'architecture. Transmise intégralement à CONF.model dans les scripts Lua. La clé 'architecture' détermine les champs valides (voir le JSON Schema).",
@@ -31,6 +31,11 @@
     "conf_glob": "CONF (table Lua globale) contient l'intégralité du fichier JSON fusionné avec les overrides. CONF_PATH = chemin absolu du fichier. CONF_DIR = répertoire du fichier."
   },
   "env": {
+    "MIMIR_ENABLE_PLANNER": 1,
+    "MIMIR_PLANNER_MODE": "cost",
+    "MIMIR_PLANNER_FUSION": 1,
+    "MIMIR_ENABLE_FUSION_TRAIN": 1,
+    "MIMIR_RUNTIME_AUTOTUNE": 1,
     "MIMIR_ACCEL_VERBOSE": 0,
     "MIMIR_PLANNER_TRACE": 0,
     "MIMIR_PLANNER_DUMP": 0,

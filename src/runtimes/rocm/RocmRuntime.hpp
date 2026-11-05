@@ -50,6 +50,13 @@ public:
         bool training
     ) override;
 
+    RuntimeCapabilityLevel queryPointwiseFusionCapability(
+        const std::vector<const Layer*>&,bool backward,bool training) const override;
+    bool pointwiseFusionForward(const std::vector<const Layer*>&,const std::vector<float>&,
+        std::vector<std::vector<float>>&,bool retain,bool training) override;
+    bool pointwiseFusionBackward(const std::vector<const Layer*>&,
+        const std::vector<const std::vector<float>*>&,const std::vector<float>&,std::vector<float>&) override;
+
 private:
     struct Impl;
     Impl* impl_ = nullptr;

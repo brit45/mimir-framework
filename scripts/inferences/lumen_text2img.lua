@@ -12,6 +12,8 @@ Help.auto_exit_help({
     "--prompt TEXT : description de l'image",
     "--seed N : graine (1337)", "--steps N : étapes de diffusion (30)",
     "--guidance N : guidage (5)", "--out PATH : image PPM (lumen-output.ppm)",
+    "--headless / --no-viz : génération unique en ligne de commande, sans panneau de réglages",
+    "Par défaut, si Viz est disponible : éditer prompt/seed/steps/guidance/sortie, puis cliquer Générer.",
     "--vae-scale N : échelle latente positive, nécessaire au smoke test sans checkpoint",
     "--allow-untrained : autorise explicitement un débruiteur aléatoire pour un smoke test",
   },
@@ -188,12 +190,25 @@ else
     "utiliser OMP_NUM_THREADS=1 pour un smoke test bit-reproductible\n")
 end
 
-local pixels, width_or_error, height, channels =
-  Mimir.Model.lumen_text2img(prompt, seed, steps, guidance)
-if type(pixels) ~= "table" then die(width_or_error or "génération impossible") end
+local function generate(settings)
+  local pixels, width_or_error, height, channels =
+    Mimir.Model.lumen_text2img(settings.prompt, settings.seed, settings.steps, settings.guidance)
+  if type(pixels) ~= "table" then die(width_or_error or "génération impossible") end
 
-FS.mkdir_p(FS.dirname(output))
-local ok_write, write_err = write_ppm(output, pixels, width_or_error, height, channels)
-if not ok_write then die("écriture PPM: " .. tostring(write_err)) end
-print(string.format("[lumen_text2img] image écrite: %s (%dx%dx%d, seed=%d)",
-  output, width_or_error, height, channels, seed))
+  FS.mkdir_p(FS.dirname(settings.output))
+  local ok_write, write_err = write_ppm(settings.output, pixels, width_or_error, height, channels)
+  if not ok_write then die("écriture PPM: " .. tostring(write_err)) end
+  print(string.format("[lumen_text2img] image écrite: %s (%dx%dx%d, seed=%d)",
+    settings.output, width_or_error, height, channels, settings.seed))
+  return pixels, width_or_error, height, channels
+end
+
+local settings = {prompt=prompt,seed=seed,steps=steps,guidance=guidance,output=output}
+local InferenceUI = dofile(ROOTWORK.."/scripts/modules/lumen_inference_ui.lua")
+local handled, viz_reason = InferenceUI.run(settings, generate, {
+  disabled=Args.get_bool(opts,"headless",false) or not Args.get_bool(opts,"viz",true),
+})
+if not handled then
+  if viz_reason then print("[lumen_text2img] Viz indisponible ("..viz_reason.."); génération en ligne de commande.") end
+  generate(settings)
+end
