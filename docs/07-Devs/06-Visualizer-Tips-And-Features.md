@@ -3,7 +3,7 @@
 Savoir brancher correctement les tips (viz taps), et ajouter/configurer/implementer
 une nouvelle feature Viz sans casser le run.
 
-**Public concerné :** Developpeur framework (C++/runtime/monitoring/UI SFML).
+**Public concerné :** Développeur framework (C++/runtime/monitoring/interface).
 
 > **Prérequis**
 >
@@ -32,7 +32,8 @@ Chemin de donnees (vue simplifiee):
 2. `Model` produit des `VizFrame` (tips) quand `viz_taps_enabled_` est actif.
 3. `AsyncMonitor` recupere les frames et les passe au `Visualizer`.
 4. `Visualizer::setLayerBlockImages(...)` convertit en `ImageData`.
-5. `Visualizer` cree/rebuild les textures SFML puis rend les panels.
+5. `Visualizer` crée ou actualise les textures via `vizgfx`, puis rend les
+   panneaux avec le backend d'interface sélectionné.
 
 Fichiers de reference:
 

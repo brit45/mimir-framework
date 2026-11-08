@@ -537,6 +537,7 @@ int main() {
     adaptive_vae_cfg.latent_detail_path = true;
     adaptive_vae_cfg.latent_context_channels = 8;
     adaptive_vae_cfg.stochastic_latent = false;
+    adaptive_vae_cfg.logvar_head_bias = true;
     adaptive_vae_cfg.resnet = false;
     adaptive_vae_cfg.attention = false;
     adaptive_vae_cfg.use_skip_connections = false;
@@ -576,6 +577,7 @@ int main() {
     TASSERT_TRUE(adapted.latent_c == adaptive_vae_cfg.latent_c);
     TASSERT_TRUE(adapted.vae_stochastic_latent ==
                  adaptive_vae_cfg.stochastic_latent);
+    TASSERT_TRUE(adapted.vae_logvar_head_bias);
     TASSERT_TRUE(adapted.vae_decoder_upsample ==
                  adaptive_vae_cfg.decoder_upsample);
     TASSERT_TRUE(adapted.vae_latent_spatial_context && adapted.vae_latent_detail_path);

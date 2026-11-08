@@ -26,6 +26,13 @@ int main(int argc, char** argv) {
         TASSERT_TRUE(saw_off && saw_on_again);
         return 0;
     }
+    // Legacy recognition is limited to native encoder-decoder namespaces.
+    // An arbitrary concat with a similar suffix must keep ordinary semantics.
+    for (const char* name : {"custom/dec/up0/skip_cat", "custom/up1/concat", "pack_outputs"}) {
+        Layer ordinary(name, "Concat", 0);
+        ordinary.inputs = {"left", "right"};
+        TASSERT_TRUE(ordinary.skipInputIndex() == -1);
+    }
     for (const bool legacy : {false, true}) {
         Model model;
         model.push(legacy ? "vae_conv/dec/up0/skip_cat" : "custom_skip", "Concat", 0);

@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <map>
 #include <vector>
 #include <deque>
 #include <mutex>
@@ -335,6 +336,7 @@ private:
 
         // Type de loss recon utilisée par le modèle (ex: "MSE", "L1").
         std::string recon_loss_type;
+        std::map<std::string, double> model_metrics;
     } stats;
 
 public:
@@ -654,7 +656,8 @@ public:
                      float grad_norm, float grad_max,
                      int opt_type, int opt_step,
                      float opt_beta1, float opt_beta2,
-                     float opt_eps, float opt_weight_decay)
+                     float opt_eps, float opt_weight_decay,
+                     const std::map<std::string, double>& model_metrics = {})
     {
         // Guard: éviter divisions par zéro dans l'UI (0/0 => NaN).
         const int safe_total_epochs = std::max(1, total_epochs);
@@ -692,6 +695,7 @@ public:
         stats.opt_beta2 = opt_beta2;
         stats.opt_eps = opt_eps;
         stats.opt_weight_decay = opt_weight_decay;
+        stats.model_metrics = model_metrics;
 
         // Calculer ETA (best-effort mais stable):
         // - préfère bps fourni
@@ -981,54 +985,85 @@ public:
           out() << "Current: " << colorText(std::to_string(stats.current_loss).substr(0, 10), 93)
               << "  Avg: " << colorText(std::to_string(stats.avg_loss).substr(0, 10), 92);
 
-        if (!stats.recon_loss_type.empty()) {
+        if (!stats.model_metrics.empty()) {
+            moveCursor(row++, 2);
+            clearLine();
+            out() << colorText("● MODEL METRICS / SIGNAL", 95);
+
+            std::vector<std::string> metric_lines;
+            const size_t max_line = static_cast<size_t>(std::max(24, width - 8));
+            std::string line;
+            for (const auto& [name, value] : stats.model_metrics) {
+                std::ostringstream item_stream;
+                item_stream << name << "=" << std::setprecision(7) << std::defaultfloat << value;
+                std::string item = item_stream.str();
+                if (!line.empty() && line.size() + 2 + item.size() > max_line) {
+                    metric_lines.push_back(std::move(line));
+                    line.clear();
+                }
+                while (item.size() > max_line) {
+                    if (!line.empty()) {
+                        metric_lines.push_back(std::move(line));
+                        line.clear();
+                    }
+                    metric_lines.push_back(item.substr(0, max_line));
+                    item.erase(0, max_line);
+                }
+                if (!line.empty()) line += "  ";
+                line += item;
+            }
+            if (!line.empty()) metric_lines.push_back(std::move(line));
+            for (const auto& metric_line : metric_lines) {
+                moveCursor(row++, 4);
+                clearLine();
+                out() << metric_line;
+            }
+        } else {
+            if (!stats.recon_loss_type.empty()) {
+                moveCursor(row++, 4);
+                clearLine();
+                out() << "Recon Loss Type  " << colorText(stats.recon_loss_type, 96);
+            }
+
+            // Components used by models with reconstruction or regularization losses.
             moveCursor(row++, 4);
             clearLine();
-            out() << "Recon Loss Type  " << colorText(stats.recon_loss_type, 96);
+            out() << "KL Divergence    " << progressBar(std::min(stats.kl_divergence * 10, 100.0f), 25, false)
+                  << " " << std::fixed << std::setprecision(6) << stats.kl_divergence;
+
+            moveCursor(row++, 4);
+            clearLine();
+            out() << "Wasserstein      " << progressBar(std::min(stats.wasserstein * 100, 100.0f), 25, false)
+                  << " " << stats.wasserstein;
+
+            moveCursor(row++, 4);
+            clearLine();
+            out() << "Entropy Δ        " << progressBar(std::min(stats.entropy_diff * 10, 100.0f), 25, false)
+                  << " " << stats.entropy_diff;
+
+            moveCursor(row++, 4);
+            clearLine();
+            out() << "Moment Mismatch  " << progressBar(std::min(stats.moment_mismatch * 20, 100.0f), 25, false)
+                  << " " << stats.moment_mismatch;
+
+            moveCursor(row++, 4);
+            clearLine();
+            out() << "Spatial Coher.   " << progressBar(std::min(stats.spatial_coherence * 100, 100.0f), 25, false)
+                  << " " << stats.spatial_coherence;
+
+            moveCursor(row++, 4);
+            clearLine();
+            out() << "Temporal Cons.   " << progressBar(std::min(stats.temporal_consistency * 100, 100.0f), 25, false)
+                  << " " << stats.temporal_consistency;
+
+            moveCursor(row++, 4);
+            clearLine();
+            std::string recon_metric_label = "RECON";
+            if (!stats.recon_loss_type.empty()) recon_metric_label = stats.recon_loss_type;
+            out() << std::left << std::setw(18) << (recon_metric_label + " (0.1×)")
+                  << progressBar(std::min(stats.mse_loss * 100, 100.0f), 25, false)
+                  << " " << stats.mse_loss;
         }
-
-        // Particle Density Loss Components
-        moveCursor(row++, 4);
-        clearLine();
-          out() << "KL Divergence    " << progressBar(std::min(stats.kl_divergence * 10, 100.0f), 25, false)
-              << " " << std::fixed << std::setprecision(6) << stats.kl_divergence;
-
-        moveCursor(row++, 4);
-        clearLine();
-          out() << "Wasserstein      " << progressBar(std::min(stats.wasserstein * 100, 100.0f), 25, false)
-              << " " << stats.wasserstein;
-
-        moveCursor(row++, 4);
-        clearLine();
-          out() << "Entropy Δ        " << progressBar(std::min(stats.entropy_diff * 10, 100.0f), 25, false)
-              << " " << stats.entropy_diff;
-
-        moveCursor(row++, 4);
-        clearLine();
-          out() << "Moment Mismatch  " << progressBar(std::min(stats.moment_mismatch * 20, 100.0f), 25, false)
-              << " " << stats.moment_mismatch;
-
-        moveCursor(row++, 4);
-        clearLine();
-          out() << "Spatial Coher.   " << progressBar(std::min(stats.spatial_coherence * 100, 100.0f), 25, false)
-              << " " << stats.spatial_coherence;
-
-        moveCursor(row++, 4);
-        clearLine();
-          out() << "Temporal Cons.   " << progressBar(std::min(stats.temporal_consistency * 100, 100.0f), 25, false)
-              << " " << stats.temporal_consistency;
-
-        moveCursor(row++, 4);
-        clearLine();
-                {
-                    std::string recon_metric_label = "RECON";
-                    if (!stats.recon_loss_type.empty()) {
-                            recon_metric_label = stats.recon_loss_type;
-                    }
-                    out() << std::left << std::setw(18) << (recon_metric_label + " (0.1×)")
-                            << progressBar(std::min(stats.mse_loss * 100, 100.0f), 25, false)
-              << " " << stats.mse_loss;
-                }
 
         moveCursor(row++, 4);
         clearLine();
@@ -1039,6 +1074,31 @@ public:
         clearLine();
           out() << "Grad MaxAbs      " << progressBar(std::min(stats.grad_max * 1.0f, 100.0f), 25, false)
               << " " << std::fixed << std::setprecision(6) << stats.grad_max;
+
+        if (const auto runtime_config = std::atomic_load(&runtime_config_)) {
+            const auto diagnostics = runtime_config->gradient_diagnostics.snapshot();
+            if (diagnostics.samples > 0) {
+                moveCursor(row++, 2);
+                clearLine();
+                out() << colorText("● GRADIENT DIAGNOSTICS", 95);
+
+                moveCursor(row++, 4);
+                clearLine();
+                out() << "Clip rate: " << std::fixed << std::setprecision(2)
+                      << diagnostics.clip_rate << "% | window=" << diagnostics.samples
+                      << "/256 | nonfinite=" << diagnostics.nonfinite;
+
+                moveCursor(row++, 4);
+                clearLine();
+                out() << "Grad norm median / p95: " << std::setprecision(6)
+                      << diagnostics.grad_norm_median << " / " << diagnostics.grad_norm_p95;
+
+                moveCursor(row++, 4);
+                clearLine();
+                out() << "Grad norm unclipped max: " << std::setprecision(6)
+                      << diagnostics.grad_norm_unclipped_max;
+            }
+        }
 
         moveCursor(row++, 1);
         clearLine();

@@ -2,12 +2,25 @@
 
 Ce tutoriel décrit le chemin réellement utilisé par `basic_mlp` : définir une
 classe dérivée de `Model`, construire son graphe, convertir sa configuration
-JSON et l'enregistrer dans `ModelArchitectures`.
+JSON et l'enregistrer dans `ModelArchitectures`. Le graphe DL est défini
+exclusivement en C/C++ dans cette classe dérivée ; Lua et JSON configurent et
+pilotent le modèle. L'autre voie, MPK, reste expérimentale et n'est pas encore
+entièrement exploitable en production. Voir le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
 > **Prérequis**
 >
 > Le projet doit compiler et `./bin/mimir --lua
 > scripts/tools/inspect_architectures.lua -- -a` doit fonctionner.
+
+## Choisir son niveau
+
+| Niveau | Travail demandé | Résultat attendu |
+| --- | --- | --- |
+| Débutant | Lire `BasicMLPModel` et identifier classe, config et factory | Expliquer qui définit le graphe et qui lance le run |
+| Intermédiaire | Ajouter la classe et ses trois couches ci-dessous | Passe avant avec dimensions cohérentes |
+| Avancé | Relier la configuration JSON, le registre et les checkpoints | Même topologie avant et après sauvegarde/relecture |
+| Expert | Ajouter objectifs, gradients et tests négatifs propres au modèle | Erreurs contrôlées et validation numérique ciblée |
 
 ## Sources de vérité
 
@@ -31,7 +44,7 @@ Créez `src/Models/MyDomain/MySimpleModel.hpp` sur le modèle de
 ```cpp
 #pragma once
 
-#include "../Model.hpp"
+#include "Model.hpp"
 
 class MySimpleModel : public Model {
 public:
@@ -50,8 +63,10 @@ private:
 };
 ```
 
-`buildInto` est utile pour séparer la description du graphe de l'instance
-concrète. C'est le pattern actuellement employé par `BasicMLPModel`.
+`buildInto` est un helper statique appartenant à la classe dérivée. Il centralise
+la description du graphe et est appelé par `buildFromConfig` sur cette instance.
+Il ne dispense pas d'hériter de `Model`. C'est le pattern employé par
+`BasicMLPModel`.
 
 ## Étape 2 — Construire le graphe
 
@@ -60,6 +75,7 @@ Dans `src/Models/MyDomain/MySimpleModel.cpp`, reproduisez le contrat réel de
 
 ```cpp
 #include "MySimpleModel.hpp"
+#include <stdexcept>
 
 MySimpleModel::MySimpleModel() {
     setModelName("MySimpleModel");
@@ -67,6 +83,9 @@ MySimpleModel::MySimpleModel() {
 }
 
 void MySimpleModel::buildFromConfig(const Config& cfg) {
+    if (cfg.input_dim <= 0 || cfg.hidden_dim <= 0 || cfg.output_dim <= 0) {
+        throw std::invalid_argument("MySimpleModel: dimensions must be positive");
+    }
     cfg_ = cfg;
     buildInto(*this, cfg_);
 }
@@ -121,6 +140,12 @@ Les points importants sont factuels :
 - `__input__` est l'entrée conventionnelle et `x` la sortie principale ;
 - pour `Linear`, le nombre de paramètres avec biais vaut
   `in_features * out_features + out_features`.
+
+**Vérification intermédiaire :** pour `input_dim=64`, `hidden_dim=128` et
+`output_dim=16`, les formes successives sont `[64]`, `[128]`, `[128]`, `[16]`.
+Les deux blocs de poids contiennent respectivement `64*128+128` et
+`128*16+16` paramètres. Les calculs de `Linear` et `GELU` sont exécutés par les
+runtimes ; la classe décrit leur composition.
 
 ## Étape 3 — Ajouter les sources à CMake
 
@@ -212,6 +237,20 @@ Les tests du registre sont répartis entre
 ctest --test-dir build --output-on-failure -R RegistryTest
 ```
 
+## Exercices après intégration
+
+- **Intermédiaire :** changez les dimensions via la configuration autorisée,
+  sans ajouter ni recâbler de couches dans le script Lua. Comparez le nombre
+  de paramètres attendu et celui du modèle.
+- **Avancé :** entraînez sur une petite fixture synthétique, sauvegardez puis
+  rechargez un checkpoint avec la même topologie. Comparez une sortie connue.
+- **Expert :** ajoutez un cas de dimension invalide, une vérification des
+  gradients et un test de sauvegarde/relecture. Modifiez la topologie dans la
+  classe C++, puis vérifiez qu'une reprise incompatible est rejetée.
+
+Ces exercices supposent que vous avez effectivement ajouté et compilé
+`MySimpleModel` ; les fichiers pédagogiques ne sont pas installés par cette page.
+
 ## Erreurs fréquentes
 
 > **Attention**
@@ -219,6 +258,9 @@ ctest --test-dir build --output-on-failure -R RegistryTest
 > `Model.build()` est conservé comme no-op de compatibilité dans le chemin
 > moderne ; ne construisez pas le graphe une seconde fois depuis Lua.
 
+- Graphe défini dans un script Lua plutôt que dans la classe dérivée.
+- MPK utilisé comme garantie de compatibilité ou de production : son chargement
+  reste expérimental et doit être validé sur la configuration concernée.
 - Type de layer absent de `LayerRegistry`.
 - Mauvais `params_count` pour un layer entraînable.
 - Sortie d'un layer différente de l'entrée attendue par le suivant.

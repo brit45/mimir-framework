@@ -5,6 +5,10 @@ inline void pack(std::vector<int>& p, const CudaOperationGeometry::ExtendedConv&
 inline void pack(std::vector<int>& p, const CudaOperationGeometry::BatchNorm& g){pack(p,g.channels);pack(p,g.spatial);pack(p,g.batch);pack(p,g.affine);pack(p,g.bias);pack(p,g.running);}
 inline void pack(std::vector<int>& p, const CudaOperationGeometry::Attention& g){pack(p,g.ed);pack(p,g.ked);pack(p,g.heads);pack(p,g.q);pack(p,g.k);pack(p,g.cross);pack(p,g.causal);pack(p,g.qbias);pack(p,g.obias);pack(p,g.mainParameters);pack(p,g.output);}
 inline void pack(std::vector<int>& p, const CudaOperationGeometry::Recurrent& g){pack(p,g.steps);pack(p,g.input);pack(p,g.hidden);pack(p,g.gates);pack(p,g.parameters);pack(p,g.workspace);}
+inline void pack(std::vector<int>& p, const CudaOperationGeometry::ConvND& g){pack(p,g.batch);pack(p,g.ic);pack(p,g.oc);pack(p,g.ig);pack(p,g.og);pack(p,g.i0);pack(p,g.i1);pack(p,g.i2);pack(p,g.i3);pack(p,g.o0);pack(p,g.o1);pack(p,g.o2);pack(p,g.o3);pack(p,g.k0);pack(p,g.k1);pack(p,g.k2);pack(p,g.k3);pack(p,g.s0);pack(p,g.s1);pack(p,g.s2);pack(p,g.s3);pack(p,g.p0);pack(p,g.p1);pack(p,g.p2);pack(p,g.p3);pack(p,g.d0);pack(p,g.d1);pack(p,g.d2);pack(p,g.d3);pack(p,g.input_spatial);pack(p,g.output_spatial);pack(p,g.kernel_spatial);pack(p,g.parameters);pack(p,g.bias);}
+inline void pack(std::vector<int>& p, const CudaOperationGeometry::CausalSequence& g){pack(p,g.steps);pack(p,g.channels);pack(p,g.taps);pack(p,g.dilation);pack(p,g.values);pack(p,g.weights);pack(p,g.parameters);pack(p,g.bias);}
+inline void pack(std::vector<int>& p, const CudaOperationGeometry::PrimerReduction& g){pack(p,g.outer);pack(p,g.axis_size);pack(p,g.inner);pack(p,g.values);pack(p,g.outputs);}
+inline void pack(std::vector<int>& p, const CudaOperationGeometry::PrimerTriangle& g){pack(p,g.rows);pack(p,g.columns);pack(p,g.values);}
 inline int kernelId(const std::string& name){
 if(name=="norm_forward")return 0;
 if(name=="norm_backward")return 1;
@@ -51,6 +55,21 @@ if(name=="portable_sequence_constant_forward")return 41;
 if(name=="portable_sequence_constant_backward")return 42;
 if(name=="pointwise_fusion_forward")return 43;
 if(name=="pointwise_fusion_backward")return 44;
+if(name=="convolution_nd_forward")return 45;
+if(name=="convolution_nd_input_grad")return 46;
+if(name=="convolution_nd_weight_grad")return 47;
+if(name=="causal_depthwise_forward")return 48;
+if(name=="causal_depthwise_input_grad")return 49;
+if(name=="causal_depthwise_weight_grad")return 50;
+if(name=="swiglu_forward")return 51;
+if(name=="swiglu_backward")return 52;
+if(name=="primer_unary_forward")return 53;
+if(name=="primer_unary_backward")return 54;
+if(name=="primer_binary_forward")return 55;
+if(name=="primer_binary_backward")return 56;
+if(name=="primer_reduce_forward")return 57;
+if(name=="primer_reduce_backward")return 58;
+if(name=="primer_triangle")return 59;
 return -1;}
 inline std::vector<int> kernelWriteArguments(int id){switch(id){
 case 0:return {5,6,7};
@@ -98,4 +117,19 @@ case 41:return {5};
 case 42:return {5};
 case 43:return {5};
 case 44:return {6};
+case 45:return {5};
+case 46:return {5};
+case 47:return {5};
+case 48:return {5};
+case 49:return {5};
+case 50:return {5};
+case 51:return {5};
+case 52:return {6,7};
+case 53:return {4};
+case 54:return {5};
+case 55:return {5};
+case 56:return {6,7};
+case 57:return {4};
+case 58:return {5};
+case 59:return {4};
 default:return {};}}

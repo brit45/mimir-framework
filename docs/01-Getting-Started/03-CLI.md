@@ -56,7 +56,7 @@ Options :
 Exécute un script Lua directement. La config n'est pas injectée.
 
 ```bash
-./bin/mimir --lua script.lua [args...]
+./run_mimir.sh --lua script.lua -- [arguments du script]
 ```
 
 **Injection disponible :**
@@ -77,7 +77,8 @@ Charge un JSON avec section `lua.scripts` et exécute les scripts dans l'ordre.
 - `CONF_DIR` : répertoire parent du fichier config
 - `arg[]` : arguments spécifiés pour chaque script dans `lua.scripts[i].args`
 
-**Structure de config attendue :**
+**Structure de config attendue :** les chemins `script1.lua` et `script2.lua`
+sont à remplacer par vos fichiers. Les sections métier sont lues par ces scripts.
 
 ```json
 {
@@ -90,8 +91,8 @@ Charge un JSON avec section `lua.scripts` et exécute les scripts dans l'ordre.
 			}
 		]
 	},
-	"model": { ... },
-	"training": { ... }
+	"model": { "architecture": "basic_mlp" },
+	"training": { "learning_rate": 0.001 }
 }
 ```
 
@@ -101,14 +102,12 @@ Ou le chemin `run.lua.scripts`:
 {
 	"run": {
 		"lua": {
-			"scripts": [...]
+			"scripts": ["script1.lua"]
 		}
 	},
-	"model": { ... }
+	"model": { "architecture": "basic_mlp" }
 }
 ```
-## Exécuter un script Lua avec arguments
-
 ## Exemples d'utilisation
 
 ### Exemple 1: Mode `--conf` avec config simple
@@ -130,7 +129,7 @@ Les overrides sont appliqués avant l'exécution des scripts, donc les scripts v
 ### Exemple 3: Mode `--lua` avec arguments
 
 ```bash
-./bin/mimir --lua scripts/examples/example_conf_inference.lua -- --num-samples 20
+./bin/mimir --lua scripts/tools/inspect_architectures.lua -- --list basic_mlp --params
 ```
 
 Les arguments après `--` sont accessibles dans `arg[]`. Utilisez
@@ -138,7 +137,9 @@ Les arguments après `--` sont accessibles dans `arg[]`. Utilisez
 
 ### Exemple 4: Créer votre propre config
 
-Crée un fichier `my_config.json`:
+Créez un fichier `my_config.json`. Ce template **initialise le modèle et fait
+un forward synthétique** ; il affiche `training` mais ne réalise pas de boucle
+d’entraînement. Utilisez les scripts spécialisés `scripts/training/` pour entraîner.
 
 ```json
 {
@@ -149,12 +150,13 @@ Crée un fichier `my_config.json`:
 	},
 	"model": {
 		"architecture": "transformer",
-		"vocab_size": 4096,
-		"seq_len": 256,
-		"d_model": 512,
-		"num_layers": 6,
-		"num_heads": 8,
-		"mlp_hidden": 2048
+		"vocab_size": 128,
+		"seq_len": 8,
+		"d_model": 16,
+		"num_layers": 1,
+		"num_heads": 2,
+		"mlp_hidden": 32,
+		"output_dim": 4
 	},
 	"training": {
 		"num_epochs": 10,
@@ -215,6 +217,30 @@ Notes :
 
 - Le séparateur `--` termine les options du CLI Mímir ; les valeurs suivantes sont transmises au script.
 - Dans un script, parsage recommandé : `local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")` puis `Args.parse(arg)`.
+
+## Options propres au lanceur et MPI
+
+`run_mimir.sh` prépare l’environnement et choisit le binaire ; ses options ne
+sont pas celles de `bin/mimir` ni du script Lua. Consultez :
+
+```bash
+./run_mimir.sh --launcher-help
+```
+
+| Option du lanceur | Effet |
+| --- | --- |
+| `--mpi-ranks N` | Lance `mpirun -n N`, avec au moins deux rangs |
+| `--mpi N`, `--ddp-ranks N` | Alias de `--mpi-ranks` |
+| `--mpi-exec CHEMIN` | Sélectionne le lanceur MPI |
+| `MIMIR_EXECUTABLE=/chemin/mimir` | Sélectionne un autre binaire déjà compilé |
+
+Les flags du lanceur doivent précéder le `--` du script. DDP exige un build
+`ENABLE_MPI=ON` **et** l’activation `--ddp` dans le script d’entraînement ;
+lancer deux processus ne suffit pas. Voir le [tutoriel AMP/DDP](../08-Tuto/16-Tuto-Compilation-Portabilite-AMP-DDP.md).
+
+L’outil `show-graph.lua` possède son propre parseur historique : ses options
+suivent directement le nom du script, sans séparateur `--`. Voir
+[les rapports](../02-User-Guide/16-Show-Graph-Metrics.md).
 
 ## Sortie au démarrage
 

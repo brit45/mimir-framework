@@ -140,7 +140,10 @@ Ce smoke test écrit des artefacts temporaires. Utilise-le pour vérifier ensemb
   --safe --iters 1
 ```
 
-`--safe` choisit un profil réduit. Un benchmark mesure le temps ; ce n’est pas une preuve de correction mathématique. Complète-le par les tests C++.
+`--safe` choisit un profil réduit, qui peut encore allouer plusieurs Gio selon
+les cas sélectionnés. Consultez les options et le budget avant de le lancer.
+Un benchmark mesure le temps ; ce n'est pas une preuve de correction
+mathématique. Complétez-le par les tests C++.
 
 ## 4. Exemples
 
@@ -194,7 +197,8 @@ Pour sauvegarder :
 
 ### Templates `--conf`
 
-- `template_conf_load_and_train.lua` : charge `CONF`, crée et entraîne ;
+- `template_conf_load_and_train.lua` : charge `CONF`, crée/alloue/initialise et
+  teste un forward ; la boucle d'entraînement et le dataset restent à ajouter ;
 - `example_conf_inference.lua` : lit la même configuration pour l’inférence.
 
 Voir [Config-driven scripting](08-Config-Driven-Scripting.md).
@@ -218,13 +222,18 @@ Il lit les métadonnées et tensors du checkpoint. Il ne construit pas automatiq
 Transforme un ou plusieurs CSV d’entraînement en rapport HTML :
 
 ```bash
-./bin/mimir --lua scripts/tools/show-graph.lua -- \
+./bin/mimir --lua scripts/tools/show-graph.lua \
   --csv checkpoint/run/loss_history.csv \
+  --checkpoint checkpoint/run/final --strict-context \
   --out /tmp/mimir_training_report.html \
   --no-interactive
 ```
 
 Le mode `--watch` surveille les changements et régénère le rapport.
+Le parser actuel de cet outil refuse le séparateur `--` isolé. Les chemins
+doivent désigner le CSV et un checkpoint du même run ; le
+[tutoriel d’observation](../08-Tuto/14-Tuto-Viz-Metriques-Diagnostic.md)
+donne une recette vérifiée.
 
 ### `inspect_z_prior_raw_folder.lua`
 
@@ -319,12 +328,20 @@ Le nom déclaré dans le MPK est utilisé en priorité. S’il entre en collisio
 avec une architecture native, le nom du fichier sans l’extension devient
 l’alias. Un MPK invalide est ignoré avec un avertissement au démarrage.
 
-`--apply-graph` reconstruit un graphe nodal hors registre uniquement si ses types sont compatibles avec `push_layer`.
+`--apply-graph` est un mécanisme d’import MPK expérimental : il reconstruit un
+graphe nodal uniquement si ses types sont compatibles avec les bindings bas
+niveau. MPK n’est pas entièrement exploitable en production. Ce mécanisme ne
+définit pas une troisième voie de conception de graphes dans les scripts Lua ;
+la voie native est une classe C++ dérivée de `Model`, selon le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
 ## 9. Scripts d’inférence
 
 Le dossier contient :
 
+- génération et chat natifs `causal_lm_generate.lua` ;
+- encodage/décodage et édition d'image `infer_vae_conv.lua` et `edit_vae_conv.lua` ;
+- génération Lumen `lumen_text2img.lua` et détection `detect_medical_anomalies.lua` ;
 - encodeurs texte CLIP 1 et 2 ;
 - bloc transformer SDXL ;
 - décodeur VAE Hugging Face ;
@@ -364,7 +381,7 @@ Les scripts d’entraînement peuvent écrire checkpoints, historique CSV, logs 
 | `fs.lua` | chemins et filesystem multiplateforme |
 | `pipeline.lua` | façade compatible vers `pipeline_api.lua` |
 | `pipeline_api.lua` | construction registry-first, train, infer, save |
-| `checkpoint_resume.lua` | résolution du RawFolder récent parmi `epoch_*`, `step_*`, `final` et le dossier racine |
+| `checkpoint_resume.lua` | résolution du RawFolder récent parmi le dernier `epoch_*`, les `step_*`/`step-*`, `final` et la racine |
 | `base_tokenizer.lua` | vocabulaire/tokenizer partagé |
 | `mpk.lua` | format MPK |
 | `mpk_layers.lua` | validation de graphes MPK |

@@ -60,6 +60,60 @@ class ConfigurationMatrix(unittest.TestCase):
         for runtimes in (['vulkan', 'vulkan'], ['rocm'], ['CUDA']):
             with self.assertRaises(ValueError):
                 matrix.configuration_count(runtimes)
+            with self.assertRaises(ValueError):
+                matrix.recommended(runtimes)
+
+    def test_recommended_matrix_is_compact_and_covers_each_control(self):
+        for runtimes, expected in (([], 12), (['vulkan'], 13),
+                                   (['cuda', 'vulkan'], 15),
+                                   (['cuda', 'vulkan', 'opencl'], 16)):
+            configs = matrix.recommended(runtimes)
+            self.assertEqual(len(configs), expected)
+            self.assertEqual(matrix.recommended_configuration_count(runtimes), expected)
+            self.assertEqual(len({c['configuration_id'] for c in configs}), expected)
+
+            baseline = next(c for c in configs
+                            if c['mimir_options']['planner_enabled']
+                            and c['mimir_options']['planner_mode'] == 'cost'
+                            and c['environment']['OMP_WAIT_POLICY'] == 'active'
+                            and all(c['environment'][flag] == '1'
+                                    for flag in (matrix.GPU_FLAGS[r] for r in runtimes)))
+            baseline_env = baseline['environment']
+            self.assertEqual(baseline['mimir_options']['planner_dump'], False)
+            self.assertEqual(baseline['mimir_options']['device_residency'], True)
+            if runtimes:
+                cpu_fallback = next(c for c in configs
+                                    if all(c['environment'][flag] == '0'
+                                           for flag in matrix.GPU_FLAGS.values()))
+                self.assertTrue(cpu_fallback['mimir_options']['allow_cpu_fallback'])
+                self.assertEqual(cpu_fallback['environment']['MIMIR_DISABLE_CPU'], '0')
+
+            for config in configs:
+                env = config['environment']
+                for runtime in ('CUDA', 'VULKAN', 'OPENCL'):
+                    self.assertEqual(env['MIMIR_DISABLE_' + runtime],
+                                     str(1 - int(env['MIMIR_GPU_' + runtime])))
+                self.assertIn(config['configuration_id'], env['MIMIR_PLANNER_JSON'])
+
+            for flag, default in matrix.RECOMMENDED_FLAGS.items():
+                variant = next(c for c in configs
+                               if c['environment'][flag] == str(1 - default)
+                               and c['mimir_options']['planner_mode'] == 'cost'
+                               and c['mimir_options']['planner_enabled']
+                               and c['environment']['OMP_WAIT_POLICY'] == 'active'
+                               and all(c['environment'][gpu_flag] == baseline_env[gpu_flag]
+                                       for gpu_flag in matrix.GPU_FLAGS.values()))
+                changed = {key for key in baseline_env
+                           if baseline_env[key] != variant['environment'][key]}
+                self.assertEqual(changed, {flag, 'MIMIR_PLANNER_JSON'})
+
+    def test_profile_selector_preserves_exhaustive_matrix(self):
+        runtimes = ['cuda', 'vulkan']
+        self.assertEqual(list(matrix.select('full', runtimes)),
+                         list(matrix.full_factorial(runtimes)))
+        self.assertEqual(matrix.select('recommended', runtimes), matrix.recommended(runtimes))
+        with self.assertRaises(ValueError):
+            matrix.select('unknown', runtimes)
 
     def test_notebook_expands_cases_and_records_resume_protocol(self):
         notebook = json.loads((ROOT / 'Colab-bench-multi-framework.ipynb').read_text())
@@ -67,7 +121,10 @@ class ConfigurationMatrix(unittest.TestCase):
                     if c.get('id') == 'colab-config-matrix-expansion')
         source = ''.join(cell['source'])
         ast.parse(source)
-        self.assertIn("full_factorial(MIMIR_GPU_RUNTIMES if BACKEND=='cuda' else [])", source)
+        self.assertIn("select(CONFIGURATION_PROFILE,MIMIR_GPU_RUNTIMES if BACKEND=='cuda' else [])", source)
+        setup = next(''.join(c['source']) for c in notebook['cells']
+                     if 'CONFIGURATION_PROFILE=' in ''.join(c.get('source', [])))
+        self.assertIn("CONFIGURATION_PROFILE='recommended'", setup)
         self.assertIn("case['mimir_environment']=dict(configuration['environment'])", source)
         self.assertIn("resume_completed_trials=True", source)
         self.assertIn("architecture='MNIST MLP (shared existing workload)'", source)

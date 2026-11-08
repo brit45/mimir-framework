@@ -24,6 +24,7 @@ Source de vérité :
 - [Les grandes responsabilités de Model](#les-grandes-responsabilités-de-model)
 - [API C++ principale (méthodes clés)](#api-c-principale-méthodes-clés)
 - [Créer un modèle via le framework (héritage de Model)](#créer-un-modèle-via-le-framework-héritage-de-model)
+- [AMP et entraînement distribué](#amp-et-entraînement-distribué)
 - [Construire un graphe manuellement avec push()](#construire-un-graphe-manuellement-avec-push)
 - [Routing (wiring) : inputs / output](#routing-wiring-inputs-output)
 - [Paramétrer les paramètres internes des layers (C++)](#paramétrer-les-paramètres-internes-des-layers-c)
@@ -49,7 +50,7 @@ Source de vérité :
 |---|---|---|
 |Topologie / layers|`Model` + `Layer`|Stocke la liste ordonnée de `Layer` et leur routing (`inputs`/`output`).|
 |Paramètres|`Layer::weight_block` + buffers legacy|Réserve/organise les poids + gradients + états (BatchNorm, etc.).|
-|Execution forward|`Model::forwardPass*`|Exécute les layers dans l’ordre avec un `switch (LayerType)` dans `src/Model.cpp`.|
+|Execution forward|`Model::forwardPass*`|Résout les entrées et exécute le plan via `RuntimeRouter` ; les kernels appartiennent aux runtimes.|
 |Execution backward|`Model::backwardPass` (et variantes)|Best-effort selon layers.|
 |Optimisation|`Optimizer`|Applique SGD, Adam, AdamW, Lion, Adafactor, RAdam, NAdam, RMSprop ou LAMB + stratégies de LR decay.|
 |Sécurité mémoire|`MemoryGuard`|Bloque/limite certaines allocations si strict mode.|
@@ -58,7 +59,7 @@ Source de vérité :
 
 |Méthode|Effet|Notes|
 |---|---|---|
-|`build()`|Construit la topologie interne|Souvent appelée via le registre d’architectures (pas toujours direct).|
+|`build()`|Workflow générique historique C++|Appelle les hooks de topologie et alloue/initialise les poids. Le registre utilise les builders natifs ; le binding Lua `Mimir.Model.build()` est un no-op de compatibilité.|
 |`allocateParams()`|Alloue les paramètres|À faire avant `initializeWeights` et avant l’entraînement.|
 |`initializeWeights(method, seed)`|Init des poids|Peut être bloqué si paramètres gelés (freeze).|
 |`totalParamCount()`|Compte les paramètres|Utile pour métriques/logs.|
@@ -69,12 +70,47 @@ Source de vérité :
 |`setTokenizer(t)` / `setEncoder(e)`|Injecte tokenizer/encoder|En pratique, le runtime synchronise modèle ↔ contexte.|
 |`freezeParameters(true/false)`|Gèle/dégèle les paramètres|Bloque les opérations qui mutent poids/gradients.|
 
+## AMP et entraînement distribué
+
+`setAutocastDType` accepte `float32`, `float16` et `bfloat16`. Les deux
+précisions réduites requièrent `ENABLE_AMP=ON` (défaut CMake). Le routeur
+interroge `supportsAutocast` pour chaque opération : seul le runtime CPU
+déclare actuellement `Linear` F16/BF16. Les autres opérations gardent leur
+chemin ordinaire ; activer AMP ne convertit pas tout le graphe en précision
+réduite. Un `Linear` demandé en AMP sans backend compatible est refusé.
+Le backward utilise les activations arrondies du forward pour ces projections.
+Le dtype de stockage (`setDefaultDType`) est un réglage distinct.
+
+`DistributedRuntime`, sous `src/runtimes/`, utilise MPI avec
+`ENABLE_MPI=ON` (défaut CMake `OFF`). Il initialise le groupe avec
+`MPI_THREAD_FUNNELED`, vérifie la topologie identique entre rangs, diffuse les
+poids initiaux et moyenne les gradients avant l'update. Une compilation sans
+MPI renvoie une erreur explicite si DDP est demandé.
+
+Le lancement multiprocessus et l'activation du mode d'entraînement sont deux
+étapes distinctes : `run_mimir.sh --mpi-ranks 2` invoque le lanceur MPI,
+alors que le script causal attend aussi `--ddp` ou `training.ddp=true`.
+Le script initialise DDP avant les threads de monitoring et réserve les
+interfaces au rang principal. Deux rangs MPI ne signifient pas deux GPU ;
+le choix du périphérique et la couverture des opérations restent séparés.
+
+Les raccourcis de compilation sont `config.sh --amp` et `config.sh --ddp` ;
+ils règlent respectivement `ENABLE_AMP` et `ENABLE_MPI`. Ils ne démarrent pas
+eux-mêmes un entraînement.
+
 ## Créer un modèle via le framework (héritage de `Model`)
 
-Dans ce repo, il y a deux approches “framework” (en C++) pour créer des modèles à partir de la classe parente `Model` :
+Une architecture native est définie en C/C++ dans une classe dérivée de `Model`.
+Deux modes d’instanciation de cette même classe sont possibles :
 
 - **Approche A (recommandée)** : passer par le registre `ModelArchitectures` (usiné pour CLI/Lua/config JSON).
-- **Approche B** : instancier une classe dérivée et surcharger `build()` (ou les hooks `build*Branch`) directement.
+- **Approche B** : instancier directement la classe dérivée et appeler sa routine
+  de construction, par exemple `buildFromConfig`.
+
+Ces deux modes ne changent pas le langage de définition du graphe. Les scripts
+et JSON pilotent les instances. MPK est l’autre voie de description, encore
+expérimentale et pas entièrement exploitable en production ; voir le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
 ### Approche A — Registre `ModelArchitectures` (config → modèle)
 
@@ -147,7 +183,13 @@ Ces “builders” utilisent `Model::push(...)` **et** le routing par noms (`Lay
    - calcule `params_count` correctement.
 4. Enregistre l’entrée dans `ModelArchitectures::Registry` (typiquement dans `ensureBuiltinsRegistered()` de `ModelArchitectures.cpp`).
 
-### Approche B — Héritage direct : surcharger `build()` / hooks
+### Approche B — Instancier la classe native directement
+
+L'usage actuel consiste à appeler `buildFromConfig(...)` sur la classe dérivée,
+puis à allouer et initialiser ou charger ses poids. Cette construction est la
+même que celle utilisée par sa fabrique dans le registre.
+
+### Construction générique historique C++
 
 La classe `Model` définit :
 
@@ -160,12 +202,10 @@ Les hooks à surcharger (dans une classe dérivée) sont déclarés `virtual` da
 - `buildTextBranch(...)`, `buildImageBranch(...)`, `buildAudioBranch(...)`, `buildVideoBranch(...)`
 - `injectMagicToken(...)`
 
-Dans ce mode, vous pouvez :
-
-- soit **surcharger `build()`** entièrement (si vous voulez un contrôle total),
-- soit laisser `Model::build()` faire le “workflow” et ne surcharger que les hooks.
-
-Dans les deux cas, la mécanique interne reste la même : vous construisez `layers` via `push()` + configuration des champs `Layer`, puis `allocateParams()` + `initializeWeights()`.
+`Model::build()` et `autoBuildFromDataset()` ne sont pas déclarées `virtual`.
+Seuls les hooks ci-dessus sont surchargeables polymorphiquement. Pour une
+nouvelle architecture, préférez une routine explicite `buildFromConfig` et
+son enregistrement ; ne comptez pas sur un override de `build()` via `Model*`.
 
 ## Construire un graphe manuellement avec `push()`
 
@@ -184,7 +224,7 @@ Ce que fait `push()` (implémentation actuelle dans `src/Model.cpp`) :
 
 Ce que `push()` **ne fait pas** :
 
-- Il ne devine pas le bon `params_count` (c’est toi qui dois le calculer).
+- Il ne devine pas le bon `params_count` (vous devez le calculer).
 - Il ne configure pas automatiquement `in_features/out_features`, `seq_len`, `embed_dim`, etc.
 - Il ne route pas des tenseurs multi-entrées à votre place (ça passe par `Layer.inputs` / `Layer.output`).
 
@@ -216,7 +256,9 @@ Notes importantes :
 ## Paramétrer les paramètres internes des layers (C++)
 
 Les paramètres “internes” d’un layer sont essentiellement les champs de `struct Layer` (`src/Layers.hpp`).
-Ils sont lus pendant le forward via le `switch (LayerType)` dans `src/Model.cpp` et via les helpers dans `src/runtimes/cpu/LayerOps.hpp` / `src/runtimes/cpu/LayerOpsExt.hpp`.
+Ils sont validés et lus par les capacités, les dispatchers et les kernels des
+runtimes. `Model.cpp` orchestre le graphe ; il ne doit pas devenir le lieu
+d'implémentation des calculs d'une nouvelle couche.
 
 ### Pattern général
 
@@ -231,7 +273,7 @@ Les formules ci-dessous correspondent à ce que les forwards lisent **actuelleme
 |Type (`LayerType`)|Champs à configurer (minimum utile)|Layout des poids (dans `weight_block`)|`params_count` typique|
 |---|---|---|---|
 |`Linear`|`in_features`, `out_features`, `use_bias` (optionnel), `seq_len` (optionnel)|`W` puis `bias` si activé. `W` est indexé comme `out_features` blocs de `in_features`.|$in\_f\cdot out\_f + (use\_bias?out\_f:0)$|
-|`Conv2d`|`in_channels`, `out_channels`, `input_height`, `input_width`, `kernel_size`, `stride`, `padding`|Poids uniquement (pas de bias dans l’impl actuelle) avec l’index `((oc*in_c+ic)*k+kh)*k+kw`.|$out\_c\cdot in\_c\cdot k\cdot k$|
+|`Conv2d`|`in_channels`, `out_channels`, `input_height`, `input_width`, `kernel_size`, `stride`, `padding`, `use_bias`|Filtres avec l'index `((oc*in_c+ic)*k+kh)*k+kw`, puis `out_channels` biais si activés.|$out\_c\cdot in\_c\cdot k\cdot k + (use\_bias?out\_c:0)$|
 |`LayerNorm`|`in_features` (taille normalisée), `eps`, `affine`, `use_bias`|Si `affine`: `gamma[normalized]` puis `beta[normalized]` si `use_bias`.|Si `affine`: $n + (use\_bias?n:0)$ sinon `0`|
 |`GroupNorm`|`in_channels`, `input_height`, `input_width`, `num_groups`, `eps`, `affine`, `use_bias`|Si `affine`: `gamma[channels]` puis `beta[channels]` si `use_bias`.|Si `affine`: $c + (use\_bias?c:0)$ sinon `0`|
 |`Embedding`|`vocab_size`, `embed_dim`, `padding_idx` (optionnel)|Table `[vocab_size * embed_dim]` (pas de bias).|$vocab\_size\cdot embed\_dim$|
@@ -248,48 +290,39 @@ Cet exemple montre le principe : `push()` + configuration des champs + allocatio
 ```cpp
 #include "Model.hpp"
 
+class MiniMLPModel final : public Model {
+public:
+    MiniMLPModel() {
+        setModelName("mini_mlp");
+        push("fc1", "Linear", 128 * 64 + 64);
+        auto* fc1 = getLayerByName("fc1");
+        fc1->inputs = {"__input__"};
+        fc1->output = "hidden";
+        fc1->in_features = 128;
+        fc1->out_features = 64;
+        fc1->use_bias = true;
+
+        push("relu1", "ReLU", 0);
+        auto* relu = getLayerByName("relu1");
+        relu->inputs = {"hidden"};
+        relu->output = "activated";
+
+        push("fc2", "Linear", 64 * 10 + 10);
+        auto* fc2 = getLayerByName("fc2");
+        fc2->inputs = {"activated"};
+        fc2->output = "x";
+        fc2->in_features = 64;
+        fc2->out_features = 10;
+        fc2->use_bias = true;
+    }
+};
+
 int main() {
-    Model m;
-
-    // fc1: 128 -> 64
-    {
-        const int in_f = 128;
-        const int out_f = 64;
-        const bool use_bias = true;
-        const size_t params = static_cast<size_t>(in_f) * static_cast<size_t>(out_f) + (use_bias ? static_cast<size_t>(out_f) : 0ULL);
-
-        m.push("fc1", "Linear", params);
-        Layer* L = m.getLayerByName("fc1");
-        L->in_features = in_f;
-        L->out_features = out_f;
-        L->use_bias = use_bias;
-        // L->inputs vide => {"x"}, L->output vide => "x"
-    }
-
-    // relu
-    m.push("relu1", "ReLU", 0);
-
-    // fc2: 64 -> 10
-    {
-        const int in_f = 64;
-        const int out_f = 10;
-        const bool use_bias = true;
-        const size_t params = static_cast<size_t>(in_f) * static_cast<size_t>(out_f) + (use_bias ? static_cast<size_t>(out_f) : 0ULL);
-
-        m.push("fc2", "Linear", params);
-        Layer* L = m.getLayerByName("fc2");
-        L->in_features = in_f;
-        L->out_features = out_f;
-        L->use_bias = use_bias;
-    }
-
-    m.allocateParams();
-    m.initializeWeights("xavier", 42);
-
-    std::vector<float> x(128, 0.1f);
-    std::vector<float> y = m.forwardPass(x, false);
-    (void)y;
-    return 0;
+    MiniMLPModel model;
+    model.allocateParams();
+    model.initializeWeights("xavier", 42);
+    const auto output = model.forwardPass(std::vector<float>(128, 0.25f), false);
+    return output.size() == 10 ? 0 : 1;
 }
 ```
 
@@ -308,18 +341,22 @@ add->output = "x";
 ## Exemple (C++) — squelette minimal
 
 ```cpp
-#include "Model.hpp"
+#include "Models/MLP/BasicMLPModel.hpp"
 
 int main() {
-    Model m;
-
-    m.allocateParams();
-    m.initializeWeights("xavier", 0);
-
-    std::vector<float> x = {0.1f, 0.2f, 0.3f};
-    std::vector<float> y = m.forwardPass(x, /*training=*/false);
-
-    return 0;
+    // BasicMLPModel hérite de Model ; son graphe est défini dans sa classe C++.
+    BasicMLPModel model;
+    BasicMLPModel::Config config;
+    config.input_dim = 4;
+    config.hidden_dim = 8;
+    config.output_dim = 2;
+    config.hidden_layers = 1;
+    model.buildFromConfig(config);
+    model.allocateParams();
+    model.initializeWeights("xavier", 42);
+    const auto output = model.forwardPass(
+        std::vector<float>{0.1f, 0.2f, 0.3f, 0.4f}, false);
+    return output.size() == 2 ? 0 : 1;
 }
 ```
 

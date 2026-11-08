@@ -65,11 +65,18 @@ private:
     static int lua_createModelFromConfig(lua_State* L);
     static int lua_buildModel(lua_State* L);
     static int lua_trainModel(lua_State* L);
+    static int lua_causalLmPrepareCorpus(lua_State* L);
+    static int lua_causalLmTrainCorpus(lua_State* L);
+    static int lua_causalLmGenerate(lua_State* L);
+    static int lua_causalLmChat(lua_State* L);
+    static int lua_causalLmResetMemory(lua_State* L);
+    static int lua_causalLmMemorySize(lua_State* L);
     static int lua_visionTrainStep(lua_State* L);
     static int lua_inferModel(lua_State* L);
     static int lua_saveModel(lua_State* L);
     static int lua_loadModel(lua_State* L);
     static int lua_modelDType(lua_State* L);
+    static int lua_modelAutocast(lua_State* L);
     static int lua_modelGetConfig(lua_State* L);
 
     // === Benchmark API ===
@@ -111,6 +118,12 @@ private:
     static int lua_setHardwareAccel(lua_State* L);
     static int lua_getHardwareCaps(lua_State* L);
     static int lua_runtimeOps(lua_State* L);
+    static int lua_distributedInitialize(lua_State* L);
+    static int lua_distributedShutdown(lua_State* L);
+    static int lua_distributedRank(lua_State* L);
+    static int lua_distributedWorldSize(lua_State* L);
+    static int lua_distributedIsMainProcess(lua_State* L);
+    static int lua_distributedBarrier(lua_State* L);
     static int lua_conditioningPrompt(lua_State* L);
     
     // === ModelArchitectures API ===
@@ -164,6 +177,7 @@ private:
     static int lua_tokenize(lua_State* L);
     static int lua_detokenize(lua_State* L);
     static int lua_getVocabSize(lua_State* L);
+    static int lua_getBPEMergeCount(lua_State* L);
     static int lua_getMaxVocab(lua_State* L);
     static int lua_setMaxVocab(lua_State* L);
     static int lua_saveTokenizer(lua_State* L);

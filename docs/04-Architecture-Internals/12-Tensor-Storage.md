@@ -119,12 +119,18 @@ Dans `src/Layers.hpp` :
 
 Invariant : `params_count` doit être correct **avant** l’allocation des poids (voir `docs/04-Architecture-Internals/10-Model-Class.md`).
 
-## 6) OpenCL “TensorSystem” (legacy)
+## 6) Calcul des poids spatiaux `TensorSystem` (legacy)
 
-`TensorSystem` (dans `src/tensors.hpp` et `src/tensors.cpp`) contient un kernel OpenCL `compute_weights` destiné à calculer un champ `Weight` à partir de `Pos/Value/Length`.
+`TensorSystem` (dans `src/tensors.hpp` et `src/tensors.cpp`) demande le calcul
+du champ `Weight` à partir de `Pos/Value/Length` via
+`RuntimeRouter::dispatchTensorWeights`. Chaque backend doit annoncer
+`supportsTensorWeights` avant de recevoir cette opération ; il n'y a plus
+d'appel OpenCL direct dans `tensors.cpp`.
 
 - Ce chemin est orthogonal aux “tensors du modèle”.
-- S’il est compilé (`ENABLE_OPENCL`), il peut exister dans le binaire mais ne signifie pas que les poids du modèle sont sur GPU.
+- Ce calcul historique ne signifie pas que les blocs de poids neuronaux sont
+  résidents sur GPU. Sans routeur configuré, ce helper possède un repli CPU
+  autonome ; une liste de runtimes explicitement configurée reste autoritaire.
 
 ## 7) Checklist (lorsque vous ajoutez/modifies un codepath)
 

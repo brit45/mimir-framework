@@ -1,40 +1,157 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="690" viewBox="0 0 1900 690" role="img" aria-labelledby="title desc">
-<title id="title">Cycle de vie moderne du modèle</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1230" viewBox="0 0 1200 1230" role="img" aria-labelledby="title desc">
+<title id="title">Cycle de vie du modèle natif</title>
+<desc id="desc">Le registre construit une classe C++ dérivée de Model. Les paramètres sont alloués avant une initialisation neuve ou un chargement compatible. Le modèle est ensuite utilisé en entraînement ou en inférence, puis sauvegardé. Sources : src/Model.hpp, src/Models/Registry/ModelArchitectures.cpp, src/Serialization/Serialization.hpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Model.hpp&quot;, &quot;src/Models/Registry/ModelArchitectures.cpp&quot;, &quot;src/Serialization/Serialization.hpp&quot;], &quot;related_docs&quot;: [&quot;docs/02-User-Guide/02-Model-Lifecycle.md&quot;, &quot;docs/08-Tuto/12-Tuto-Entrainement-Validation-Reprise-Inference.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Cycle de vie moderne du modèle</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Workflow recommandé : create → allocate_params → init/load → forward → train/infer → save.</text>
-<line x1="60" y1="112" x2="1840" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="227.42857142857142" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="183.71428571428572" y="265" class="label" text-anchor="middle">create</text>
-<text x="183.71428571428572" y="322" class="small" text-anchor="middle">architecture + config</text>
-<rect x="325.42857142857144" y="240" width="227.42857142857142" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="439.14285714285717" y="265" class="label" text-anchor="middle">allocate_params</text>
-<text x="439.14285714285717" y="322" class="small" text-anchor="middle">tenseurs poids</text>
-<path d="M297.42857142857144,295.0 L325.42857142857144,295.0" class="edgeB"/>
-<rect x="580.8571428571429" y="240" width="227.42857142857142" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="694.5714285714286" y="265" class="label" text-anchor="middle">init_weights</text>
-<text x="694.5714285714286" y="322" class="small" text-anchor="middle">ou load checkpoint</text>
-<path d="M552.8571428571429,295.0 L580.8571428571429,295.0" class="edgeB"/>
-<rect x="836.2857142857142" y="240" width="227.42857142857142" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="949.9999999999999" y="265" class="label" text-anchor="middle">forward</text>
-<text x="949.9999999999999" y="322" class="small" text-anchor="middle">inférence / loss</text>
-<path d="M808.2857142857143,295.0 L836.2857142857142,295.0" class="edgeB"/>
-<rect x="1091.7142857142858" y="240" width="227.42857142857142" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1205.4285714285716" y="265" class="label" text-anchor="middle">backward</text>
-<text x="1205.4285714285716" y="322" class="small" text-anchor="middle">si entraînement</text>
-<path d="M1063.7142857142856,295.0 L1091.7142857142858,295.0" class="edgeB"/>
-<rect x="1347.142857142857" y="240" width="227.42857142857142" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1460.857142857143" y="265" class="label" text-anchor="middle">optimizer</text>
-<text x="1460.857142857143" y="322" class="small" text-anchor="middle">mise à jour</text>
-<path d="M1319.142857142857,295.0 L1347.142857142857,295.0" class="edgeB"/>
-<rect x="1602.5714285714284" y="240" width="227.42857142857142" height="110" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1716.2857142857142" y="265" class="label" text-anchor="middle">save</text>
-<text x="1716.2857142857142" y="322" class="small" text-anchor="middle">checkpoint/export</text>
-<path d="M1574.5714285714284,295.0 L1602.5714285714284,295.0" class="edgeB"/>
-<text x="1840" y="666" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1230" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Cycle de vie du modèle natif</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Créer la structure, allouer, puis initialiser ou charger les poids.</tspan>
+</text>
+<path d="M 369.33,264 L 437.33,264" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,264 L 830.67,264" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 921.76,365 L 921.76,415 L 278.24,415 L 278.24,465" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 993.33,365 L 993.33,465" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 369.33,576 L 437.33,576" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,576 L 762.67,576" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 528.43,687 L 528.43,737 L 278.24,737 L 278.24,787" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 671.57,687 L 671.57,737 L 921.76,737 L 921.76,787" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 369.33,886.5 L 437.33,886.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,886.5 L 762.67,886.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<g data-node="config">
+<rect x="44" y="163" width="325.33" height="202" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Architecture et</tspan>
+<tspan x="66" dy="29">config</tspan>
+</text>
+<text x="66" y="266" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Classe C++ dérivée de</tspan>
+<tspan x="66" dy="26">Model</tspan>
+<tspan x="66" dy="26">Valeurs autorisées du run</tspan>
+</text>
+</g>
+<g data-node="create">
+<rect x="437.33" y="163" width="325.33" height="202" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Créer via le registre</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Model.create(name, cfg)</tspan>
+<tspan x="459.33" dy="26">Construction native du</tspan>
+<tspan x="459.33" dy="26">graphe</tspan>
+</text>
+</g>
+<g data-node="allocate">
+<rect x="830.67" y="163" width="325.33" height="202" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Allouer les</tspan>
+<tspan x="852.67" dy="29">paramètres</tspan>
+</text>
+<text x="852.67" y="266" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">allocate_params()</tspan>
+<tspan x="852.67" dy="26">Avant init ou chargement</tspan>
+</text>
+</g>
+<g data-node="init">
+<rect x="44" y="465" width="325.33" height="222" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="496" font-size="14" fill="#2563eb" font-weight="700">
+<tspan x="66" dy="0">NOUVEAU RUN</tspan>
+</text>
+<text x="66" y="523" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Nouveau départ</tspan>
+</text>
+<text x="66" y="566" font-size="19" fill="#334155">
+<tspan x="66" dy="0">init_weights(méthode,</tspan>
+<tspan x="66" dy="26">seed)</tspan>
+<tspan x="66" dy="26">Poids initialisés une fois</tspan>
+</text>
+</g>
+<g data-node="forward">
+<rect x="437.33" y="465" width="325.33" height="222" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Exécuter le modèle</tspan>
+</text>
+<text x="459.33" y="539" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">forward(entrées,</tspan>
+<tspan x="459.33" dy="26">training)</tspan>
+<tspan x="459.33" dy="26">Tenseurs et sorties</tspan>
+<tspan x="459.33" dy="26">nommés</tspan>
+</text>
+</g>
+<g data-node="load">
+<rect x="830.67" y="465" width="325.33" height="222" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="852.67" y="496" font-size="14" fill="#b45309" font-weight="700">
+<tspan x="852.67" dy="0">REPRISE / INFÉRENCE</tspan>
+</text>
+<text x="852.67" y="523" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Charger un</tspan>
+<tspan x="852.67" dy="29">checkpoint</tspan>
+</text>
+<text x="852.67" y="595" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Serialization.load(...)</tspan>
+<tspan x="852.67" dy="26">Topologie et assets</tspan>
+<tspan x="852.67" dy="26">compatibles</tspan>
+</text>
+</g>
+<g data-node="train">
+<rect x="44" y="787" width="325.33" height="199" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="818" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Entraîner</tspan>
+</text>
+<text x="66" y="861" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Loss → backward →</tspan>
+<tspan x="66" dy="26">optimizer</tspan>
+<tspan x="66" dy="26">Validation sans mise à</tspan>
+<tspan x="66" dy="26">jour</tspan>
+</text>
+</g>
+<g data-node="save">
+<rect x="437.33" y="787" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="818" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Sauvegarder le run</tspan>
+</text>
+<text x="459.33" y="861" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Poids, config et état utile</tspan>
+<tspan x="459.33" dy="26">Format et options</tspan>
+<tspan x="459.33" dy="26">explicites</tspan>
+</text>
+</g>
+<g data-node="infer">
+<rect x="830.67" y="787" width="325.33" height="199" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="852.67" y="818" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Faire une inférence</tspan>
+</text>
+<text x="852.67" y="861" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">training = false</tspan>
+<tspan x="852.67" dy="26">Décoder ou post-traiter</tspan>
+</text>
+</g>
+<rect x="901.36" y="375.5" width="40.8" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="910.36" y="394.5" font-size="15" fill="#475569">
+<tspan x="910.36" dy="0">OU</tspan>
+</text>
+<rect x="972.93" y="400.5" width="40.8" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="981.93" y="419.5" font-size="15" fill="#475569">
+<tspan x="981.93" dy="0">OU</tspan>
+</text>
+<rect x="44" y="1034" width="1112" height="110" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1062" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Model.build() est un appel de compatibilité : create a déjà construit le graphe.</tspan>
+<tspan x="66" dy="26">• Ne pas réinitialiser les poids après un chargement destiné à une reprise ou une inférence.</tspan>
+<tspan x="66" dy="26">• Faire une inférence → Sauvegarder le run : si nécessaire</tspan>
+</text>
+<text x="44" y="1179" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : Model.hpp · ModelArchitectures.cpp · Serialization.hpp</tspan>
+</text>
+</g>
 </svg>

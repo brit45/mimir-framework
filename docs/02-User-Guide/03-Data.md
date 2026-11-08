@@ -13,7 +13,7 @@ Cette page décrit le comportement **réel** du loader de dataset actuellement e
 
 Sources principales :
 
-- API Lua: `src/scriptings/Lua/luaScripting/LuaScripting.cpp` (`lua_loadDataset`, `lua_getDataset`, `lua_prepareSequences`)
+- API Lua: `src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp` (`lua_loadDataset`, `lua_getDataset`, `lua_prepareSequences`)
 - Indexation + lazy-loading: `src/Helpers.hpp` (`loadDataset`, `DatasetItem`, `DatasetMemoryManager`, `DatasetManager`)
 
 ## Sur cette page
@@ -160,7 +160,7 @@ Pour appeler directement Lumen, transmettre `{annotation = item.annotation}` com
 
 Les squelettes personnalisés de l’éditeur sont reconnus dans `entities[].skeleton` : `name`, `points` (`name`, `position: [x,y]` ou `null`, `parent` optionnel, `entities` optionnel) et `edges` optionnel (`from`, `to`, `label`). Les noms de points sont uniques par squelette ; les liaisons et identifiants d’entités sont validés au chargement. Branches et cycles sont autorisés. Les positions sont normalisées sur l’image entière, et les points non placés ne contribuent pas à la pondération spatiale.
 
-Lumen et les VAE conditionnés utilisent `Mimir.Model.conditioning_prompt(caption, annotation)`, construit par la même fonction C++ que leur conditionnement natif. Les points nommés et les liaisons libres sont associés au squelette propriétaire, identifié par l’entité ; les associations de points portent aussi les identifiants des entités cibles. Lumen et la boucle VAE conditionnée hydratent systématiquement le tokenizer avant les steps : `ensure_vocab_from_text`/`ensureVocabFromText` sur chaque contexte complet, puis `learn_bpe`/`learnBPEFromCorpus` une fois sur le corpus. Le tokenizer est ensuite transmis au modèle et sauvegardé avec le checkpoint. Le script Lumen ne reconstruit pas le format de contexte en Lua. Le contexte est tokenisé puis transformé en embeddings par l’encodeur textuel. Dans Lumen, ses embeddings alimentent la cross-attention du DiT. Le contexte annoté complet doit tenir dans `text_seq_len` : Lumen refuse une troncature et le script indique la valeur nécessaire de `--text-seq-len`. Les entraînements VAE conditionnés vérifient de même `seq_len`. La loss de diffusion met l’accent sur les points placés, les segments parent/enfant et libres, et les connexions vers les centres des boîtes des entités associées. Chaque segment est échantillonné avec un pas maximal de 0,025 en coordonnées normalisées ; chaque échantillon fournit une région de largeur 0,05, tronquée aux bords. Ces régions partagent la moyenne régionale avec les bbox et conservent une pondération globale de moyenne un. Ce mécanisme utilise la loss et ses gradients existants, sans ajouter de tête de pose ni garantir la précision des articulations générées. Il fonctionne aussi sans bbox. `skeleton_region_count` expose le nombre de régions de squelette rasterisées dans les statistiques Lumen ; `--bbox-loss-weight 0` désactive cette supervision, en conservant le conditionnement par les annotations. Les datasets sans annotation gardent leur comportement précédent.
+Lumen et les VAE conditionnés utilisent `Mimir.Model.conditioning_prompt(caption, annotation)`, construit par la même fonction C++ que leur conditionnement natif. Les points nommés et les liaisons libres sont associés au squelette propriétaire, identifié par l’entité ; les associations de points portent aussi les identifiants des entités cibles. La boucle VAE conditionnée compose ses contextes avant les steps avec `ensure_vocab_from_text`/`ensureVocabFromText`, puis `learn_bpe`/`learnBPEFromCorpus` sur le corpus. Pour Lumen, cette hydratation concerne les nouveaux runs avec le Transformer interne ; la reprise et les encodeurs VAEText/T5 importés conservent leur tokenizer de checkpoint sans agrandissement. Le tokenizer est ensuite transmis au modèle et sauvegardé avec le checkpoint. Le script Lumen ne reconstruit pas le format de contexte en Lua. Le contexte est tokenisé puis transformé en embeddings par l’encodeur textuel. Dans Lumen, ses embeddings alimentent la cross-attention du DiT. Avec le Transformer interne de Lumen et `dynamic_text_seq_len=true`, la longueur est adaptée au contexte complet ; `text_seq_len` reste la référence des positions apprises. En mode fixe, un contexte annoté trop long est refusé et le script indique la valeur nécessaire de `--text-seq-len`. Les encodeurs VAEText/T5 importés ont une longueur fixe issue du checkpoint ; un prompt ordinaire plus long est tronqué, tandis que les annotations structurées trop longues sont refusées. Les entraînements VAE conditionnés vérifient de même `seq_len`. La loss de diffusion met l’accent sur les points placés, les segments parent/enfant et libres, et les connexions vers les centres des boîtes des entités associées. Chaque segment est échantillonné avec un pas maximal de 0,025 en coordonnées normalisées ; chaque échantillon fournit une région de largeur 0,05, tronquée aux bords. Ces régions partagent la moyenne régionale avec les bbox et conservent une pondération globale de moyenne un. Ce mécanisme utilise la loss et ses gradients existants, sans ajouter de tête de pose ni garantir la précision des articulations générées. Il fonctionne aussi sans bbox. `skeleton_region_count` expose le nombre de régions de squelette rasterisées dans les statistiques Lumen ; `--bbox-loss-weight 0` désactive cette supervision, en conservant le conditionnement par les annotations. Les datasets sans annotation gardent leur comportement précédent.
 
 Pour une inférence textuelle ou un appel avec des tokens explicites, construire le même contexte avant la tokenisation :
 
@@ -178,7 +178,7 @@ L’historique `.annotation_state.json`, son verrou et les fichiers temporaires 
 
 ## API Lua: `Mimir.Dataset`
 
-### `Mimir.Dataset.load(dataset_dir)`
+### `Mimir.Dataset.load(dataset_dir, target_w?, target_h?, min_modalities?, use_cache?, cache_path?, max_ram_mb?, lazy_loading?)`
 
 Charge (indexe) le dataset.
 
@@ -192,6 +192,9 @@ Remarques:
 - La fonction vérifie que le dossier existe.
 - Elle appelle `loadDataset(dataset_dir)` côté C++.
 - Les paramètres optionnels permettent de choisir les dimensions cibles, le seuil de modalités, le cache, la limite RAM et le chargement lazy.
+- Les défauts sont `64`, `64`, `1`, `false`, `"dataset_cache.json"`, `10240` et `true`.
+  `use_cache=true` sélectionne `loadDatasetCached` ; ses options `max_ram_mb`
+  et `lazy_loading` ne sont pas appliquées par le chemin sans cache.
 - L’indexation est en mode “lazy”: les données (texte/image/audio/vidéo) ne sont pas chargées en RAM à ce stade.
 
 ### Vidéos comme dataset
@@ -253,7 +256,15 @@ Même si `Mimir.Dataset.load()` n’effectue que l’indexation, le C++ contient
 Conséquences côté Lua:
 
 - `prepare_sequences()` appelle `loadText()` en interne. Si un fichier texte est trop gros (ou si le gestionnaire RAM interne considère qu’il ne peut pas allouer), le texte ne sera pas chargé et l’item ne produira pas de séquence.
-- Le gestionnaire RAM dataset a une limite par défaut de 10 GB dans `Helpers.hpp`, mais **elle n’est pas configurable via l’API Lua dataset actuelle**.
+- Le chemin avec cache expose son budget en Mio via le septième argument
+  `max_ram_mb` (10240 par défaut). Ce budget du dataset est distinct de
+  `MemoryGuard` et de l'allocateur des tenseurs.
+
+```lua
+-- Cache explicite, images 64×64, au moins une modalité, budget dataset 2048 Mio.
+assert(Mimir.Dataset.load("/chemin/dataset", 64, 64, 1,
+  true, "/tmp/mimir_dataset_cache.json", 2048, true))
+```
 
 À retenir:
 
@@ -291,7 +302,9 @@ end
 
 ## Bonnes pratiques
 
-- Datasets multi-modaux: préfère des basenames uniques sur tout le dataset (évite les collisions entre sous-dossiers).
+- Datasets multi-modaux : gardez un chemin relatif sans extension commun aux
+  modalités d'un item ; des basenames identiques dans des sous-dossiers
+  différents restent des items distincts.
 - Reproductibilité: loggue dans votre checkpoint les infos “pipeline” (chemin dataset, `seq_len`, vocab/tokenizer utilisé).
 - Validation rapide: ajoute un script de smoke test qui fait `load()` puis `get(1)` et vérifie la présence des champs attendus.
 

@@ -1,36 +1,154 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="620" viewBox="0 0 1700 620" role="img" aria-labelledby="title desc">
-<title id="title">Flux de données runtime</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1454" viewBox="0 0 1200 1454" role="img" aria-labelledby="title desc">
+<title id="title">Flux des tenseurs nommés</title>
+<desc id="desc">Model injecte les entrées dans les stores float et int. Il résout les entrées de chaque couche, délègue le calcul au routeur et publie les sorties nommées. Les activations nécessaires au backward sont conservées, et le plan peut libérer ou réutiliser les buffers selon leur durée de vie. Sources : src/Model.cpp, src/Layers.hpp, src/Planning/Planner.hpp, src/runtimes/RuntimeRouter.cpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Model.cpp&quot;, &quot;src/Layers.hpp&quot;, &quot;src/Planning/Planner.hpp&quot;, &quot;src/runtimes/RuntimeRouter.cpp&quot;], &quot;related_docs&quot;: [&quot;docs/04-Architecture-Internals/01-Engine-Overview.md&quot;, &quot;docs/04-Architecture-Internals/13-Autograd-Gradients.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Flux de données runtime</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Chemin des tenseurs depuis les entrées jusqu’aux sorties à travers le graphe.</text>
-<line x1="60" y1="112" x2="1640" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="236.66666666666666" height="110" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="188.33333333333331" y="265" class="label" text-anchor="middle">Input tensors</text>
-<text x="188.33333333333331" y="322" class="small" text-anchor="middle">x, labels, t</text>
-<rect x="334.66666666666663" y="240" width="236.66666666666666" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="452.99999999999994" y="265" class="label" text-anchor="middle">Node queue</text>
-<text x="452.99999999999994" y="322" class="small" text-anchor="middle">ordre planner</text>
-<path d="M306.66666666666663,295.0 L334.66666666666663,295.0" class="edgeB"/>
-<rect x="599.3333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="717.6666666666666" y="265" class="label" text-anchor="middle">Layer kernel</text>
-<text x="717.6666666666666" y="322" class="small" text-anchor="middle">opération C++</text>
-<path d="M571.3333333333333,295.0 L599.3333333333333,295.0" class="edgeB"/>
-<rect x="863.9999999999999" y="240" width="236.66666666666666" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="982.3333333333333" y="265" class="label" text-anchor="middle">Tensor store</text>
-<text x="982.3333333333333" y="322" class="small" text-anchor="middle">outputs temporaires</text>
-<path d="M835.9999999999999,295.0 L863.9999999999999,295.0" class="edgeB"/>
-<rect x="1128.6666666666665" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1246.9999999999998" y="265" class="label" text-anchor="middle">Loss / output</text>
-<text x="1246.9999999999998" y="322" class="small" text-anchor="middle">résultat</text>
-<path d="M1100.6666666666665,295.0 L1128.6666666666665,295.0" class="edgeB"/>
-<rect x="1393.333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#fee2e2" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1511.6666666666663" y="265" class="label" text-anchor="middle">Free/reuse</text>
-<text x="1511.6666666666663" y="322" class="small" text-anchor="middle">mémoire</text>
-<path d="M1365.3333333333333,295.0 L1393.333333333333,295.0" class="edgeB"/>
-<text x="1640" y="596" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1454" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Flux des tenseurs nommés</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Entrées float et IDs int alimentent le même graphe à noms explicites.</tspan>
+</text>
+<path d="M 278.24,362 L 278.24,412 L 528.43,412 L 528.43,462" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 921.76,362 L 921.76,412 L 671.57,412 L 671.57,462" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 528.43,635 L 528.43,685 L 278.24,685 L 278.24,735" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 369.33,821.5 L 437.33,821.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,821.5 L 830.67,821.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 921.76,735 L 921.76,685 L 671.57,685 L 671.57,635" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 993.33,908 L 993.33,1008" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 528.43,908 L 528.43,958 L 278.24,958 L 278.24,1008" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 921.76,908 L 921.76,958 L 671.57,958 L 671.57,1008" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<g data-node="float">
+<rect x="44" y="163" width="325.33" height="199" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Entrées flottantes</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Images, latents,</tspan>
+<tspan x="66" dy="26">features…</tspan>
+<tspan x="66" dy="26">Selon la classe</tspan>
+<tspan x="66" dy="26">d’architecture</tspan>
+</text>
+</g>
+<g data-node="integer">
+<rect x="830.67" y="163" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Entrées entières</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">IDs de tokens / text_ids…</tspan>
+<tspan x="852.67" dy="26">Embedding lit le chemin int</tspan>
+</text>
+</g>
+<g data-node="stores">
+<rect x="437.33" y="462" width="325.33" height="173" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="493" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Stores nommés</tspan>
+</text>
+<text x="459.33" y="536" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">TensorStore float</tspan>
+<tspan x="459.33" dy="26">IntTensorStore</tspan>
+<tspan x="459.33" dy="26">Noms définis par le modèle</tspan>
+</text>
+</g>
+<g data-node="inputs">
+<rect x="44" y="735" width="325.33" height="173" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Résoudre le layer</tspan>
+</text>
+<text x="66" y="809" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Layer.inputs</tspan>
+<tspan x="66" dy="26">Une ou plusieurs entrées</tspan>
+</text>
+</g>
+<g data-node="router">
+<rect x="437.33" y="735" width="325.33" height="173" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="459.33" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Router → dispatcher</tspan>
+</text>
+<text x="459.33" y="809" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Opération et runtime</tspan>
+<tspan x="459.33" dy="26">choisis</tspan>
+<tspan x="459.33" dy="26">Calcul dans les kernels</tspan>
+</text>
+</g>
+<g data-node="publish">
+<rect x="830.67" y="735" width="325.33" height="173" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Publier la sortie</tspan>
+</text>
+<text x="852.67" y="809" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Layer.output</tspan>
+<tspan x="852.67" dy="26">Valeur complète après</tspan>
+<tspan x="852.67" dy="26">succès</tspan>
+</text>
+</g>
+<g data-node="snapshots">
+<rect x="44" y="1008" width="325.33" height="228" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="1039" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Conserver si</tspan>
+<tspan x="66" dy="29">nécessaire</tspan>
+</text>
+<text x="66" y="1111" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Activations pour le</tspan>
+<tspan x="66" dy="26">backward</tspan>
+<tspan x="66" dy="26">Gradients accumulés par</tspan>
+<tspan x="66" dy="26">nom</tspan>
+</text>
+</g>
+<g data-node="memory">
+<rect x="437.33" y="1008" width="325.33" height="228" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="459.33" y="1039" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Fin de vie /</tspan>
+<tspan x="459.33" dy="29">réutilisation</tspan>
+</text>
+<text x="459.33" y="1111" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Dernier consommateur du</tspan>
+<tspan x="459.33" dy="26">tenseur</tspan>
+<tspan x="459.33" dy="26">Selon plan et mode</tspan>
+<tspan x="459.33" dy="26">effectifs</tspan>
+</text>
+</g>
+<g data-node="output">
+<rect x="830.67" y="1008" width="325.33" height="228" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="852.67" y="1039" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Sortie de</tspan>
+<tspan x="852.67" dy="29">l’architecture</tspan>
+</text>
+<text x="852.67" y="1111" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Logits, reconstructions,</tspan>
+<tspan x="852.67" dy="26">latent…</tspan>
+<tspan x="852.67" dy="26">Post-traitement séparé</tspan>
+</text>
+</g>
+<rect x="857.11" y="695.5" width="129.3" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="866.11" y="714.5" font-size="15" fill="#475569">
+<tspan x="866.11" dy="0">layer suivant</tspan>
+</text>
+<rect x="485.53" y="918.5" width="85.8" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="494.53" y="937.5" font-size="15" fill="#475569">
+<tspan x="494.53" dy="0">training</tspan>
+</text>
+<rect x="873.76" y="918.5" width="96" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="882.76" y="937.5" font-size="15" fill="#475569">
+<tspan x="882.76" dy="0">fin de vie</tspan>
+</text>
+<rect x="44" y="1284" width="1112" height="84" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1312" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Le backward utilise les activations conservées et repasse par le routeur pour les dérivées.</tspan>
+<tspan x="66" dy="26">• Les noms et formes viennent de la classe C++ dérivée de Model ; les scripts fournissent les entrées.</tspan>
+</text>
+<text x="44" y="1403" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : Model.cpp · Layers.hpp · Planner.hpp · RuntimeRouter.cpp</tspan>
+</text>
+</g>
 </svg>

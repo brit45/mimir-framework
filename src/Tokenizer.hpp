@@ -22,6 +22,9 @@ public:
 
     // vocab manipulation
     int addToken(const std::string &tok);
+    int addSpecialToken(const std::string &tok);
+    bool hasToken(const std::string &tok) const;
+    bool isSpecialToken(const std::string &tok) const;
     void ensureVocabFromText(const std::string &text);
 
     // tokenization
@@ -57,6 +60,7 @@ public:
     // Méthodes améliorées pour FLUX
     void learnBPEFromCorpus(const std::vector<std::string>& corpus, int num_merges = 1000);
     std::vector<int> tokenizeBPE(const std::string& text) const;
+    size_t getBPEMergeCount() const;
     void setMaxSequenceLength(int max_len);
     std::vector<int> padSequence(const std::vector<int>& tokens, int target_len = -1) const;
     std::vector<std::vector<int>> batchTokenize(const std::vector<std::string>& texts, int max_len = 512);
@@ -90,6 +94,7 @@ private:
     std::unordered_map<int, std::string> reverse_vocab;  // id -> token (cache inverse)
     size_t vocabSize = 0;
     int maxSequenceLength = 512;
+    std::vector<std::string> specialTokens_;
     
     struct PairHash {
         size_t operator()(const std::pair<std::string, std::string>& p) const {
@@ -98,6 +103,7 @@ private:
     };
     
     std::unordered_map<std::pair<std::string, std::string>, int, PairHash> bpeMerges;
+    bool bpeReady = false;
     
     // Dictionnaires pour la compréhension textuelle
     void initializeUnderstandingDictionaries();

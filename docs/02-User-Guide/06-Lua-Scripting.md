@@ -11,6 +11,12 @@
 
 Ce chapitre explique **comment écrire des scripts Lua “robustes”** pour Mímir : démarrage, arguments, conventions, patterns, et pièges fréquents.
 
+Le script pilote une architecture définie en C/C++ dans une classe dérivée de
+`Model` ; il ne décrit pas son graphe DL. L’alternative MPK reste expérimentale
+et pas entièrement exploitable en production. Le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md) et le
+[tutoriel d’orchestration](../08-Tuto/03-Tuto-Coder-Script.md) précisent ce rôle.
+
 ## Etat des autres bindings
 
 - Lua est le chemin supporte complet pour le scripting metier.
@@ -67,7 +73,9 @@ assert(Mimir.Model.init_weights("xavier", seed))
 
 local ids = {}
 for i = 1, cfg.seq_len do ids[i] = 1 end
-local out = Mimir.Model.forward({ __input__ = ids }, false)
+local neutral = {}
+for i = 1, cfg.d_model do neutral[i] = 0.0 end
+local out = Mimir.Model.forward({__input__ = ids, mag = neutral, mod = neutral}, false)
 assert(out, "forward failed")
 log("out_len=" .. tostring(#out))
 ```

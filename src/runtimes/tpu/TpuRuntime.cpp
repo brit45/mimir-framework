@@ -1,6 +1,8 @@
 #include "runtimes/optimizers/OptimizerDispatch.hpp"
 #include "runtimes/tpu/TpuRuntime.hpp"
 #include "Layers.hpp"
+#include "runtimes/ConvolutionND.hpp"
+#include "runtimes/GradientCommit.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +29,10 @@ json Mimir::tpuLayerDescriptor(const Layer& l) {
 #define FIELD(f) j[#f] = l.f
     FIELD(in_features); FIELD(out_features); FIELD(in_channels); FIELD(out_channels);
     FIELD(input_height); FIELD(input_width); FIELD(output_height); FIELD(output_width);
+    FIELD(input_depth); FIELD(input_time); FIELD(kernel_d); FIELD(kernel_t);
+    FIELD(stride_d); FIELD(stride_t); FIELD(pad_d); FIELD(pad_t); FIELD(dilation_d); FIELD(dilation_t);
+    FIELD(input_spatial_shape); FIELD(kernel_shape); FIELD(stride_shape); FIELD(padding_shape); FIELD(dilation_shape);
+    FIELD(groups); FIELD(dilation_w);
     FIELD(kernel_h); FIELD(kernel_w); FIELD(stride_h); FIELD(stride_w); FIELD(pad_h); FIELD(pad_w);
     FIELD(dilation); FIELD(dilation_h); FIELD(eps); FIELD(num_groups); FIELD(affine);
     FIELD(use_bias); FIELD(track_running_stats); FIELD(running_mean); FIELD(running_var);
@@ -44,6 +50,14 @@ json Mimir::tpuLayerDescriptor(const Layer& l) {
     j["kh"] = l.get_kernel_h(); j["kw"] = l.get_kernel_w();
     j["sh"] = l.get_stride_h(); j["sw"] = l.get_stride_w();
     j["ph"] = l.get_pad_h(); j["pw"] = l.get_pad_w();
+    if(l.type_enum==LayerType::Conv3d || l.type_enum==LayerType::Conv4d){
+        const auto g=RuntimeConvolutionND::checkedGeometry(l);
+        // Channels may be inferred from shape, just as in the CPU/GPU geometry.
+        j["in_channels"]=g.in_channels;j["out_channels"]=g.out_channels;j["groups"]=g.groups;
+        auto values=[&](const auto& a){return std::vector<int>(a.begin(),a.begin()+g.rank);};
+        j["conv_nd"]={{"batch",g.batch},{"input",values(g.input)},{"kernel",values(g.kernel)},
+            {"stride",values(g.stride)},{"padding",values(g.padding)},{"dilation",values(g.dilation)}};
+    }
     return j;
 }
 namespace {
@@ -162,21 +176,128 @@ bool TpuRuntime::initialize(const RuntimeConfig& cfg) {
 #endif
 }
 bool TpuRuntime::supportsForwardLayerType(LayerType t) const {
-    return t >= LayerType::Conv2d && t < LayerType::UNKNOWN && t != LayerType::Lambda;
+    // Explicit worker support; newly registered layers must not silently become
+    // native TPU operations merely because their enum precedes UNKNOWN.
+    // This is a static implementation query, also used before initialization.
+    // Disabled/execution state is checked by operation capabilities and forward.
+    switch(t){
+        case LayerType::Conv2d:
+        case LayerType::ConvTranspose2d:
+        case LayerType::Conv1d:
+        case LayerType::DepthwiseConv2d:
+        case LayerType::Linear:
+        case LayerType::Bilinear:
+        case LayerType::Embedding:
+        case LayerType::EmbeddingBag:
+        case LayerType::BatchNorm2d:
+        case LayerType::BatchNorm1d:
+        case LayerType::LayerNorm:
+        case LayerType::GroupNorm:
+        case LayerType::InstanceNorm2d:
+        case LayerType::RMSNorm:
+        case LayerType::ReLU:
+        case LayerType::LeakyReLU:
+        case LayerType::GELU:
+        case LayerType::GEGLU:
+        case LayerType::SiLU:
+        case LayerType::Tanh:
+        case LayerType::Sigmoid:
+        case LayerType::Softmax:
+        case LayerType::LogSoftmax:
+        case LayerType::Softplus:
+        case LayerType::Mish:
+        case LayerType::HardSigmoid:
+        case LayerType::HardSwish:
+        case LayerType::MaxPool2d:
+        case LayerType::AvgPool2d:
+        case LayerType::AdaptiveAvgPool2d:
+        case LayerType::GlobalAvgPool2d:
+        case LayerType::MaxPool1d:
+        case LayerType::AvgPool1d:
+        case LayerType::TokenMeanPool:
+        case LayerType::Dropout:
+        case LayerType::Dropout2d:
+        case LayerType::AlphaDropout:
+        case LayerType::Flatten:
+        case LayerType::Reshape:
+        case LayerType::Transpose:
+        case LayerType::Permute:
+        case LayerType::Squeeze:
+        case LayerType::Unsqueeze:
+        case LayerType::View:
+        case LayerType::Add:
+        case LayerType::Subtract:
+        case LayerType::Multiply:
+        case LayerType::Divide:
+        case LayerType::Reparameterize:
+        case LayerType::Concat:
+        case LayerType::Split:
+        case LayerType::Chunk:
+        case LayerType::Stack:
+        case LayerType::MatMul:
+        case LayerType::BatchMatMul:
+        case LayerType::NMS:
+        case LayerType::SelfAttention:
+        case LayerType::MultiHeadAttention:
+        case LayerType::CrossAttention:
+        case LayerType::UpsampleNearest:
+        case LayerType::UpsampleBilinear:
+        case LayerType::UpsampleBicubic:
+        case LayerType::PixelShuffle:
+        case LayerType::ZeroPad2d:
+        case LayerType::ReflectionPad2d:
+        case LayerType::ReplicationPad2d:
+        case LayerType::LSTM:
+        case LayerType::GRU:
+        case LayerType::RNN:
+        case LayerType::Identity:
+        case LayerType::Constant:
+        case LayerType::PatchEmbed:
+        case LayerType::Conv3d:
+        case LayerType::Conv4d:
+            return true;
+        default:return false;
+    }
 }
 bool TpuRuntime::supportsBackwardLayerType(LayerType t) const { return supportsForwardLayerType(t); }
+RuntimeCapabilityLevel TpuRuntime::queryForwardOperationCapability(const Layer& l,
+    const std::vector<const std::vector<float>*>& in,bool training) const {
+    if(config_.disabled)return RuntimeCapabilityLevel::Unsupported;
+    if(l.type_enum==LayerType::Conv3d || l.type_enum==LayerType::Conv4d){
+        if(in.size()!=1 || !in[0] || !l.getWeights())return RuntimeCapabilityLevel::Unsupported;
+        try{
+            const auto g=RuntimeConvolutionND::checkedGeometry(l,in[0]->size());
+            return l.getWeightsSize()==g.parameter_size?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+        }catch(const std::exception&){return RuntimeCapabilityLevel::Unsupported;}
+    }
+    return AbstractRuntime::queryForwardOperationCapability(l,in,training);
+}
+RuntimeCapabilityLevel TpuRuntime::queryBackwardOperationCapability(const Layer& l,
+    const std::vector<const std::vector<float>*>& in,const std::vector<const std::vector<float>*>& go,bool training) const {
+    if(l.type_enum==LayerType::Conv3d || l.type_enum==LayerType::Conv4d){
+        if(!runtimeCapabilityIsNative(queryForwardOperationCapability(l,in,training)) || go.size()!=1 || !go[0])return RuntimeCapabilityLevel::Unsupported;
+        try{
+            const auto g=RuntimeConvolutionND::checkedGeometry(l,in[0]->size());
+            return go[0]->size()==g.output_size?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+        }catch(const std::exception&){return RuntimeCapabilityLevel::Unsupported;}
+    }
+    return config_.disabled?RuntimeCapabilityLevel::Unsupported:AbstractRuntime::queryBackwardOperationCapability(l,in,go,training);
+}
 bool TpuRuntime::forward(const std::vector<const std::vector<float>*>& inputs,
                          std::vector<std::vector<float>>& outputs, const Layer& l,
                          bool training, bool fused, std::vector<uint8_t>* mask) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_ || !supportsForwardLayerType(l.type_enum)) return false;
+    if (!initialized_ || !supportsForwardLayerType(l.type_enum) || !runtimeCapabilityIsNative(queryForwardOperationCapability(l,inputs,training))) return false;
     for (auto* p : inputs) if (!p) return false;
     if (l.type_enum != LayerType::Constant && inputs.empty()) return false;
     std::vector<float> weights;
     if (l.getWeightsSize()) { if (!l.getWeights()) return false; weights.assign(l.getWeights(), l.getWeights()+l.getWeightsSize()); }
     auto arrays=inputs; arrays.push_back(&weights);
+    auto descriptor=Mimir::tpuLayerDescriptor(l);
+    if(l.type_enum==LayerType::Conv3d || l.type_enum==LayerType::Conv4d)
+        descriptor["conv_nd"]["batch"]=RuntimeConvolutionND::checkedGeometry(l,inputs[0]->size()).batch;
     json response; std::vector<std::vector<float>> result;
-    if (!exchange({{"command","forward"},{"layer",Mimir::tpuLayerDescriptor(l)},{"training",training},
+    if (!exchange({{"command","forward"},{"layer",descriptor},{"training",training},
                    {"fused",fused},{"inputs",inputs.size()}},arrays,response,result)) throw std::runtime_error("TPU forward "+l.type+": "+last_error_);
     const size_t count=response.value("outputs",size_t(0));
     if (result.size()!=count+1 || count==0) return false;
@@ -196,27 +317,25 @@ bool TpuRuntime::backwardLayer(const std::vector<const std::vector<float>*>& in,
 bool TpuRuntime::backwardLayerWithContext(const std::vector<const std::vector<float>*>& in,
     const std::vector<const std::vector<float>*>& go,std::vector<std::vector<float>>& gi,Layer& l,bool training,const RuntimeBackwardContext& ctx) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_ || !supportsBackwardLayerType(l.type_enum) || go.empty()) return false;
+    if (!initialized_ || !supportsBackwardLayerType(l.type_enum) || !runtimeCapabilityIsNative(queryBackwardOperationCapability(l,in,go,training))) return false;
     std::vector<float> weights,mask,empty;
     if(l.getWeightsSize()) { if(!l.getWeights())return false; weights.assign(l.getWeights(),l.getWeights()+l.getWeightsSize()); }
     if(ctx.output_mask) for(uint8_t v:*ctx.output_mask)mask.push_back(v?1.f:0.f);
     auto arrays=in; arrays.push_back(&weights);
     arrays.insert(arrays.end(),go.begin(),go.end()); arrays.push_back(ctx.output?ctx.output:&empty); arrays.push_back(&mask);
     for(auto* p:arrays)if(!p)return false;
+    auto descriptor=Mimir::tpuLayerDescriptor(l);
+    if(l.type_enum==LayerType::Conv3d || l.type_enum==LayerType::Conv4d)
+        descriptor["conv_nd"]["batch"]=RuntimeConvolutionND::checkedGeometry(l,in[0]->size()).batch;
     json response; std::vector<std::vector<float>> result;
-    if(!exchange({{"command","backward"},{"layer",Mimir::tpuLayerDescriptor(l)},{"training",training},
+    if(!exchange({{"command","backward"},{"layer",descriptor},{"training",training},
                  {"inputs",in.size()},{"grad_outputs",go.size()}},arrays,response,result))throw std::runtime_error("TPU backward "+l.type+": "+last_error_);
     const size_t count=response.value("grad_inputs",size_t(0));
     if(result.size()!=count+2 || result[count].size()!=weights.size())return false;
-    auto& gw=result[count]; auto& gb=result[count+1];
-    if(!gw.empty() && (l.type_enum!=LayerType::Constant || l.trainable_parameter)) {
-        if(l.grad_weights.size()!=gw.size()) l.grad_weights.assign(gw.size(),0.f);
-        for(size_t i=0;i<gw.size();++i)l.grad_weights[i]+=gw[i];
-    }
-    if(!gb.empty()) {
-        if(l.grad_bias.size()!=gb.size())l.grad_bias.assign(gb.size(),0.f);
-        for(size_t i=0;i<gb.size();++i)l.grad_bias[i]+=gb[i];
-    }
+    auto& gw=result[count];auto& gb=result[count+1];
+    if(!RuntimeGradientCommit::finite(result))return false;
+    if(!gw.empty() && (l.type_enum!=LayerType::Constant || l.trainable_parameter) &&
+       !RuntimeGradientCommit::parameters(l,gw,gb,true))return false;
     result.resize(count);gi=std::move(result);return true;
 }
 bool TpuRuntime::linearForward(const float* x,const float* w,const float* b,float* y,int batch,int i,int o) {

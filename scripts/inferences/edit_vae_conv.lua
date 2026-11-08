@@ -4,7 +4,11 @@ Help.auto_exit_help({
   script_path = "scripts/inferences/edit_vae_conv.lua",
   description = "Édition d'image par modification du latent VAEConv. Export PPM RGB. Backend Viz : "..Mimir.Viz.backend(),
   options = {
-    "--checkpoint PATH : checkpoint raw_folder VAEConv entraîné (requis)",
+    "--checkpoint PATH : checkpoint VAEConv entraîné (requis)",
+    "--format FORMAT : raw_folder ou safetensors (détecté par extension)",
+    "--config PATH : configuration correspondante pour un ancien export sans métadonnées",
+    "--conv-mode 2d|3d|4d : doit correspondre au graphe sauvegardé",
+    "--dtype TYPE : float32, float16 ou bfloat16",
     "--input PATH : image PNG/JPEG/BMP ou PPM P6/P3 (requise)",
     "--output PATH : image PPM à enregistrer (défaut outputs/edited.ppm)",
     "--strength N : décalage initial du canal latent (défaut 0)",
@@ -17,15 +21,19 @@ Help.auto_exit_help({
     "Ctrl+U : choisir une autre image et recalculer son latent.",
     "H : aide et backend actif. Le backend est sélectionné à la compilation.",
     "Les canaux latents ne sont pas des commandes sémantiques (couleur, objet...).",
+    "Les graphes Conv3d/Conv4d conservent les images RGB et le latent CHW ; leurs axes supplémentaires sont singleton.",
+    "Le biais prior appris est réappliqué au décodage ; la galerie affiche la moyenne mu éditée.",
+    "En décodage latent seul, les connexions de l'encodeur au décodeur sont remplacées par des zéros natifs.",
   },
   examples = {"./bin/mimir --lua scripts/inferences/edit_vae_conv.lua -- --checkpoint checkpoint/vae/epoch_0010 --input photo.ppm --output outputs/edition.ppm"},
 })
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
-local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
+local Inference = dofile(ROOTWORK.."/scripts/modules/vae_conv_inference.lua")
 local PPM = dofile(ROOTWORK.."/scripts/modules/image_ppm.lua")
 local opts = Args.parse(arg) or {}
-local allowed = {checkpoint=true,input=true,output=true,strength=true,channel=true,mix=true,headless=true,["mem-gb"]=true}
+local allowed = {checkpoint=true,input=true,output=true,strength=true,channel=true,mix=true,headless=true,
+  format=true,config=true,["conv-mode"]=true,dtype=true,["mem-gb"]=true}
 for key in pairs(opts) do assert(allowed[key], "Option inconnue : "..tostring(key)) end
 local function number(key, default)
   local value = opts[key] == nil and default or tonumber(opts[key])
@@ -37,26 +45,11 @@ assert(type(opts.input) == "string", "--input requis")
 local output = opts.output or "outputs/edited.ppm"
 assert(type(output) == "string" and output:lower():match("%.ppm$"), "--output doit être un fichier .ppm")
 assert(output ~= opts.input, "Choisir une sortie distincte de l'image source")
-local checkpoint = assert(Ckpt.resolve_dir(opts.checkpoint), "Checkpoint raw_folder introuvable")
-local architecture = read_json(FS.join(checkpoint, "model", "architecture.json"))
-local cfg = assert(architecture.model_config or architecture.modelConfig, "model_config absent")
-assert(cfg.type == "vae_conv", "Checkpoint vae_conv attendu")
-for _, key in ipairs({"image_w","image_h","image_c","latent_w","latent_h","latent_c"}) do
-  assert(type(cfg[key]) == "number" and cfg[key] > 0 and cfg[key] == math.floor(cfg[key]), "Dimension invalide : "..key)
-end
+-- La configuration et les couches sérialisées priment sur les valeurs par
+-- défaut actuelles : un ancien checkpoint conserve son graphe d'origine.
+local context = Inference.resolve(opts)
+local cfg = context.cfg
 assert(cfg.image_c == 3, "PPM exige image_c=3")
-cfg.latent_dim = cfg.latent_w * cfg.latent_h * cfg.latent_c
-cfg.stochastic_latent = false
-cfg.dtype = ({F32="float32",F16="float16",BF16="bfloat16"})[tostring(cfg.dtype):upper()] or cfg.dtype
--- La topologie sérialisée prévaut sur les anciens champs de configuration.
-cfg.dec_norm = "none"
-for _, layer in ipairs(architecture.layers or {}) do
-  if tostring(layer.name):match("^vae_conv/dec/") then
-    local kind = tostring(layer.type):lower()
-    if kind == "groupnorm" then cfg.dec_norm = "groupnorm"; break end
-    if kind == "layernorm" then cfg.dec_norm = "layernorm" end
-  end
-end
 local strength, channel, mix = number("strength", 0), number("channel", 1), number("mix", 1)
 assert(math.abs(strength) <= 10, "--strength doit être entre -10 et 10")
 assert(channel >= 1 and channel <= cfg.latent_c and channel == math.floor(channel), "--channel hors limites")
@@ -68,31 +61,9 @@ local mem = number("mem-gb", 8)
 assert(mem > 0, "--mem-gb doit être positif")
 assert(Mimir.Allocator.configure({max_ram_gb=mem, enable_compression=true}))
 local function load_model(name)
-  local model_cfg = {}
-  for key, value in pairs(cfg) do model_cfg[key] = value end
-  model_cfg.inference_output_tensor = name == "vae_conv_decode" and "x" or "vae_conv/recon"
-  assert(Mimir.Model.create(name, model_cfg))
-  assert(Mimir.Model.allocate_params())
-  -- Le décodeur charge un sous-ensemble du checkpoint complet. Vérifier
-  -- explicitement chaque poids attendu avant le chargement partiel.
-  local manifest = read_json(FS.join(checkpoint, "manifest.json"))
-  local tensors = {}
-  for _, entry in ipairs(assert(manifest.tensor_index, "tensor_index absent")) do tensors[entry.name] = entry end
-  for _, layer in ipairs(Mimir.Model.get_layers()) do
-    if layer.param_count > 0 and not layer.name:match("/zero_enc_skip$") then
-      local entry = assert(tensors[layer.name.."_weights"], "Poids manquants : "..layer.name)
-      local metadata = read_json(FS.join(checkpoint, entry.json_file))
-      local count = 1
-      for _, size in ipairs(assert(metadata.shape, "shape absent")) do count = count * size end
-      assert(count == layer.param_count, "Topologie incompatible : "..layer.name)
-      assert(({F32=true,F16=true,BF16=true,F64=true,float32=true,float16=true,bfloat16=true,float64=true})[metadata.dtype], "dtype non supporté")
-      assert(type(metadata.data_file)=="string", "data_file absent")
-    end
-  end
-  assert(Mimir.Serialization.load(checkpoint, "raw_folder", {
-    load_encoder=false, load_tokenizer=false, load_optimizer=false,
-    strict_mode=name=="vae_conv", validate_checksums=true,
-  }))
+  -- Le sous-graphe décodeur est validé poids par poids avant chargement ;
+  -- le helper préserve ses ports d'inférence lors de la désérialisation.
+  Inference.create_and_load(context, name, name == "vae_conv_decode" and "x" or "vae_conv/mu")
 end
 local image_dim = cfg.image_w * cfg.image_h * cfg.image_c
 local latent_dim = cfg.latent_dim
@@ -121,11 +92,14 @@ end
 local function encode_source(path)
   local next_source, next_input = read_source(path)
   load_model("vae_conv")
-  local packed = assert(Mimir.Model.forward(next_input, true))
-  assert(#packed == image_dim + 2 * latent_dim,
-    string.format("Sortie VAEConv inattendue : %d valeurs, %d attendues",#packed,image_dim+2*latent_dim))
-  local next_original = {}
-  for i = 1, latent_dim do next_original[i] = packed[image_dim+i] end
+  -- Le graphe natif expose mu directement, sans dépendre du pack de sortie
+  -- d'entraînement (qui peut aussi contenir les projections de texte).
+  local next_original = assert(Mimir.Model.forward(next_input, false))
+  assert(#next_original == latent_dim,
+    string.format("Moyenne latente inattendue : %d valeurs, %d attendues",#next_original,latent_dim))
+  for _, value in ipairs(next_original) do
+    assert(value == value and math.abs(value) < math.huge, "Moyenne latente non finie")
+  end
   -- Seul le décodeur reste chargé durant les interactions.
   load_model("vae_conv_decode")
   source, input, original, input_path = next_source, next_input, next_original, path
@@ -138,7 +112,7 @@ local function compute()
   for i = 1, latent_dim do
     latent[i] = original[i] + (math.floor((i-1)/plane)+1 == channel and strength or 0)
   end
-  local decoded = assert(Mimir.Model.forward(latent, true))
+  local decoded = assert(Mimir.Model.forward(Inference.decoder_input(context, latent), false))
   assert(#decoded == image_dim, "Sortie décodeur inattendue")
   result, preview = {}, {}
   for i = 1, image_dim do

@@ -4,8 +4,57 @@
 #include "SIMD_Ops.hpp"
 #include "runtimes/LayerOps.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
+#include "runtimes/cpu/TensorWeightKernels.hpp"
 
 #include <cstddef>
+#include <limits>
+
+namespace {
+std::vector<float> roundToDType(const std::vector<float>& values,
+                                const Mimir::DType dtype) {
+    if (values.size() > static_cast<size_t>(std::numeric_limits<int>::max())) return {};
+    return Mimir::TypedTensor::fromFloat32(
+        values, {static_cast<int>(values.size())}, dtype).toFloat32();
+}
+
+bool linearForwardAutocast(const std::vector<const std::vector<float>*>& inputs,
+                           std::vector<std::vector<float>>& outputs,
+                           const Layer& layer, const Mimir::DType dtype) {
+    if (inputs.empty() || !inputs[0] || !layer.getWeights() ||
+        layer.in_features <= 0 || layer.out_features <= 0 ||
+        (dtype != Mimir::DType::F16 && dtype != Mimir::DType::BF16)) return false;
+    const auto& input = *inputs[0];
+    const int in_features = layer.in_features;
+    const int out_features = layer.out_features;
+    const int batch = layer.seq_len > 0
+        ? layer.seq_len
+        : (input.size() % static_cast<size_t>(in_features) == 0
+            ? static_cast<int>(input.size() / static_cast<size_t>(in_features)) : 0);
+    if (batch <= 0 || input.size() != static_cast<size_t>(batch) * in_features) return false;
+
+    const size_t weight_count = static_cast<size_t>(out_features) * in_features;
+    const size_t required = weight_count + (layer.use_bias ? static_cast<size_t>(out_features) : 0);
+    if (layer.getWeightsSize() < required) return false;
+    std::vector<float> master_weights(layer.getWeights(), layer.getWeights() + required);
+    const auto rounded_input = roundToDType(input, dtype);
+    const auto rounded_weights = roundToDType(master_weights, dtype);
+    if (rounded_input.size() != input.size() || rounded_weights.size() != required) return false;
+
+    std::vector<float> result(static_cast<size_t>(batch) * out_features, 0.0f);
+    SIMD::matmul_transpose_avx2(result.data(), rounded_input.data(),
+        rounded_weights.data(), static_cast<size_t>(batch),
+        static_cast<size_t>(out_features), static_cast<size_t>(in_features));
+    if (layer.use_bias) {
+        for (int row = 0; row < batch; ++row)
+            for (int out = 0; out < out_features; ++out)
+                result[static_cast<size_t>(row) * out_features + out] +=
+                    rounded_weights[weight_count + out];
+    }
+    outputs.resize(1);
+    outputs[0] = roundToDType(result, dtype);
+    return outputs[0].size() == result.size();
+}
+} // namespace
 
 bool CpuRuntime::initialize(const RuntimeConfig& cfg) {
     // CPU est toujours disponible; on conserve cfg pour homogénéité.
@@ -16,6 +65,11 @@ bool CpuRuntime::initialize(const RuntimeConfig& cfg) {
 
 void CpuRuntime::shutdown() {
     initialized_ = false;
+}
+
+bool CpuRuntime::computeTensorWeights(const std::vector<tensor>& input,
+                                      std::vector<uint16_t>& output) {
+    return supportsTensorWeights() && CpuTensorWeights::compute(input,output);
 }
 
 bool CpuRuntime::linearForward(
@@ -90,6 +144,11 @@ bool CpuRuntime::linearForwardTyped(
     return true;
 }
 
+bool CpuRuntime::supportsAutocast(const Layer& layer, const Mimir::DType dtype) const {
+    return initialized_ && layer.type_enum == LayerType::Linear &&
+        (dtype == Mimir::DType::F16 || dtype == Mimir::DType::BF16);
+}
+
 bool CpuRuntime::forwardLayer(
     const std::vector<const std::vector<float>*>& inputs,
     std::vector<std::vector<float>>& outputs,
@@ -105,6 +164,12 @@ bool CpuRuntime::forwardLayerWithContext(
     const std::vector<const std::vector<float>*>& inputs,
     std::vector<std::vector<float>>& outputs, const Layer& layer, bool training,
     const RuntimeForwardContext& context) {
+    if (context.autocast_dtype != Mimir::DType::F32 &&
+        layer.type_enum == LayerType::Linear) {
+        outputs.clear();
+        return initialized_ && linearForwardAutocast(inputs, outputs, layer,
+                                                      context.autocast_dtype);
+    }
     if (context.output_mask && (layer.type_enum == LayerType::Dropout ||
         layer.type_enum == LayerType::Dropout2d || layer.type_enum == LayerType::AlphaDropout)) {
         context.output_mask->clear();

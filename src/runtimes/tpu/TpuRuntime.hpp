@@ -33,6 +33,11 @@ public:
                        const RuntimeBackwardContext& = {}) override;
     bool supportsForwardLayerType(LayerType) const override;
     bool supportsBackwardLayerType(LayerType) const override;
+    RuntimeCapabilityLevel queryForwardOperationCapability(const Layer&,
+        const std::vector<const std::vector<float>*>&,bool) const override;
+    RuntimeCapabilityLevel queryBackwardOperationCapability(const Layer&,
+        const std::vector<const std::vector<float>*>&,
+        const std::vector<const std::vector<float>*>&,bool) const override;
     bool mergeBranches(const std::vector<float>&, const std::vector<float>&,
                        std::vector<float>&, const Layer&) override;
     const std::string& lastError() const { return last_error_; }

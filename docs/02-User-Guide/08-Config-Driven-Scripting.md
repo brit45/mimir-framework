@@ -28,7 +28,11 @@ Piloter des expériences via JSON avec --conf.
 ![Inspection Lua et JSON](../graphs/26_lua_json_inspection.svg)
 
 
-Le mode `--conf` permet de charger une configuration JSON et d'exécuter automatiquement des scripts Lua avec cette config injectée. C'est idéal pour **automatiser des workflows complexes**, **paramétrer des expériences** et **reproduire des résultats**.
+Le mode `--conf` charge une configuration JSON et exécute les scripts Lua
+référencés avec cette configuration injectée. Il configure une architecture
+native, définie en C/C++ dans une classe dérivée de `Model` ; le JSON ne définit
+pas un graphe DL. MPK reste l'alternative expérimentale décrite dans le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
 ---
 
@@ -58,6 +62,11 @@ EOF
 # 2. Exécuter
 ./bin/mimir --conf my_exp.json
 ```
+
+Ce template construit le modèle et teste un forward synthétique. Il affiche
+les paramètres `training`, mais ne charge pas de dataset et n'exécute pas de
+boucle d'entraînement. Pour un run complet, choisissez un script fourni dans
+`scripts/training/` et sa configuration correspondante.
 
 ---
 
@@ -110,7 +119,7 @@ Si la section `lua.scripts` est profondément imbriquée, vous pouvez l'organise
 {
   "run": {
     "lua": {
-      "scripts": [...]
+      "scripts": ["scripts/templates/template_conf_load_and_train.lua"]
     }
   }
 }
@@ -219,7 +228,7 @@ Les overrides sont appliqués en JSON path. Exemples:
 --override model.d_model=512
 
 # Chaîne
---override model.architecture=gpt
+--override model.architecture=causal_lm
 
 # Booléen
 --override training.use_mixed_precision=true
@@ -363,7 +372,10 @@ done
 }
 ```
 
-Le script `save_checkpoint.lua` accède à `CONF.checkpoint` pour savoir où sauvegarder.
+Le script `save_checkpoint.lua` accède à `CONF.checkpoint` pour savoir où
+sauvegarder. Sa VM est distincte de celle de `train.lua` : il doit reconstruire
+et recharger un checkpoint écrit par le premier script. Pour sauvegarder le
+modèle encore en mémoire, faites la sauvegarde dans le script d'entraînement.
 
 ---
 
@@ -385,8 +397,8 @@ local data = load_csv(CONF_DIR .. "/../data/train.csv")
 
 ```json
 {
-  "description": "Exp #42: Transformer avec VAE pour text2img",
-  "lua": { ... }
+  "description": "Expérience 42 : inspection d'un Transformer natif",
+  "lua": { "scripts": ["scripts/templates/template_conf_load_and_train.lua"] }
 }
 ```
 
@@ -394,11 +406,11 @@ local data = load_csv(CONF_DIR .. "/../data/train.csv")
 
 ```json
 {
-  "lua": { "scripts": [...] },
-  "model": { ... },
-  "training": { ... },
-  "inference": { ... },
-  "logging": { ... }
+  "lua": { "scripts": ["scripts/templates/template_conf_load_and_train.lua"] },
+  "model": { "architecture": "transformer", "d_model": 128 },
+  "training": { "num_epochs": 1, "learning_rate": 0.0001 },
+  "inference": { "temperature": 0.8 },
+  "logging": { "level": "info" }
 }
 ```
 
@@ -451,16 +463,12 @@ local batch_size = CONF.training.batch_size or 32
 
 **Problème:** Vous utilisez `--override` mais le script ne voit pas les changements.
 
-**Solution:** Les overrides ne changent que `CONF`. Si le script capture une variable locale avant l'override, la modification ne sera pas visible. Toujours accéder via `CONF` au lieu de cacher en variable locale:
-
-```lua
--- ❌ Mauvais: la variable locale n'est pas affectée par les overrides
-local epochs = CONF.training.num_epochs
--- Même après override, 'epochs' garde l'ancienne valeur
-
--- ✅ Correct: accéder à CONF directement
-print(CONF.training.num_epochs)  -- Voit l'override
-```
+**Solution :** les overrides du binaire sont appliqués avant l'exécution Lua.
+Une variable locale initialisée depuis `CONF` au démarrage les voit donc déjà.
+Vérifiez plutôt le chemin de clé, puis les priorités propres au script : il
+peut relire un fichier, utiliser un raccourci CLI ou restaurer la configuration
+d'un checkpoint. Pour des arguments analysés par le script, appliquez
+`Args.apply_overrides(...)` avant d'extraire les valeurs locales.
 
 ---
 

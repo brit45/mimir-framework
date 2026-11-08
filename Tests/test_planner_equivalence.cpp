@@ -3,6 +3,7 @@
 #include "Model.hpp"
 
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
@@ -88,6 +89,36 @@ static std::vector<float> run_resident_unary_chain() {
     return model.forwardPass(std::vector<float>{-2.0f, -0.5f, 0.0f, 2.0f}, false);
 }
 
+// Disabling latency probes still leaves the cost planner's chosen placement
+// authoritative. In particular, a tiny Sigmoid must not move from the planned
+// CPU route to a GPU-priority suffix merely because graph fusion is enabled.
+static bool fusion_placement_parity() {
+    setTestEnvironment("MIMIR_ENABLE_PLANNER", "1");
+    setTestEnvironment("MIMIR_PLANNER_MODE", "cost");
+    setTestEnvironment("MIMIR_PLANNER_COST_MODEL", "1");
+    setTestEnvironment("MIMIR_RUNTIME_AUTOTUNE", "0");
+    setTestEnvironment("MIMIR_PLANNER_BUFFER_REUSE", "0");
+    setTestEnvironment("MIMIR_PLANNER_DEVICE_RESIDENCY", "0");
+    setTestEnvironment("MIMIR_ENABLE_FUSION_TRAIN", "1");
+    Model model;
+    model.push("source", "Identity", 0);
+    model.push("sigmoid", "Sigmoid", 0);
+    auto& layers = model.getMutableLayers();
+    layers[0].inputs = {"__input__"}; layers[0].output = "source"; layers[0].shape = {3};
+    layers[1].inputs = {"source"}; layers[1].output = "x"; layers[1].shape = {3};
+    model.allocateParams();
+    for (bool training : {false, true}) {
+        setTestEnvironment("MIMIR_PLANNER_FUSION", "0");
+        const auto ordinary = model.forwardPass(std::vector<float>{-1.f, 0.f, 1.f}, training);
+        setTestEnvironment("MIMIR_PLANNER_FUSION", "1");
+        const auto fused = model.forwardPass(std::vector<float>{-1.f, 0.f, 1.f}, training);
+        if (ordinary.size() != fused.size() || ordinary.size() != 3 ||
+            std::memcmp(ordinary.data(), fused.data(), ordinary.size()*sizeof(float)) != 0)
+            return false;
+    }
+    return true;
+}
+
 int main() {
     const auto resident = run_resident_unary_chain();
     TASSERT_TRUE(resident.size() == 4);
@@ -118,5 +149,6 @@ int main() {
     for (size_t i = 0; i < chain_legacy.size(); ++i) {
         TASSERT_NEAR(chain_legacy[i], chain_reused[i], 1e-6f);
     }
+    TASSERT_TRUE(fusion_placement_parity());
     return 0;
 }

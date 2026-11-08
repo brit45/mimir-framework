@@ -10,6 +10,7 @@
 #include "TypedTensor.hpp"
 
 struct Layer;
+struct tensor;
 struct RuntimeOptimizerRequest;
 namespace RuntimeLossGrad {struct Request;struct LossWithGrad;}
 
@@ -17,6 +18,9 @@ struct RuntimeForwardContext {
     bool skip_connections_enabled = true;
     std::vector<uint8_t>* output_mask = nullptr;
     bool stochastic_latent = true;
+    // Autocast applies only to runtime operations that explicitly advertise
+    // support. Other operations remain in the stable default precision.
+    Mimir::DType autocast_dtype = Mimir::DType::F32;
 };
 
 // State captured by a training forward, independent of backend selection.
@@ -104,6 +108,12 @@ public:
 
     const RuntimeConfig& config() const { return config_; }
 
+    // Legacy spatial tensor weights also go through the router. A backend must
+    // explicitly implement this calculation before advertising native support.
+    virtual bool supportsTensorWeights() const { return false; }
+    virtual bool computeTensorWeights(const std::vector<tensor>&,
+                                     std::vector<uint16_t>&) { return false; }
+
     // API minimale alignée avec l'usage actuel (fast-path Linear)
     virtual bool linearForward(
         const float* input,
@@ -138,6 +148,8 @@ public:
         (void)input; (void)weights; (void)bias_or_null; (void)output;
         return false;
     }
+
+    virtual bool supportsAutocast(const Layer&, Mimir::DType) const { return false; }
 
     // API générique (objectif: couvrir tous les LayerType via un switch). 
     // - `inputs`: tenseurs float (multi-input)

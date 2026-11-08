@@ -1,4 +1,7 @@
 #pragma once
+#include "runtimes/ConvolutionND.hpp"
+#include "runtimes/CausalSequenceGeometry.hpp"
+#include "runtimes/PrimerGeometry.hpp"
 #include "Layers.hpp"
 #include <algorithm>
 #include <climits>
@@ -204,7 +207,86 @@ struct ExtendedConv {
     }
     size_t outputSize()const{return static_cast<size_t>(oc)*oh*ow;}
 };
+inline bool convolutionNDType(LayerType t){return t==LayerType::Conv3d || t==LayerType::Conv4d;}
+// Scalar, trivially copyable device geometry. Conv3d has a unit leading axis;
+// this lets every backend share the same 4-axis kernels without array ABI rules.
+struct ConvND {
+    int batch=0,ic=0,oc=0,ig=0,og=0;
+    int i0=1,i1=1,i2=1,i3=1,o0=1,o1=1,o2=1,o3=1;
+    int k0=1,k1=1,k2=1,k3=1,s0=1,s1=1,s2=1,s3=1;
+    int p0=0,p1=0,p2=0,p3=0,d0=1,d1=1,d2=1,d3=1;
+    int input_spatial=0,output_spatial=0,kernel_spatial=0,parameters=0;
+    bool bias=false;
+    bool valid(const Layer& l,size_t n){
+        if(!convolutionNDType(l.type_enum) || !n || n>INT_MAX || !l.getWeights())return false;
+        try {
+            const auto g=RuntimeConvolutionND::checkedGeometry(l,n);
+            if(g.output_size>INT_MAX || g.parameter_size>INT_MAX || g.input_spatial>INT_MAX ||
+               g.output_spatial>INT_MAX || g.kernel_spatial>INT_MAX || l.getWeightsSize()!=g.parameter_size)return false;
+            batch=g.batch;ic=g.in_channels;oc=g.out_channels;ig=g.in_per_group;og=g.out_per_group;
+            int a[4]={1,1,1,1},b[4]={1,1,1,1},k[4]={1,1,1,1},s[4]={1,1,1,1},p[4]={0,0,0,0},d[4]={1,1,1,1};
+            for(int j=0;j<g.rank;++j){
+                if(1LL*(g.output[j]-1)*g.stride[j]+1LL*(g.kernel[j]-1)*g.dilation[j]>INT_MAX ||
+                   1LL*g.input[j]+g.padding[j]>INT_MAX)return false;
+                const int t=j+4-g.rank;a[t]=g.input[j];b[t]=g.output[j];k[t]=g.kernel[j];s[t]=g.stride[j];p[t]=g.padding[j];d[t]=g.dilation[j];
+            }
+            i0=a[0];i1=a[1];i2=a[2];i3=a[3];o0=b[0];o1=b[1];o2=b[2];o3=b[3];
+            k0=k[0];k1=k[1];k2=k[2];k3=k[3];s0=s[0];s1=s[1];s2=s[2];s3=s[3];
+            p0=p[0];p1=p[1];p2=p[2];p3=p[3];d0=d[0];d1=d[1];d2=d[2];d3=d[3];
+            input_spatial=g.input_spatial;output_spatial=g.output_spatial;kernel_spatial=g.kernel_spatial;
+            parameters=g.weight_size;bias=l.use_bias;return true;
+        } catch(const std::exception&) {return false;}
+    }
+    size_t outputSize()const{return static_cast<size_t>(batch)*oc*output_spatial;}
+    size_t inputSize()const{return static_cast<size_t>(batch)*ic*input_spatial;}
+    size_t parameterSize()const{return static_cast<size_t>(parameters)+(bias?oc:0);}
+};
 inline bool stochasticType(LayerType t){return t==LayerType::Dropout || t==LayerType::Dropout2d || t==LayerType::AlphaDropout || t==LayerType::Reparameterize;}
+// Scalar ABI for the generated portable token-major sequence kernels.
+struct CausalSequence {
+    int steps=0,channels=0,taps=0,dilation=0,values=0,weights=0,parameters=0;
+    bool bias=false;
+    bool valid(const Layer& layer,size_t input_size){
+        if(layer.type_enum!=LayerType::CausalDepthwiseConv1d || !input_size ||
+           input_size>INT_MAX || !layer.getWeights())return false;
+        try {
+            const auto g=RuntimeCausalSequence::checkedGeometry(layer,input_size);
+            if(g.value_count>INT_MAX || g.parameter_size>INT_MAX ||
+               layer.getWeightsSize()!=g.parameter_size)return false;
+            steps=g.steps;channels=g.channels;taps=g.kernel;dilation=g.dilation;
+            values=static_cast<int>(g.value_count);weights=static_cast<int>(g.weight_size);
+            parameters=static_cast<int>(g.parameter_size);bias=g.bias;
+            return true;
+        }catch(const std::exception&){return false;}
+    }
+};
+struct PrimerReduction {
+    int outer=0,axis_size=0,inner=0,values=0,outputs=0;
+    bool valid(const Layer& layer,size_t input_size){
+        if(!input_size || input_size>INT_MAX || layer.getWeightsSize()!=0)return false;
+        try {
+            const auto g=RuntimePrimer::checkedReduction(layer,input_size);
+            if(g.outer>INT_MAX || g.axis_size>INT_MAX || g.inner>INT_MAX || g.output_size>INT_MAX)return false;
+            outer=static_cast<int>(g.outer);axis_size=static_cast<int>(g.axis_size);
+            inner=static_cast<int>(g.inner);values=static_cast<int>(g.input_size);
+            outputs=static_cast<int>(g.output_size);
+            return true;
+        }catch(const std::exception&){return false;}
+    }
+};
+struct PrimerTriangle {
+    int rows=0,columns=0,values=0;
+    bool valid(const Layer& layer,size_t input_size){
+        if(!input_size || input_size>INT_MAX || layer.getWeightsSize()!=0)return false;
+        try {
+            const auto g=RuntimePrimer::checkedTriangle(layer,input_size);
+            if(g.rows>INT_MAX || g.columns>INT_MAX)return false;
+            rows=static_cast<int>(g.rows);columns=static_cast<int>(g.columns);
+            values=static_cast<int>(g.input_size);
+            return true;
+        }catch(const std::exception&){return false;}
+    }
+};
 inline bool batchNormType(LayerType t){return t==LayerType::BatchNorm1d || t==LayerType::BatchNorm2d;}
 struct BatchNorm {
     int channels=0,spatial=1,batch=0;bool affine=false,bias=false,running=false;

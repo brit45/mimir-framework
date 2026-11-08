@@ -1,46 +1,147 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="980" viewBox="0 0 1800 980" role="img" aria-labelledby="title desc">
-<title id="title">Workflow CLI / Lua / JSON</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1178" viewBox="0 0 1200 1178" role="img" aria-labelledby="title desc">
+<title id="title">Workflow CLI, Lua et JSON</title>
+<desc id="desc">Le lanceur transmet les arguments au script et injecte la configuration JSON. Le script sélectionne une architecture du registre, configure le run, charge éventuellement son checkpoint et appelle son exécution. Les couches sont définies par la classe C++. Sources : run_mimir.sh, src/main.cpp, src/scriptings/Lua/luaScripting/LuaScripting.cpp, scripts/modules/pipeline_api.lua</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;run_mimir.sh&quot;, &quot;src/main.cpp&quot;, &quot;src/scriptings/Lua/luaScripting/LuaScripting.cpp&quot;, &quot;scripts/modules/pipeline_api.lua&quot;], &quot;related_docs&quot;: [&quot;README.md&quot;, &quot;docs/01-Getting-Started/03-CLI.md&quot;, &quot;docs/02-User-Guide/08-Config-Driven-Scripting.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Workflow CLI / Lua / JSON</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Les trois surfaces d’utilisation convergent vers le même registre et runtime.</text>
-<line x1="60" y1="112" x2="1740" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="60" y="160" width="1680" height="125" rx="16" fill="#2563eb" opacity="0.13" stroke="#2563eb"/>
-<text x="80" y="194" class="label" text-anchor="start">CLI</text>
-<rect x="60" y="305" width="1680" height="125" rx="16" fill="#7c3aed" opacity="0.13" stroke="#7c3aed"/>
-<text x="80" y="339" class="label" text-anchor="start">Lua</text>
-<rect x="60" y="450" width="1680" height="125" rx="16" fill="#059669" opacity="0.13" stroke="#059669"/>
-<text x="80" y="484" class="label" text-anchor="start">JSON</text>
-<rect x="60" y="595" width="1680" height="125" rx="16" fill="#ea580c" opacity="0.13" stroke="#ea580c"/>
-<text x="80" y="629" class="label" text-anchor="start">C++ Core</text>
-<rect x="60" y="740" width="1680" height="125" rx="16" fill="#334155" opacity="0.13" stroke="#334155"/>
-<text x="80" y="774" class="label" text-anchor="start">Résultats</text>
-<rect x="130" y="206" width="220" height="62" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="240.0" y="231" class="label" text-anchor="middle">Commande mimir</text>
-<text x="240.0" y="240" class="small" text-anchor="middle">--lua / --help</text>
-<rect x="390" y="351" width="220" height="62" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="500.0" y="376" class="label" text-anchor="middle">Script Lua</text>
-<text x="500.0" y="385" class="small" text-anchor="middle">expérimentation</text>
-<rect x="650" y="496" width="220" height="62" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="760.0" y="521" class="label" text-anchor="middle">Config JSON</text>
-<text x="760.0" y="530" class="small" text-anchor="middle">reproductible</text>
-<rect x="910" y="641" width="220" height="62" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1020.0" y="666" class="label" text-anchor="middle">Registry</text>
-<text x="1020.0" y="675" class="small" text-anchor="middle">create model</text>
-<rect x="1170" y="641" width="220" height="62" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1280.0" y="666" class="label" text-anchor="middle">Runtime</text>
-<text x="1280.0" y="675" class="small" text-anchor="middle">execute graph</text>
-<rect x="1430" y="786" width="220" height="62" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1540.0" y="811" class="label" text-anchor="middle">Outputs</text>
-<text x="1540.0" y="820" class="small" text-anchor="middle">logs/checkpoints/svg</text>
-<path d="M350,237 L390,382" class="edgeB"/>
-<path d="M610,382 L650,527" class="edgeB"/>
-<path d="M870,527 L910,672" class="edgeB"/>
-<path d="M1130,672 L1170,672" class="edgeB"/>
-<path d="M1390,672 L1430,817" class="edgeB"/>
-<text x="1740" y="956" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1178" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Workflow CLI, Lua et JSON</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Plusieurs surfaces de pilotage, une définition native du graphe.</tspan>
+</text>
+<path d="M 369.33,249.5 L 437.33,249.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,249.5 L 762.67,249.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 600,336 L 600,436" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 369.33,535.5 L 437.33,535.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,535.5 L 762.67,535.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 278.24,735 L 278.24,685 L 528.43,685 L 528.43,635" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 600,635 L 600,735" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,821.5 L 830.67,821.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="cli">
+<rect x="44" y="163" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Commande CLI</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">run_mimir.sh / bin/mimir</tspan>
+<tspan x="66" dy="26">--lua, --conf et</tspan>
+<tspan x="66" dy="26">arguments</tspan>
+</text>
+</g>
+<g data-node="lua">
+<rect x="437.33" y="163" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Script de run</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Préparation et</tspan>
+<tspan x="459.33" dy="26">orchestration</tspan>
+<tspan x="459.33" dy="26">Appels Mimir.Model</tspan>
+</text>
+</g>
+<g data-node="json">
+<rect x="830.67" y="163" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Configuration JSON</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">CONF, env et paramètres</tspan>
+<tspan x="852.67" dy="26">Valeurs reproductibles</tspan>
+</text>
+</g>
+<g data-node="cpp">
+<rect x="44" y="436" width="325.33" height="199" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Définition en C++</tspan>
+</text>
+<text x="66" y="510" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Classe dérivée de Model</tspan>
+<tspan x="66" dy="26">Topologie et Config typée</tspan>
+</text>
+</g>
+<g data-node="registry">
+<rect x="437.33" y="436" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Architecture choisie</tspan>
+</text>
+<text x="459.33" y="510" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Registre et fabrique</tspan>
+<tspan x="459.33" dy="26">Instance du modèle natif</tspan>
+</text>
+</g>
+<g data-node="checkpoint">
+<rect x="830.67" y="436" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Checkpoint du run</tspan>
+</text>
+<text x="852.67" y="510" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Topologie et poids</tspan>
+<tspan x="852.67" dy="26">compatibles</tspan>
+<tspan x="852.67" dy="26">Tokenizer et état si</tspan>
+<tspan x="852.67" dy="26">présents</tspan>
+</text>
+</g>
+<g data-node="mpk">
+<rect x="44" y="735" width="325.33" height="173" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="66" y="766" font-size="14" fill="#b45309" font-weight="700">
+<tspan x="66" dy="0">EXPÉRIMENTAL</tspan>
+</text>
+<text x="66" y="793" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Alternative MPK</tspan>
+</text>
+<text x="66" y="836" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Package de description</tspan>
+<tspan x="66" dy="26">Prise en charge partielle</tspan>
+</text>
+</g>
+<g data-node="execute">
+<rect x="437.33" y="735" width="325.33" height="173" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Exécution</tspan>
+</text>
+<text x="459.33" y="809" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Forward / validation /</tspan>
+<tspan x="459.33" dy="26">train</tspan>
+<tspan x="459.33" dy="26">Routeur et runtimes</tspan>
+</text>
+</g>
+<g data-node="result">
+<rect x="830.67" y="735" width="325.33" height="173" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Sorties et suivi</tspan>
+</text>
+<text x="852.67" y="809" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Métriques, logs et</tspan>
+<tspan x="852.67" dy="26">rapports</tspan>
+<tspan x="852.67" dy="26">Checkpoints du même run</tspan>
+</text>
+</g>
+<rect x="552.3" y="371.5" width="95.4" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="561.3" y="390.5" font-size="15" fill="#475569">
+<tspan x="561.3" dy="0">sélection</tspan>
+</text>
+<rect x="242.69" y="695.5" width="71.1" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="251.69" y="714.5" font-size="15" fill="#475569">
+<tspan x="251.69" dy="0">import</tspan>
+</text>
+<rect x="44" y="956" width="1112" height="136" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="984" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Les paramètres structurels sont interprétés par le builder de la classe C++.</tspan>
+<tspan x="66" dy="26">• Un checkpoint restaure une architecture déjà définie ; MPK reste expérimental pour la production.</tspan>
+<tspan x="66" dy="26">• Configuration JSON → Script de run : configuration</tspan>
+<tspan x="66" dy="26">• Checkpoint du run → Architecture choisie : reprise</tspan>
+</text>
+<text x="44" y="1127" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : run_mimir.sh · main.cpp · LuaScripting.cpp · pipeline_api.lua</tspan>
+</text>
+</g>
 </svg>

@@ -5,12 +5,10 @@
 #include "Model.hpp"
 #include "runtimes/optimizers/OptimizerDispatch.hpp"
 #include "viz/ModelGraph.hpp"
+#include "viz/LatentCorrelationCapture.hpp"
 #include "training/BBoxSupervision.hpp"
-#include "HardwareOpt.hpp"
-#include "SIMD_Ops.hpp"
 #include "Layers.hpp"
 #include "LayerTypes.hpp"
-#include "LayerOps.hpp"
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
 #ifdef ENABLE_VULKAN
@@ -22,6 +20,7 @@
 #include "runtimes/AbstractRuntime.hpp"
 #include "runtimes/LayerOps.hpp"
 #include "runtimes/RuntimeRouter.hpp"
+#include "runtimes/DistributedRuntime.hpp"
 #ifdef ENABLE_CUDA
 #include "runtimes/cuda/CudaRuntime.hpp"
 #endif
@@ -30,13 +29,15 @@
 #endif
 #include "RngContext.hpp"
 #include "RuntimeAllocator.hpp"
-#include "LayerOpsExt.hpp"
 #include "runtimes/cpu/CpuRuntime.hpp"
 #include "runtimes/ops_loss_and_grad.hpp"
 #include "Planning/Planner.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
-#include "Models/NLP/CausalAttentionOps.hpp"
 #include "Serialization/Serialization.hpp"
+#include "Serialization/LayerMetadata.hpp"
+#include "runtimes/ConvolutionND.hpp"
+#include "runtimes/CausalSequenceGeometry.hpp"
+#include "runtimes/cpu/SimdDispatch.hpp"
 #include <fstream>
 #include <iomanip>
 #include <ctime>
@@ -55,30 +56,25 @@
 #include <mutex>
 #include <atomic>
 
-void framework_log_write_file_only(const char* data, size_t size);
+void framework_log_write_file_only(const char *data, size_t size);
 
 // Racine de capture par thread. Elle reste active jusqu'a consumeVizTaps(),
 // ce qui permet aux sous-modeles executes apres le forward principal (VAE,
 // perception, discriminateur...) de publier dans la meme VIZ.
-static thread_local Model* g_viz_capture_root = nullptr;
+static thread_local Model *g_viz_capture_root = nullptr;
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
 #include <random>
-#if defined(_MSC_VER)
-#include <intrin.h>
-#else
-#include <cpuid.h>
-#endif
 #include <atomic>
 #include <mutex>
 #include <unordered_set>
+#include <functional>
 
 #if defined(_MSC_VER)
 #define MIMIR_RESTRICT __restrict
@@ -100,137 +96,10 @@ using namespace LayerRegistry;
 // Détection des capacités CPU au runtime
 // ============================================================================
 
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-static inline bool mimir_get_cpuid(unsigned int leaf, unsigned int* eax, unsigned int* ebx,
-                                   unsigned int* ecx, unsigned int* edx) {
-#if defined(_MSC_VER)
-    int regs[4] = {0, 0, 0, 0};
-    __cpuidex(regs, static_cast<int>(leaf), 0);
-    *eax = static_cast<unsigned int>(regs[0]);
-    *ebx = static_cast<unsigned int>(regs[1]);
-    *ecx = static_cast<unsigned int>(regs[2]);
-    *edx = static_cast<unsigned int>(regs[3]);
-    return true;
-#else
-    return __get_cpuid(leaf, eax, ebx, ecx, edx) != 0;
-#endif
-}
-
-static inline bool mimir_get_cpuid_count(unsigned int leaf, unsigned int subleaf, unsigned int* eax,
-                                         unsigned int* ebx, unsigned int* ecx, unsigned int* edx) {
-#if defined(_MSC_VER)
-    int regs[4] = {0, 0, 0, 0};
-    __cpuidex(regs, static_cast<int>(leaf), static_cast<int>(subleaf));
-    *eax = static_cast<unsigned int>(regs[0]);
-    *ebx = static_cast<unsigned int>(regs[1]);
-    *ecx = static_cast<unsigned int>(regs[2]);
-    *edx = static_cast<unsigned int>(regs[3]);
-    return true;
-#else
-    return __get_cpuid_count(leaf, subleaf, eax, ebx, ecx, edx) != 0;
-#endif
-}
-
-static inline bool mimir_os_supports_avx_state() {
-    // Vérifie que l'OS a activé le sauvegarde/restauration XMM/YMM (AVX).
-    // Nécessaire pour utiliser AVX/AVX2/FMA/F16C sans #UD.
-    unsigned int eax, ebx, ecx, edx;
-    if (!mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
-
-    const bool osxsave = (ecx & (1u << 27)) != 0;
-    const bool avx_hw = (ecx & (1u << 28)) != 0;
-    if (!osxsave || !avx_hw) return false;
-
-    // XGETBV(0): bits 1 (XMM) et 2 (YMM) doivent être à 1
-#if defined(_MSC_VER)
-    const unsigned __int64 xcr0 = _xgetbv(0);
-    return (xcr0 & 0x6ull) == 0x6ull;
-#else
-    uint32_t xcr0_lo = 0;
-    uint32_t xcr0_hi = 0;
-    __asm__ volatile ("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
-    (void)xcr0_hi;
-    return (xcr0_lo & 0x6u) == 0x6u;
-#endif
-}
-#endif
-
-bool Model::hasAVX2() {
-    static bool detected = false;
-    static bool result = false;
-    
-    if (!detected) {
-        #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-            unsigned int eax, ebx, ecx, edx;
-            const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && mimir_get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
-                result = (ebx & (1u << 5)) != 0; // EBX bit 5 = AVX2
-            } else {
-                result = false;
-            }
-        #endif
-        detected = true;
-    }
-    
-    return result;
-}
-
-bool Model::hasFMA() {
-    static bool detected = false;
-    static bool result = false;
-    
-    if (!detected) {
-        #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-            unsigned int eax, ebx, ecx, edx;
-            const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
-                result = (ecx & (1u << 12)) != 0; // ECX bit 12 = FMA
-            } else {
-                result = false;
-            }
-        #endif
-        detected = true;
-    }
-    
-    return result;
-}
-
-bool Model::hasF16C() {
-    static bool detected = false;
-    static bool result = false;
-    
-    if (!detected) {
-        #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-            unsigned int eax, ebx, ecx, edx;
-            const bool os_ok = mimir_os_supports_avx_state();
-            if (os_ok && mimir_get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
-                result = (ecx & (1u << 29)) != 0; // ECX bit 29 = F16C
-            } else {
-                result = false;
-            }
-        #endif
-        detected = true;
-    }
-    
-    return result;
-}
-
-bool Model::hasBMI2() {
-    static bool detected = false;
-    static bool result = false;
-    
-    if (!detected) {
-        #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-            unsigned int eax, ebx, ecx, edx;
-            if (mimir_get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
-                result = (ebx & (1 << 8)) != 0; // EBX bit 8 = BMI2
-            }
-        #endif
-        detected = true;
-    }
-    
-    return result;
-}
+bool Model::hasAVX2() { return RuntimeSimd::features().avx2; }
+bool Model::hasFMA() { return RuntimeSimd::features().fma; }
+bool Model::hasF16C() { return RuntimeSimd::features().f16c; }
+bool Model::hasBMI2() { return RuntimeSimd::features().bmi2; }
 
 // Global compute engine (initialized on demand)
 #ifdef ENABLE_VULKAN
@@ -264,70 +133,126 @@ static bool g_cpu_available = false;
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
-namespace {
-static inline bool env_flag_true(const char* name, bool default_value) {
-    if (!name) return default_value;
-    const char* v = std::getenv(name);
-    if (!v) return default_value;
-    if (v[0] == '\0') return default_value;
-    if (v[0] == '0' && v[1] == '\0') return false;
-    // tout autre valeur non vide => true
-    return true;
-}
-
-static inline int env_int(const char* name, int default_value) {
-    const char* v = std::getenv(name);
-    if (!v || v[0] == '\0') return default_value;
-    try {
-        return std::stoi(v);
-    } catch (...) {
-        return default_value;
+namespace
+{
+    static std::vector<float> castFloatVector(const std::vector<float> &values,
+                                              const Mimir::DType dtype)
+    {
+        if (dtype == Mimir::DType::F32)
+            return values;
+        if (values.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+            throw std::length_error("AMP tensor is too large for the typed runtime");
+        return Mimir::TypedTensor::fromFloat32(
+                   values, {static_cast<int>(values.size())}, dtype)
+            .toFloat32();
     }
-}
 
-static inline bool any_runtime_fastpath_enabled(const RuntimeConfig& cfg) {
-    return cfg.linear_enabled || cfg.conv_enabled || cfg.norm_enabled || cfg.attention_enabled;
-}
+    static uint64_t modelTopologySignature(const std::vector<Layer> &layers)
+    {
+        uint64_t signature = 1469598103934665603ULL;
+        auto hash_byte = [&signature](const uint8_t byte)
+        {
+            signature ^= byte;
+            signature *= 1099511628211ULL;
+        };
+        auto hash_text = [&hash_byte](const std::string &text)
+        {
+            for (unsigned char ch : text)
+                hash_byte(ch);
+            hash_byte(0xff);
+        };
+        for (const auto &layer : layers)
+        {
+            const size_t count = layer.params_count;
+            hash_text(layer.name);
+            hash_text(layer.shared_weights_from);
+            hash_byte(static_cast<uint8_t>(layer.type_enum));
+            for (size_t shift = 0; shift < sizeof(count); ++shift)
+                hash_byte(static_cast<uint8_t>((count >> (shift * 8)) & 0xff));
+        }
+        return signature;
+    }
 
-static inline void refresh_runtime_router_bindings() {
-    AbstractRuntime* rocm = nullptr;
-    AbstractRuntime* cuda = nullptr;
-    AbstractRuntime* vulkan = nullptr;
-    AbstractRuntime* opencl = nullptr;
-    AbstractRuntime* cpu = nullptr;
+    static inline bool env_flag_true(const char *name, bool default_value)
+    {
+        if (!name)
+            return default_value;
+        const char *v = std::getenv(name);
+        if (!v)
+            return default_value;
+        if (v[0] == '\0')
+            return default_value;
+        if (v[0] == '0' && v[1] == '\0')
+            return false;
+        // tout autre valeur non vide => true
+        return true;
+    }
+
+    static inline int env_int(const char *name, int default_value)
+    {
+        const char *v = std::getenv(name);
+        if (!v || v[0] == '\0')
+            return default_value;
+        try
+        {
+            return std::stoi(v);
+        }
+        catch (...)
+        {
+            return default_value;
+        }
+    }
+
+    static inline bool any_runtime_fastpath_enabled(const RuntimeConfig &cfg)
+    {
+        return cfg.linear_enabled || cfg.conv_enabled || cfg.norm_enabled || cfg.attention_enabled;
+    }
+
+    static inline void refresh_runtime_router_bindings()
+    {
+        AbstractRuntime *rocm = nullptr;
+        AbstractRuntime *cuda = nullptr;
+        AbstractRuntime *vulkan = nullptr;
+        AbstractRuntime *opencl = nullptr;
+        AbstractRuntime *cpu = nullptr;
 
 #ifdef ENABLE_ROCM
-    rocm = g_rocm_engine.get();
+        rocm = g_rocm_engine.get();
 #endif
 #ifdef ENABLE_CUDA
-    cuda = g_cuda_engine.get();
+        cuda = g_cuda_engine.get();
 #endif
 #ifdef ENABLE_VULKAN
-    vulkan = g_compute_engine.get();
+        vulkan = g_compute_engine.get();
 #endif
 #ifdef ENABLE_OPENCL
-    opencl = g_opencl_engine.get();
+        opencl = g_opencl_engine.get();
 #endif
-    cpu = g_cpu_engine.get();
+        cpu = g_cpu_engine.get();
 
-    RuntimeRouter::instance().setRuntimes(rocm, cuda, vulkan, opencl, Mimir::tpuSessionRuntime(), cpu);
-}
+        RuntimeRouter::instance().setRuntimes(rocm, cuda, vulkan, opencl, Mimir::tpuSessionRuntime(), cpu);
+    }
 }
 
 // === constructeurs / destructeurs (déjà présents) ===
 Model::Model()
     : tokenizer(20000), encoder(256, 20000), hasTokenizer(true), hasEncoder(true),
-    max_ram_mb_(0)
+      max_ram_mb_(0)
 {
     RuntimeRouter::instance().setActivators(
-        [this]() -> bool { return this->initializeRocmComputeEngine(); },
-        [this]() -> bool { return this->initializeCudaComputeEngine(); },
-        [this]() -> bool { return this->initializeComputeEngine(); },
-        [this]() -> bool { return this->initializeOpenCLComputeEngine(); },
-        [this]() -> bool { return this->initializeCpuComputeEngine(); }
-    );
+        [this]() -> bool
+        { return this->initializeRocmComputeEngine(); },
+        [this]() -> bool
+        { return this->initializeCudaComputeEngine(); },
+        [this]() -> bool
+        { return this->initializeComputeEngine(); },
+        [this]() -> bool
+        { return this->initializeOpenCLComputeEngine(); },
+        [this]() -> bool
+        { return this->initializeCpuComputeEngine(); });
 
-    tw = 64; th = 64;
+    tw = 64;
+    th = 64;
     // ConditioningEncoder toujours présent + embeddings spéciaux (SEQ/MOD/MAG) disponibles.
     encoder.ensureSpecialEmbeddings();
     Mimir::initializeFpgaSession();
@@ -337,81 +262,120 @@ Model::Model()
 
 Model::~Model() = default;
 
-void Model::setDefaultDType(const std::string& dtype) {
+void Model::setDefaultDType(const std::string &dtype)
+{
     const auto dt = Mimir::parse_dtype(dtype);
-    if (dt == Mimir::DType::UNKNOWN) {
+    if (dt == Mimir::DType::UNKNOWN)
+    {
         throw std::runtime_error("Model.setDefaultDType: dtype non supporté: '" + dtype + "'");
     }
     default_dtype_ = Mimir::dtype_to_string(dt);
     const auto accumulation = (dt == Mimir::DType::F64)
-        ? Mimir::DType::F64
-        : Mimir::DType::F32;
-    for (auto& layer : layers) {
+                                  ? Mimir::DType::F64
+                                  : Mimir::DType::F32;
+    for (auto &layer : layers)
+    {
         layer.dtype = dt;
         layer.accumulation_dtype = accumulation;
     }
-    if (!Model::frameworkLogsSuppressed()) {
+    if (!Model::frameworkLogsSuppressed())
+    {
         std::cerr << "[dtype] default=" << default_dtype_
                   << " accumulation=" << Mimir::dtype_to_string(accumulation) << std::endl;
     }
     // Keep a canonical copy in config for serialization/planner/Lua.
-    try {
+    try
+    {
         modelConfig["dtype"] = default_dtype_;
-    } catch (...) {
+    }
+    catch (...)
+    {
+    }
+}
+
+void Model::setAutocastDType(const std::string &dtype)
+{
+    const auto dt = Mimir::parse_dtype(dtype);
+    if (dt != Mimir::DType::F32 && dt != Mimir::DType::F16 && dt != Mimir::DType::BF16)
+        throw std::runtime_error("Model.setAutocastDType: expected float32, float16 or bfloat16");
+#ifndef MIMIR_ENABLE_AMP
+    if (dt != Mimir::DType::F32)
+        throw std::runtime_error("Model.setAutocastDType: AMP is disabled in this build; reconfigure with -DENABLE_AMP=ON");
+#endif
+    autocast_dtype_ = Mimir::dtype_to_string(dt);
+    try
+    {
+        modelConfig["autocast_dtype"] = autocast_dtype_;
+        modelConfig["amp_enabled"] = dt != Mimir::DType::F32;
+    }
+    catch (...)
+    {
     }
 }
 
 // ===== Hardware Acceleration =====
 
-bool Model::hasVulkanCompute() const {
+bool Model::hasVulkanCompute() const
+{
     return g_compute_available;
 }
 
-void Model::setFrameworkLogsSuppressed(bool enable) {
+void Model::setFrameworkLogsSuppressed(bool enable)
+{
     g_suppress_framework_logs = enable;
 }
 
-bool Model::frameworkLogsSuppressed() {
+bool Model::frameworkLogsSuppressed()
+{
     return g_suppress_framework_logs;
 }
 
-bool Model::hasOpenCLCompute() const {
+bool Model::hasOpenCLCompute() const
+{
     return g_opencl_available;
 }
 
-bool Model::hasCudaCompute() const {
+bool Model::hasCudaCompute() const
+{
     return g_cuda_available;
 }
 
-bool Model::hasRocmCompute() const {
+bool Model::hasRocmCompute() const
+{
     return g_rocm_available;
 }
 
-bool Model::hasCpuCompute() const {
+bool Model::hasCpuCompute() const
+{
     return g_cpu_available;
 }
 
-bool Model::initializeCpuComputeEngine() {
+bool Model::initializeCpuComputeEngine()
+{
     // Pattern init_once thread-safe avec atomic
     static std::atomic<bool> initialized{false};
     static std::mutex init_mutex;
 
-    if (initialized.load(std::memory_order_acquire)) {
+    if (initialized.load(std::memory_order_acquire))
+    {
         return g_cpu_available;
     }
 
     std::lock_guard<std::mutex> lock(init_mutex);
-    if (initialized.load(std::memory_order_relaxed)) {
+    if (initialized.load(std::memory_order_relaxed))
+    {
         return g_cpu_available;
     }
 
     const RuntimeConfig cfg_from_env = RuntimeConfig::fromEnv("CPU");
-        if (cfg_from_env.disabled) {
-            g_cpu_available = false;
-            g_cpu_engine.reset();
+    if (cfg_from_env.disabled)
+    {
+        g_cpu_available = false;
+        g_cpu_engine.reset();
         refresh_runtime_router_bindings();
         initialized.store(true, std::memory_order_release);
-        if (cfg_from_env.verbose && !Model::frameworkLogsSuppressed()) {
+        if (cfg_from_env.verbose && !Model::frameworkLogsSuppressed())
+        {
             std::cerr << "⚠ CPU runtime disabled via MIMIR_DISABLE_CPU" << std::endl;
         }
         return false;
@@ -421,19 +385,25 @@ bool Model::initializeCpuComputeEngine() {
     RuntimeConfig cfg = cfg_from_env;
     cfg.linear_enabled = env_flag_true("MIMIR_CPU_LINEAR", true);
 
-    try {
+    try
+    {
         g_cpu_engine = std::make_unique<CpuRuntime>();
         g_cpu_available = g_cpu_engine->initialize(cfg);
         refresh_runtime_router_bindings();
-        if (g_cpu_available && cfg.verbose && !Model::frameworkLogsSuppressed()) {
+        if (g_cpu_available && cfg.verbose && !Model::frameworkLogsSuppressed())
+        {
             std::cerr << "✓ CPU Runtime initialized" << std::endl;
         }
-        if (!g_cpu_available) {
+        if (!g_cpu_available)
+        {
             g_cpu_engine.reset();
             refresh_runtime_router_bindings();
         }
-    } catch (const std::exception& e) {
-        if (!Model::frameworkLogsSuppressed()) {
+    }
+    catch (const std::exception &e)
+    {
+        if (!Model::frameworkLogsSuppressed())
+        {
             std::cerr << "⚠ CPU Runtime unavailable: " << e.what() << std::endl;
         }
         g_cpu_available = false;
@@ -445,7 +415,8 @@ bool Model::initializeCpuComputeEngine() {
     return g_cpu_available;
 }
 
-bool Model::initializeComputeEngine() {
+bool Model::initializeComputeEngine()
+{
 #ifndef ENABLE_VULKAN
     g_compute_available = false;
     return false;
@@ -456,34 +427,40 @@ bool Model::initializeComputeEngine() {
 
     // Permet de forcer le mode CPU pour diagnostic/stabilité.
     // Toute valeur non vide et différente de "0" désactive Vulkan.
-    if (const char* v = std::getenv("MIMIR_DISABLE_VULKAN")) {
-        if (v[0] != '\0' && !(v[0] == '0' && v[1] == '\0')) {
+    if (const char *v = std::getenv("MIMIR_DISABLE_VULKAN"))
+    {
+        if (v[0] != '\0' && !(v[0] == '0' && v[1] == '\0'))
+        {
             g_compute_available = false;
             g_compute_engine.reset();
             refresh_runtime_router_bindings();
             initialized.store(true, std::memory_order_release);
-            if (!Model::frameworkLogsSuppressed()) {
+            if (!Model::frameworkLogsSuppressed())
+            {
                 std::cerr << "⚠ Vulkan Compute disabled via MIMIR_DISABLE_VULKAN" << std::endl;
             }
             return false;
         }
     }
-    
-    if (initialized.load(std::memory_order_acquire)) {
+
+    if (initialized.load(std::memory_order_acquire))
+    {
         return g_compute_available;
     }
-    
+
     std::lock_guard<std::mutex> lock(init_mutex);
-    
+
     // Double-check après lock
-    if (initialized.load(std::memory_order_relaxed)) {
+    if (initialized.load(std::memory_order_relaxed))
+    {
         return g_compute_available;
     }
 
     RuntimeConfig cfg = RuntimeConfig::fromEnv("VULKAN");
     cfg.linear_enabled = env_flag_true("MIMIR_VULKAN_LINEAR", true);
     cfg.conv_enabled = env_flag_true("MIMIR_VULKAN_CONV", true);
-    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
+    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg))
+    {
         g_compute_available = false;
         g_compute_engine.reset();
         refresh_runtime_router_bindings();
@@ -491,37 +468,47 @@ bool Model::initializeComputeEngine() {
         return false;
     }
 
-    try {
+    try
+    {
         g_compute_engine = std::make_unique<VulkanRuntime>();
         g_compute_available = g_compute_engine->initialize(cfg);
         refresh_runtime_router_bindings();
 
-        if (g_compute_available) {
-            if (!Model::frameworkLogsSuppressed()) {
-            std::cerr << "✓ Vulkan Compute initialized" << std::endl;
+        if (g_compute_available)
+        {
+            if (!Model::frameworkLogsSuppressed())
+            {
+                std::cerr << "✓ Vulkan Compute initialized" << std::endl;
             }
-        } else {
-            if (!Model::frameworkLogsSuppressed()) {
+        }
+        else
+        {
+            if (!Model::frameworkLogsSuppressed())
+            {
                 std::cerr << "⚠ Vulkan Compute initialization failed, using CPU fallback" << std::endl;
             }
             g_compute_engine.reset();
             refresh_runtime_router_bindings();
         }
-    } catch (const std::exception& e) {
-        if (!Model::frameworkLogsSuppressed()) {
+    }
+    catch (const std::exception &e)
+    {
+        if (!Model::frameworkLogsSuppressed())
+        {
             std::cerr << "⚠ Vulkan Compute unavailable: " << e.what() << std::endl;
         }
         g_compute_available = false;
         g_compute_engine.reset();
         refresh_runtime_router_bindings();
     }
-    
+
     initialized.store(true, std::memory_order_release);
     return g_compute_available;
 #endif
 }
 
-bool Model::initializeOpenCLComputeEngine() {
+bool Model::initializeOpenCLComputeEngine()
+{
 #ifndef ENABLE_OPENCL
     g_opencl_available = false;
     return false;
@@ -530,8 +517,10 @@ bool Model::initializeOpenCLComputeEngine() {
     static std::mutex init_mutex;
 
     // Toute valeur non vide et différente de "0" désactive OpenCL.
-    if (const char* v = std::getenv("MIMIR_DISABLE_OPENCL")) {
-        if (v[0] != '\0' && !(v[0] == '0' && v[1] == '\0')) {
+    if (const char *v = std::getenv("MIMIR_DISABLE_OPENCL"))
+    {
+        if (v[0] != '\0' && !(v[0] == '0' && v[1] == '\0'))
+        {
             g_opencl_available = false;
             g_opencl_engine.reset();
             refresh_runtime_router_bindings();
@@ -541,18 +530,21 @@ bool Model::initializeOpenCLComputeEngine() {
         }
     }
 
-    if (initialized.load(std::memory_order_acquire)) {
-            return g_opencl_available; 
+    if (initialized.load(std::memory_order_acquire))
+    {
+        return g_opencl_available;
     }
 
     std::lock_guard<std::mutex> lock(init_mutex);
-    if (initialized.load(std::memory_order_relaxed)) {
+    if (initialized.load(std::memory_order_relaxed))
+    {
         return g_opencl_available;
     }
 
     RuntimeConfig cfg = RuntimeConfig::fromEnv("OPENCL");
     cfg.linear_enabled = env_flag_true("MIMIR_OPENCL_LINEAR", true);
-    if (cfg.disabled || !cfg.linear_enabled) {
+    if (cfg.disabled || !cfg.linear_enabled)
+    {
         g_opencl_available = false;
         g_opencl_engine.reset();
         refresh_runtime_router_bindings();
@@ -560,20 +552,27 @@ bool Model::initializeOpenCLComputeEngine() {
         return false;
     }
 
-    try {
+    try
+    {
         g_opencl_engine = std::make_unique<OpenCLRuntime>();
         g_opencl_available = g_opencl_engine->initialize(cfg);
         refresh_runtime_router_bindings();
-        if (g_opencl_available) {
+        if (g_opencl_available)
+        {
             std::cerr << "✓ OpenCL Compute initialized" << std::endl;
-        } else {
-            if (env_flag_true("MIMIR_ACCEL_VERBOSE", false)) {
+        }
+        else
+        {
+            if (env_flag_true("MIMIR_ACCEL_VERBOSE", false))
+            {
                 std::cerr << "⚠ OpenCL Compute unavailable, using CPU fallback" << std::endl;
             }
             g_opencl_engine.reset();
             refresh_runtime_router_bindings();
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "⚠ OpenCL Compute unavailable: " << e.what() << std::endl;
         g_opencl_available = false;
         g_opencl_engine.reset();
@@ -585,7 +584,8 @@ bool Model::initializeOpenCLComputeEngine() {
 #endif
 }
 
-bool Model::initializeCudaComputeEngine() {
+bool Model::initializeCudaComputeEngine()
+{
 #ifndef ENABLE_CUDA
     g_cuda_available = false;
     return false;
@@ -599,39 +599,50 @@ bool Model::initializeCudaComputeEngine() {
     cfg.norm_enabled = env_flag_true("MIMIR_CUDA_NORM", true);
     cfg.attention_enabled = env_flag_true("MIMIR_CUDA_ATTENTION", true);
 
-    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
+    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg))
+    {
         g_cuda_available = false;
         g_cuda_engine.reset();
         refresh_runtime_router_bindings();
         initialized.store(true, std::memory_order_release);
-        if (cfg.verbose && cfg.disabled) {
+        if (cfg.verbose && cfg.disabled)
+        {
             std::cerr << "⚠ CUDA Compute disabled via MIMIR_DISABLE_CUDA" << std::endl;
         }
         return false;
     }
 
-    if (initialized.load(std::memory_order_acquire)) {
+    if (initialized.load(std::memory_order_acquire))
+    {
         return g_cuda_available;
     }
 
     std::lock_guard<std::mutex> lock(init_mutex);
-    if (initialized.load(std::memory_order_relaxed)) {
+    if (initialized.load(std::memory_order_relaxed))
+    {
         return g_cuda_available;
     }
 
-    try {
+    try
+    {
         g_cuda_engine = std::make_unique<CudaRuntime>();
         g_cuda_available = g_cuda_engine->initialize(cfg);
         refresh_runtime_router_bindings();
-        if (g_cuda_available) {
-            if (cfg.verbose) {
+        if (g_cuda_available)
+        {
+            if (cfg.verbose)
+            {
                 std::cerr << "✓ CUDA Compute initialized" << std::endl;
             }
-        } else {
+        }
+        else
+        {
             g_cuda_engine.reset();
             refresh_runtime_router_bindings();
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "⚠ CUDA Compute unavailable: " << e.what() << std::endl;
         g_cuda_available = false;
         g_cuda_engine.reset();
@@ -643,7 +654,8 @@ bool Model::initializeCudaComputeEngine() {
 #endif
 }
 
-bool Model::initializeRocmComputeEngine() {
+bool Model::initializeRocmComputeEngine()
+{
 #ifndef ENABLE_ROCM
     g_rocm_available = false;
     return false;
@@ -657,39 +669,50 @@ bool Model::initializeRocmComputeEngine() {
     cfg.norm_enabled = env_flag_true("MIMIR_ROCM_NORM", true);
     cfg.attention_enabled = env_flag_true("MIMIR_ROCM_ATTENTION", true);
 
-    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg)) {
+    if (cfg.disabled || !any_runtime_fastpath_enabled(cfg))
+    {
         g_rocm_available = false;
         g_rocm_engine.reset();
         refresh_runtime_router_bindings();
         initialized.store(true, std::memory_order_release);
-        if (cfg.verbose && cfg.disabled) {
+        if (cfg.verbose && cfg.disabled)
+        {
             std::cerr << "⚠ ROCm Compute disabled via MIMIR_DISABLE_ROCM" << std::endl;
         }
         return false;
     }
 
-    if (initialized.load(std::memory_order_acquire)) {
+    if (initialized.load(std::memory_order_acquire))
+    {
         return g_rocm_available;
     }
 
     std::lock_guard<std::mutex> lock(init_mutex);
-    if (initialized.load(std::memory_order_relaxed)) {
+    if (initialized.load(std::memory_order_relaxed))
+    {
         return g_rocm_available;
     }
 
-    try {
+    try
+    {
         g_rocm_engine = std::make_unique<RocmRuntime>();
         g_rocm_available = g_rocm_engine->initialize(cfg);
         refresh_runtime_router_bindings();
-        if (g_rocm_available) {
-            if (cfg.verbose) {
+        if (g_rocm_available)
+        {
+            if (cfg.verbose)
+            {
                 std::cerr << "✓ ROCm Compute initialized" << std::endl;
             }
-        } else {
+        }
+        else
+        {
             g_rocm_engine.reset();
             refresh_runtime_router_bindings();
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "⚠ ROCm Compute unavailable: " << e.what() << std::endl;
         g_rocm_available = false;
         g_rocm_engine.reset();
@@ -701,9 +724,11 @@ bool Model::initializeRocmComputeEngine() {
 #endif
 }
 
-void Model::shutdownComputeEngine() {
+void Model::shutdownComputeEngine()
+{
 #ifdef ENABLE_VULKAN
-    if (g_compute_engine) {
+    if (g_compute_engine)
+    {
         g_compute_engine->shutdown();
         g_compute_engine.reset();
         g_compute_available = false;
@@ -714,9 +739,11 @@ void Model::shutdownComputeEngine() {
 #endif
 }
 
-void Model::shutdownOpenCLComputeEngine() {
+void Model::shutdownOpenCLComputeEngine()
+{
 #ifdef ENABLE_OPENCL
-    if (g_opencl_engine) {
+    if (g_opencl_engine)
+    {
         g_opencl_engine->shutdown();
         g_opencl_engine.reset();
         g_opencl_available = false;
@@ -727,9 +754,11 @@ void Model::shutdownOpenCLComputeEngine() {
 #endif
 }
 
-void Model::shutdownCudaComputeEngine() {
+void Model::shutdownCudaComputeEngine()
+{
 #ifdef ENABLE_CUDA
-    if (g_cuda_engine) {
+    if (g_cuda_engine)
+    {
         g_cuda_engine->shutdown();
         g_cuda_engine.reset();
         g_cuda_available = false;
@@ -740,9 +769,11 @@ void Model::shutdownCudaComputeEngine() {
 #endif
 }
 
-void Model::shutdownRocmComputeEngine() {
+void Model::shutdownRocmComputeEngine()
+{
 #ifdef ENABLE_ROCM
-    if (g_rocm_engine) {
+    if (g_rocm_engine)
+    {
         g_rocm_engine->shutdown();
         g_rocm_engine.reset();
         g_rocm_available = false;
@@ -753,46 +784,57 @@ void Model::shutdownRocmComputeEngine() {
 #endif
 }
 
-void Model::shutdownCpuComputeEngine() {
-    if (g_cpu_engine) {
+void Model::shutdownCpuComputeEngine()
+{
+    if (g_cpu_engine)
+    {
         g_cpu_engine->shutdown();
         g_cpu_engine.reset();
         g_cpu_available = false;
         refresh_runtime_router_bindings();
-    } else {
+    }
+    else
+    {
         g_cpu_available = false;
         refresh_runtime_router_bindings();
     }
 }
 
-void Model::zeroGradients() {
-    if (params_frozen_) {
+void Model::zeroGradients()
+{
+    if (params_frozen_)
+    {
         throw std::runtime_error("Model::zeroGradients: parameters are frozen");
     }
     // Réinitialiser tous les gradients des layers à zéro
-    for (auto& layer : layers) {
+    for (auto &layer : layers)
+    {
         std::fill(layer.grad_weights.begin(), layer.grad_weights.end(), 0.0f);
         std::fill(layer.grad_bias.begin(), layer.grad_bias.end(), 0.0f);
     }
-    
+
     // Réinitialiser l'état du forward pour le prochain backward
     forward_state.clear();
 }
 
-void Model::releaseTrainingWorkingSet(size_t completed_step) {
+void Model::releaseTrainingWorkingSet(size_t completed_step)
+{
     forward_state.clear();
     clearTensorStore();
     clearTensorStoreInt();
 
 #if defined(__GLIBC__)
-    static const size_t trim_every = []() {
-        const char* value = std::getenv("MIMIR_MALLOC_TRIM_EVERY");
-        if (!value || *value == '\0') return size_t{1};
-        char* end = nullptr;
+    static const size_t trim_every = []()
+    {
+        const char *value = std::getenv("MIMIR_MALLOC_TRIM_EVERY");
+        if (!value || *value == '\0')
+            return size_t{1};
+        char *end = nullptr;
         const unsigned long parsed = std::strtoul(value, &end, 10);
         return (end != value) ? static_cast<size_t>(parsed) : size_t{1};
     }();
-    if (trim_every > 0 && completed_step % trim_every == 0) {
+    if (trim_every > 0 && completed_step % trim_every == 0)
+    {
         malloc_trim(0);
     }
 #else
@@ -800,23 +842,27 @@ void Model::releaseTrainingWorkingSet(size_t completed_step) {
 #endif
 }
 
-Gradients Model::getGradients() const {
+Gradients Model::getGradients() const
+{
     Gradients grads;
-    
+
     // Collecter tous les gradients des layers
     size_t param_idx = 0;
-    for (const auto& layer : layers) {
+    for (const auto &layer : layers)
+    {
         // Ajouter les gradients de poids
-        for (const auto& grad : layer.grad_weights) {
+        for (const auto &grad : layer.grad_weights)
+        {
             grads.param_grads[param_idx++] = grad;
         }
-        
+
         // Ajouter les gradients de biais
-        for (const auto& grad : layer.grad_bias) {
+        for (const auto &grad : layer.grad_bias)
+        {
             grads.param_grads[param_idx++] = grad;
         }
     }
-    
+
     return grads;
 }
 
@@ -824,12 +870,15 @@ Gradients Model::getGradients() const {
 // TENSOR STORE (Multi-input/Branch Support)
 // ============================================================================
 
-const std::vector<float>& Model::getTensor(const std::string& name) const {
+const std::vector<float> &Model::getTensor(const std::string &name) const
+{
     auto it = tensor_store.find(name);
-    if (it == tensor_store.end()) {
+    if (it == tensor_store.end())
+    {
         std::cerr << "❌ ERROR: Tensor '" << name << "' not found in TensorStore" << std::endl;
         std::cerr << "Available tensors: ";
-        for (const auto& kv : tensor_store) {
+        for (const auto &kv : tensor_store)
+        {
             std::cerr << "'" << kv.first << "' ";
         }
         std::cerr << std::endl;
@@ -838,27 +887,33 @@ const std::vector<float>& Model::getTensor(const std::string& name) const {
     return it->second;
 }
 
-bool Model::hasTensor(const std::string& name) const {
+bool Model::hasTensor(const std::string &name) const
+{
     return tensor_store.find(name) != tensor_store.end();
 }
 
-const Mimir::TypedTensor& Model::getTypedTensor(const std::string& name) const {
+const Mimir::TypedTensor &Model::getTypedTensor(const std::string &name) const
+{
     auto it = typed_tensor_store.find(name);
     if (it == typed_tensor_store.end())
         throw std::runtime_error("Typed tensor not found: " + name);
     return it->second;
 }
 
-bool Model::hasTypedTensor(const std::string& name) const {
+bool Model::hasTypedTensor(const std::string &name) const
+{
     return typed_tensor_store.find(name) != typed_tensor_store.end();
 }
 
-const std::vector<int>& Model::getTensorInt(const std::string& name) const {
+const std::vector<int> &Model::getTensorInt(const std::string &name) const
+{
     auto it = tensor_store_int.find(name);
-    if (it == tensor_store_int.end()) {
+    if (it == tensor_store_int.end())
+    {
         std::cerr << "❌ ERROR: IntTensor '" << name << "' not found in IntTensorStore" << std::endl;
         std::cerr << "Available int tensors: ";
-        for (const auto& kv : tensor_store_int) {
+        for (const auto &kv : tensor_store_int)
+        {
             std::cerr << "'" << kv.first << "' ";
         }
         std::cerr << std::endl;
@@ -867,16 +922,20 @@ const std::vector<int>& Model::getTensorInt(const std::string& name) const {
     return it->second;
 }
 
-bool Model::hasTensorInt(const std::string& name) const {
+bool Model::hasTensorInt(const std::string &name) const
+{
     return tensor_store_int.find(name) != tensor_store_int.end();
 }
 
-std::vector<int>& Model::getTensorIntMutable(const std::string& name) {
+std::vector<int> &Model::getTensorIntMutable(const std::string &name)
+{
     auto it = tensor_store_int.find(name);
-    if (it == tensor_store_int.end()) {
+    if (it == tensor_store_int.end())
+    {
         std::cerr << "❌ ERROR: IntTensor '" << name << "' not found in IntTensorStore" << std::endl;
         std::cerr << "Available int tensors: ";
-        for (const auto& kv : tensor_store_int) {
+        for (const auto &kv : tensor_store_int)
+        {
             std::cerr << "'" << kv.first << "' ";
         }
         std::cerr << std::endl;
@@ -885,12 +944,15 @@ std::vector<int>& Model::getTensorIntMutable(const std::string& name) {
     return it->second;
 }
 
-std::vector<float>& Model::getTensorMutable(const std::string& name) {
+std::vector<float> &Model::getTensorMutable(const std::string &name)
+{
     auto it = tensor_store.find(name);
-    if (it == tensor_store.end()) {
+    if (it == tensor_store.end())
+    {
         std::cerr << "❌ ERROR: Tensor '" << name << "' not found in TensorStore" << std::endl;
         std::cerr << "Available tensors: ";
-        for (const auto& kv : tensor_store) {
+        for (const auto &kv : tensor_store)
+        {
             std::cerr << "'" << kv.first << "' ";
         }
         std::cerr << std::endl;
@@ -899,69 +961,84 @@ std::vector<float>& Model::getTensorMutable(const std::string& name) {
     return it->second;
 }
 
-void Model::storeTensor(const std::string& name, const std::vector<float>& data) {
+void Model::storeTensor(const std::string &name, const std::vector<float> &data)
+{
     tensor_store[name] = data;
     const auto dtype = Mimir::parse_dtype(default_dtype_);
     typed_tensor_store.insert_or_assign(
         name, Mimir::TypedTensor::fromFloat32(data, {static_cast<int>(data.size())}, dtype));
 }
 
-void Model::storeTensorInt(const std::string& name, const std::vector<int>& data) {
+void Model::storeTensorInt(const std::string &name, const std::vector<int> &data)
+{
     tensor_store_int[name] = data;
 }
 
-void Model::storeTensor(const std::string& name, std::vector<float>&& data) {
+void Model::storeTensor(const std::string &name, std::vector<float> &&data)
+{
     const auto dtype = Mimir::parse_dtype(default_dtype_);
     typed_tensor_store.insert_or_assign(
         name, Mimir::TypedTensor::fromFloat32(data, {static_cast<int>(data.size())}, dtype));
     tensor_store[name] = std::move(data);
 }
 
-void Model::storeTensorInt(const std::string& name, std::vector<int>&& data) {
+void Model::storeTensorInt(const std::string &name, std::vector<int> &&data)
+{
     tensor_store_int[name] = std::move(data);
 }
 
-std::vector<std::string> Model::getAvailableTensors() const {
+std::vector<std::string> Model::getAvailableTensors() const
+{
     std::vector<std::string> names;
     names.reserve(tensor_store.size());
-    for (const auto& kv : tensor_store) {
+    for (const auto &kv : tensor_store)
+    {
         names.push_back(kv.first);
     }
     return names;
 }
 
-std::vector<std::string> Model::getAvailableIntTensors() const {
+std::vector<std::string> Model::getAvailableIntTensors() const
+{
     std::vector<std::string> names;
     names.reserve(tensor_store_int.size());
-    for (const auto& kv : tensor_store_int) {
+    for (const auto &kv : tensor_store_int)
+    {
         names.push_back(kv.first);
     }
     return names;
 }
 
-void Model::clearTensorStore() {
+void Model::clearTensorStore()
+{
     tensor_store.clear();
     typed_tensor_store.clear();
 }
 
-void Model::clearTensorStoreInt() {
+void Model::clearTensorStoreInt()
+{
     tensor_store_int.clear();
 }
 
-void Model::setKVCacheEnabled(bool enabled) {
+void Model::setKVCacheEnabled(bool enabled)
+{
     kv_cache_enabled_ = enabled;
-    if (!enabled) {
+    if (!enabled)
+    {
         clearKVCache();
     }
 }
 
-void Model::clearKVCache() {
+void Model::clearKVCache()
+{
     kv_cache_by_layer_.clear();
 }
 
-size_t Model::getKVCacheTokenCount() const {
+size_t Model::getKVCacheTokenCount() const
+{
     size_t total = 0;
-    for (const auto& kv : kv_cache_by_layer_) {
+    for (const auto &kv : kv_cache_by_layer_)
+    {
         total += static_cast<size_t>(std::max(0, kv.second.seq_len));
     }
     return total;
@@ -969,14 +1046,17 @@ size_t Model::getKVCacheTokenCount() const {
 
 // === Forward pass (tokens int -> float delegation) ===
 
-std::vector<float> Model::forwardPass(const std::vector<int> &input_ids, bool training) {
+std::vector<float> Model::forwardPass(const std::vector<int> &input_ids, bool training)
+{
     return forwardPassView(input_ids, training);
 }
 
-const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_ids, bool training) {
+const std::vector<float> &Model::forwardPassView(const std::vector<int> &input_ids, bool training)
+{
     std::vector<float> input_f;
     input_f.reserve(input_ids.size());
-    for (int v : input_ids) {
+    for (int v : input_ids)
+    {
         input_f.push_back(static_cast<float>(v));
     }
     return forwardPassView(input_f, training);
@@ -985,48 +1065,61 @@ const std::vector<float>& Model::forwardPassView(const std::vector<int> &input_i
 // === Forward pass (multi-entrées: floats + tokens int) ===
 
 std::vector<float> Model::forwardPassNamed(
-    const std::unordered_map<std::string, std::vector<float>>& float_inputs,
-    const std::unordered_map<std::string, std::vector<int>>& int_inputs,
-    bool training
-) {
+    const std::unordered_map<std::string, std::vector<float>> &float_inputs,
+    const std::unordered_map<std::string, std::vector<int>> &int_inputs,
+    bool training)
+{
     return forwardPassNamedView(float_inputs, int_inputs, training);
 }
 
-void Model::addVizTapFrame(VizFrame vf) {
-    if (!viz_taps_enabled_) return;
-    if (viz_taps_max_frames_ <= 0) return;
-    if (vf.w <= 0 || vf.h <= 0 || vf.channels <= 0) return;
-    if (vf.pixels.empty()) return;
+void Model::addVizTapFrame(VizFrame vf)
+{
+    if (!viz_taps_enabled_)
+        return;
+    if (viz_taps_max_frames_ <= 0)
+        return;
+    if (vf.w <= 0 || vf.h <= 0 || vf.channels <= 0)
+        return;
+    if (vf.pixels.empty())
+        return;
 
-    auto trim_local = [](const std::string& s) -> std::string {
+    auto trim_local = [](const std::string &s) -> std::string
+    {
         size_t b = 0;
-        while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r')) ++b;
-        if (b >= s.size()) return std::string();
+        while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r'))
+            ++b;
+        if (b >= s.size())
+            return std::string();
         size_t e = s.size();
-        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r')) --e;
+        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r'))
+            --e;
         return s.substr(b, e - b);
     };
 
-    auto base_label = [&](const std::string& label) -> std::string {
+    auto base_label = [&](const std::string &label) -> std::string
+    {
         const size_t bar = label.find('|');
-        if (bar == std::string::npos) return trim_local(label);
+        if (bar == std::string::npos)
+            return trim_local(label);
         return trim_local(label.substr(0, bar));
     };
 
     const std::string base = base_label(vf.label);
-    if (base.empty()) return;
+    if (base.empty())
+        return;
 
     // Dedup by *base label* (keep last): the part after "|" is metadata that may change
     // every step (e.g. stats, filenames). We want the UI tile to update in-place.
-    auto it = std::find_if(viz_taps_.begin(), viz_taps_.end(), [&](const VizFrame& existing) {
-        return base_label(existing.label) == base;
-    });
-    if (it != viz_taps_.end()) {
+    auto it = std::find_if(viz_taps_.begin(), viz_taps_.end(), [&](const VizFrame &existing)
+                           { return base_label(existing.label) == base; });
+    if (it != viz_taps_.end())
+    {
         *it = std::move(vf);
         return;
     }
 
-    if (static_cast<int>(viz_taps_.size()) < viz_taps_max_frames_) {
+    if (static_cast<int>(viz_taps_.size()) < viz_taps_max_frames_)
+    {
         viz_taps_.push_back(std::move(vf));
         return;
     }
@@ -1035,83 +1128,1288 @@ void Model::addVizTapFrame(VizFrame vf) {
     viz_taps_.back() = std::move(vf);
 }
 
-std::vector<Model::VizFrame> Model::consumeVizTaps() {
+std::vector<Model::VizFrame> Model::consumeVizTaps()
+{
     // Le cache est dédupliqué et mis à jour en place par addVizTapFrame().
     // Retourner un snapshot complet évite qu'un forward partiel fasse disparaître
     // de l'interface toutes les couches qui n'ont pas été recapturées ce cycle-ci.
     auto out = viz_taps_;
-    if (g_viz_capture_root == this) g_viz_capture_root = nullptr;
+    if (g_viz_capture_root == this)
+        g_viz_capture_root = nullptr;
     return out;
 }
 
-bool Model::InitVizTips() {
+mimir::viz::NeuronNetworkSnapshot Model::captureNeuronNetworkSnapshot() const
+{
+    using mimir::viz::NeuronLayer;
+    mimir::viz::NeuronNetworkSnapshot snapshot;
+    std::unordered_map<std::string, size_t> producers;
+    // External inputs are actual unresolved tensor names, not imaginary dense
+    // layers. Their width is known only when the consumers agree on it.
+    struct External { size_t index; size_t units; std::string kind; bool ambiguous = false; };
+    std::unordered_map<std::string, External> external;
+    auto positive = [](int value) { return static_cast<size_t>(std::max(0, value)); };
+    auto direct_geometry = [&](const Layer& layer, bool input) -> std::pair<size_t, std::string> {
+        switch (layer.type_enum) {
+            case LayerType::Linear:
+                return {positive(input ? layer.in_features : layer.out_features), "neurone"};
+            case LayerType::Bilinear:
+                return {input ? 0 : positive(layer.out_features), "neurone"};
+            case LayerType::Conv1d: case LayerType::Conv2d: case LayerType::Conv3d:
+            case LayerType::Conv4d: case LayerType::ConvTranspose2d:
+                return {positive(input ? layer.in_channels : layer.out_channels), "canal"};
+            case LayerType::DepthwiseConv2d:
+                return {positive(layer.in_channels), "canal"};
+            case LayerType::CausalDepthwiseConv1d:
+                return {positive(layer.in_features), "canal"};
+            case LayerType::Embedding: case LayerType::EmbeddingBag:
+                return input ? std::pair<size_t, std::string>{0, "identifiants de tokens"} :
+                    std::pair<size_t, std::string>{positive(layer.embed_dim > 0 ? layer.embed_dim : layer.out_features), "composante embedding"};
+            case LayerType::SelfAttention: case LayerType::MultiHeadAttention:
+            case LayerType::CrossAttention:
+                return {positive(layer.embed_dim), "composante"};
+            case LayerType::PatchEmbed:
+                return {input ? 0 : positive(layer.embed_dim), "composante"};
+            case LayerType::RNN: case LayerType::LSTM: case LayerType::GRU:
+                return {positive(input ? layer.in_features : layer.out_features), "unité récurrente"};
+            case LayerType::RMSNorm: case LayerType::LayerNorm:
+                return {positive(layer.in_features > 0 ? layer.in_features : layer.embed_dim), "composante"};
+            case LayerType::BatchNorm1d: case LayerType::BatchNorm2d:
+            case LayerType::GroupNorm: case LayerType::InstanceNorm2d:
+                return {positive(layer.in_channels), "canal"};
+            case LayerType::SwiGLU:
+                return {positive(input ? layer.in_features : layer.out_features), "composante"};
+            default: return {0, "opération"};
+        }
+    };
+    auto preserves_geometry = [](LayerType type) {
+        return Mimir::Planning::FusionCalibration::pointwiseCandidate(type) ||
+            type == LayerType::Identity || type == LayerType::Reparameterize ||
+            type == LayerType::Add || type == LayerType::Subtract || type == LayerType::Multiply ||
+            type == LayerType::Divide || type == LayerType::Dropout || type == LayerType::Dropout2d ||
+            type == LayerType::AlphaDropout || type == LayerType::Softmax || type == LayerType::LogSoftmax ||
+            type == LayerType::SwiGLU || type == LayerType::RMSNorm || type == LayerType::LayerNorm ||
+            type == LayerType::BatchNorm1d || type == LayerType::BatchNorm2d ||
+            type == LayerType::GroupNorm || type == LayerType::InstanceNorm2d ||
+            type == LayerType::MaxPool1d || type == LayerType::MaxPool2d ||
+            type == LayerType::AvgPool1d || type == LayerType::AvgPool2d ||
+            type == LayerType::AdaptiveAvgPool2d || type == LayerType::GlobalAvgPool2d ||
+            type == LayerType::TokenMeanPool;
+    };
+    for (size_t index = 0; index < layers.size(); ++index) {
+        const auto& layer = layers[index];
+        const auto& input_names = Mimir::Planning::planner_inputs_for(layer);
+        std::vector<size_t> sources;
+        for (const auto& name : input_names) {
+            auto found = producers.find(name);
+            if (found == producers.end()) {
+                const auto geometry = direct_geometry(layer, true);
+                auto prior = external.find(name);
+                if (prior == external.end()) {
+                    NeuronLayer node;
+                    node.name = name; node.type = "Input"; node.output = name;
+                    node.units = geometry.first; node.kind = geometry.second;
+                    node.is_operation = !node.units; node.is_input = true;
+                    const size_t source = snapshot.layers.size();
+                    snapshot.layers.push_back(std::move(node));
+                    external.emplace(name, External{source, geometry.first, geometry.second, false});
+                    producers[name] = source;
+                    found = producers.find(name);
+                }
+            }
+            // A tensor may feed several consumers before it is overwritten.
+            // Conflicting inferred input widths stay explicitly unknown.
+            auto ext = external.find(name);
+            if (ext != external.end() && found != producers.end() && found->second == ext->second.index) {
+                const auto geometry = direct_geometry(layer, true);
+                if (geometry.first && ext->second.units && geometry.first != ext->second.units)
+                    ext->second.ambiguous = true;
+                else if (geometry.first && !ext->second.units && !ext->second.ambiguous) {
+                    ext->second.units = geometry.first; ext->second.kind = geometry.second;
+                }
+                auto& input_node = snapshot.layers[ext->second.index];
+                input_node.units = ext->second.ambiguous ? 0 : ext->second.units;
+                input_node.kind = ext->second.ambiguous ? "opération" : ext->second.kind;
+                input_node.is_operation = !input_node.units;
+            }
+            if (found != producers.end() && std::find(sources.begin(), sources.end(), found->second) == sources.end())
+                sources.push_back(found->second);
+        }
+        NeuronLayer node;
+        node.layer = static_cast<int>(index); node.name = layer.name; node.type = layer.type;
+        node.output = Mimir::Planning::planner_output_name_for(layer); node.inputs = input_names;
+        const auto geometry = direct_geometry(layer, false);
+        node.units = geometry.first; node.kind = geometry.second;
+        if (!node.units && preserves_geometry(layer.type_enum) && !sources.empty()) {
+            const auto& first = snapshot.layers[sources.front()];
+            const bool same = first.units && std::all_of(sources.begin(), sources.end(), [&](size_t source) {
+                const auto& value = snapshot.layers[source]; return value.units == first.units && value.kind == first.kind;
+            });
+            if (same) { node.units = first.units; node.kind = first.kind; }
+        }
+        node.is_operation = !node.units;
+        for (size_t source : sources)
+            node.depth = std::max(node.depth, snapshot.layers[source].depth + 1);
+        const size_t target = snapshot.layers.size();
+        snapshot.layers.push_back(std::move(node));
+        for (size_t source : sources)
+            snapshot.connections.push_back({source, target, snapshot.layers[source].output});
+        producers[Mimir::Planning::planner_output_name_for(layer)] = target;
+    }
+    // Width-preserving unary operations can precede the first explicit
+    // dimension declaration (BasicMLP's input Identity is one example).
+    // Resolve equality components in both directions, then apply the real
+    // consumer input declarations. Never infer a broadcast operand's width
+    // from Add/Multiply output, or propagate through a reshape/spatial pool.
+    const size_t node_count = snapshot.layers.size();
+    std::vector<size_t> parents(node_count);
+    for (size_t index = 0; index < node_count; ++index) parents[index] = index;
+    auto root = [&](size_t index) {
+        size_t result = index;
+        while (parents[result] != result) result = parents[result];
+        while (parents[index] != index) {
+            const size_t next = parents[index]; parents[index] = result; index = next;
+        }
+        return result;
+    };
+    auto unary_equal_width = [&](const Layer& layer) {
+        if (Mimir::Planning::planner_inputs_for(layer).size() != 1) return false;
+        const auto type = layer.type_enum;
+        return Mimir::Planning::FusionCalibration::pointwiseCandidate(type) ||
+            type == LayerType::Identity || type == LayerType::Dropout || type == LayerType::Dropout2d ||
+            type == LayerType::AlphaDropout || type == LayerType::Softmax || type == LayerType::LogSoftmax ||
+            type == LayerType::RMSNorm || type == LayerType::LayerNorm ||
+            type == LayerType::BatchNorm1d || type == LayerType::BatchNorm2d ||
+            type == LayerType::GroupNorm || type == LayerType::InstanceNorm2d;
+    };
+    for (const auto& link : snapshot.connections) {
+        const auto& source = snapshot.layers[link.source_layer];
+        const auto& target = snapshot.layers[link.target_layer];
+        // Normalizing a flattened map can retain every scalar while changing
+        // the displayed axis from channels to dense components. Those two
+        // declared geometries are not equal-width units in this view.
+        const bool different_axes = source.units && target.units &&
+            ((source.kind == "canal") != (target.kind == "canal"));
+        if (!different_axes && target.layer >= 0 && unary_equal_width(layers[static_cast<size_t>(target.layer)]))
+            parents[root(link.target_layer)] = root(link.source_layer);
+    }
+    struct WidthConstraint { size_t units = 0; std::string kind; bool conflict = false; bool has_known_axis = false; };
+    std::vector<WidthConstraint> widths(node_count);
+    auto constrain = [](WidthConstraint& value, size_t units, const std::string& kind) {
+        if (!units || value.conflict) return;
+        if (value.units && value.units != units) { value.conflict = true; return; }
+        if (!value.units) { value.units = units; value.kind = kind; }
+    };
+    for (size_t index = 0; index < node_count; ++index) {
+        const auto& node = snapshot.layers[index];
+        auto& value = widths[root(index)];
+        constrain(value, node.units, node.kind);
+        value.has_known_axis = value.has_known_axis || (!node.is_input && node.units);
+    }
+    for (const auto& input : external)
+        if (input.second.ambiguous) widths[root(input.second.index)].conflict = true;
+    for (const auto& link : snapshot.connections) {
+        const auto& target = snapshot.layers[link.target_layer];
+        if (target.layer < 0) continue;
+        const auto expected = direct_geometry(layers[static_cast<size_t>(target.layer)], true);
+        if (!expected.first) continue;
+        auto& value = widths[root(link.source_layer)];
+        // A dense input may consume an entire flattened feature map whereas
+        // this view represents the preceding map by channels. Those are
+        // distinct axes, so their counts are not an equality constraint.
+        if (value.has_known_axis && value.units &&
+            ((value.kind == "canal") != (expected.second == "canal"))) continue;
+        constrain(value, expected.first, expected.second);
+    }
+    for (size_t index = 0; index < node_count; ++index) {
+        auto& node = snapshot.layers[index];
+        const auto& value = widths[root(index)];
+        if (value.conflict) {
+            node.units = 0; node.kind = "opération"; node.is_operation = true;
+        } else if (value.units && !node.units) {
+            node.units = value.units; node.kind = value.kind; node.is_operation = false;
+        }
+    }
+    return snapshot;
+}
+
+mimir::viz::LiveWeightNetworkSnapshot Model::captureLiveWeightNetworkSnapshot() const
+{
+    namespace viz = mimir::viz;
+    viz::LiveWeightNetworkSnapshot snapshot;
+    snapshot.network = captureNeuronNetworkSnapshot();
+    const auto layout = viz::layoutNeuronNetwork3D(snapshot.network,
+        viz::liveWeightNeuronPointLimit, viz::liveWeightStructuralLinkLimit);
+    std::vector<std::vector<size_t>> visible_units(snapshot.network.layers.size());
+    for (const auto& point : layout.points)
+        if (!point.is_operation && point.node_index < visible_units.size())
+            visible_units[point.node_index].push_back(point.unit_index);
+    for (auto& units : visible_units) std::sort(units.begin(), units.end());
+    std::vector<size_t> node_for_layer(layers.size(), viz::liveWeightNoLayer);
+    std::vector<std::vector<size_t>> inputs(snapshot.network.layers.size());
+    for (size_t node = 0; node < snapshot.network.layers.size(); ++node) {
+        const int layer = snapshot.network.layers[node].layer;
+        if (layer >= 0 && static_cast<size_t>(layer) < node_for_layer.size())
+            node_for_layer[static_cast<size_t>(layer)] = node;
+    }
+    for (const auto& connection : snapshot.network.connections)
+        if (connection.target_layer < inputs.size() && connection.source_layer < inputs.size())
+            inputs[connection.target_layer].push_back(connection.source_layer);
+
+    struct VisibleRow { size_t output = 0, group = 0, end = 0; };
+    struct Source {
+        size_t layer = 0, count = 0, selected = 0;
+        const float* values = nullptr;
+        size_t from = viz::liveWeightNoLayer, to = viz::liveWeightNoLayer;
+        size_t in = 0, out = 0, kernel = 0, groups = 1, main = 0;
+        bool geometry = false;
+        bool bias = false;
+        std::string key;
+        std::unordered_map<size_t, std::vector<size_t>> group_inputs;
+        std::vector<VisibleRow> rows;
+        std::vector<size_t> biases;
+        size_t matrix_candidates = 0;
+    };
+    std::vector<Source> sources;
+    std::unordered_set<std::string> names;
+    for (const auto& layer : layers) names.insert(layer.name);
+    std::unordered_set<const void*> seen_storage;
+    std::unordered_set<const float*> seen_values;
+    auto product = [](size_t first, size_t second) {
+        return first && second > std::numeric_limits<size_t>::max() / first ? size_t{0} : first * second;
+    };
+    for (size_t index = 0; index < layers.size(); ++index) {
+        const auto& layer = layers[index];
+        if (!layer.shared_weights_from.empty() && layer.shared_weights_from != layer.name &&
+            names.count(layer.shared_weights_from)) { ++snapshot.shared_layers; continue; }
+        const size_t declared = layer.getWeightsSize();
+        if (!declared) continue;
+        const float* values = nullptr;
+        size_t available = 0;
+        const void* storage = nullptr;
+        if (layer.weight_block) {
+            storage = layer.weight_block;
+            if (layer.weight_block->use_dynamic_alloc && layer.weight_block->dynamic_handle) {
+                const auto* handle = static_cast<const DynamicTensorAllocator::TensorHandle*>(layer.weight_block->dynamic_handle);
+                storage = handle;
+                if (handle->is_loaded && handle->data_ptr) { values = handle->data_ptr; available = handle->size; }
+            } else if (!layer.weight_block->use_dynamic_alloc) {
+                values = layer.weight_block->data.data(); available = layer.weight_block->data.size();
+            }
+        } else { values = layer.weights.data(); available = layer.weights.size(); storage = values; }
+        if ((storage && !seen_storage.insert(storage).second) ||
+            (values && available && !seen_values.insert(values).second)) { ++snapshot.shared_layers; continue; }
+        snapshot.total_parameters = viz::neuronSaturatingAdd(snapshot.total_parameters, declared);
+        if (!values || available < declared) ++snapshot.unavailable_layers;
+        if (!values || !available) { snapshot.sampled = true; continue; }
+        Source source;
+        source.layer = index; source.count = std::min(declared, available); source.values = values;
+        source.to = node_for_layer[index];
+        if (source.to != viz::liveWeightNoLayer && inputs[source.to].size() == 1)
+            source.from = inputs[source.to].front();
+        const auto positive = [](int value) { return static_cast<size_t>(std::max(0, value)); };
+        bool convolution = false, causal = false;
+        try {
+            switch (layer.type_enum) {
+                case LayerType::Linear:
+                    source.in = positive(layer.in_features); source.out = positive(layer.out_features);
+                    source.kernel = 1;
+                    break;
+                case LayerType::Conv3d: case LayerType::Conv4d: {
+                    const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+                    source.in = geometry.in_channels; source.out = geometry.out_channels;
+                    source.kernel = geometry.kernel_spatial; source.groups = geometry.groups;
+                    convolution = true;
+                    break;
+                }
+                case LayerType::CausalDepthwiseConv1d: {
+                    // Parameter packing is independent of the live sequence length.
+                    const auto geometry = RuntimeCausalSequence::checkedGeometry(layer, positive(layer.in_features));
+                    source.in = source.out = geometry.channels;
+                    source.groups = geometry.channels; source.kernel = geometry.kernel;
+                    convolution = causal = true;
+                    break;
+                }
+                case LayerType::Conv1d:
+                    if (layer.groups != 1) break;
+                    source.in = positive(layer.in_channels); source.out = positive(layer.out_channels);
+                    source.kernel = positive(layer.kernel_h > 0 ? layer.kernel_h : 3);
+                    convolution = true;
+                    break;
+                case LayerType::Conv2d: case LayerType::ConvTranspose2d:
+                    // Legacy kernels use square O,I,K,K storage; rectangular or
+                    // grouped metadata can belong to another packing and is not guessed.
+                    if (layer.groups != 1 || (layer.kernel_w > 0 && layer.kernel_w != layer.get_kernel_h())) break;
+                    source.in = positive(layer.in_channels); source.out = positive(layer.out_channels);
+                    source.kernel = product(positive(layer.get_kernel_h()), positive(layer.get_kernel_h()));
+                    convolution = true;
+                    break;
+                case LayerType::DepthwiseConv2d:
+                    source.in = source.out = positive(layer.in_channels);
+                    source.groups = source.in;
+                    source.kernel = product(positive(layer.kernel_h > 0 ? layer.kernel_h : 3),
+                                            positive(layer.kernel_h > 0 ? layer.kernel_h : 3));
+                    convolution = true;
+                    break;
+                default: break;
+            }
+        } catch (...) { source.in = source.out = source.kernel = 0; }
+        if (source.in && source.out && source.kernel && source.groups &&
+            source.in % source.groups == 0 && source.out % source.groups == 0) {
+            source.main = product(product(source.out, source.in / source.groups), source.kernel);
+            const size_t bias_count = layer.use_bias ? source.out : 0;
+            source.geometry = source.count == declared && source.main && source.main <= source.count &&
+                bias_count <= source.count - source.main && source.main + bias_count == source.count;
+            source.bias = source.geometry && layer.use_bias;
+        }
+        if (source.geometry && source.from != viz::liveWeightNoLayer && source.to != viz::liveWeightNoLayer) {
+            const auto& from = snapshot.network.layers[source.from];
+            const auto& to = snapshot.network.layers[source.to];
+            // Match the represented axes, not just accidental flattened lengths.
+            const bool compatible_axes = causal || (convolution ? from.kind == "canal" && to.kind == "canal"
+                                                                              : from.kind != "canal" && to.kind != "canal");
+            if (from.is_operation || to.is_operation || from.units != source.in || to.units != source.out || !compatible_axes)
+                source.from = viz::liveWeightNoLayer;
+        }
+        if (source.geometry && source.from != viz::liveWeightNoLayer && source.to != viz::liveWeightNoLayer) {
+            const size_t in_group = source.in / source.groups, out_group = source.out / source.groups;
+            for (size_t input : visible_units[source.from]) source.group_inputs[input / in_group].push_back(input);
+            for (size_t output : visible_units[source.to]) {
+                const size_t group = output / out_group;
+                const auto found = source.group_inputs.find(group);
+                if (found == source.group_inputs.end()) continue;
+                const size_t count = product(found->second.size(), source.kernel);
+                if (count && count <= source.main - source.matrix_candidates) {
+                    source.matrix_candidates += count;
+                    source.rows.push_back({output, group, source.matrix_candidates});
+                }
+            }
+        }
+        if (source.bias && source.to != viz::liveWeightNoLayer)
+            source.biases = visible_units[source.to];
+        std::ostringstream key;
+        key << index << '|' << layer.name << '|' << layer.type << '|' << declared << '|'
+            << layer.in_features << ',' << layer.out_features << ',' << layer.in_channels << ',' << layer.out_channels << ','
+            << layer.embed_dim << ',' << layer.vocab_size << ',' << layer.num_heads << ',' << layer.num_kv_heads << ','
+            << layer.head_dim << ',' << source.kernel << ',' << source.groups;
+        source.key = key.str();
+        sources.push_back(std::move(source));
+    }
+    // Fair bounded quotas avoid letting the first large embedding consume the
+    // entire diagnostic. Selection never depends on weight magnitude or updates.
+    size_t selected = 0;
+    if (sources.size() > viz::liveWeightCoefficientLimit) {
+        for (size_t index = 0; index < viz::liveWeightCoefficientLimit; ++index) {
+            sources[viz::neuronSampleIndex(sources.size(), viz::liveWeightCoefficientLimit, index)].selected = 1;
+            ++selected;
+        }
+    }
+    bool progress = true;
+    while (selected < viz::liveWeightCoefficientLimit && progress) {
+        progress = false;
+        for (auto& source : sources) if (selected < viz::liveWeightCoefficientLimit && source.selected < source.count) {
+            ++source.selected; ++selected; progress = true;
+        }
+    }
+    for (const auto& source : sources) {
+        if (source.selected < source.count) snapshot.sampled = true;
+        std::vector<size_t> chosen;
+        std::unordered_set<size_t> indices;
+        auto choose = [&](size_t index) {
+            if (index < source.count && chosen.size() < source.selected && indices.insert(index).second) chosen.push_back(index);
+        };
+        const size_t candidates = source.matrix_candidates + source.biases.size();
+        const size_t mapped_count = std::min(source.selected, candidates);
+        for (size_t ordinal = 0; ordinal < mapped_count; ++ordinal) {
+            const size_t candidate = viz::neuronSampleIndex(candidates, mapped_count, ordinal);
+            if (candidate >= source.matrix_candidates) choose(source.main + source.biases[candidate - source.matrix_candidates]);
+            else {
+                const auto row = std::upper_bound(source.rows.begin(), source.rows.end(), candidate,
+                    [](size_t value, const VisibleRow& item) { return value < item.end; });
+                const size_t begin = row == source.rows.begin() ? 0 : (row - 1)->end;
+                const size_t offset = candidate - begin;
+                const auto& inputs_in_group = source.group_inputs.at(row->group);
+                const size_t input = inputs_in_group[offset / source.kernel];
+                choose((row->output * (source.in / source.groups) + input % (source.in / source.groups)) *
+                       source.kernel + offset % source.kernel);
+            }
+        }
+        const size_t remaining = source.selected - chosen.size();
+        for (size_t ordinal = 0; ordinal < remaining; ++ordinal)
+            choose(viz::neuronSampleIndex(source.count, remaining, ordinal));
+        // At most 2048 prior selections can collide; 4096 probes are sufficient
+        // to fill every remaining slot without traversing the parameter block.
+        for (size_t probe = 0; chosen.size() < source.selected && probe < source.count &&
+             probe < 2 * viz::liveWeightCoefficientLimit; ++probe) choose(probe);
+        std::sort(chosen.begin(), chosen.end());
+        for (size_t parameter : chosen) {
+            const float value = source.values[parameter];
+            if (!std::isfinite(value)) { ++snapshot.nonfinite_parameters; continue; }
+            viz::LiveWeightSample sample;
+            sample.layer = static_cast<int>(source.layer); sample.parameter_index = parameter; sample.value = value;
+            sample.key = source.key + '|' + std::to_string(parameter);
+            sample.target_layer = source.to;
+            sample.source_layer = source.from;
+            const auto& layer = layers[source.layer];
+            sample.label = "L" + std::to_string(source.layer) + " " + layer.name + " [" + layer.type + "]";
+            if (source.geometry && parameter < source.main) {
+                const size_t per_group = source.in / source.groups;
+                sample.output_unit = parameter / (per_group * source.kernel);
+                const size_t group = sample.output_unit / (source.out / source.groups);
+                sample.input_unit = group * per_group + (parameter / source.kernel) % per_group;
+                sample.mapped = source.from != viz::liveWeightNoLayer && source.to != viz::liveWeightNoLayer &&
+                    std::binary_search(visible_units[source.from].begin(), visible_units[source.from].end(), sample.input_unit) &&
+                    std::binary_search(visible_units[source.to].begin(), visible_units[source.to].end(), sample.output_unit);
+                sample.label += " · W[" + std::to_string(sample.output_unit) + "," + std::to_string(sample.input_unit);
+                if (source.kernel > 1) sample.label += "; tap=" + std::to_string(parameter % source.kernel);
+                sample.label += "]";
+            } else if (source.bias && parameter >= source.main && parameter - source.main < source.out) {
+                sample.is_bias = true; sample.output_unit = parameter - source.main;
+                sample.label += " · biais[" + std::to_string(sample.output_unit) + "]";
+            } else sample.label += " · coefficient[" + std::to_string(parameter) + "]";
+            sample.label += " · offset " + std::to_string(parameter);
+            snapshot.weights.push_back(std::move(sample));
+        }
+    }
+    snapshot.sampled = snapshot.sampled || snapshot.total_parameters > snapshot.weights.size();
+    return snapshot;
+}
+
+mimir::viz::LatentSpaceRawSnapshot Model::captureLatentSpaceSnapshot(
+    size_t optimizer_step, size_t max_token_vectors,
+    size_t max_sequence_positions, size_t max_vectors_per_matrix) const
+{
+    using Group = mimir::viz::LatentVectorGroup;
+    mimir::viz::LatentSpaceRawSnapshot snapshot;
+    snapshot.optimizer_step = optimizer_step;
+    snapshot.model_name = getModelName();
+    if (modelConfig.is_object()) {
+        const auto type = modelConfig.find("type");
+        if (type != modelConfig.end() && type->is_string()) snapshot.architecture = type->get<std::string>();
+        auto dimension = [&](const char* name) {
+            const auto value = modelConfig.find(name);
+            if (value == modelConfig.end() || !value->is_number_integer()) return 0;
+            const auto number = value->get<int64_t>();
+            return number > 0 && number <= std::numeric_limits<int>::max() ? static_cast<int>(number) : 0;
+        };
+        snapshot.d_model = dimension("d_model");
+        snapshot.latent_dim = dimension("latent_dim");
+        snapshot.sequence_length = dimension("seq_len");
+    }
+    if (snapshot.architecture.empty()) snapshot.architecture = "graphe natif";
+    if (snapshot.model_name.empty()) snapshot.model_name = snapshot.architecture;
+
+    constexpr size_t point_budget = 512;
+    constexpr size_t feature_budget = 256 * 1024;
+    constexpr size_t dimension_budget = 2048;
+    const size_t matrix_limit = std::min(max_vectors_per_matrix, point_budget);
+    const size_t token_limit = std::min(max_token_vectors, point_budget);
+    const size_t activation_limit = std::min(max_sequence_positions, point_budget);
+    struct Source {
+        const float* values = nullptr;
+        size_t rows = 0, width = 0, row_stride = 0, feature_stride = 1, selected = 0;
+        int layer = -1;
+        Group group = Group::ParameterWeight;
+        std::string label, axis;
+        bool sequence = false, tokens = false;
+        std::vector<size_t> row_indices;
+    };
+    std::vector<Source> parameter_sources, activation_sources;
+    // Endpoints are included without multiplying two potentially large sizes.
+    auto sample_index = [](size_t count, size_t selected, size_t index) {
+        if (selected <= 1) return (count - 1) / 2;
+        const size_t denominator = selected - 1;
+        return index * ((count - 1) / denominator) +
+            index * ((count - 1) % denominator) / denominator;
+    };
+    auto product = [](size_t a, size_t b) {
+        return a && b > std::numeric_limits<size_t>::max() / a ? size_t{0} : a * b;
+    };
+    auto add_source = [&](std::vector<Source>& sources, const float* values, size_t available,
+                          size_t offset, size_t rows, size_t width, size_t row_stride,
+                          size_t feature_stride, size_t limit, int index, Group group,
+                          const std::string& label, const char* axis, bool sequence = false) {
+        if (!values || !rows || !width || !row_stride || !feature_stride || !limit || offset >= available) return false;
+        const size_t row_span = product(rows - 1, row_stride);
+        const size_t feature_span = product(width - 1, feature_stride);
+        if ((rows > 1 && !row_span) || (width > 1 && !feature_span) ||
+            row_span >= available - offset || feature_span >= available - offset - row_span) return false;
+        Source source;
+        source.values = values + offset; source.rows = rows; source.width = width;
+        source.row_stride = row_stride; source.feature_stride = feature_stride;
+        source.selected = std::min(rows, limit); source.layer = index;
+        source.group = group; source.label = label; source.axis = axis; source.sequence = sequence;
+        sources.push_back(std::move(source));
+        return true;
+    };
+    std::unordered_set<const float*> seen_weights;
+    std::unordered_set<std::string> parameter_owners;
+    std::unordered_map<std::string, size_t> last_producer;
+    for (size_t index = 0; index < layers.size(); ++index) {
+        last_producer[layers[index].output.empty() ? "x" : layers[index].output] = index;
+        parameter_owners.insert(layers[index].name);
+    }
+
+    auto add_activation = [&](const Layer& layer, size_t index, const std::vector<float>& values,
+                              bool output, const std::string& label) {
+        if (values.empty() || !activation_limit) return;
+        size_t width = 0;
+        bool sequence = false;
+        const auto type = layer.type_enum;
+        Group group = type == LayerType::Reparameterize || layer.name.find("latent") != std::string::npos
+            ? Group::LatentActivation : Group::LayerActivation;
+        const bool convolution = type == LayerType::Conv1d || type == LayerType::Conv2d ||
+            type == LayerType::ConvTranspose2d || type == LayerType::DepthwiseConv2d ||
+            type == LayerType::Conv3d || type == LayerType::Conv4d;
+        if (type == LayerType::CausalDepthwiseConv1d || type == LayerType::SwiGLU) {
+            if (layer.in_features > 0 && values.size() % static_cast<size_t>(layer.in_features) == 0) {
+                width = layer.in_features; sequence = true;
+            }
+        } else if (convolution) {
+            const int channels = output ? layer.out_channels : layer.in_channels;
+            if (type == LayerType::Conv3d || type == LayerType::Conv4d) {
+                try {
+                    const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+                    const size_t plane = output ? geometry.output_spatial : geometry.input_spatial;
+                    const size_t sample = product(static_cast<size_t>(std::max(0, channels)), plane);
+                    if (sample && values.size() % sample == 0) width = plane;
+                } catch (...) { /* Unknown metadata remains a flat vector below. */ }
+            } else if (channels > 0) {
+                const int height = output ? layer.output_height : layer.input_height;
+                const int spatial_width = output ? layer.output_width : layer.input_width;
+                const size_t plane = height > 0 && spatial_width > 0 ?
+                    product(static_cast<size_t>(height), static_cast<size_t>(spatial_width)) : 0;
+                const size_t sample = product(static_cast<size_t>(channels), plane);
+                if (sample && values.size() % sample == 0) width = plane;
+            }
+        } else if (type == LayerType::Linear || type == LayerType::Bilinear) {
+            const int features = output ? layer.out_features : layer.in_features;
+            if (features > 0 && values.size() % static_cast<size_t>(features) == 0) {
+                width = features; sequence = layer.seq_len > 0;
+            }
+        } else if (type == LayerType::Embedding || type == LayerType::EmbeddingBag) {
+            if (!output) return; // Integer ids are not learned feature activations.
+            const int features = layer.embed_dim > 0 ? layer.embed_dim : layer.out_features;
+            if (features > 0 && values.size() % static_cast<size_t>(features) == 0) {
+                width = features; sequence = true;
+            }
+        } else if (type == LayerType::SelfAttention || type == LayerType::MultiHeadAttention ||
+                   type == LayerType::CrossAttention || type == LayerType::PatchEmbed) {
+            if (layer.embed_dim > 0 && values.size() % static_cast<size_t>(layer.embed_dim) == 0) {
+                width = layer.embed_dim; sequence = true;
+            }
+        } else if (type == LayerType::RNN || type == LayerType::LSTM || type == LayerType::GRU) {
+            const int features = output ? layer.out_features : layer.in_features;
+            if (features > 0 && values.size() % static_cast<size_t>(features) == 0) {
+                width = features; sequence = true;
+            }
+        } else if ((type == LayerType::LayerNorm || type == LayerType::RMSNorm) &&
+                   layer.in_features > 0 && values.size() % static_cast<size_t>(layer.in_features) == 0) {
+            width = layer.in_features; sequence = layer.seq_len > 0;
+        }
+        // A configured shape is used only when its product matches the actual
+        // tensor. Otherwise expose one genuine flat vector, never invent a grid.
+        if (!width && !layer.shape.empty()) {
+            auto shape = output && (type == LayerType::Reshape || type == LayerType::View) && !layer.target_shape.empty()
+                ? layer.target_shape : layer.shape;
+            if (output && type == LayerType::Permute && layer.permute_dims.size() == shape.size()) {
+                auto reordered = shape;
+                bool valid = true;
+                for (size_t axis = 0; axis < shape.size(); ++axis) {
+                    const int original = layer.permute_dims[axis];
+                    if (original < 0 || static_cast<size_t>(original) >= shape.size()) { valid = false; break; }
+                    reordered[axis] = shape[original];
+                }
+                if (valid) shape = std::move(reordered); else shape.clear();
+            }
+            size_t count = 1;
+            for (int dimension : shape) { if (dimension <= 0) { count = 0; break; } count = product(count, dimension); }
+            if (!shape.empty() && count == values.size()) width = static_cast<size_t>(shape.back());
+        }
+        if (!width) width = values.size();
+        if (sequence && group != Group::LatentActivation) group = Group::SequenceActivation;
+        add_source(activation_sources, values.data(), values.size(), 0, values.size()/width,
+                   width, width, 1, activation_limit, static_cast<int>(index), group,
+                   label, sequence ? "position" : width == values.size() ? "vecteur plat" : "tranche", sequence);
+    };
+
+    for (size_t index = 0; index < layers.size(); ++index) {
+        const Layer& layer = layers[index];
+        const std::string prefix = "L" + std::to_string(index) + " " + layer.name + " [" +
+            LayerRegistry::type_to_string(layer.type_enum) + "]";
+        if (layer.rope_theta > 0.f) snapshot.position_encoding = "RoPE";
+        const size_t count = layer.getWeightsSize();
+        const float* weights = nullptr;
+        // Tied parameters can still have separate provisional blocks before
+        // their first forward. The declared owner is authoritative immediately.
+        const bool declared_alias = !layer.shared_weights_from.empty() &&
+            layer.shared_weights_from != layer.name && parameter_owners.count(layer.shared_weights_from);
+        if (!declared_alias && count && layer.weight_block && layer.weight_block->use_dynamic_alloc && layer.weight_block->dynamic_handle) {
+            // A projection must not hydrate an entire cold/compressed parameter
+            // block merely to sample a handful of vectors.
+            const auto* handle = static_cast<const DynamicTensorAllocator::TensorHandle*>(layer.weight_block->dynamic_handle);
+            if (handle->is_loaded) weights = handle->data_ptr;
+        } else if (!declared_alias && count) weights = layer.getWeights();
+        if (weights && seen_weights.insert(weights).second) {
+            bool described = false;
+            auto rows = [&](size_t offset, size_t number, size_t width, Group group, const std::string& section, size_t limit = 0) {
+                const bool added = add_source(parameter_sources, weights, count, offset, number, width,
+                    width, 1, limit ? limit : matrix_limit, static_cast<int>(index), group, prefix + " " + section, "ligne");
+                described = described || added; return added;
+            };
+            auto columns = [&](size_t offset, size_t number, size_t width, size_t stride, Group group, const std::string& section) {
+                const bool added = add_source(parameter_sources, weights, count, offset, number, width,
+                    1, stride, matrix_limit, static_cast<int>(index), group, prefix + " " + section, "colonne");
+                described = described || added; return added;
+            };
+            auto bias = [&](size_t offset, size_t width) {
+                if (layer.use_bias) rows(offset, 1, width, Group::ParameterWeight, "biais");
+            };
+            const size_t in = static_cast<size_t>(std::max(0, layer.in_features));
+            const size_t out = static_cast<size_t>(std::max(0, layer.out_features));
+            switch (layer.type_enum) {
+                case LayerType::Embedding:
+                case LayerType::EmbeddingBag: {
+                    const size_t width = static_cast<size_t>(std::max(0, layer.embed_dim > 0 ? layer.embed_dim : layer.out_features));
+                    if (token_limit && rows(0, static_cast<size_t>(std::max(0, layer.vocab_size)), width,
+                            Group::TokenEmbedding, "embeddings", token_limit)) {
+                        Source& source = parameter_sources.back(); source.tokens = true;
+                        const auto names = Mimir::Planning::planner_inputs_for(layer);
+                        if (!names.empty() && hasTensorInt(names[0])) {
+                            const auto& ids = getTensorInt(names[0]);
+                            std::unordered_set<size_t> seen;
+                            const size_t inspected = std::min(ids.size(), std::max<size_t>(token_limit, std::min<size_t>(2048, token_limit*4)));
+                            for (size_t position = 0; position < inspected; ++position) {
+                                const int id = ids[sample_index(ids.size(), inspected, position)];
+                                if (id >= 0 && static_cast<size_t>(id) < source.rows && seen.insert(id).second)
+                                    source.row_indices.push_back(static_cast<size_t>(id));
+                            }
+                            if (!source.row_indices.empty()) source.selected = std::min(source.row_indices.size(), token_limit);
+                        }
+                    }
+                    // A zero embedding quota explicitly excludes this family.
+                    described = true;
+                    break;
+                }
+                case LayerType::Linear: {
+                    Group group = index + 1 == layers.size() ? Group::OutputWeight : Group::FeedForwardWeight;
+                    if (layer.name.find("latent_down") != std::string::npos) group = Group::LatentDownWeight;
+                    if (layer.name.find("latent_up") != std::string::npos) {
+                        group = Group::LatentUpWeight;
+                        columns(0, in, out, in, group, "projection");
+                    } else rows(0, out, in, group, "projection");
+                    const size_t main = product(in, out); if (main) bias(main, out);
+                    break;
+                }
+                case LayerType::CausalDepthwiseConv1d: {
+                    try {
+                        const auto geometry = RuntimeCausalSequence::checkedGeometry(layer);
+                        rows(0, geometry.channels, geometry.kernel, Group::ConvolutionWeight, "filtres causaux");
+                        bias(geometry.weight_size, geometry.channels);
+                    } catch (...) { /* Unknown metadata remains visible as packed storage. */ }
+                    break;
+                }
+                case LayerType::Conv3d:
+                case LayerType::Conv4d: {
+                    try {
+                        const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+                        rows(0, geometry.out_channels, geometry.weight_size/geometry.out_channels,
+                             Group::ConvolutionWeight, "filtres");
+                        bias(geometry.weight_size, geometry.out_channels);
+                    } catch (...) { /* Expose unknown packed storage below. */ }
+                    break;
+                }
+                case LayerType::Conv1d:
+                case LayerType::Conv2d:
+                case LayerType::ConvTranspose2d:
+                case LayerType::DepthwiseConv2d: {
+                    const size_t channels = layer.type_enum == LayerType::DepthwiseConv2d ? 1 : static_cast<size_t>(std::max(0, layer.in_channels));
+                    const size_t outputs = static_cast<size_t>(std::max(0, layer.type_enum == LayerType::DepthwiseConv2d ? layer.in_channels : layer.out_channels));
+                    const size_t kernel = static_cast<size_t>(std::max(0, layer.get_kernel_h()));
+                    const size_t kernel_width = layer.type_enum == LayerType::Conv1d ? 1 : static_cast<size_t>(std::max(0, layer.get_kernel_w()));
+                    const size_t groups = layer.type_enum == LayerType::DepthwiseConv2d ? 1 : static_cast<size_t>(std::max(1, layer.groups));
+                    const size_t declared = channels % groups ? 0 : product(channels/groups, product(kernel, kernel_width));
+                    const size_t legacy = product(channels, layer.type_enum == LayerType::Conv1d ? kernel : product(kernel, kernel));
+                    const size_t bias_count = layer.use_bias ? outputs : 0;
+                    if (outputs && count >= bias_count && (count-bias_count)%outputs == 0) {
+                        const size_t width = (count-bias_count)/outputs;
+                        // Validate both declared rectangular/grouped storage and
+                        // the square layout used by legacy CPU/GPU kernels.
+                        if (width && (width == declared || width == legacy)) {
+                            rows(0, outputs, width, Group::ConvolutionWeight, "filtres");
+                            bias(count-bias_count, outputs);
+                        }
+                    }
+                    break;
+                }
+                case LayerType::LayerNorm: case LayerType::RMSNorm:
+                case LayerType::BatchNorm1d: case LayerType::BatchNorm2d:
+                case LayerType::InstanceNorm2d: case LayerType::GroupNorm: {
+                    size_t width = in ? in : static_cast<size_t>(std::max(0, layer.in_channels));
+                    if (!width) width = layer.type_enum == LayerType::RMSNorm ? count : count/(layer.use_bias ? 2 : 1);
+                    if (layer.affine) {
+                        rows(0, 1, width, Group::NormWeight, "gamma");
+                        if (layer.type_enum != LayerType::RMSNorm && layer.use_bias)
+                            rows(width, 1, width, Group::NormWeight, "beta");
+                    }
+                    described = true; break;
+                }
+                case LayerType::SelfAttention: case LayerType::MultiHeadAttention: {
+                    const size_t width = static_cast<size_t>(std::max(0, layer.embed_dim));
+                    size_t kv = width;
+                    if (layer.type_enum == LayerType::MultiHeadAttention && layer.rope_theta > 0.f &&
+                        layer.num_heads > 0 && layer.num_kv_heads > 0 && width % layer.num_heads == 0)
+                        kv = product(static_cast<size_t>(layer.num_kv_heads), width/layer.num_heads);
+                    const size_t qsize = product(width, width), kvsize = product(kv, width);
+                    if (qsize && kvsize && qsize <= count && kvsize <= (count-qsize)/2) {
+                        rows(0, width, width, Group::AttentionWeight, "Q");
+                        rows(qsize, kv, width, Group::AttentionWeight, "K");
+                        rows(qsize+kvsize, kv, width, Group::AttentionWeight, "V");
+                        rows(qsize+2*kvsize, width, width, Group::AttentionWeight, "O");
+                    }
+                    break;
+                }
+                case LayerType::CrossAttention: {
+                    const size_t width = static_cast<size_t>(std::max(0, layer.embed_dim));
+                    const size_t kvwidth = in ? in : width;
+                    const size_t qsize = product(width, width), kvsize = product(product(kvwidth, width), 2);
+                    if (qsize && kvsize && qsize <= count && kvsize <= count-qsize) {
+                        columns(0, width, width, width, Group::AttentionWeight, "Q");
+                        columns(qsize, width, kvwidth, 2*width, Group::AttentionWeight, "K");
+                        columns(qsize+width, width, kvwidth, 2*width, Group::AttentionWeight, "V");
+                        columns(qsize+kvsize, width, width, width, Group::AttentionWeight, "O");
+                    }
+                    break;
+                }
+                case LayerType::LSTM: case LayerType::GRU: case LayerType::RNN: {
+                    const size_t gates = layer.type_enum == LayerType::LSTM ? 4 : layer.type_enum == LayerType::GRU ? 3 : 1;
+                    const size_t hidden = product(gates, out), first = product(hidden, in), second = product(hidden, out);
+                    rows(0, hidden, in, Group::RecurrentWeight, "entrée/gates");
+                    if (first) rows(first, hidden, out, Group::RecurrentWeight, "récurrence/gates");
+                    if (first && second && first <= count && second <= count-first) bias(first+second, 2*hidden);
+                    break;
+                }
+                case LayerType::PatchEmbed: {
+                    const size_t width = static_cast<size_t>(std::max(0, layer.embed_dim > 0 ? layer.embed_dim : layer.out_features));
+                    const size_t patch = static_cast<size_t>(std::max(0, layer.patch_dim));
+                    columns(0, width, patch, width, Group::FeedForwardWeight, "patches");
+                    const size_t main = product(width, patch); if (main) bias(main, width);
+                    break;
+                }
+                default: break;
+            }
+            if (!described) rows(0, 1, count, Group::ParameterWeight, "paramètres aplatis");
+        }
+        const std::string output_name = layer.output.empty() ? "x" : layer.output;
+        const auto producer = last_producer.find(output_name);
+        if (producer != last_producer.end() && producer->second == index && hasTensor(output_name))
+            add_activation(layer, index, getTensor(output_name), true, prefix + " sortie " + output_name);
+        else if (forward_state.is_valid && index < forward_state.layer_outputs.size() && !forward_state.layer_outputs[index].empty())
+            add_activation(layer, index, forward_state.layer_outputs[index], true, prefix + " sortie conservée");
+        if (forward_state.is_valid && index < forward_state.layer_inputs_multi.size()) {
+            const auto& inputs = forward_state.layer_inputs_multi[index];
+            if (!inputs.empty()) add_activation(layer, index, inputs[0], false, prefix + " entrée conservée du dernier forward");
+        }
+    }
+
+    auto candidates = [](const std::vector<Source>& sources) {
+        size_t count = 0;
+        for (const auto& source : sources) count += source.selected;
+        return count;
+    };
+    const size_t weights = candidates(parameter_sources), activations = candidates(activation_sources);
+    size_t activation_points = std::min(activations, activation_limit);
+    if (weights && weights + activation_points > point_budget)
+        activation_points = std::min(activation_points, point_budget/2);
+    size_t weight_points = std::min(weights, point_budget-activation_points);
+    activation_points = std::min(activations, std::min(activation_limit, point_budget-weight_points));
+    size_t remaining_points = weight_points + activation_points, remaining_features = feature_budget;
+    auto append = [&](const Source& source, size_t candidate) {
+        const size_t rows = source.row_indices.empty() ? source.rows : source.row_indices.size();
+        const size_t selected_row = sample_index(rows, source.selected, candidate);
+        const size_t row = source.row_indices.empty() ? selected_row : source.row_indices[selected_row];
+        const size_t width = std::min({source.width, dimension_budget,
+            remaining_features/std::max<size_t>(1, remaining_points)});
+        if (remaining_points) --remaining_points;
+        if (!width) return;
+        mimir::viz::LatentVectorSample sample;
+        sample.layer = source.layer; sample.group = source.group;
+        sample.sequence_position = source.sequence && row <= static_cast<size_t>(std::numeric_limits<int>::max()) ? static_cast<int>(row) : -1;
+        sample.original_dimension = source.width;
+        sample.feature_offset = (source.width-width)/2;
+        sample.label = source.label + " " + source.axis + " " + std::to_string(row);
+        if (source.tokens && row < getTokenizer().getVocabSize() && row <= static_cast<size_t>(std::numeric_limits<int>::max())) {
+            std::string token = getTokenizer().getTokenById(static_cast<int>(row));
+            for (char& character : token) if (static_cast<unsigned char>(character) <= 32) character = ' ';
+            if (token.size() > 96) token = token.substr(0,96) + "…";
+            sample.label += " · " + token;
+        }
+        if (width != source.width) sample.label += " · fenêtre [" + std::to_string(sample.feature_offset) + "," +
+            std::to_string(sample.feature_offset+width) + ") sur " + std::to_string(source.width);
+        sample.values.reserve(width);
+        double squared = 0;
+        const float* values = source.values + row*source.row_stride + sample.feature_offset*source.feature_stride;
+        for (size_t feature = 0; feature < width; ++feature) {
+            const float value = values[feature*source.feature_stride];
+            if (!std::isfinite(value)) return;
+            sample.values.push_back(value); squared += static_cast<double>(value)*value;
+        }
+        sample.norm = static_cast<float>(std::min(std::sqrt(squared), static_cast<double>(std::numeric_limits<float>::max())));
+        remaining_features -= width;
+        snapshot.feature_dimension = std::max(snapshot.feature_dimension, width);
+        snapshot.vectors.push_back(std::move(sample));
+    };
+    auto collect = [&](const std::vector<Source>& sources, size_t count, size_t selected) {
+        size_t source_index = 0, first = 0;
+        for (size_t index = 0; index < selected; ++index) {
+            const size_t candidate = sample_index(count, selected, index);
+            while (source_index < sources.size() && candidate-first >= sources[source_index].selected) {
+                first += sources[source_index].selected; ++source_index;
+            }
+            if (source_index < sources.size()) append(sources[source_index], candidate-first);
+        }
+    };
+    collect(parameter_sources, weights, weight_points);
+    collect(activation_sources, activations, activation_points);
+    return snapshot;
+}
+
+mimir::viz::LatentCorrelationObservation Model::captureLatentCorrelationObservation(
+    size_t optimizer_step, uint64_t forward_serial, bool training) const
+{
+    namespace capture = mimir::viz::correlation_capture;
+    mimir::viz::LatentCorrelationObservation observation;
+    observation.optimizer_step = optimizer_step;
+    observation.forward_serial = forward_serial;
+    observation.training = training;
+    observation.model_name = getModelName();
+    if (modelConfig.is_object()) observation.architecture = modelConfig.value("type", std::string{});
+    if (observation.architecture.empty()) observation.architecture = "graphe natif";
+    if (observation.model_name.empty()) observation.model_name = observation.architecture;
+    // A manual capture before the first successful forward must never turn
+    // weights, stale tensors, or initialized buffers into corpus observations.
+    if (!latent_correlation_forward_serial_ || !forward_serial || layers.empty()) return observation;
+
+    struct Available {
+        const std::vector<float>* values = nullptr;
+        size_t consumer = 0;
+        bool recovered_input = false;
+    };
+    std::vector<Available> available(layers.size());
+    std::unordered_map<std::string, size_t> producer;
+    const bool saved_training = training && latent_correlation_last_forward_training_ &&
+        forward_serial == latent_correlation_forward_serial_ && forward_state.is_valid;
+    // Associate each saved input with its real producer, including graphs that
+    // overwrite "x" repeatedly. Only the current forward's training cache counts.
+    for (size_t index = 0; index < layers.size(); ++index) {
+        if (saved_training && index < forward_state.layer_inputs_multi.size() &&
+            index < forward_state.layer_input_names.size()) {
+            const auto& names = forward_state.layer_input_names[index];
+            const auto& values = forward_state.layer_inputs_multi[index];
+            if (values.size() == names.size()) for (size_t input = 0; input < names.size(); ++input) {
+                const auto owner = producer.find(names[input]);
+                if (owner != producer.end() && !values[input].empty() && !available[owner->second].values)
+                    available[owner->second] = {&values[input], index, true};
+            }
+        }
+        if (saved_training && index < forward_state.layer_outputs.size() &&
+            !forward_state.layer_outputs[index].empty())
+            available[index] = {&forward_state.layer_outputs[index], 0, false};
+        producer[layers[index].output.empty() ? "x" : layers[index].output] = index;
+    }
+    for (const auto& owner : producer) {
+        const auto tensor = tensor_store.find(owner.first);
+        if (tensor != tensor_store.end() && !tensor->second.empty())
+            available[owner.second] = {&tensor->second, 0, false};
+    }
+
+    const std::vector<int>* ids = nullptr;
+    const std::vector<float>* float_ids = nullptr;
+    // Resolve the IDs actually consumed by Embedding, including the public
+    // vector<int> overload which delegates through FLOAT tensors. Never build
+    // new tokenizer state or reinterpret a stale training cache in inference.
+    for (size_t index = 0; index < layers.size(); ++index) {
+        if (layers[index].type_enum != LayerType::Embedding) continue;
+        const auto names = Mimir::Planning::planner_inputs_for(layers[index]);
+        if (names.empty()) continue;
+        const auto integer = tensor_store_int.find(names.front());
+        if (integer != tensor_store_int.end() && !integer->second.empty()) {
+            ids = &integer->second; break;
+        }
+        if (saved_training && index < forward_state.layer_inputs_multi.size() &&
+            !forward_state.layer_inputs_multi[index].empty() && !forward_state.layer_inputs_multi[index][0].empty())
+            float_ids = &forward_state.layer_inputs_multi[index][0];
+        else {
+            const auto last = producer.find(names.front());
+            const auto value = tensor_store.find(names.front());
+            if ((last == producer.end() || last->second < index) && value != tensor_store.end() && !value->second.empty())
+                float_ids = &value->second;
+            else if (names.front() == "x") {
+                bool prior_producer = false;
+                for (size_t previous = 0; previous < index; ++previous)
+                    prior_producer |= (layers[previous].output.empty() ? "x" : layers[previous].output) == "x";
+                const auto initial = tensor_store.find("__input__");
+                if (!prior_producer && initial != tensor_store.end() && !initial->second.empty()) float_ids = &initial->second;
+            }
+        }
+        if (float_ids) break;
+    }
+
+    struct Geometry {
+        capture::Layout layout = capture::Layout::Flat;
+        size_t width = 0, plane = 1;
+        bool sequence = false;
+    };
+    auto multiply = [](size_t a, size_t b) {
+        return a && b > std::numeric_limits<size_t>::max() / a ? size_t{0} : a * b;
+    };
+    std::function<Geometry(size_t, size_t, unsigned)> geometry;
+    geometry = [&](size_t index, size_t count, unsigned depth) -> Geometry {
+        const Layer& layer = layers[index];
+        Geometry result{capture::Layout::Flat, count, 1, false};
+        auto feature_last = [&](int width, bool sequence) {
+            if (width > 0 && count % static_cast<size_t>(width) == 0) {
+                result = {capture::Layout::FeatureLast, static_cast<size_t>(width), 1, sequence};
+                return true;
+            }
+            return false;
+        };
+        auto channel_first = [&](int channels, size_t plane) {
+            const size_t sample = channels > 0 ? multiply(static_cast<size_t>(channels), plane) : 0;
+            if (sample && count % sample == 0) {
+                result = {capture::Layout::ChannelFirst, static_cast<size_t>(channels), plane, false};
+                return true;
+            }
+            return false;
+        };
+        switch (layer.type_enum) {
+            case LayerType::Linear: case LayerType::Bilinear:
+            case LayerType::RNN: case LayerType::LSTM: case LayerType::GRU:
+                if (feature_last(layer.out_features, layer.seq_len > 0 ||
+                    layer.type_enum == LayerType::RNN || layer.type_enum == LayerType::LSTM || layer.type_enum == LayerType::GRU)) return result;
+                break;
+            case LayerType::Embedding: case LayerType::EmbeddingBag:
+            case LayerType::SelfAttention: case LayerType::MultiHeadAttention:
+            case LayerType::CrossAttention: case LayerType::PatchEmbed:
+                if (feature_last(layer.embed_dim > 0 ? layer.embed_dim : layer.out_features, true)) return result;
+                break;
+            case LayerType::CausalDepthwiseConv1d: case LayerType::SwiGLU:
+                if (feature_last(layer.in_features, true)) return result;
+                break;
+            case LayerType::RMSNorm: case LayerType::LayerNorm:
+                if (feature_last(layer.in_features, layer.seq_len > 0)) {
+                    // RMSNorm often omits seq_len but its actual rows still
+                    // correspond to the embedding input sequence.
+                    result.sequence = result.sequence || (ids && ids->size() == count / result.width) ||
+                        (float_ids && float_ids->size() == count / result.width);
+                    return result;
+                }
+                break;
+            case LayerType::Conv3d: case LayerType::Conv4d:
+                try {
+                    const auto g = RuntimeConvolutionND::checkedGeometry(layer);
+                    if (channel_first(g.out_channels, g.output_spatial)) return result;
+                } catch (...) {}
+                break;
+            case LayerType::Conv2d: case LayerType::ConvTranspose2d:
+            case LayerType::DepthwiseConv2d: case LayerType::Conv1d: {
+                // Legacy convolution runtimes expose a single C/spatial tensor.
+                // Some adjust H/W internally or implement square kernels from
+                // only the first axis. Pool the REAL resident output plane;
+                // recomputing theoretical H/W can silently mix its channels.
+                const int channels = layer.type_enum == LayerType::DepthwiseConv2d ? layer.in_channels : layer.out_channels;
+                const size_t batched_rank = layer.type_enum == LayerType::Conv1d ? 3 : 4;
+                const bool ambiguous_batch = layer.shape.size() >= batched_rank && layer.shape.front() != 1;
+                if (!ambiguous_batch && channels > 0 && count % static_cast<size_t>(channels) == 0 &&
+                    channel_first(channels, count / static_cast<size_t>(channels))) return result;
+                break;
+            }
+            case LayerType::BatchNorm1d:
+                if (feature_last(layer.in_features > 0 ? layer.in_features : layer.in_channels, false)) return result;
+                break;
+            case LayerType::BatchNorm2d: case LayerType::GroupNorm: case LayerType::InstanceNorm2d:
+                if (layer.input_height > 0 && layer.input_width > 0 && channel_first(layer.in_channels,
+                    multiply(static_cast<size_t>(layer.input_height), static_cast<size_t>(layer.input_width)))) return result;
+                break;
+            default: break;
+        }
+        // Shape-preserving operators inherit the layout of their first real
+        // producer. Reshape/Permute/Flatten/Concat deliberately do not guess it.
+        const auto type = layer.type_enum;
+        const bool preserves = type == LayerType::Identity || type == LayerType::Reparameterize ||
+            type == LayerType::Add || type == LayerType::Subtract || type == LayerType::Multiply ||
+            type == LayerType::Divide || type == LayerType::Dropout || type == LayerType::Dropout2d ||
+            type == LayerType::AlphaDropout || Mimir::Planning::FusionCalibration::pointwiseCandidate(type);
+        if (preserves && depth < 16) {
+            const auto names = Mimir::Planning::planner_inputs_for(layer);
+            if (!names.empty()) for (size_t previous = index; previous-- > 0;) {
+                if ((layers[previous].output.empty() ? "x" : layers[previous].output) == names.front())
+                    return geometry(previous, count, depth + 1);
+            }
+        }
+        return result;
+    };
+
+    std::vector<capture::Source> sources;
+    capture::Source final_fallback;
+    const std::string final_name = modelConfig.is_object() ?
+        modelConfig.value(training ? "forward_output_tensor" : "inference_output_tensor",
+            modelConfig.value("forward_output_tensor", std::string("x"))) : "x";
+    const auto final_producer = producer.find(final_name);
+    for (size_t index = 0; index < layers.size(); ++index) {
+        const auto& value = available[index];
+        const auto& layer = layers[index];
+        if (!value.values || layer.type_enum == LayerType::Constant) continue;
+        const auto names = Mimir::Planning::planner_inputs_for(layer);
+        if (layer.type_enum == LayerType::Identity && !names.empty() &&
+            (names.front() == "__input__" || names.front() == "text_ids")) continue;
+        const auto g = geometry(index, value.values->size(), 0);
+        capture::Source source;
+        source.values = value.values; source.layer = static_cast<int>(index);
+        source.layout = g.layout; source.width = g.width; source.plane = g.plane; source.sequence = g.sequence;
+        source.key = std::to_string(index) + "/" + layer.name + "/" +
+            (value.recovered_input ? "saved_input/" + std::to_string(value.consumer) : "output");
+        source.label = "L" + std::to_string(index) + " " + layer.name + " [" +
+            LayerRegistry::type_to_string(layer.type_enum) + "]";
+        if (value.recovered_input) source.label += " · entrée conservée de " + layers[value.consumer].name;
+        else source.label += " · sortie " + (layer.output.empty() ? "x" : layer.output);
+        const std::string name = layer.name + "/" + layer.output;
+        source.priority = layer.type_enum == LayerType::Reparameterize ||
+            name.find("latent_code") != std::string::npos || name.find("latent_activated") != std::string::npos ||
+            name.find("/mu") != std::string::npos ? 0 :
+            name.find("latent") != std::string::npos || name.find("hidden") != std::string::npos ? 1 :
+            layer.getWeightsSize() && layer.type_enum != LayerType::Embedding && layer.type_enum != LayerType::EmbeddingBag ? 2 : 3;
+        if (final_producer != producer.end() && final_producer->second == index) {
+            source.label += " · sortie finale (aucun interne disponible)";
+            final_fallback = std::move(source);
+        } else sources.push_back(std::move(source));
+    }
+    std::stable_sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) { return a.priority < b.priority; });
+    if (sources.empty() && final_fallback.values) sources.push_back(std::move(final_fallback));
+    if (sources.size() > 8) sources.resize(8);
+
+    int padding_id = getHasTokenizer() ? getTokenizer().getPadId() : -1;
+    if (modelConfig.is_object() && modelConfig.contains("padding_idx") && modelConfig["padding_idx"].is_number_integer())
+        padding_id = modelConfig["padding_idx"].get<int>();
+    if (padding_id < 0) for (const auto& layer : layers)
+        if ((layer.type_enum == LayerType::Embedding || layer.type_enum == LayerType::EmbeddingBag) && layer.padding_idx >= 0) {
+            padding_id = layer.padding_idx; break;
+        }
+    const auto mask = tensor_store_int.find("attention_mask");
+    const auto* attention_mask = mask == tensor_store_int.end() ? nullptr : &mask->second;
+    size_t remaining = 128;
+    for (size_t index = 0; index < sources.size(); ++index) {
+        const size_t quota = std::max<size_t>(1, remaining / (sources.size() - index));
+        const size_t before = observation.values.size();
+        if (!capture::appendFeatures(sources[index], quota, ids, padding_id, attention_mask, observation, float_ids)) {
+            // Reject the whole observation instead of silently changing its
+            // feature schema when a source is padded out or nonfinite.
+            observation.features.clear(); observation.values.clear(); return observation;
+        }
+        remaining -= observation.values.size() - before;
+    }
+
+    // A fingerprint is emitted only if ALL graph inputs fit this small budget.
+    // Hashing a partial image/prompt could incorrectly deduplicate distinct
+    // corpus items. Large or unavailable inputs simply have no fingerprint.
+    std::unordered_set<std::string> external_names{"__input__"}, produced;
+    for (const auto& layer : layers) {
+        for (const auto& input : Mimir::Planning::planner_inputs_for(layer))
+            if (input != "x" && !produced.count(input)) external_names.insert(input);
+        produced.insert(layer.output.empty() ? "x" : layer.output);
+    }
+    if (attention_mask) external_names.insert("attention_mask");
+    std::vector<std::string> ordered_names(external_names.begin(), external_names.end());
+    std::sort(ordered_names.begin(), ordered_names.end());
+    size_t input_values = 0, input_sources = 0;
+    bool exact_fingerprint = ordered_names.size() <= 16;
+    uint64_t fingerprint = UINT64_C(14695981039346656037);
+    for (const auto& name : ordered_names) {
+        const auto integers = tensor_store_int.find(name);
+        const auto floats = tensor_store.find(name);
+        const bool integer = integers != tensor_store_int.end() && !integers->second.empty();
+        const size_t count = integer ? integers->second.size() : floats != tensor_store.end() ? floats->second.size() : 0;
+        if (!count) continue;
+        ++input_sources;
+        if (count > 1024 - std::min<size_t>(input_values, 1024)) exact_fingerprint = false;
+        input_values = count > std::numeric_limits<size_t>::max() - input_values ?
+            std::numeric_limits<size_t>::max() : input_values + count;
+        if (!exact_fingerprint) continue;
+        for (unsigned char character : name) capture::hashValue(fingerprint, character);
+        capture::hashValue(fingerprint, integer ? 1 : 2);
+        capture::hashValue(fingerprint, count);
+        for (size_t index = 0; index < count; ++index) {
+            if (integer) capture::hashValue(fingerprint, static_cast<uint64_t>(integers->second[index]));
+            else {
+                uint32_t bits = 0; std::memcpy(&bits, &floats->second[index], sizeof(bits));
+                capture::hashValue(fingerprint, bits);
+            }
+        }
+    }
+    observation.context_fingerprint = exact_fingerprint && input_sources ? fingerprint : 0;
+    observation.context_label = std::to_string(input_sources) + " entrée(s), " + std::to_string(input_values) + " valeurs";
+    observation.context_label = "forward " + std::to_string(forward_serial) + " · " +
+        (training ? "entraînement" : "inférence") + " · " + observation.context_label;
+    return observation;
+}
+
+void Model::observeCompletedForwardCorrelations(bool training)
+{
+    ++latent_correlation_forward_serial_;
+    latent_correlation_last_forward_training_ = training;
+    const auto control = latent_space_control_;
+    if (!control) return;
+    uint64_t epoch = 0;
+    if (!control->beginCorrelationObservation(latent_space_bound_generation_,
+            latent_correlation_forward_serial_, epoch)) return;
+    try {
+        auto observation = captureLatentCorrelationObservation(latent_space_optimizer_step_,
+            latent_correlation_forward_serial_, training);
+        observation.generation = latent_space_bound_generation_;
+        observation.epoch = epoch;
+        control->submitCorrelationObservation(std::move(observation));
+    } catch (const std::exception&) {
+        // A diagnostic must not turn a successful model operation into a
+        // failed training step or modify its random stream/optimizer state.
+    } catch (...) {
+    }
+}
+
+void Model::bindLatentSpaceControl(std::shared_ptr<mimir::viz::LatentSpaceControl> control)
+{
+    latent_space_control_ = std::move(control);
+    latent_space_bound_generation_ = latent_space_control_ ? latent_space_control_->generation.load(std::memory_order_acquire) : 0;
+    if (const auto* optimizer = getSerializedOptimizer())
+        latent_space_optimizer_step_ = std::max(latent_space_optimizer_step_, optimizer->step);
+}
+
+void Model::captureRequestedLatentSpace(size_t optimizer_step, bool force)
+{
+    latent_space_optimizer_step_ = optimizer_step;
+    const auto control = latent_space_control_;
+    if (!control || control->generation.load(std::memory_order_acquire) != latent_space_bound_generation_) return;
+    if (control->correlations_enabled.load(std::memory_order_acquire)) return;
+    uint64_t token = 0, revision = 0;
+    bool neurons = false, live_weights = false;
+    if (!control->beginCapture(token, force, latent_space_bound_generation_,
+            mimir::viz::LatentSpaceControl::Clock::now(), &revision, &neurons, &live_weights)) return;
+    try {
+        mimir::viz::LatentSpaceRawSnapshot snapshot;
+        if (neurons || live_weights) {
+            snapshot.neuron_mode = neurons;
+            snapshot.live_weight_mode = live_weights;
+            snapshot.model_name = getModelName();
+            if (modelConfig.is_object() && modelConfig.contains("type") && modelConfig["type"].is_string())
+                snapshot.architecture = modelConfig["type"].get<std::string>();
+            if (snapshot.architecture.empty()) snapshot.architecture = "graphe natif";
+            if (snapshot.model_name.empty()) snapshot.model_name = snapshot.architecture;
+            snapshot.optimizer_step = optimizer_step;
+            if (live_weights) snapshot.live_weights = captureLiveWeightNetworkSnapshot();
+            else snapshot.neuron_network = captureNeuronNetworkSnapshot();
+        } else snapshot = captureLatentSpaceSnapshot(optimizer_step);
+        snapshot.generation = token;
+        snapshot.revision = revision;
+        const bool empty = live_weights ? snapshot.live_weights.network.layers.empty() :
+            neurons ? snapshot.neuron_network.layers.empty() : snapshot.vectors.empty();
+        if (empty) {
+            control->fail(neurons || live_weights ? "Aucune couche disponible pour ce modèle" :
+                "Aucun paramètre ou activation fini disponible pour ce modèle", token, revision);
+            return;
+        }
+        control->submitRawSnapshot(std::move(snapshot));
+    } catch (const std::exception& error) {
+        control->fail(std::string("Capture 3D impossible: ") + error.what(), token, revision);
+    } catch (...) {
+        control->fail("Capture 3D impossible: erreur inconnue", token, revision);
+    }
+}
+
+bool Model::InitVizTips()
+{
     return false;
 }
 
-bool Model::UpdateVizTips(const Layer& layer, VizFrame& frame) {
+bool Model::UpdateVizTips(const Layer &layer, VizFrame &frame)
+{
     return applyVizTipByLayerName(layer, frame);
 }
 
-void Model::clearVizTipsRegistry() {
+void Model::clearVizTipsRegistry()
+{
     viz_tips_by_layer_name_.clear();
 }
 
-void Model::registerVizTip(const std::string& layer_name, const std::string& tip_label) {
-    auto trim_local = [](const std::string& s) -> std::string {
+void Model::registerVizTip(const std::string &layer_name, const std::string &tip_label)
+{
+    auto trim_local = [](const std::string &s) -> std::string
+    {
         size_t b = 0;
-        while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r')) ++b;
-        if (b >= s.size()) return std::string();
+        while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r'))
+            ++b;
+        if (b >= s.size())
+            return std::string();
         size_t e = s.size();
-        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r')) --e;
+        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r'))
+            --e;
         return s.substr(b, e - b);
     };
 
     const std::string key = trim_local(layer_name);
     const std::string val = trim_local(tip_label);
-    if (key.empty() || val.empty()) return;
+    if (key.empty() || val.empty())
+        return;
     viz_tips_by_layer_name_[key] = val;
 }
 
-bool Model::applyVizTipByLayerName(const Layer& layer, VizFrame& frame) const {
-    if (layer.name.empty()) return false;
+bool Model::applyVizTipByLayerName(const Layer &layer, VizFrame &frame) const
+{
+    if (layer.name.empty())
+        return false;
     auto it = viz_tips_by_layer_name_.find(layer.name);
-    if (it == viz_tips_by_layer_name_.end()) return false;
+    if (it == viz_tips_by_layer_name_.end())
+        return false;
 
-    const std::string& tip = it->second;
-    if (tip.empty()) return false;
+    const std::string &tip = it->second;
+    if (tip.empty())
+        return false;
 
     // Le chemin canonique doit rester avant le separateur: le Visualizer le
     // parse pour reconnaitre le layer dans architecture.json. Le tip humain
     // est une information secondaire, placee apres "|".
-    if (frame.label.empty()) frame.label = tip;
-    else frame.label += " | " + tip;
+    if (frame.label.empty())
+        frame.label = tip;
+    else
+        frame.label += " | " + tip;
     return true;
 }
 
-const std::vector<float>& Model::forwardPassNamedView(
-    const std::unordered_map<std::string, std::vector<float>>& float_inputs,
-    const std::unordered_map<std::string, std::vector<int>>& int_inputs,
-    bool training
-) {
+const std::vector<float> &Model::forwardPassNamedView(
+    const std::unordered_map<std::string, std::vector<float>> &float_inputs,
+    const std::unordered_map<std::string, std::vector<int>> &int_inputs,
+    bool training)
+{
     // On injecte les entrées supplémentaires via un canal interne, puis on
     // réutilise le forward float principal (qui exécute le graphe complet).
     pending_float_inputs_ = float_inputs;
     pending_int_inputs_ = int_inputs;
 
     auto itx = float_inputs.find("x");
-    if (itx != float_inputs.end()) {
+    if (itx != float_inputs.end())
+    {
         return forwardPassView(itx->second, training);
     }
 
     // Fallback: si "x" absent, utiliser __input__ si présent, sinon vecteur vide.
     auto iti = float_inputs.find("__input__");
-    if (iti != float_inputs.end()) {
+    if (iti != float_inputs.end())
+    {
         return forwardPassView(iti->second, training);
     }
 
     // Compat: beaucoup de tests/unités injectent une seule entrée nommée (ex: x0)
     // sans alias explicite vers "x". Utiliser cette unique entrée comme ancre du forward.
-    if (float_inputs.size() == 1) {
+    if (float_inputs.size() == 1)
+    {
         return forwardPassView(float_inputs.begin()->second, training);
     }
 
@@ -1119,33 +2417,45 @@ const std::vector<float>& Model::forwardPassNamedView(
     return forwardPassView(empty, training);
 }
 
-std::optional<Model::TrainStepResult> Model::trainStep(const TrainStepRequest& request) {
+std::optional<Model::TrainStepResult> Model::trainStep(const TrainStepRequest &request)
+{
     applyRuntimeConfiguration();
-    if (request.optimizer == nullptr || request.target == nullptr) return std::nullopt;
+    if (request.optimizer == nullptr || request.target == nullptr)
+        return std::nullopt;
 
-    const std::vector<float>* input = nullptr;
-    for (const char* name : {"__input__", "image", "input", "x"}) {
+    const std::vector<float> *input = nullptr;
+    for (const char *name : {"__input__", "image", "input", "x"})
+    {
         const auto it = request.float_inputs.find(name);
-        if (it != request.float_inputs.end() && it->second != nullptr) {
+        if (it != request.float_inputs.end() && it->second != nullptr)
+        {
             input = it->second;
             break;
         }
     }
-    if (input == nullptr) return std::nullopt;
+    if (input == nullptr)
+        return std::nullopt;
 
-    const std::vector<float>* forward_input = input;
+    const std::vector<float> *forward_input = input;
     std::vector<float> masked_input;
-    const std::vector<float>* output_weights = nullptr;
-    if (request.loss_weights != nullptr && !request.loss_weights->empty()) {
-        if (request.loss_weights->size() == request.target->size()) {
+    const std::vector<float> *output_weights = nullptr;
+    if (request.loss_weights != nullptr && !request.loss_weights->empty())
+    {
+        if (request.loss_weights->size() == request.target->size())
+        {
             output_weights = request.loss_weights;
-        } else if (request.loss_weights->size() == input->size()) {
+        }
+        else if (request.loss_weights->size() == input->size())
+        {
             masked_input.resize(input->size());
-            for (size_t i = 0; i < input->size(); ++i) {
+            for (size_t i = 0; i < input->size(); ++i)
+            {
                 masked_input[i] = (*input)[i] * std::max(0.0f, (*request.loss_weights)[i]);
             }
             forward_input = &masked_input;
-        } else {
+        }
+        else
+        {
             throw std::invalid_argument(
                 "Model::trainStep: loss_weights size must match the input or target size");
         }
@@ -1153,56 +2463,81 @@ std::optional<Model::TrainStepResult> Model::trainStep(const TrainStepRequest& r
 
     BBoxSupervision::Weights bbox_weights;
     std::vector<float> combined_output_weights;
-    if (request.annotation) {
+    if (request.annotation)
+    {
         bool at_output = true;
         bbox_weights = BBoxSupervision::forModel(request.annotation, modelConfig,
-            input->size(), request.target->size(), &at_output);
-        if (!bbox_weights.values.empty()) {
-            if (at_output) {
+                                                 input->size(), request.target->size(), &at_output);
+        if (!bbox_weights.values.empty())
+        {
+            if (at_output)
+            {
                 combined_output_weights = bbox_weights.values;
-                if (output_weights) for (size_t i=0;i<combined_output_weights.size();++i)
-                    combined_output_weights[i] *= (*output_weights)[i];
+                if (output_weights)
+                    for (size_t i = 0; i < combined_output_weights.size(); ++i)
+                        combined_output_weights[i] *= (*output_weights)[i];
                 output_weights = &combined_output_weights;
-            } else {
+            }
+            else
+            {
                 const std::vector<float> original = *forward_input;
                 masked_input.resize(original.size());
-                for (size_t i=0;i<original.size();++i) masked_input[i]=original[i]*bbox_weights.values[i];
-                forward_input=&masked_input;
+                for (size_t i = 0; i < original.size(); ++i)
+                    masked_input[i] = original[i] * bbox_weights.values[i];
+                forward_input = &masked_input;
             }
         }
     }
 
-    if (request.mode == TrainStepMode::Optimize) zeroGradients();
-    const std::vector<float>& prediction = forwardPassView(*forward_input, true);
-    if (prediction.size() != request.target->size()) {
+    if (request.mode == TrainStepMode::Optimize)
+        zeroGradients();
+    const std::vector<float> &prediction = forwardPassView(*forward_input, true);
+    if (prediction.size() != request.target->size())
+    {
         throw std::invalid_argument(
             "Model::trainStep: prediction and target sizes differ");
     }
 
     std::string loss_type = "mse";
-    try {
-        if (modelConfig.contains("loss")) loss_type = modelConfig["loss"].get<std::string>();
-        else if (modelConfig.contains("recon_loss")) loss_type = modelConfig["recon_loss"].get<std::string>();
-    } catch (...) {
+    try
+    {
+        if (modelConfig.contains("loss"))
+            loss_type = modelConfig["loss"].get<std::string>();
+        else if (modelConfig.contains("recon_loss"))
+            loss_type = modelConfig["recon_loss"].get<std::string>();
+    }
+    catch (...)
+    {
     }
 
     RuntimeLossGrad::PixelLossOptions options;
     options.weights = output_weights;
     options.relations = request.relations ? request.relations : &bbox_weights.relations;
-    try {
-        if (modelConfig.contains("huber_delta")) options.huber_delta = std::max(1e-6f, modelConfig["huber_delta"].get<float>());
-        if (modelConfig.contains("smoothl1_delta")) options.huber_delta = std::max(1e-6f, modelConfig["smoothl1_delta"].get<float>());
-        if (modelConfig.contains("smoothl1_beta")) options.huber_delta = std::max(1e-6f, modelConfig["smoothl1_beta"].get<float>());
-        if (modelConfig.contains("charbonnier_eps")) options.charbonnier_eps = std::max(1e-12f, modelConfig["charbonnier_eps"].get<float>());
-        if (modelConfig.contains("nll_sigma")) options.gaussian_nll_sigma = std::max(1e-6f, modelConfig["nll_sigma"].get<float>());
-        if (modelConfig.contains("gaussian_nll_sigma")) options.gaussian_nll_sigma = std::max(1e-6f, modelConfig["gaussian_nll_sigma"].get<float>());
-    } catch (...) {
+    try
+    {
+        if (modelConfig.contains("huber_delta"))
+            options.huber_delta = std::max(1e-6f, modelConfig["huber_delta"].get<float>());
+        if (modelConfig.contains("smoothl1_delta"))
+            options.huber_delta = std::max(1e-6f, modelConfig["smoothl1_delta"].get<float>());
+        if (modelConfig.contains("smoothl1_beta"))
+            options.huber_delta = std::max(1e-6f, modelConfig["smoothl1_beta"].get<float>());
+        if (modelConfig.contains("charbonnier_eps"))
+            options.charbonnier_eps = std::max(1e-12f, modelConfig["charbonnier_eps"].get<float>());
+        if (modelConfig.contains("nll_sigma"))
+            options.gaussian_nll_sigma = std::max(1e-6f, modelConfig["nll_sigma"].get<float>());
+        if (modelConfig.contains("gaussian_nll_sigma"))
+            options.gaussian_nll_sigma = std::max(1e-6f, modelConfig["gaussian_nll_sigma"].get<float>());
+    }
+    catch (...)
+    {
     }
 
     auto loss = RuntimeLossGrad::pixel_loss_and_grad(
         prediction, *request.target, loss_type, options);
-    if (request.grad_scale != 1.0f) {
-        for (float& gradient : loss.grad) gradient *= request.grad_scale;
+    if (request.grad_scale != 1.0f)
+    {
+        for (float &gradient : loss.grad)
+            gradient *= request.grad_scale;
     }
     backwardPass(loss.grad);
 
@@ -1214,578 +2549,855 @@ std::optional<Model::TrainStepResult> Model::trainStep(const TrainStepRequest& r
     result.metrics["relation_count"] = static_cast<float>(request.relations ? request.relations->size() : bbox_weights.relation_count);
     result.metrics[RuntimeLossGrad::canonical_pixel_loss_name(loss_type)] = result.loss;
     double sum_squares = 0.0;
-    for (const auto& layer : layers) {
-        for (float gradient : layer.grad_weights) {
+    for (const auto &layer : layers)
+    {
+        for (float gradient : layer.grad_weights)
+        {
             sum_squares += static_cast<double>(gradient) * static_cast<double>(gradient);
             result.grad_max_abs = std::max(result.grad_max_abs, std::abs(gradient));
         }
     }
     result.grad_norm = static_cast<float>(std::sqrt(sum_squares));
-    if (request.mode == TrainStepMode::Optimize) {
+    if (request.mode == TrainStepMode::Optimize)
+    {
         optimizerStep(*request.optimizer, request.learning_rate);
     }
     return result;
 }
 
-Layer* Model::getLayerByName(const std::string& name) {
-    for (auto& layer : layers) {
-        if (layer.name == name) {
+Layer *Model::getLayerByName(const std::string &name)
+{
+    for (auto &layer : layers)
+    {
+        if (layer.name == name)
+        {
             return &layer;
         }
     }
-    return nullptr;  // Layer not found
+    return nullptr; // Layer not found
 }
 
 // === méthodes utilitaires simples (déjà présentes) ===
 void Model::setDensity(double d) { densityFactor = (d > 0.0 ? d : 1.0); }
 double Model::getDensity() const { return densityFactor; }
 
-void Model::push(const std::string &name, const std::string &type, size_t params_count) {
+void Model::push(const std::string &name, const std::string &type, size_t params_count)
+{
     // Normaliser le type et créer le layer avec enum
     std::string normalized_type = normalize_type(type);
     Layer layer(name, normalized_type, params_count);
     layer.dtype = Mimir::parse_dtype(default_dtype_);
     layer.accumulation_dtype = layer.dtype == Mimir::DType::F64
-        ? Mimir::DType::F64 : Mimir::DType::F32;
-    
+                                   ? Mimir::DType::F64
+                                   : Mimir::DType::F32;
+
     // Le constructeur Layer a déjà converti string -> enum
     // Vérifier que c'est supporté
-    if (layer.type_enum == LayerType::UNKNOWN) {
-        std::cerr << "❌ ERROR: Unknown layer type '" << type << "' (normalized: '" 
+    if (layer.type_enum == LayerType::UNKNOWN)
+    {
+        std::cerr << "❌ ERROR: Unknown layer type '" << type << "' (normalized: '"
                   << normalized_type << "')" << std::endl;
         log_supported_types();
         throw std::runtime_error("Unknown layer type: " + type);
     }
-    
+
     // Si des dimensions sont configurées dans modelConfig, les appliquer
-    if (modelConfig.contains("in_channels")) {
+    if (modelConfig.contains("in_channels"))
+    {
         layer.in_channels = modelConfig["in_channels"];
     }
-    if (modelConfig.contains("out_channels")) {
+    if (modelConfig.contains("out_channels"))
+    {
         layer.out_channels = modelConfig["out_channels"];
     }
-    if (modelConfig.contains("height")) {
+    if (modelConfig.contains("height"))
+    {
         layer.input_height = modelConfig["height"];
     }
-    if (modelConfig.contains("width")) {
+    if (modelConfig.contains("width"))
+    {
         layer.input_width = modelConfig["width"];
     }
-    if (modelConfig.contains("kernel")) {
+    if (modelConfig.contains("kernel"))
+    {
         layer.kernel_size = modelConfig["kernel"];
     }
-    if (modelConfig.contains("stride")) {
+    if (modelConfig.contains("stride"))
+    {
         layer.stride = modelConfig["stride"];
     }
-    if (modelConfig.contains("padding")) {
+    if (modelConfig.contains("padding"))
+    {
         layer.padding = modelConfig["padding"];
     }
-    if (normalized_type == "NMS") {
-        if (modelConfig.contains("nms_iou_threshold")) {
+    if (normalized_type == "NMS")
+    {
+        if (modelConfig.contains("nms_iou_threshold"))
+        {
             layer.nms_iou_threshold = modelConfig["nms_iou_threshold"];
         }
-        if (modelConfig.contains("nms_score_threshold")) {
+        if (modelConfig.contains("nms_score_threshold"))
+        {
             layer.nms_score_threshold = modelConfig["nms_score_threshold"];
         }
-        if (modelConfig.contains("nms_max_detections")) {
+        if (modelConfig.contains("nms_max_detections"))
+        {
             layer.nms_max_detections = modelConfig["nms_max_detections"];
         }
-        if (modelConfig.contains("nms_class_agnostic")) {
+        if (modelConfig.contains("nms_class_agnostic"))
+        {
             layer.nms_class_agnostic = modelConfig["nms_class_agnostic"];
         }
     }
-    
+
+    Mimir::Serialization::LayerMetadata::readConvolutionND(layer, modelConfig);
+
     // Calculer les dimensions de sortie pour Conv2D
-    if ((normalized_type == "Conv2d" || normalized_type == "ConvTranspose2d") && layer.kernel_size > 0) {
-        if (normalized_type == "Conv2d") {
+    if ((normalized_type == "Conv2d" || normalized_type == "ConvTranspose2d") && layer.kernel_size > 0)
+    {
+        if (normalized_type == "Conv2d")
+        {
             layer.output_height = (layer.input_height + 2 * layer.padding - layer.kernel_size) / layer.stride + 1;
             layer.output_width = (layer.input_width + 2 * layer.padding - layer.kernel_size) / layer.stride + 1;
-        } else { // ConvTranspose2d
+        }
+        else
+        { // ConvTranspose2d
             layer.output_height = (layer.input_height - 1) * layer.stride - 2 * layer.padding + layer.kernel_size;
             layer.output_width = (layer.input_width - 1) * layer.stride - 2 * layer.padding + layer.kernel_size;
         }
     }
-    
+
     // Détecter automatiquement le type de branche basé sur le nom du layer
     layer.detectBranchType();
-    
+
     layers.push_back(layer);
     // Invalider le cache uses_mag_mod : un nouveau layer vient d'être ajouté.
     uses_mag_mod_cached_ = false;
 }
 
-size_t Model::totalParamCount() const {
+size_t Model::totalParamCount() const
+{
     size_t s = 0;
-    for (const auto &L : layers) s += L.params_count;
+    for (const auto &L : layers)
+        s += L.params_count;
     return s;
 }
 
-void Model::allocateParams() {
+void Model::allocateParams()
+{
+    distributed_parameters_synced_ = false;
+    for (auto& layer : layers) {
+        if (layer.type_enum == LayerType::CausalDepthwiseConv1d) {
+            const auto geometry = RuntimeCausalSequence::checkedGeometry(layer);
+            if (layer.params_count && layer.params_count != geometry.parameter_size)
+                throw std::invalid_argument("CausalDepthwiseConv1d parameter count mismatch for layer " + layer.name);
+            layer.params_count = geometry.parameter_size;
+            continue;
+        }
+        if (!Mimir::Serialization::LayerMetadata::convolutionND(layer)) continue;
+        const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+        if (layer.params_count != 0 && layer.params_count != geometry.parameter_size)
+            throw std::invalid_argument("ConvND parameter count mismatch for layer " + layer.name);
+        layer.params_count = geometry.parameter_size;
+        layer.in_channels = geometry.in_channels;
+        layer.output_height = geometry.output[geometry.rank - 2];
+        layer.output_width = geometry.output[geometry.rank - 1];
+        layer.output_depth = geometry.output[geometry.rank - 3];
+        if (geometry.rank == 4) layer.output_time = geometry.output[0];
+    }
     size_t tot = totalParamCount();
-    
-    auto& allocator = DynamicTensorAllocator::instance();
-    
-    if (!Model::frameworkLogsSuppressed()) {
+
+    auto &allocator = DynamicTensorAllocator::instance();
+
+    if (!Model::frameworkLogsSuppressed())
+    {
         std::cerr << "📦 Allocation de " << layers.size() << " blocs de poids (" << tot << " paramètres au total)..." << std::endl;
     }
-    
+
     // NOUVEAU: Allouer un tensor par layer au lieu d'un tensor par paramètre
     layer_weight_blocks.clear();
     layer_weight_blocks.resize(layers.size());
-    
-    for (size_t i = 0; i < layers.size(); ++i) {
+
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
         size_t layer_param_count = layers[i].params_count;
-        
-        if (layer_param_count > 0) {
+
+        if (layer_param_count > 0)
+        {
             // ⚠️ CRITIQUE: Allocation dynamique via MemoryGuard (passe par DynamicTensorAllocator)
             // Le flag 'true' force l'allocation à passer par requestAllocation()
             layer_weight_blocks[i] = tensor(layer_param_count, true);
-            
+
             // Lier le tensor au layer
             layers[i].weight_block = &layer_weight_blocks[i];
             // Frozen imported graph components may carry their checkpoint values.
             if (modelConfig.is_object() && modelConfig.value("initialize_from_layer_weights", false) &&
-                layers[i].weights.size() == layer_param_count) {
+                layers[i].weights.size() == layer_param_count)
+            {
                 std::copy(layers[i].weights.begin(), layers[i].weights.end(), layers[i].getWeights());
             }
-            
-            if (!Model::frameworkLogsSuppressed()) {
-                std::cerr << "  Layer " << i << " (" << layers[i].name << "): " 
+
+            if (!Model::frameworkLogsSuppressed())
+            {
+                std::cerr << "  Layer " << i << " (" << layers[i].name << "): "
                           << layer_param_count << " paramètres dans 1 tensor" << std::endl;
             }
         }
     }
-    
-    if (!Model::frameworkLogsSuppressed()) {
+
+    if (!Model::frameworkLogsSuppressed())
+    {
         std::cerr << "✓ " << layers.size() << " blocs de poids créés (1 tensor par layer)" << std::endl;
     }
 }
 
-void Model::initializeWeights(const std::string &method, unsigned int seed) {
-    if (params_frozen_) {
+void Model::initializeWeights(const std::string &method, unsigned int seed)
+{
+    distributed_parameters_synced_ = false;
+    if (params_frozen_)
+    {
         throw std::runtime_error("Model::initializeWeights: parameters are frozen");
     }
-    if (layer_weight_blocks.empty()) {
+    if (layer_weight_blocks.empty())
+    {
         std::cerr << "⚠️  Cannot initialize weights: weight blocks not allocated" << std::endl;
         return;
     }
-    
-    auto& allocator = DynamicTensorAllocator::instance();
+
+    auto &allocator = DynamicTensorAllocator::instance();
     std::mt19937 gen(seed == 0 ? std::random_device{}() : seed);
-    
+
     std::cerr << "🎲 Initializing weights using " << method << " method (bloc par layer)..." << std::endl;
-    auto frozen_prefixes = [&]() -> std::vector<std::string> {
+    auto frozen_prefixes = [&]() -> std::vector<std::string>
+    {
         std::vector<std::string> out;
-        if (modelConfig.contains("frozen_layer_prefixes") && modelConfig["frozen_layer_prefixes"].is_array()) {
-            for (const auto& v : modelConfig["frozen_layer_prefixes"]) {
-                if (v.is_string()) out.push_back(v.get<std::string>());
+        if (modelConfig.contains("frozen_layer_prefixes") && modelConfig["frozen_layer_prefixes"].is_array())
+        {
+            for (const auto &v : modelConfig["frozen_layer_prefixes"])
+            {
+                if (v.is_string())
+                    out.push_back(v.get<std::string>());
             }
         }
         return out;
     }();
 
-    auto is_frozen_layer = [&](const Layer& l) -> bool {
-        if (frozen_prefixes.empty()) return false;
-        for (const auto& p : frozen_prefixes) {
-            if (p.empty()) continue;
-            if (l.name.rfind(p, 0) == 0) return true;
+    auto is_frozen_layer = [&](const Layer &l) -> bool
+    {
+        if (frozen_prefixes.empty())
+            return false;
+        for (const auto &p : frozen_prefixes)
+        {
+            if (p.empty())
+                continue;
+            if (l.name.rfind(p, 0) == 0)
+                return true;
         }
         return false;
     };
 
-    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx)
+    {
         const auto &layer = layers[layer_idx];
-        
-        if (layer.params_count == 0 || !layer.weight_block) continue;
-        if (is_frozen_layer(layer)) continue;
-        
+
+        if (layer.params_count == 0 || !layer.weight_block)
+            continue;
+        if (is_frozen_layer(layer))
+            continue;
+
         // Afficher progression tous les 10 layers
-        if (layer_idx % 10 == 0) {
-            std::cerr << "  Initializing layer " << layer_idx << "/" << layers.size() 
+        if (layer_idx % 10 == 0)
+        {
+            std::cerr << "  Initializing layer " << layer_idx << "/" << layers.size()
                       << " (" << layer.name << ")..." << std::endl;
         }
-        
+
         // fan_in/fan_out: utiliser les dimensions réelles quand disponibles
         int fan_in = 0;
         int fan_out = 0;
 
-        if (layer.type_enum == LayerType::Linear && layer.in_features > 0 && layer.out_features > 0) {
+        if (layer.type_enum == LayerType::Linear && layer.in_features > 0 && layer.out_features > 0)
+        {
             fan_in = layer.in_features;
             fan_out = layer.out_features;
-        } else {
+        }
+        else if (layer.type_enum == LayerType::CausalDepthwiseConv1d)
+        {
+            const auto geometry = RuntimeCausalSequence::checkedGeometry(layer);
+            fan_in = fan_out = geometry.kernel;
+        }
+        else if (Mimir::Serialization::LayerMetadata::convolutionND(layer))
+        {
+            const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+            fan_in = static_cast<int>(std::min<size_t>(
+                geometry.in_per_group * geometry.kernel_spatial, std::numeric_limits<int>::max()));
+            fan_out = static_cast<int>(std::min<size_t>(
+                geometry.out_per_group * geometry.kernel_spatial, std::numeric_limits<int>::max()));
+        }
+        else
+        {
             // Estimation fan_in/fan_out depuis params_count
             int fan_estimate = static_cast<int>(std::sqrt(static_cast<float>(layer.params_count)));
             fan_in = std::max(fan_estimate, 32);
             fan_out = std::max(fan_estimate, 32);
         }
-        
+
         float std_dev = 0.01f;
-        
-        if (method == "xavier" || method == "glorot") {
+
+        if (method == "xavier" || method == "glorot")
+        {
             std_dev = std::sqrt(2.0f / (fan_in + fan_out));
         }
-        else if (method == "he" || method == "kaiming") {
+        else if (method == "he" || method == "kaiming")
+        {
             std_dev = 1.5f * std::sqrt(2.0f / fan_in);
         }
-        else if (method == "normal") {
+        else if (method == "normal")
+        {
             std_dev = 0.05f;
         }
-        
+
         // Déterminer précisément la zone bias quand possible
         const size_t num_weights = layer.params_count;
         size_t num_pure_weights = num_weights;
 
-        if (layer.type_enum == LayerType::Linear && layer.in_features > 0 && layer.out_features > 0) {
+        if (layer.type_enum == LayerType::Linear && layer.in_features > 0 && layer.out_features > 0)
+        {
             const size_t expected_w = static_cast<size_t>(layer.in_features) * static_cast<size_t>(layer.out_features);
             const size_t expected_b = layer.use_bias ? static_cast<size_t>(layer.out_features) : 0;
-            if (expected_w + expected_b == num_weights) {
+            if (expected_w + expected_b == num_weights)
+            {
                 num_pure_weights = expected_w;
-            } else {
+            }
+            else
+            {
                 // Fallback si le comptage ne correspond pas exactement
                 size_t estimated_bias = std::min(expected_b, num_weights / 10);
                 num_pure_weights = num_weights - estimated_bias;
             }
-        } else {
+        }
+        else if (layer.type_enum == LayerType::CausalDepthwiseConv1d)
+        {
+            num_pure_weights = RuntimeCausalSequence::checkedGeometry(layer).weight_size;
+        }
+        else if (Mimir::Serialization::LayerMetadata::convolutionND(layer))
+        {
+            num_pure_weights = RuntimeConvolutionND::checkedGeometry(layer).weight_size;
+        }
+        else
+        {
             // Heuristique générique
             size_t estimated_bias = static_cast<size_t>(fan_out);
-            if (estimated_bias > num_weights / 10) {
+            if (estimated_bias > num_weights / 10)
+            {
                 estimated_bias = num_weights / 10;
             }
             num_pure_weights = num_weights - estimated_bias;
         }
-        
+
         // Initialiser directement le weight_block du layer
-        float* weights_data = layer.weight_block->getData();
-        if (!weights_data) continue;
+        float *weights_data = layer.weight_block->getData();
+        if (!weights_data)
+            continue;
 
         // Keep the RNG stream independent of tensor size and worker count.
         std::normal_distribution<float> dist(0.0f, std_dev);
-        for (size_t i = 0; i < num_weights; ++i) {
+        for (size_t i = 0; i < num_weights; ++i)
+        {
             float value = (i >= num_pure_weights) ? 0.0f : dist(gen);
-            value = std::clamp(value, -3.0f, 3.0f);  // ±3σ capture 99.7%
+            value = std::clamp(value, -3.0f, 3.0f); // ±3σ capture 99.7%
             weights_data[i] = value;
         }
     }
-    
+
     std::cerr << "✓ Weights initialized (" << layers.size() << " layers, " << totalParamCount() << " parameters)" << std::endl;
 }
 
-void Model::updateWeightsWithNoise(float learning_rate, float noise_std) {
+void Model::updateWeightsWithNoise(float learning_rate, float noise_std)
+{
     // NOTE: Fonction obsolète utilisant l'ancienne structure params
     std::cerr << "⚠️ updateWeightsWithNoise() est obsolète" << std::endl;
 }
 
-std::vector<uint16_t> Model::getWeights() const {
+std::vector<uint16_t> Model::getWeights() const
+{
     // NOTE: Fonction obsolète utilisant l'ancienne structure params
     return std::vector<uint16_t>();
 }
 
-void Model::setTokenizer(const Tokenizer &t) {
+void Model::setTokenizer(const Tokenizer &t)
+{
     tokenizer = t;
     hasTokenizer = true;
     // Garder l'encoder compatible avec la taille vocab du tokenizer.
     // Utile lorsque le tokenizer est chargé après construction.
     encoder.ensureVocabSize(tokenizer.getVocabSize());
     encoder.ensureSpecialEmbeddings();
-    if (!Model::frameworkLogsSuppressed()) {
+    if (!Model::frameworkLogsSuppressed())
+    {
         std::cerr << "[registry] tokenizer attached vocab=" << tokenizer.getVocabSize()
                   << " encoder_dim=" << encoder.dim << std::endl;
     }
 }
 
-void Model::setEncoder(const ConditioningEncoder &e) {
+void Model::setEncoder(const ConditioningEncoder &e)
+{
     encoder = e;
     encoder.ensureSpecialEmbeddings();
     hasEncoder = true;
-    if (!Model::frameworkLogsSuppressed()) {
+    if (!Model::frameworkLogsSuppressed())
+    {
         std::cerr << "[encoder] attached dim=" << encoder.dim
                   << " vocab=" << encoder.vocab_size << std::endl;
     }
 }
 
-void Model::forward(std::vector<uint8_t> &out_uint8) const {
+void Model::forward(std::vector<uint8_t> &out_uint8) const
+{
     // NOTE: Fonction obsolète utilisant l'ancienne structure params
     // Utilisez forwardPass() à la place
     out_uint8.clear();
 }
 
-void Model::setOutputTarget(const std::vector<uint8_t> &target) {
+void Model::setOutputTarget(const std::vector<uint8_t> &target)
+{
     // NOTE: Fonction obsolète utilisant l'ancienne structure params
 }
 
-bool optimizerTypeFromString(const std::string& name, OptimizerType& type) {
+bool optimizerTypeFromString(const std::string &name, OptimizerType &type)
+{
     std::string normalized = name;
     std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (normalized == "sgd") type = OptimizerType::SGD;
-    else if (normalized == "adam") type = OptimizerType::ADAM;
-    else if (normalized == "adamw") type = OptimizerType::ADAMW;
-    else if (normalized == "lion") type = OptimizerType::LION;
-    else if (normalized == "adafactor") type = OptimizerType::ADAFACTOR;
-    else if (normalized == "radam") type = OptimizerType::RADAM;
-    else if (normalized == "nadam") type = OptimizerType::NADAM;
-    else if (normalized == "rmsprop") type = OptimizerType::RMSPROP;
-    else if (normalized == "lamb") type = OptimizerType::LAMB;
-    else return false;
+                   [](unsigned char c)
+                   { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "sgd")
+        type = OptimizerType::SGD;
+    else if (normalized == "adam")
+        type = OptimizerType::ADAM;
+    else if (normalized == "adamw")
+        type = OptimizerType::ADAMW;
+    else if (normalized == "lion")
+        type = OptimizerType::LION;
+    else if (normalized == "adafactor")
+        type = OptimizerType::ADAFACTOR;
+    else if (normalized == "radam")
+        type = OptimizerType::RADAM;
+    else if (normalized == "nadam")
+        type = OptimizerType::NADAM;
+    else if (normalized == "rmsprop")
+        type = OptimizerType::RMSPROP;
+    else if (normalized == "lamb")
+        type = OptimizerType::LAMB;
+    else
+        return false;
     return true;
 }
 
-const char* optimizerTypeName(OptimizerType type) {
-    switch (type) {
-        case OptimizerType::SGD: return "sgd";
-        case OptimizerType::ADAM: return "adam";
-        case OptimizerType::ADAMW: return "adamw";
-        case OptimizerType::LION: return "lion";
-        case OptimizerType::ADAFACTOR: return "adafactor";
-        case OptimizerType::RADAM: return "radam";
-        case OptimizerType::NADAM: return "nadam";
-        case OptimizerType::RMSPROP: return "rmsprop";
-        case OptimizerType::LAMB: return "lamb";
+const char *optimizerTypeName(OptimizerType type)
+{
+    switch (type)
+    {
+    case OptimizerType::SGD:
+        return "sgd";
+    case OptimizerType::ADAM:
+        return "adam";
+    case OptimizerType::ADAMW:
+        return "adamw";
+    case OptimizerType::LION:
+        return "lion";
+    case OptimizerType::ADAFACTOR:
+        return "adafactor";
+    case OptimizerType::RADAM:
+        return "radam";
+    case OptimizerType::NADAM:
+        return "nadam";
+    case OptimizerType::RMSPROP:
+        return "rmsprop";
+    case OptimizerType::LAMB:
+        return "lamb";
     }
     return "unknown";
 }
 
-void configureOptimizerFromJson(Optimizer& optimizer, const json& config) {
-    if (config.contains("optimizer") && config["optimizer"].is_string()) {
+void configureOptimizerFromJson(Optimizer &optimizer, const json &config)
+{
+    if (config.contains("optimizer") && config["optimizer"].is_string())
+    {
         OptimizerType parsed;
-        if (!optimizerTypeFromString(config["optimizer"].get<std::string>(), parsed)) {
+        if (!optimizerTypeFromString(config["optimizer"].get<std::string>(), parsed))
+        {
             throw std::invalid_argument("optimiseur inconnu: " + config["optimizer"].get<std::string>());
         }
         optimizer.type = parsed;
     }
-    if (config.contains("beta1")) optimizer.beta1 = config["beta1"].get<float>();
-    if (config.contains("beta2")) optimizer.beta2 = config["beta2"].get<float>();
-    if (config.contains("epsilon")) optimizer.eps = config["epsilon"].get<float>();
-    if (config.contains("eps")) optimizer.eps = config["eps"].get<float>();
-    if (config.contains("weight_decay")) optimizer.weight_decay = config["weight_decay"].get<float>();
-    if (config.contains("rmsprop_alpha")) optimizer.rmsprop_alpha = config["rmsprop_alpha"].get<float>();
-    if (config.contains("adafactor_clip_threshold")) optimizer.adafactor_clip_threshold = config["adafactor_clip_threshold"].get<float>();
-    if (config.contains("adafactor_decay_rate")) optimizer.adafactor_decay_rate = config["adafactor_decay_rate"].get<float>();
-    if (config.contains("adafactor_eps2")) optimizer.adafactor_eps2 = config["adafactor_eps2"].get<float>();
-    if (config.contains("adafactor_beta1")) optimizer.adafactor_beta1 = config["adafactor_beta1"].get<float>();
-    if (config.contains("adafactor_scale_parameter")) optimizer.adafactor_scale_parameter = config["adafactor_scale_parameter"].get<bool>();
-    if (config.contains("adafactor_relative_step")) optimizer.adafactor_relative_step = config["adafactor_relative_step"].get<bool>();
+    if (config.contains("beta1"))
+        optimizer.beta1 = config["beta1"].get<float>();
+    if (config.contains("beta2"))
+        optimizer.beta2 = config["beta2"].get<float>();
+    if (config.contains("epsilon"))
+        optimizer.eps = config["epsilon"].get<float>();
+    if (config.contains("eps"))
+        optimizer.eps = config["eps"].get<float>();
+    if (config.contains("weight_decay"))
+        optimizer.weight_decay = config["weight_decay"].get<float>();
+    if (config.contains("rmsprop_alpha"))
+        optimizer.rmsprop_alpha = config["rmsprop_alpha"].get<float>();
+    if (config.contains("adafactor_clip_threshold"))
+        optimizer.adafactor_clip_threshold = config["adafactor_clip_threshold"].get<float>();
+    if (config.contains("adafactor_decay_rate"))
+        optimizer.adafactor_decay_rate = config["adafactor_decay_rate"].get<float>();
+    if (config.contains("adafactor_eps2"))
+        optimizer.adafactor_eps2 = config["adafactor_eps2"].get<float>();
+    if (config.contains("adafactor_beta1"))
+        optimizer.adafactor_beta1 = config["adafactor_beta1"].get<float>();
+    if (config.contains("adafactor_scale_parameter"))
+        optimizer.adafactor_scale_parameter = config["adafactor_scale_parameter"].get<bool>();
+    if (config.contains("adafactor_relative_step"))
+        optimizer.adafactor_relative_step = config["adafactor_relative_step"].get<bool>();
 }
 
-Optimizer Model::optimizerSnapshot(const Optimizer& source) const {
+Optimizer Model::optimizerSnapshot(const Optimizer &source) const
+{
     Optimizer opt = source;
     const bool use_m = opt.usesFirstMoment();
     const bool use_v = opt.usesSecondMoment();
-    if (!source.mv_by_param_ptr.empty()) {
+    if (!source.mv_by_param_ptr.empty())
+    {
         opt.m.clear();
         opt.v.clear();
         opt.parameter_layout.clear();
         size_t offset = 0;
-        for (const auto& layer : layers) {
-            if (!layer.weight_block || layer.params_count == 0) continue;
+        for (const auto &layer : layers)
+        {
+            if (!layer.weight_block || layer.params_count == 0)
+                continue;
             const auto key = reinterpret_cast<std::uintptr_t>(layer.weight_block->getData());
             auto it = source.mv_by_param_ptr.find(key);
-            if (it == source.mv_by_param_ptr.end()) continue;
-            if (!use_m && !use_v) continue;
+            if (it == source.mv_by_param_ptr.end())
+                continue;
+            if (!use_m && !use_v)
+                continue;
             const size_t n = layer.getWeightsSize();
-            const auto& block = it->second;
-            if ((use_m && block.m.size() != n) || (use_v && block.v.size() != n)) {
+            const auto &block = it->second;
+            if ((use_m && block.m.size() != n) || (use_v && block.v.size() != n))
+            {
                 throw std::runtime_error("Invalid optimizer moment size for " + layer.name);
             }
             opt.parameter_layout.push_back({layer.name, offset, n});
-            if (use_m) opt.m.insert(opt.m.end(), block.m.begin(), block.m.end());
-            if (use_v) opt.v.insert(opt.v.end(), block.v.begin(), block.v.end());
+            if (use_m)
+                opt.m.insert(opt.m.end(), block.m.begin(), block.m.end());
+            if (use_v)
+                opt.v.insert(opt.v.end(), block.v.begin(), block.v.end());
             offset += n;
         }
     }
-    if (!use_m) opt.m.clear();
-    if (!use_v) opt.v.clear();
-    if (!use_m && !use_v) opt.parameter_layout.clear();
+    if (!use_m)
+        opt.m.clear();
+    if (!use_v)
+        opt.v.clear();
+    if (!use_m && !use_v)
+        opt.parameter_layout.clear();
     opt.mv_by_param_ptr.clear();
     return opt;
 }
 
-void Model::restoreOptimizerState(Optimizer& opt) const {
-    if (!opt.mv_by_param_ptr.empty() || (opt.m.empty() && opt.v.empty() && opt.parameter_layout.empty())) return;
+void Model::restoreOptimizerState(Optimizer &opt) const
+{
+    if (!opt.mv_by_param_ptr.empty() || (opt.m.empty() && opt.v.empty() && opt.parameter_layout.empty()))
+        return;
     std::vector<Optimizer::StateBlock> layout = opt.parameter_layout;
-    if (layout.empty()) {
+    if (layout.empty())
+    {
         // Legacy checkpoints stored all layer blocks in graph order.
         size_t offset = 0;
-        for (const auto& layer : layers) {
-            if (!layer.weight_block || layer.params_count == 0) continue;
+        for (const auto &layer : layers)
+        {
+            if (!layer.weight_block || layer.params_count == 0)
+                continue;
             layout.push_back({layer.name, offset, layer.getWeightsSize()});
             offset += layer.getWeightsSize();
         }
     }
     size_t total = 0;
     std::unordered_set<std::string> names;
-    for (const auto& entry : layout) {
-        if (entry.offset != total || !names.insert(entry.name).second || entry.size == 0) {
+    for (const auto &entry : layout)
+    {
+        if (entry.offset != total || !names.insert(entry.name).second || entry.size == 0)
+        {
             throw std::runtime_error("Invalid optimizer parameter layout");
         }
-        auto it = std::find_if(layers.begin(), layers.end(), [&](const Layer& l) { return l.name == entry.name; });
-        if (it == layers.end() || !it->weight_block || it->getWeightsSize() != entry.size) {
+        auto it = std::find_if(layers.begin(), layers.end(), [&](const Layer &l)
+                               { return l.name == entry.name; });
+        if (it == layers.end() || !it->weight_block || it->getWeightsSize() != entry.size)
+        {
             throw std::runtime_error("Optimizer checkpoint topology mismatch: " + entry.name);
         }
         total += entry.size;
     }
     if ((opt.usesFirstMoment() && opt.m.size() != total) ||
-        (opt.usesSecondMoment() && opt.v.size() != total)) {
+        (opt.usesSecondMoment() && opt.v.size() != total))
+    {
         throw std::runtime_error("Missing or incompatible optimizer moments");
     }
-    for (const auto& entry : layout) {
-        const auto it = std::find_if(layers.begin(), layers.end(), [&](const Layer& l) { return l.name == entry.name; });
-        auto& block = opt.ensureMomentsFor(it->weight_block->getData(), entry.size);
-        if (opt.usesFirstMoment()) std::copy_n(opt.m.begin() + entry.offset, entry.size, block.m.begin());
-        if (opt.usesSecondMoment()) std::copy_n(opt.v.begin() + entry.offset, entry.size, block.v.begin());
+    for (const auto &entry : layout)
+    {
+        const auto it = std::find_if(layers.begin(), layers.end(), [&](const Layer &l)
+                                     { return l.name == entry.name; });
+        auto &block = opt.ensureMomentsFor(it->weight_block->getData(), entry.size);
+        if (opt.usesFirstMoment())
+            std::copy_n(opt.m.begin() + entry.offset, entry.size, block.m.begin());
+        if (opt.usesSecondMoment())
+            std::copy_n(opt.v.begin() + entry.offset, entry.size, block.v.begin());
     }
     opt.m.clear();
     opt.v.clear();
     opt.parameter_layout.clear();
 }
 
-void Model::setSerializedOptimizer(Optimizer opt) {
+void Model::setSerializedOptimizer(Optimizer opt)
+{
     opt = optimizerSnapshot(opt);
     serialized_optimizer_ = std::move(opt);
-    if (!Model::frameworkLogsSuppressed()) {
+    if (!Model::frameworkLogsSuppressed())
+    {
         std::cerr << "[memory] optimizer_state step=" << serialized_optimizer_->step
                   << " m=" << serialized_optimizer_->m.size()
                   << " v=" << serialized_optimizer_->v.size() << std::endl;
     }
 }
 
-void Model::applyParamUpdate(float learning_rate) {
+void Model::applyParamUpdate(float learning_rate)
+{
     // NOTE: Fonction obsolète - utilisez optimizerStep() pour l'entraînement moderne avec layer_weight_blocks
     std::cerr << "[DEPRECATED] applyParamUpdate() est obsolète. Utilisez optimizerStep() à la place.\n";
     return;
 }
 
 // Multi-optimizer step
-void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients* gradients) {
-    if (params_frozen_) {
+void Model::optimizerStep(Optimizer &opt, float learning_rate, const Gradients *gradients)
+{
+    if (params_frozen_)
+    {
         throw std::runtime_error("Model::optimizerStep: parameters are frozen");
+    }
+    auto &distributed = Mimir::DistributedRuntime::instance();
+    if (distributed.initialized() && distributed.worldSize() > 1)
+    {
+        std::vector<size_t> counts;
+        counts.reserve(layers.size());
+        std::vector<int> active(layers.size(), 0);
+        size_t total = 0;
+        for (size_t index = 0; index < layers.size(); ++index)
+        {
+            const auto &layer = layers[index];
+            const size_t count = layer.params_count;
+            counts.push_back(count);
+            active[index] = layer.grad_weights.empty() ? 0 : 1;
+            if (count > std::numeric_limits<size_t>::max() - total)
+                throw std::overflow_error("DDP gradient size overflow");
+            total += count;
+        }
+        distributed.requireIdentical(modelTopologySignature(layers), "model topology");
+        if (layer_weight_blocks.empty())
+            throw std::runtime_error("DDP model parameters have not been allocated");
+        distributed.allReduceMax(active);
+
+        std::vector<float> packed;
+        packed.reserve(total);
+        for (size_t index = 0; index < layers.size(); ++index)
+        {
+            const auto &layer = layers[index];
+            const size_t count = counts[index];
+            if (count == 0 || !active[index])
+                continue;
+            if (!layer.grad_weights.empty() && layer.grad_weights.size() != count)
+                throw std::runtime_error("DDP gradient size mismatch in layer '" + layer.name + "'");
+            if (layer.grad_weights.empty())
+                packed.insert(packed.end(), count, 0.0f);
+            else
+                packed.insert(packed.end(), layer.grad_weights.begin(), layer.grad_weights.end());
+        }
+        distributed.allReduceMean(packed);
+        size_t offset = 0;
+        for (size_t index = 0; index < layers.size(); ++index)
+        {
+            auto &layer = layers[index];
+            const size_t count = counts[index];
+            if (count == 0 || !active[index])
+                continue;
+            layer.grad_weights.assign(packed.begin() + static_cast<std::ptrdiff_t>(offset),
+                                      packed.begin() + static_cast<std::ptrdiff_t>(offset + count));
+            offset += count;
+        }
     }
     applyRuntimeOptimizerConfiguration(opt);
     publishRuntimeConfiguration(&opt);
     // NOUVEAU: Utiliser les weight_blocks au lieu de params
-    if (layer_weight_blocks.empty()) return;
+    if (layer_weight_blocks.empty())
+        return;
 
-    auto frozen_prefixes = [&]() -> std::vector<std::string> {
+    auto frozen_prefixes = [&]() -> std::vector<std::string>
+    {
         std::vector<std::string> out;
-        if (modelConfig.contains("frozen_layer_prefixes") && modelConfig["frozen_layer_prefixes"].is_array()) {
-            for (const auto& v : modelConfig["frozen_layer_prefixes"]) {
-                if (v.is_string()) out.push_back(v.get<std::string>());
+        if (modelConfig.contains("frozen_layer_prefixes") && modelConfig["frozen_layer_prefixes"].is_array())
+        {
+            for (const auto &v : modelConfig["frozen_layer_prefixes"])
+            {
+                if (v.is_string())
+                    out.push_back(v.get<std::string>());
             }
         }
         return out;
     }();
 
-    auto is_frozen_layer = [&](const Layer& l) -> bool {
-        if (frozen_prefixes.empty()) return false;
-        for (const auto& p : frozen_prefixes) {
-            if (p.empty()) continue;
-            if (l.name.rfind(p, 0) == 0) return true;
+    auto is_frozen_layer = [&](const Layer &l) -> bool
+    {
+        if (frozen_prefixes.empty())
+            return false;
+        for (const auto &p : frozen_prefixes)
+        {
+            if (p.empty())
+                continue;
+            if (l.name.rfind(p, 0) == 0)
+                return true;
         }
         return false;
     };
 
     // Sécurité numérique: eps doit être strictement positif et fini.
     // Certains checkpoints/configs peuvent contenir NaN/0 ou 0, ce qui casse Adam/AdamW.
-    if (!std::isfinite(opt.eps) || opt.eps <= 0.0f) {
+    if (!std::isfinite(opt.eps) || opt.eps <= 0.0f)
+    {
         opt.eps = 1e-8f;
     }
 
     // Optional global grad clipping (L2 norm), configured via modelConfig.
     // This makes clipping work for any training loop (including grad accumulation).
     float grad_clip_norm = 0.0f;
-    if (modelConfig.contains("grad_clip_norm")) {
+    if (modelConfig.contains("grad_clip_norm"))
+    {
         grad_clip_norm = std::max(0.0f, modelConfig["grad_clip_norm"].get<float>());
-    } else if (modelConfig.contains("clip_norm")) {
+    }
+    else if (modelConfig.contains("clip_norm"))
+    {
         grad_clip_norm = std::max(0.0f, modelConfig["clip_norm"].get<float>());
     }
     const bool observe_gradients = runtime_config_->gradient_diagnostics.requested();
     double unclipped_norm = 0.0;
     bool gradients_clipped = false;
-    if (grad_clip_norm > 0.0f || observe_gradients) {
+    if (grad_clip_norm > 0.0f || observe_gradients)
+    {
         double sum_sq = 0.0;
-        for (const auto& layer : layers) {
-            if (is_frozen_layer(layer)) continue;
-            for (float g : layer.grad_weights) sum_sq += static_cast<double>(g) * static_cast<double>(g);
-            for (float g : layer.grad_bias) sum_sq += static_cast<double>(g) * static_cast<double>(g);
+        for (const auto &layer : layers)
+        {
+            if (is_frozen_layer(layer))
+                continue;
+            for (float g : layer.grad_weights)
+                sum_sq += static_cast<double>(g) * static_cast<double>(g);
+            for (float g : layer.grad_bias)
+                sum_sq += static_cast<double>(g) * static_cast<double>(g);
         }
         unclipped_norm = std::sqrt(sum_sq);
         const float norm = static_cast<float>(unclipped_norm);
-        if (grad_clip_norm > 0.0f && norm > grad_clip_norm && norm > 1e-12f) {
+        if (grad_clip_norm > 0.0f && norm > grad_clip_norm && norm > 1e-12f)
+        {
             gradients_clipped = true;
             const float scale = grad_clip_norm / norm;
-            for (auto& layer : layers) {
-                if (is_frozen_layer(layer)) continue;
-                for (auto& g : layer.grad_weights) g *= scale;
-                for (auto& g : layer.grad_bias) g *= scale;
+            for (auto &layer : layers)
+            {
+                if (is_frozen_layer(layer))
+                    continue;
+                for (auto &g : layer.grad_weights)
+                    g *= scale;
+                for (auto &g : layer.grad_bias)
+                    g *= scale;
             }
         }
     }
-    
+
     // Appliquer le scheduler exactement une fois. `learning_rate` reste la LR de
     // base demandée par l'appelant (éventuellement modulée par le feedback), et
     // getCurrentLR() fournit uniquement le facteur warmup/decay correspondant.
     float effective_lr = learning_rate;
-    if (opt.warmup_steps > 0 || opt.decay_strategy != LRDecayStrategy::NONE) {
+    if (opt.warmup_steps > 0 || opt.decay_strategy != LRDecayStrategy::NONE)
+    {
         const float base = std::max(1e-12f, opt.initial_lr);
         effective_lr = opt.getCurrentLR() * (learning_rate / base);
     }
-    
+
     // Restore named checkpoint blocks once; preserve the active runtime state thereafter.
     restoreOptimizerState(opt);
 
     opt.step += 1;
-    
+
     // NOUVEAU: Appliquer l'optimiseur sur chaque weight_block du layer
-    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx)
+    {
         auto &layer = layers[layer_idx];
-        
-        if (!layer.weight_block || layer.params_count == 0) continue;
-        if (is_frozen_layer(layer)) continue;
-        if (layer.grad_weights.empty()) continue;
-        
-        float* weights = layer.weight_block->getData();
+
+        if (!layer.weight_block || layer.params_count == 0)
+            continue;
+        if (is_frozen_layer(layer))
+            continue;
+        if (layer.grad_weights.empty())
+            continue;
+
+        float *weights = layer.weight_block->getData();
         size_t weight_count = layer.getWeightsSize();
         const size_t n = std::min(weight_count, layer.grad_weights.size());
-        
-        Optimizer::MomentBlock* moments = nullptr;
-        if (opt.type != OptimizerType::SGD) {
+
+        Optimizer::MomentBlock *moments = nullptr;
+        if (opt.type != OptimizerType::SGD)
+        {
             moments = &opt.ensureMomentsFor(weights, weight_count);
         }
-        
-        RuntimeOptimizerRequest update{&opt,effective_lr,weights,layer.grad_weights.data(),
-            moments && !moments->m.empty()?moments->m.data():nullptr,
-            moments && !moments->v.empty()?moments->v.data():nullptr,n};
-        AbstractRuntime* optimizer_runtime=nullptr;
-        if(n && !RuntimeRouter::instance().dispatchOptimizer(update,&optimizer_runtime))
+
+        RuntimeOptimizerRequest update{&opt, effective_lr, weights, layer.grad_weights.data(),
+                                       moments && !moments->m.empty() ? moments->m.data() : nullptr,
+                                       moments && !moments->v.empty() ? moments->v.data() : nullptr, n};
+        AbstractRuntime *optimizer_runtime = nullptr;
+        if (n && !RuntimeRouter::instance().dispatchOptimizer(update, &optimizer_runtime))
             throw std::runtime_error("No runtime completed optimizer update");
-        
+
         // NOTE: ne pas réinitialiser ici.
         // Les boucles d'entraînement modernes appellent zeroGradients() en début de step.
         // Garder le dernier gradient permet la sérialisation/debug (include_gradients).
     }
     if (observe_gradients)
         runtime_config_->gradient_diagnostics.record(unclipped_norm, gradients_clipped);
+    captureRequestedLatentSpace(opt.step);
 }
 
-Model::DecoderOutput Model::eval(const std::vector<uint8_t> &target) const {
+Model::DecoderOutput Model::eval(const std::vector<uint8_t> &target) const
+{
     DecoderOutput out;
     std::vector<uint8_t> gen;
     forward(gen);
-    if (gen.size() != target.size() || gen.empty()) { out.mse = -1.0; return out; }
+    if (gen.size() != target.size() || gen.empty())
+    {
+        out.mse = -1.0;
+        return out;
+    }
     double s = 0.0;
-    for (size_t i = 0; i < gen.size(); ++i) {
+    for (size_t i = 0; i < gen.size(); ++i)
+    {
         double d = double(gen[i]) - double(target[i]);
         s += d * d;
     }
     out.mse = s / double(gen.size());
 
-    if (!hasTokenizer) return out;
+    if (!hasTokenizer)
+        return out;
     size_t vs = tokenizer.getVocabSize();
-    if (vs == 0) return out;
+    if (vs == 0)
+        return out;
     // produce trivial logits from generated image
     out.logits.assign(vs, 0.0f);
-    for (size_t i = 0; i < out.logits.size(); ++i) out.logits[i] = 1.0f / float(out.logits.size());
+    for (size_t i = 0; i < out.logits.size(); ++i)
+        out.logits[i] = 1.0f / float(out.logits.size());
     // top-k tokens
-    for (size_t i = 0; i < std::min<size_t>(8, out.logits.size()); ++i) out.tokens.push_back(int(i));
+    for (size_t i = 0; i < std::min<size_t>(8, out.logits.size()); ++i)
+        out.tokens.push_back(int(i));
     return out;
 }
 
@@ -1793,28 +3405,36 @@ void Model::setLastEncoding(const std::vector<float> &e) { lastEncoding = e; }
 
 // ---------------- file helpers ----------------
 // convert MagicToken vector to JSON
-[[maybe_unused]] static json magic_tokens_to_json(const std::vector<MagicToken> &mvec) {
+[[maybe_unused]] static json magic_tokens_to_json(const std::vector<MagicToken> &mvec)
+{
     json a = json::array();
-    for (const auto &m : mvec) {
+    for (const auto &m : mvec)
+    {
         json mj;
         mj["modality_mask"] = m.modality_mask;
         mj["seed"] = m.seed;
         mj["embed"] = json::array();
-        for (int i = 0; i < 8; ++i) mj["embed"].push_back(m.embed[i]);
+        for (int i = 0; i < 8; ++i)
+            mj["embed"].push_back(m.embed[i]);
         a.push_back(mj);
     }
     return a;
 }
 
 // read magic tokens from JSON
-static void json_to_magic_tokens(const json &j, std::vector<MagicToken> &outMagic) {
-    if (!j.is_array()) return;
-    for (const auto &m : j) {
+static void json_to_magic_tokens(const json &j, std::vector<MagicToken> &outMagic)
+{
+    if (!j.is_array())
+        return;
+    for (const auto &m : j)
+    {
         MagicToken mt{};
         mt.modality_mask = m.value("modality_mask", 0u);
         mt.seed = m.value("seed", 0u);
-        if (m.contains("embed") && m["embed"].is_array()) {
-            for (size_t i = 0; i < 8 && i < m["embed"].size(); ++i) mt.embed[i] = m["embed"][i].get<float>();
+        if (m.contains("embed") && m["embed"].is_array())
+        {
+            for (size_t i = 0; i < 8 && i < m["embed"].size(); ++i)
+                mt.embed[i] = m["embed"][i].get<float>();
         }
         outMagic.push_back(mt);
     }
@@ -1822,27 +3442,40 @@ static void json_to_magic_tokens(const json &j, std::vector<MagicToken> &outMagi
 
 // ---------------- static persistence helpers ----------------
 // helper: sanitize strings in id2token array (replace control chars by '<NL>' or space)
-[[maybe_unused]] static void sanitize_id2token_json(json &tokj) {
-    if (!tokj.is_object() || !tokj.contains("id2token")) return;
-    try {
+[[maybe_unused]] static void sanitize_id2token_json(json &tokj)
+{
+    if (!tokj.is_object() || !tokj.contains("id2token"))
+        return;
+    try
+    {
         auto &arr = tokj["id2token"];
-        if (!arr.is_array()) return;
-        for (auto &el : arr) {
-            if (!el.is_string()) continue;
+        if (!arr.is_array())
+            return;
+        for (auto &el : arr)
+        {
+            if (!el.is_string())
+                continue;
             std::string s = el.get<std::string>();
             bool changed = false;
-            for (char &c : s) {
-                if (static_cast<unsigned char>(c) <= 0x1F) { // control chars
+            for (char &c : s)
+            {
+                if (static_cast<unsigned char>(c) <= 0x1F)
+                { // control chars
                     changed = true;
                     c = ' '; // replace with space to avoid embedded newlines
                 }
             }
-            if (changed) el = s;
+            if (changed)
+                el = s;
         }
-    } catch (...) { /* best-effort */ }
+    }
+    catch (...)
+    { /* best-effort */
+    }
 }
 
-bool Model::saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch) {
+bool Model::saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicToken> &magic_tokens, const fs::path &dir, int epoch)
+{
     // NOTE: Cette fonction est obsolète et a été remplacée par le module Serialization
     // Utilisez maintenant checkpoint.save() depuis Lua ou Mimir::Serialization::save_checkpoint() depuis C++
     std::cerr << "⚠️ Model::saveCheckpoint() est obsolète! Utilisez Mimir::Serialization::save_checkpoint()" << std::endl;
@@ -1850,10 +3483,12 @@ bool Model::saveCheckpoint(const Tokenizer &tokenizer, const std::vector<MagicTo
     return false;
 }
 
-static void write_u64_le(std::ofstream &f, uint64_t v) {
+static void write_u64_le(std::ofstream &f, uint64_t v)
+{
     uint8_t b[8];
-    for (int i = 0; i < 8; ++i) b[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
-    f.write(reinterpret_cast<char*>(b), 8);
+    for (int i = 0; i < 8; ++i)
+        b[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
+    f.write(reinterpret_cast<char *>(b), 8);
 }
 
 // writer for a set of float32 tensors into a safetensors-like file.
@@ -1864,28 +3499,32 @@ static void write_u64_le(std::ofstream &f, uint64_t v) {
 //
 // Header format (JSON object) follows safetensors style:
 // { "metadata": {}, "tensors": { "name": { "dtype":"f32", "shape":[N], "data":[offset, length] }, ... } }
-static bool write_safetensors_file(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors, std::string *err = nullptr) {
-    try {
+static bool write_safetensors_file(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors, std::string *err = nullptr)
+{
+    try
+    {
         // prepare metadata and compute offsets
         json header;
         header["metadata"] = json::object();
         json tensors_meta = json::object();
 
         uint64_t offset = 0; // data offset after header
-        std::vector<std::pair<const std::string*, const std::vector<float>*>> order;
+        std::vector<std::pair<const std::string *, const std::vector<float> *>> order;
         order.reserve(tensors.size());
-        for (const auto &kv : tensors) order.emplace_back(&kv.first, &kv.second);
+        for (const auto &kv : tensors)
+            order.emplace_back(&kv.first, &kv.second);
 
         // compute total data size to help building header offsets (we don't need it here)
-        for (const auto &p : order) {
+        for (const auto &p : order)
+        {
             const std::string &name = *p.first;
             const std::vector<float> &buf = *p.second;
             uint64_t byte_len = static_cast<uint64_t>(buf.size()) * sizeof(float);
             // record meta: data = [offset, length]
             json m;
             m["dtype"] = "f32";
-            m["shape"] = json::array({ static_cast<uint64_t>(buf.size()) });
-            m["data"] = json::array({ offset, byte_len });
+            m["shape"] = json::array({static_cast<uint64_t>(buf.size())});
+            m["data"] = json::array({offset, byte_len});
             tensors_meta[name] = m;
             offset += byte_len;
         }
@@ -1896,8 +3535,10 @@ static bool write_safetensors_file(const fs::path &outpath, const std::unordered
 
         // open file and write header length + header
         std::ofstream ofs(outpath.string(), std::ios::binary);
-        if (!ofs) {
-            if (err) *err = "failed to open output file";
+        if (!ofs)
+        {
+            if (err)
+                *err = "failed to open output file";
             return false;
         }
 
@@ -1905,58 +3546,115 @@ static bool write_safetensors_file(const fs::path &outpath, const std::unordered
         ofs.write(header_str.data(), static_cast<std::streamsize>(header_len));
 
         // now write tensor data in the same order as header (order vector)
-        for (const auto &p : order) {
+        for (const auto &p : order)
+        {
             const std::vector<float> &buf = *p.second;
-            if (!buf.empty()) {
+            if (!buf.empty())
+            {
                 // write raw floats (assume host is little-endian; if not, convert)
-                ofs.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size() * sizeof(float)));
+                ofs.write(reinterpret_cast<const char *>(buf.data()), static_cast<std::streamsize>(buf.size() * sizeof(float)));
             }
         }
 
         ofs.close();
         return true;
-    } catch (const std::exception &e) {
-        if (err) *err = e.what();
+    }
+    catch (const std::exception &e)
+    {
+        if (err)
+            *err = e.what();
         return false;
-    } catch (...) {
-        if (err) *err = "unknown error";
+    }
+    catch (...)
+    {
+        if (err)
+            *err = "unknown error";
         return false;
     }
 }
 
 // Model::packToSafetensor implementation that delegates to writer above.
 // Utilise une map fournie par l'appelant (nom -> float buffer).
-bool Model::packToSafetensor(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors) const {
+bool Model::packToSafetensor(const fs::path &outpath, const std::unordered_map<std::string, std::vector<float>> &tensors) const
+{
     // create parent dir
-    try {
-        if (outpath.has_parent_path()) fs::create_directories(outpath.parent_path());
-    } catch (...) { /* ignore */ }
+    try
+    {
+        if (outpath.has_parent_path())
+            fs::create_directories(outpath.parent_path());
+    }
+    catch (...)
+    { /* ignore */
+    }
 
     std::string err;
-    if (!write_safetensors_file(outpath, tensors, &err)) {
+    if (!write_safetensors_file(outpath, tensors, &err))
+    {
         std::cerr << "packToSafetensor: failed to write " << outpath << " : " << err << "\n";
         return false;
     }
     return true;
 }
 
-bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, ConditioningEncoder &outEnc, std::vector<MagicToken> &outMagic) {
+bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, Tokenizer &outTok, ConditioningEncoder &outEnc, std::vector<MagicToken> &outMagic)
+{
     bool loaded_any = false;
-    try {
-        fs::path sjson = safep; sjson += ".json";
-        if (fs::exists(sjson) && fs::is_regular_file(sjson)) {
-            try {
+    try
+    {
+        fs::path sjson = safep;
+        sjson += ".json";
+        if (fs::exists(sjson) && fs::is_regular_file(sjson))
+        {
+            try
+            {
                 std::ifstream f(sjson);
-                if (f) {
-                    json full; f >> full;
-                    if (full.contains("tokenizer")) { try { outTok.from_json(full["tokenizer"]); loaded_any = true; } catch(...) {} }
-                    else if (full.contains("id2token")) { json tj; tj["id2token"] = full["id2token"]; try { outTok.from_json(tj); loaded_any = true; } catch(...) {} }
-                    if (full.contains("magic_tokens")) { try { json_to_magic_tokens(full["magic_tokens"], outMagic); loaded_any = true; } catch(...) {} }
-                    if (full.contains("encoder")) {
-                        try {
+                if (f)
+                {
+                    json full;
+                    f >> full;
+                    if (full.contains("tokenizer"))
+                    {
+                        try
+                        {
+                            outTok.from_json(full["tokenizer"]);
+                            loaded_any = true;
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                    else if (full.contains("id2token"))
+                    {
+                        json tj;
+                        tj["id2token"] = full["id2token"];
+                        try
+                        {
+                            outTok.from_json(tj);
+                            loaded_any = true;
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                    if (full.contains("magic_tokens"))
+                    {
+                        try
+                        {
+                            json_to_magic_tokens(full["magic_tokens"], outMagic);
+                            loaded_any = true;
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                    if (full.contains("encoder"))
+                    {
+                        try
+                        {
                             auto ej = full["encoder"];
                             outEnc.dim = ej.value("dim", outEnc.dim);
-                            if (ej.contains("embeddings") && ej["embeddings"].is_array()) {
+                            if (ej.contains("embeddings") && ej["embeddings"].is_array())
+                            {
                                 auto &rows = ej["embeddings"];
                                 outEnc.vocab_size = (int)rows.size();
                                 outEnc.token_embeddings.assign((size_t)outEnc.dim * (size_t)outEnc.vocab_size, 0.0f);
@@ -1965,55 +3663,96 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                                         outEnc.token_embeddings[r * (size_t)outEnc.dim + d] = rows[r][d].get<float>();
                                 loaded_any = true;
                             }
-                        } catch (...) {}
+                        }
+                        catch (...)
+                        {
+                        }
                     }
-                    if (loaded_any) return true;
+                    if (loaded_any)
+                        return true;
                 }
-            } catch (...) {
+            }
+            catch (...)
+            {
                 // fallback: safep json is invalid/corrupted, ignore and continue to checkpoint folders
             }
         }
-    } catch (...) {}
+    }
+    catch (...)
+    {
+    }
 
-    try {
-        if (fs::exists(ckdir) && fs::is_directory(ckdir)) {
-            int best_epoch = -1; fs::path best_dir;
-            for (auto &p : fs::directory_iterator(ckdir)) {
-                if (!p.is_directory()) continue;
+    try
+    {
+        if (fs::exists(ckdir) && fs::is_directory(ckdir))
+        {
+            int best_epoch = -1;
+            fs::path best_dir;
+            for (auto &p : fs::directory_iterator(ckdir))
+            {
+                if (!p.is_directory())
+                    continue;
                 std::string n = p.path().filename().string();
-                if (n.rfind("epoch_", 0) == 0) {
-                    try { int e = std::stoi(n.substr(6)); if (e > best_epoch) { best_epoch = e; best_dir = p.path(); } } catch(...) {}
+                if (n.rfind("epoch_", 0) == 0)
+                {
+                    try
+                    {
+                        int e = std::stoi(n.substr(6));
+                        if (e > best_epoch)
+                        {
+                            best_epoch = e;
+                            best_dir = p.path();
+                        }
+                    }
+                    catch (...)
+                    {
+                    }
                 }
             }
-            if (best_epoch >= 0 && !best_dir.empty()) {
+            if (best_epoch >= 0 && !best_dir.empty())
+            {
                 fs::path tokp = best_dir / "tokenizer.json";
                 fs::path encp = best_dir / "encoder.json";
                 fs::path mp = best_dir / "metadata.json";
                 fs::path layersp = best_dir / "layers.json";
                 fs::path embp = best_dir / "embeddings.bin";
                 fs::path paramsp = best_dir / "params_data.bin";
-                
-                if (fs::exists(tokp)) {
-                    try {
+
+                if (fs::exists(tokp))
+                {
+                    try
+                    {
                         std::ifstream tf(tokp);
                         json tj;
                         tf >> tj;
                         outTok.from_json(tj);
                         loaded_any = true;
-                    } catch(...) {
+                    }
+                    catch (...)
+                    {
                         // tokenizer.json is invalid -> fallback to minimal tokenizer
-                        try {
+                        try
+                        {
                             json minimal;
-                            minimal["id2token"] = json::array({ "<PAD>", "<UNK>", "<SEQ>", "<MOD>", "<MAG>", "<NL>" });
+                            minimal["id2token"] = json::array({"<PAD>", "<UNK>", "<SEQ>", "<MOD>", "<MAG>", "<NL>"});
                             outTok.from_json(minimal);
                             loaded_any = true;
-                        } catch(...) {}
+                        }
+                        catch (...)
+                        {
+                        }
                     }
                 }
-                if (fs::exists(encp)) {
-                    try { std::ifstream ef(encp); json ej; ef >> ej;
+                if (fs::exists(encp))
+                {
+                    try
+                    {
+                        std::ifstream ef(encp);
+                        json ej;
+                        ef >> ej;
                         outEnc.dim = ej.value("dim", outEnc.dim);
-                        if (ej.contains("embeddings") && ej["embeddings"].is_array()) {
+                        if (ej.contains("embeddings") && ej["embeddings"].is_array())
+                        {
                             auto &rows = ej["embeddings"];
                             outEnc.vocab_size = (int)rows.size();
                             outEnc.token_embeddings.assign((size_t)outEnc.dim * (size_t)outEnc.vocab_size, 0.0f);
@@ -2022,12 +3761,29 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                                     outEnc.token_embeddings[r * (size_t)outEnc.dim + d] = rows[r][d].get<float>();
                             loaded_any = true;
                         }
-                    } catch(...) {}
+                    }
+                    catch (...)
+                    {
+                    }
                 }
-                if (fs::exists(mp)) {
-                    try { std::ifstream mf(mp); json mj; mf >> mj; if (mj.contains("magic_tokens")) { json_to_magic_tokens(mj["magic_tokens"], outMagic); loaded_any = true; } } catch(...) {}
+                if (fs::exists(mp))
+                {
+                    try
+                    {
+                        std::ifstream mf(mp);
+                        json mj;
+                        mf >> mj;
+                        if (mj.contains("magic_tokens"))
+                        {
+                            json_to_magic_tokens(mj["magic_tokens"], outMagic);
+                            loaded_any = true;
+                        }
+                    }
+                    catch (...)
+                    {
+                    }
                 }
-                
+
                 // NOTE: Anciennes méthodes de sauvegarde/chargement supprimées
                 // Utiliser maintenant le module Serialization avec checkpoint.load()
                 /*
@@ -2042,7 +3798,7 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                         std::cerr << "⚠️ Échec du chargement de layers.json" << std::endl;
                     }
                 }
-                
+
                 // Charger les embeddings
                 if (fs::exists(embp)) {
                     try {
@@ -2054,7 +3810,7 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                         std::cerr << "⚠️ Échec du chargement des embeddings" << std::endl;
                     }
                 }
-                
+
                 // Charger les données des paramètres
                 if (fs::exists(paramsp)) {
                     try {
@@ -2067,11 +3823,15 @@ bool Model::tryLoadExistingModel(const fs::path &ckdir, const fs::path &safep, T
                     }
                 }
                 */
-                
-                if (loaded_any) return true;
+
+                if (loaded_any)
+                    return true;
             }
         }
-    } catch (...) {}
+    }
+    catch (...)
+    {
+    }
 
     return loaded_any;
 }
@@ -2084,33 +3844,41 @@ void Model::buildAudioBranch(const MagicToken & /*tok*/) { /* noop */ }
 void Model::buildImageBranch(const MagicToken & /*tok*/) { /* noop */ }
 void Model::buildVideoBranch(const MagicToken & /*tok*/) { /* noop */ }
 
-void Model::detectAndSetupBranches() {
+void Model::detectAndSetupBranches()
+{
     // Parcourir tous les layers et détecter automatiquement les types de branches
-    for (auto& layer : layers) {
+    for (auto &layer : layers)
+    {
         layer.detectBranchType();
     }
-    
+
     // Analyser la structure pour identifier les connexions entre branches
-    for (size_t i = 0; i < layers.size(); ++i) {
-        auto& layer = layers[i];
-        
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
+        auto &layer = layers[i];
+
         // Si c'est un layer résiduel, chercher le layer source
-        if (layer.branch_type == BranchType::RESIDUAL) {
+        if (layer.branch_type == BranchType::RESIDUAL)
+        {
             // Par convention, le shortcut se connecte généralement plusieurs layers en arrière
             // Chercher un layer avec un nom similaire mais sans "shortcut" ou "residual"
             std::string base_name = layer.name;
             size_t pos = base_name.find("_shortcut");
-            if (pos == std::string::npos) {
+            if (pos == std::string::npos)
+            {
                 pos = base_name.find("_residual");
             }
-            
-            if (pos != std::string::npos) {
+
+            if (pos != std::string::npos)
+            {
                 base_name = base_name.substr(0, pos);
-                
+
                 // Chercher le layer de base correspondant
-                for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
-                    if (layers[j].name.find(base_name) != std::string::npos && 
-                        j != static_cast<int>(i)) {
+                for (int j = static_cast<int>(i) - 1; j >= 0; --j)
+                {
+                    if (layers[j].name.find(base_name) != std::string::npos &&
+                        j != static_cast<int>(i))
+                    {
                         layer.branch_sources.push_back(j);
                         layers[j].is_branch_point = true;
                         break;
@@ -2119,18 +3887,27 @@ void Model::detectAndSetupBranches() {
             }
         }
     }
-    
+
     std::cerr << "✓ Détection des branches terminée. Trouvé:" << std::endl;
-    for (size_t i = 0; i < layers.size(); ++i) {
-        if (layers[i].requiresBranchComputation()) {
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
+        if (layers[i].requiresBranchComputation())
+        {
             std::cerr << "  - Layer " << i << " (" << layers[i].name << "): ";
-            if (layers[i].branch_type == BranchType::RESIDUAL) {
+            if (layers[i].branch_type == BranchType::RESIDUAL)
+            {
                 std::cerr << "RESIDUAL";
-            } else if (layers[i].branch_type == BranchType::SKIP_CONNECTION) {
+            }
+            else if (layers[i].branch_type == BranchType::SKIP_CONNECTION)
+            {
                 std::cerr << "SKIP_CONNECTION";
-            } else if (layers[i].is_branch_point) {
+            }
+            else if (layers[i].is_branch_point)
+            {
                 std::cerr << "BRANCH_POINT";
-            } else if (layers[i].is_merge_point) {
+            }
+            else if (layers[i].is_merge_point)
+            {
                 std::cerr << "MERGE_POINT";
             }
             std::cerr << std::endl;
@@ -2138,63 +3915,79 @@ void Model::detectAndSetupBranches() {
     }
 }
 
-void Model::executeBranchComputation(int layer_idx, 
-                                    std::vector<std::vector<float>>& layer_outputs,
-                                    bool training) {
-    if (layer_idx < 0 || layer_idx >= static_cast<int>(layers.size())) {
+void Model::executeBranchComputation(int layer_idx,
+                                     std::vector<std::vector<float>> &layer_outputs,
+                                     bool training)
+{
+    if (layer_idx < 0 || layer_idx >= static_cast<int>(layers.size()))
+    {
         return;
     }
-    
-    auto& layer = layers[layer_idx];
-    
-    if (!layer.requiresBranchComputation()) {
+
+    auto &layer = layers[layer_idx];
+
+    if (!layer.requiresBranchComputation())
+    {
         return;
     }
-    
+
     // Si c'est un point de fusion (residual, skip connection, etc.)
-    if (layer.branch_type == BranchType::RESIDUAL && !layer.branch_sources.empty()) {
+    if (layer.branch_type == BranchType::RESIDUAL && !layer.branch_sources.empty())
+    {
         // Récupérer la sortie du layer source
         int source_idx = layer.branch_sources[0];
-        if (source_idx >= 0 && source_idx < static_cast<int>(layer_outputs.size())) {
+        if (source_idx >= 0 && source_idx < static_cast<int>(layer_outputs.size()))
+        {
             // Fusionner avec l'opération spécifiée
             std::vector<float> merged_output;
             if (!RuntimeRouter::instance().dispatchBranchMerge(
-                    layer_outputs[layer_idx], layer_outputs[source_idx], merged_output, layer)) {
+                    layer_outputs[layer_idx], layer_outputs[source_idx], merged_output, layer))
+            {
                 throw std::runtime_error("Runtime branch merge failed: " + layer.name);
             }
             layer_outputs[layer_idx] = std::move(merged_output);
         }
     }
-    else if (layer.branch_type == BranchType::SPLIT) {
+    else if (layer.branch_type == BranchType::SPLIT)
+    {
         // Pour les splits, on doit diviser la sortie
         // Ceci sera géré au niveau du forward pass principal
     }
 }
 
 void Model::backpropThroughBranch(int layer_idx,
-                                 const std::vector<float>& grad_output,
-                                 std::vector<std::vector<float>>& layer_gradients) {
-    if (layer_idx < 0 || layer_idx >= static_cast<int>(layers.size())) {
+                                  const std::vector<float> &grad_output,
+                                  std::vector<std::vector<float>> &layer_gradients)
+{
+    if (layer_idx < 0 || layer_idx >= static_cast<int>(layers.size()))
+    {
         return;
     }
-    
-    auto& layer = layers[layer_idx];
-    
-    if (!layer.requiresBranchComputation()) {
+
+    auto &layer = layers[layer_idx];
+
+    if (!layer.requiresBranchComputation())
+    {
         return;
     }
-    
+
     // Backprop à travers les connexions de branche
-    if (layer.branch_type == BranchType::RESIDUAL && !layer.branch_sources.empty()) {
+    if (layer.branch_type == BranchType::RESIDUAL && !layer.branch_sources.empty())
+    {
         // Pour une connexion résiduelle, le gradient se propage vers les deux branches
         int source_idx = layer.branch_sources[0];
-        if (source_idx >= 0 && source_idx < static_cast<int>(layer_gradients.size())) {
+        if (source_idx >= 0 && source_idx < static_cast<int>(layer_gradients.size()))
+        {
             // Le gradient du résidual se propage tel quel vers la branche source
-            if (layer_gradients[source_idx].empty()) {
+            if (layer_gradients[source_idx].empty())
+            {
                 layer_gradients[source_idx] = grad_output;
-            } else {
+            }
+            else
+            {
                 // Accumuler les gradients
-                for (size_t i = 0; i < grad_output.size() && i < layer_gradients[source_idx].size(); ++i) {
+                for (size_t i = 0; i < grad_output.size() && i < layer_gradients[source_idx].size(); ++i)
+                {
                     layer_gradients[source_idx][i] += grad_output[i];
                 }
             }
@@ -2204,32 +3997,77 @@ void Model::backpropThroughBranch(int layer_idx,
 
 // === Forward/Backward Pass Complet ===
 
-std::shared_ptr<SkipConnectionControl> Model::skipConnectionControl() {
-    if (!skip_control_initialized_) {
+std::shared_ptr<SkipConnectionControl> Model::skipConnectionControl()
+{
+    if (!skip_control_initialized_)
+    {
         skip_control_->enabled = !modelConfig.is_object() || modelConfig.value("skip_connections_enabled", true);
         skip_control_initialized_ = true;
     }
     skip_control_->available = std::any_of(layers.begin(), layers.end(),
-        [](const Layer& layer) { return layer.skipInputIndex() >= 0; });
+                                           [](const Layer &layer)
+                                           { return layer.skipInputIndex() >= 0; });
     return skip_control_;
 }
 
-std::vector<float> Model::forwardPass(const std::vector<float> &input, bool training) {
+std::vector<float> Model::forwardPass(const std::vector<float> &input, bool training)
+{
     return forwardPassView(input, training);
 }
 
-const std::vector<float>& Model::forwardPassView(const std::vector<float> &input, bool training) {
+const std::vector<float> &Model::forwardPassView(const std::vector<float> &input, bool training)
+{
+    auto &distributed = Mimir::DistributedRuntime::instance();
+    if (distributed.initialized() && distributed.worldSize() > 1 &&
+        !distributed_parameters_synced_)
+    {
+        distributed.requireIdentical(modelTopologySignature(layers), "model topology");
+        if (layer_weight_blocks.empty())
+            throw std::runtime_error("DDP model parameters have not been allocated");
+        size_t total = 0;
+        for (const auto &layer : layers)
+        {
+            if (layer.params_count > std::numeric_limits<size_t>::max() - total)
+                throw std::overflow_error("DDP parameter size overflow");
+            total += layer.params_count;
+        }
+        std::vector<float> packed;
+        packed.reserve(total);
+        for (const auto &layer : layers)
+        {
+            if (layer.params_count == 0)
+                continue;
+            const float *weights = layer.getWeights();
+            if (!weights || layer.getWeightsSize() < layer.params_count)
+                throw std::runtime_error("DDP parameters unavailable in layer '" + layer.name + "'");
+            packed.insert(packed.end(), weights, weights + layer.params_count);
+        }
+        distributed.broadcast(packed, 0);
+        size_t offset = 0;
+        for (auto &layer : layers)
+        {
+            if (layer.params_count == 0)
+                continue;
+            float *weights = layer.getWeights();
+            std::copy_n(packed.data() + offset, layer.params_count, weights);
+            offset += layer.params_count;
+        }
+        distributed_parameters_synced_ = true;
+    }
     applyRuntimeConfiguration();
     const bool skip_connections_enabled = skipConnectionControl()->enabled.load();
-    if (skip_control_->available.load()) modelConfig["skip_connections_enabled"] = skip_connections_enabled;
+    if (skip_control_->available.load())
+        modelConfig["skip_connections_enabled"] = skip_connections_enabled;
     const bool viz_capture_allowed = !modelConfig.is_object() || !modelConfig.value("viz_taps_suppressed", false);
     const bool viz_capture_requested = viz_capture_allowed && viz_taps_enabled_ && viz_taps_max_frames_ > 0;
-    if (viz_capture_requested && g_viz_capture_root == nullptr) {
+    if (viz_capture_requested && g_viz_capture_root == nullptr)
+    {
         g_viz_capture_root = this;
     }
-    Model* const viz_capture_root = g_viz_capture_root;
+    Model *const viz_capture_root = g_viz_capture_root;
     const bool nested_viz_model = viz_capture_allowed && viz_capture_root != nullptr && viz_capture_root != this;
-    if (nested_viz_model) {
+    if (nested_viz_model)
+    {
         setVizTapsEnabled(true);
         setVizTapsLimits(viz_capture_root->viz_taps_max_frames_,
                          viz_capture_root->viz_taps_max_side_);
@@ -2241,31 +4079,38 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             static_cast<int>(std::min(required, static_cast<size_t>(std::numeric_limits<int>::max()))));
     }
     // Vérifications préliminaires
-    if (layers.empty()) {
+    if (layers.empty())
+    {
         std::cerr << "⚠️  Cannot perform forward pass: no layers defined" << std::endl;
         return input;
     }
-    
-    if (layer_weight_blocks.empty()) {
+
+    if (layer_weight_blocks.empty())
+    {
         std::cerr << "⚠️  Cannot perform forward pass: weights not allocated" << std::endl;
         std::cerr << "    Call allocate_params() and init_weights() first" << std::endl;
         return input;
     }
 
-    if (modelConfig.contains("use_kv_cache")) {
-        try {
+    if (modelConfig.contains("use_kv_cache"))
+    {
+        try
+        {
             setKVCacheEnabled(modelConfig["use_kv_cache"].get<bool>());
-        } catch (...) {
+        }
+        catch (...)
+        {
         }
     }
-    if (training) {
+    if (training)
+    {
         clearKVCache();
     }
-    
+
     // ========================================================================
     // INITIALIZATION: TensorStore + Validation
     // ========================================================================
-    
+
     // Clear et initialiser TensorStore avec l'input principal
     clearTensorStore();
     storeTensor("x", input);
@@ -2273,16 +4118,19 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     storeTensor("__input__", input);
 
     // Injection optionnelle d'entrées nommées (forwardPassNamed)
-    if (pending_int_inputs_.has_value()) {
+    if (pending_int_inputs_.has_value())
+    {
         clearTensorStoreInt();
-        for (const auto& kv : *pending_int_inputs_) {
+        for (const auto &kv : *pending_int_inputs_)
+        {
             storeTensorInt(kv.first, kv.second);
         }
 
         // Convention: "seq" = sortie tokenizer (ids). Alias utile pour modèles existants.
         // Les modèles texte utilisent "text_ids".
         const auto it_seq = pending_int_inputs_->find("seq");
-        if (it_seq != pending_int_inputs_->end()) {
+        if (it_seq != pending_int_inputs_->end())
+        {
             // store under both keys (safe overwrite ok)
             storeTensorInt("text_ids", it_seq->second);
             // Compat: beaucoup de graphes lisent "__input__" (et parfois "x") comme entrée ids.
@@ -2291,48 +4139,67 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             storeTensorInt("x", it_seq->second);
         }
     }
-    if (pending_float_inputs_.has_value()) {
-        for (const auto& kv : *pending_float_inputs_) {
+    if (pending_float_inputs_.has_value())
+    {
+        for (const auto &kv : *pending_float_inputs_)
+        {
             storeTensor(kv.first, kv.second);
         }
     }
 
     // Convention: "mag" et "mod" = embeddings float (médias + liaison).
     // On les injecte par défaut depuis l'ConditioningEncoder si non fournis explicitement.
-    if (hasEncoder) {
-        const auto& mag = encoder.getMagEmbedding();
-        const auto& mod = encoder.getModEmbedding();
+    if (hasEncoder)
+    {
+        const auto &mag = encoder.getMagEmbedding();
+        const auto &mod = encoder.getModEmbedding();
 
         // Cache du scan O(layers*inputs) : recalculé seulement après un push().
-        if (!uses_mag_mod_cached_) {
+        if (!uses_mag_mod_cached_)
+        {
             uses_mag_mod_ = false;
-            for (const auto& lyr : layers) {
-                for (const auto& in : lyr.inputs) {
-                    if (in == "mag" || in == "mod") { uses_mag_mod_ = true; break; }
+            for (const auto &lyr : layers)
+            {
+                for (const auto &in : lyr.inputs)
+                {
+                    if (in == "mag" || in == "mod")
+                    {
+                        uses_mag_mod_ = true;
+                        break;
+                    }
                 }
-                if (uses_mag_mod_) break;
+                if (uses_mag_mod_)
+                    break;
             }
             uses_mag_mod_cached_ = true;
         }
 
-        if (uses_mag_mod_) {
+        if (uses_mag_mod_)
+        {
             int expected = 0;
-            if (modelConfig.contains("d_model")) expected = std::max(0, modelConfig["d_model"].get<int>());
-            else if (modelConfig.contains("text_d_model")) expected = std::max(0, modelConfig["text_d_model"].get<int>());
-            if (expected > 0) {
-                if (!mag.empty() && static_cast<int>(mag.size()) != expected) {
+            if (modelConfig.contains("d_model"))
+                expected = std::max(0, modelConfig["d_model"].get<int>());
+            else if (modelConfig.contains("text_d_model"))
+                expected = std::max(0, modelConfig["text_d_model"].get<int>());
+            if (expected > 0)
+            {
+                if (!mag.empty() && static_cast<int>(mag.size()) != expected)
+                {
                     throw std::runtime_error("ConditioningEncoder mag dim mismatch: have=" + std::to_string(mag.size()) + ", expected=" + std::to_string(expected));
                 }
-                if (!mod.empty() && static_cast<int>(mod.size()) != expected) {
+                if (!mod.empty() && static_cast<int>(mod.size()) != expected)
+                {
                     throw std::runtime_error("ConditioningEncoder mod dim mismatch: have=" + std::to_string(mod.size()) + ", expected=" + std::to_string(expected));
                 }
             }
         }
 
-        if (!mag.empty() && tensor_store.find("mag") == tensor_store.end()) {
+        if (!mag.empty() && tensor_store.find("mag") == tensor_store.end())
+        {
             storeTensor("mag", mag);
         }
-        if (!mod.empty() && tensor_store.find("mod") == tensor_store.end()) {
+        if (!mod.empty() && tensor_store.find("mod") == tensor_store.end())
+        {
             storeTensor("mod", mod);
         }
     }
@@ -2341,10 +4208,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
     // VALIDATION: Vérifier que tous les layers sont supportés (une seule fois)
     static bool validated = false;
-    if (!validated) {
-        for (size_t i = 0; i < layers.size(); ++i) {
-            if (layers[i].type_enum == LayerType::UNKNOWN) {
-                std::cerr << "❌ ERROR: Unsupported layer type '" << layers[i].type 
+    if (!validated)
+    {
+        for (size_t i = 0; i < layers.size(); ++i)
+        {
+            if (layers[i].type_enum == LayerType::UNKNOWN)
+            {
+                std::cerr << "❌ ERROR: Unsupported layer type '" << layers[i].type
                           << "' at index " << i << " (" << layers[i].name << ")" << std::endl;
                 log_supported_types();
                 throw std::runtime_error("Unsupported layer type: " + layers[i].type);
@@ -2360,38 +4230,43 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     const bool planner_enabled = env_flag_true("MIMIR_ENABLE_PLANNER", true);
     const bool fusion_in_training = env_flag_true("MIMIR_ENABLE_FUSION_TRAIN", true);
     const bool fusion_enabled = (!training || fusion_in_training) && env_flag_true(
-        "MIMIR_PLANNER_FUSION", env_flag_true("MIMIR_ENABLE_FUSION", true));
+                                                                         "MIMIR_PLANNER_FUSION", env_flag_true("MIMIR_ENABLE_FUSION", true));
     const bool planner_cost_model = env_flag_true("MIMIR_PLANNER_COST_MODEL", true);
-    const std::string planner_mode_value = [] {
-        const char* value = std::getenv("MIMIR_PLANNER_MODE");
+    const std::string planner_mode_value = []
+    {
+        const char *value = std::getenv("MIMIR_PLANNER_MODE");
         return std::string(value ? value : "cost");
     }();
     const Mimir::Planning::PlannerMode planner_mode =
-        planner_mode_value == "cost" && planner_cost_model ? Mimir::Planning::PlannerMode::Cost :
-        planner_mode_value == "static" ? Mimir::Planning::PlannerMode::Static :
-        Mimir::Planning::PlannerMode::Legacy;
-    const bool planner_buffer_reuse = env_flag_true("MIMIR_PLANNER_BUFFER_REUSE", planner_mode==Mimir::Planning::PlannerMode::Cost);
+        planner_mode_value == "cost" && planner_cost_model ? Mimir::Planning::PlannerMode::Cost : planner_mode_value == "static" ? Mimir::Planning::PlannerMode::Static
+                                                                                                                                 : Mimir::Planning::PlannerMode::Legacy;
+    const bool planner_buffer_reuse = env_flag_true("MIMIR_PLANNER_BUFFER_REUSE", planner_mode == Mimir::Planning::PlannerMode::Cost);
     // Par défaut, la planification reste silencieuse dans le terminal.
     // Opt-in explicite via MIMIR_PLANNER_STDOUT=1 (compatibilité conservée avec l'ancien nom).
     const bool planner_to_terminal = env_flag_true(
         "MIMIR_PLANNER_STDOUT",
-        env_flag_true("MIMIR_PLANNER_TERMINAL", false)
-    );
-    auto emit_planner_line = [&](const std::string& line) {
-        if (planner_to_terminal) {
+        env_flag_true("MIMIR_PLANNER_TERMINAL", false));
+    auto emit_planner_line = [&](const std::string &line)
+    {
+        if (planner_to_terminal)
+        {
             std::cerr << line << std::endl;
-        } else {
+        }
+        else
+        {
             framework_log_write_file_only((line + "\n").c_str(), line.size() + 1);
         }
     };
     bool graph_plan_changed = false;
-    if (planner_enabled) {
+    if (planner_enabled)
+    {
         if (!static_plan_.built ||
             static_plan_.built_for_training != training ||
             static_plan_.built_with_fusion != fusion_enabled ||
             static_plan_.built_with_buffer_reuse != planner_buffer_reuse ||
             static_plan_.mode != planner_mode ||
-            static_plan_.execution.ops.size() != layers.size()) {
+            static_plan_.execution.ops.size() != layers.size())
+        {
             static_plan_.execution = Mimir::Planning::build_execution_plan_global(
                 layers, training, planner_mode, fusion_enabled, planner_buffer_reuse);
             Mimir::Planning::plan_host_buffer_reuse(static_plan_.execution, planner_buffer_reuse);
@@ -2409,27 +4284,34 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // Runtime activation and placement must precede every dump so the
         // selected runtime, transfers and regions describe the executable plan.
         RuntimeRouter::instance().planForwardLayerRoutes(layers);
-        if (planner_mode != Mimir::Planning::PlannerMode::Legacy) {
-            std::vector<AbstractRuntime*> planner_runtimes;
+        if (planner_mode != Mimir::Planning::PlannerMode::Legacy)
+        {
+            std::vector<AbstractRuntime *> planner_runtimes;
 #ifdef ENABLE_ROCM
-            if (g_rocm_engine) planner_runtimes.push_back(g_rocm_engine.get());
+            if (g_rocm_engine)
+                planner_runtimes.push_back(g_rocm_engine.get());
 #endif
 #ifdef ENABLE_CUDA
-            if (g_cuda_engine) planner_runtimes.push_back(g_cuda_engine.get());
+            if (g_cuda_engine)
+                planner_runtimes.push_back(g_cuda_engine.get());
 #endif
 #ifdef ENABLE_VULKAN
-            if (g_compute_engine) planner_runtimes.push_back(g_compute_engine.get());
+            if (g_compute_engine)
+                planner_runtimes.push_back(g_compute_engine.get());
 #endif
 #ifdef ENABLE_OPENCL
-            if (g_opencl_engine) planner_runtimes.push_back(g_opencl_engine.get());
+            if (g_opencl_engine)
+                planner_runtimes.push_back(g_opencl_engine.get());
 #endif
-            if (auto* tpu = Mimir::tpuSessionRuntime(); tpu && tpu->isInitialized())
+            if (auto *tpu = Mimir::tpuSessionRuntime(); tpu && tpu->isInitialized())
                 planner_runtimes.push_back(tpu);
-            if (g_cpu_engine) planner_runtimes.push_back(g_cpu_engine.get());
+            if (g_cpu_engine)
+                planner_runtimes.push_back(g_cpu_engine.get());
             Mimir::Planning::apply_runtime_placement(static_plan_.execution, planner_runtimes);
         }
 
-        if (!static_plan_.dumped && env_flag_true("MIMIR_PLANNER_DUMP", false)) {
+        if (!static_plan_.dumped && env_flag_true("MIMIR_PLANNER_DUMP", false))
+        {
             static_plan_.dumped = true;
             const auto lifetimes = Mimir::Planning::analyze_tensor_lifetimes(layers);
             const auto scratch = Mimir::Planning::plan_conv2d_fastpath_scratch(layers);
@@ -2437,13 +4319,19 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             size_t generic_unary_fusions = 0;
             size_t generic_split_fusions = 0;
             size_t generic_chain_edges = 0;
-            for (size_t i = 0; i < static_plan_.execution.fuse_activation_consumer.size(); ++i) {
-                if (static_plan_.execution.fuse_activation_consumer[i] >= 0) ++generic_activation_fusions;
-                if (static_plan_.execution.fuse_unary_consumer[i] >= 0) ++generic_unary_fusions;
-                if (static_plan_.execution.fuse_split_consumer[i] >= 0) ++generic_split_fusions;
+            for (size_t i = 0; i < static_plan_.execution.fuse_activation_consumer.size(); ++i)
+            {
+                if (static_plan_.execution.fuse_activation_consumer[i] >= 0)
+                    ++generic_activation_fusions;
+                if (static_plan_.execution.fuse_unary_consumer[i] >= 0)
+                    ++generic_unary_fusions;
+                if (static_plan_.execution.fuse_split_consumer[i] >= 0)
+                    ++generic_split_fusions;
             }
-            for (size_t i = 0; i < static_plan_.execution.fuse_chain_next.size(); ++i) {
-                if (static_plan_.execution.fuse_chain_next[i] >= 0) ++generic_chain_edges;
+            for (size_t i = 0; i < static_plan_.execution.fuse_chain_next.size(); ++i)
+            {
+                if (static_plan_.execution.fuse_chain_next[i] >= 0)
+                    ++generic_chain_edges;
             }
             std::ostringstream planner_summary;
             planner_summary << "[planner] tensors=" << lifetimes.size()
@@ -2460,61 +4348,87 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             const std::string global_dump = Mimir::Planning::dump_execution_plan_text(static_plan_.execution);
             std::istringstream global_lines(global_dump);
             std::string global_line;
-            while (std::getline(global_lines, global_line)) {
-                if (!global_line.empty()) emit_planner_line(global_line);
+            while (std::getline(global_lines, global_line))
+            {
+                if (!global_line.empty())
+                    emit_planner_line(global_line);
             }
-            if (const char* json_path = std::getenv("MIMIR_PLANNER_JSON"); json_path && json_path[0] != '\0') {
+            if (const char *json_path = std::getenv("MIMIR_PLANNER_JSON"); json_path && json_path[0] != '\0')
+            {
                 std::ofstream json(json_path, std::ios::binary | std::ios::trunc);
-                if (json) json << Mimir::Planning::dump_execution_plan_json(static_plan_.execution) << '\n';
+                if (json)
+                    json << Mimir::Planning::dump_execution_plan_json(static_plan_.execution) << '\n';
             }
         }
-    } else {
+    }
+    else
+    {
         graph_plan_changed = static_plan_.built;
         static_plan_.built = false;
     }
 
-    if(graph_plan_changed)Mimir::Planning::FusionCalibration::clearProfiles();
+    if (graph_plan_changed)
+        Mimir::Planning::FusionCalibration::clearProfiles();
 
     // Keep the last built plan available even if the UI opens after inference.
     // Otherwise refresh metadata at most twice per second while inspected.
-    const auto graph_now=std::chrono::steady_clock::now();
-    if (graph_plan_changed || graph_snapshot_time_.time_since_epoch().count()==0 ||
+    const auto graph_now = std::chrono::steady_clock::now();
+    if (graph_plan_changed || graph_snapshot_time_.time_since_epoch().count() == 0 ||
         (runtime_config_->modelGraphRequested() &&
-         graph_now-graph_snapshot_time_ >= std::chrono::milliseconds(500))) {
+         graph_now - graph_snapshot_time_ >= std::chrono::milliseconds(500)))
+    {
         runtime_config_->publishModelGraph(Mimir::Viz::modelGraphSnapshot(layers,
-            planner_enabled && static_plan_.built ? &static_plan_.execution : nullptr,
-            planner_enabled ? (planner_mode==Mimir::Planning::PlannerMode::Cost ? "cost" :
-                planner_mode==Mimir::Planning::PlannerMode::Static ? "static" : "legacy") : "desactive",
-            training,fusion_enabled,planner_buffer_reuse));
-        graph_snapshot_time_=graph_now;
+                                                                          planner_enabled && static_plan_.built ? &static_plan_.execution : nullptr,
+                                                                          planner_enabled ? (planner_mode == Mimir::Planning::PlannerMode::Cost ? "cost" : planner_mode == Mimir::Planning::PlannerMode::Static ? "static"
+                                                                                                                                                                                                                : "legacy")
+                                                                                          : "desactive",
+                                                                          training, fusion_enabled, planner_buffer_reuse));
+        graph_snapshot_time_ = graph_now;
     }
 
     const bool runtime_verbose = !Model::frameworkLogsSuppressed();
     const bool runtime_trace = runtime_verbose && env_flag_true("MIMIR_RUNTIME_TRACE", false);
     const bool layer_profile = runtime_verbose && env_flag_true("MIMIR_LAYER_PROFILE", false);
-    if (runtime_verbose && (graph_plan_changed || runtime_trace)) {
-        auto join_strings = [](const std::vector<std::string>& items, const char* sep) -> std::string {
-            if (items.empty()) return std::string();
+    if (runtime_verbose && (graph_plan_changed || runtime_trace))
+    {
+        auto join_strings = [](const std::vector<std::string> &items, const char *sep) -> std::string
+        {
+            if (items.empty())
+                return std::string();
             std::ostringstream oss;
-            for (size_t i = 0; i < items.size(); ++i) {
-                if (i > 0) oss << sep;
+            for (size_t i = 0; i < items.size(); ++i)
+            {
+                if (i > 0)
+                    oss << sep;
                 oss << items[i];
             }
             return oss.str();
         };
 
-        auto fusion_to_string = [](Mimir::Planning::FusionKind fusion) -> const char* {
-            switch (fusion) {
-                case Mimir::Planning::FusionKind::NONE: return "NONE";
-                case Mimir::Planning::FusionKind::CONV2D_RELU: return "CONV2D_RELU";
-                case Mimir::Planning::FusionKind::GENERIC_ACTIVATION: return "GENERIC_ACTIVATION";
-                case Mimir::Planning::FusionKind::GENERIC_SPLIT: return "GENERIC_SPLIT";
-                case Mimir::Planning::FusionKind::GENERIC_CHUNK: return "GENERIC_CHUNK";
-                case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_SPLIT: return "GENERIC_ACTIVATION_SPLIT";
-                case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_CHUNK: return "GENERIC_ACTIVATION_CHUNK";
-                case Mimir::Planning::FusionKind::GENERIC_UNARY_SHAPE: return "GENERIC_UNARY_SHAPE";
-                case Mimir::Planning::FusionKind::GENERIC_LAYER: return "GENERIC_LAYER";
-                default: return "UNKNOWN";
+        auto fusion_to_string = [](Mimir::Planning::FusionKind fusion) -> const char *
+        {
+            switch (fusion)
+            {
+            case Mimir::Planning::FusionKind::NONE:
+                return "NONE";
+            case Mimir::Planning::FusionKind::CONV2D_RELU:
+                return "CONV2D_RELU";
+            case Mimir::Planning::FusionKind::GENERIC_ACTIVATION:
+                return "GENERIC_ACTIVATION";
+            case Mimir::Planning::FusionKind::GENERIC_SPLIT:
+                return "GENERIC_SPLIT";
+            case Mimir::Planning::FusionKind::GENERIC_CHUNK:
+                return "GENERIC_CHUNK";
+            case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_SPLIT:
+                return "GENERIC_ACTIVATION_SPLIT";
+            case Mimir::Planning::FusionKind::GENERIC_ACTIVATION_CHUNK:
+                return "GENERIC_ACTIVATION_CHUNK";
+            case Mimir::Planning::FusionKind::GENERIC_UNARY_SHAPE:
+                return "GENERIC_UNARY_SHAPE";
+            case Mimir::Planning::FusionKind::GENERIC_LAYER:
+                return "GENERIC_LAYER";
+            default:
+                return "UNKNOWN";
             }
         };
 
@@ -2522,66 +4436,81 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         active_runtimes.reserve(5);
 
 #ifdef ENABLE_ROCM
-        if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) {
+        if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized())
+        {
             active_runtimes.emplace_back(g_rocm_engine->name());
         }
 #endif
 
 #ifdef ENABLE_CUDA
-        if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) {
+        if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized())
+        {
             active_runtimes.emplace_back(g_cuda_engine->name());
         }
 #endif
 
-    #ifdef ENABLE_VULKAN
-        if (g_compute_available && g_compute_engine && g_compute_engine->isInitialized()) {
+#ifdef ENABLE_VULKAN
+        if (g_compute_available && g_compute_engine && g_compute_engine->isInitialized())
+        {
             active_runtimes.emplace_back(g_compute_engine->name());
         }
-    #endif
+#endif
 
-    #ifdef ENABLE_OPENCL
-        if (g_opencl_available && g_opencl_engine && g_opencl_engine->isInitialized()) {
+#ifdef ENABLE_OPENCL
+        if (g_opencl_available && g_opencl_engine && g_opencl_engine->isInitialized())
+        {
             active_runtimes.emplace_back(g_opencl_engine->name());
         }
-    #endif
+#endif
 
-        if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized()) {
+        if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized())
+        {
             active_runtimes.emplace_back(g_cpu_engine->name());
         }
 
         const std::string selected_hardware = active_runtimes.empty() ? std::string("NONE") : active_runtimes.front();
         std::unordered_map<std::string, size_t> layer_type_count;
         layer_type_count.reserve(layers.size());
-        for (const auto& layer : layers) {
+        for (const auto &layer : layers)
+        {
             ++layer_type_count[layer.type.empty() ? type_to_string(layer.type_enum) : layer.type];
         }
 
         std::vector<std::pair<std::string, size_t>> sorted_types(layer_type_count.begin(), layer_type_count.end());
-        std::sort(sorted_types.begin(), sorted_types.end(), [](const auto& a, const auto& b) {
+        std::sort(sorted_types.begin(), sorted_types.end(), [](const auto &a, const auto &b)
+                  {
             if (a.second != b.second) return a.second > b.second;
-            return a.first < b.first;
-        });
+            return a.first < b.first; });
 
         std::vector<int> fused_into(layers.size(), -1);
-        if (planner_enabled && static_plan_.built) {
-            const auto& plan = static_plan_.execution;
-            for (size_t i = 0; i < plan.fuse_chain_next.size(); ++i) {
+        if (planner_enabled && static_plan_.built)
+        {
+            const auto &plan = static_plan_.execution;
+            for (size_t i = 0; i < plan.fuse_chain_next.size(); ++i)
+            {
                 const int consumer = plan.fuse_chain_next[i];
-                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) {
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size())
+                {
                     fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
                 }
             }
-            for (size_t i = 0; i < plan.fuse_activation_consumer.size(); ++i) {
+            for (size_t i = 0; i < plan.fuse_activation_consumer.size(); ++i)
+            {
                 const int consumer = plan.fuse_activation_consumer[i];
-                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size())
+                    fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
             }
-            for (size_t i = 0; i < plan.fuse_unary_consumer.size(); ++i) {
+            for (size_t i = 0; i < plan.fuse_unary_consumer.size(); ++i)
+            {
                 const int consumer = plan.fuse_unary_consumer[i];
-                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size())
+                    fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
             }
-            for (size_t i = 0; i < plan.fuse_split_consumer.size(); ++i) {
+            for (size_t i = 0; i < plan.fuse_split_consumer.size(); ++i)
+            {
                 const int consumer = plan.fuse_split_consumer[i];
-                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size()) fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
+                if (consumer >= 0 && static_cast<size_t>(consumer) < fused_into.size())
+                    fused_into[static_cast<size_t>(consumer)] = static_cast<int>(i);
             }
         }
 
@@ -2590,15 +4519,18 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                   << " train=" << (training ? 1 : 0)
                   << " planner=" << (planner_enabled ? 1 : 0)
                   << " layers=" << layers.size();
-        for (size_t i = 0; i < layers.size(); ++i) {
-            const auto& layer = layers[i];
+        for (size_t i = 0; i < layers.size(); ++i)
+        {
+            const auto &layer = layers[i];
             signature << '|' << i << ':' << layer.name << ':' << layer.type << ':' << Mimir::Planning::planner_output_name_for(layer);
-            if (planner_enabled && static_plan_.built && i < static_plan_.execution.skip_layer.size()) {
+            if (planner_enabled && static_plan_.built && i < static_plan_.execution.skip_layer.size())
+            {
                 signature << ":skip=" << static_cast<int>(static_plan_.execution.skip_layer[i]);
             }
         }
 
-        if (!static_plan_.runtime_scan_dumped || static_plan_.runtime_scan_signature != signature.str()) {
+        if (!static_plan_.runtime_scan_dumped || static_plan_.runtime_scan_signature != signature.str())
+        {
             static_plan_.runtime_scan_dumped = true;
             static_plan_.runtime_scan_signature = signature.str();
 
@@ -2611,36 +4543,45 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
             std::ostringstream type_scan;
             type_scan << "[runtime] layer_scan total=" << layers.size() << " types=";
-            for (size_t i = 0; i < sorted_types.size(); ++i) {
-                if (i > 0) type_scan << ", ";
+            for (size_t i = 0; i < sorted_types.size(); ++i)
+            {
+                if (i > 0)
+                    type_scan << ", ";
                 type_scan << sorted_types[i].first << ':' << sorted_types[i].second;
             }
             std::cerr << type_scan.str() << std::endl;
 
-            if (planner_enabled && static_plan_.built) {
-                const auto& plan = static_plan_.execution;
+            if (planner_enabled && static_plan_.built)
+            {
+                const auto &plan = static_plan_.execution;
                 emit_planner_line("[runtime] planner_map begin");
-                for (size_t i = 0; i < layers.size(); ++i) {
-                    const auto& layer = layers[i];
-                    const auto& input_names = Mimir::Planning::planner_inputs_for(layer);
+                for (size_t i = 0; i < layers.size(); ++i)
+                {
+                    const auto &layer = layers[i];
+                    const auto &input_names = Mimir::Planning::planner_inputs_for(layer);
 
                     std::vector<std::string> io_parts;
                     io_parts.reserve(input_names.size());
-                    for (const auto& in : input_names) io_parts.push_back(in);
+                    for (const auto &in : input_names)
+                        io_parts.push_back(in);
 
                     const bool skipped = i < plan.skip_layer.size() && plan.skip_layer[i] != 0;
                     std::string call_path;
-                    if (skipped) {
+                    if (skipped)
+                    {
                         const int producer = fused_into[i];
                         call_path = (producer >= 0)
-                            ? (std::string("fused_skip<-layer#") + std::to_string(producer))
-                            : std::string("fused_skip");
-                    } else {
+                                        ? (std::string("fused_skip<-layer#") + std::to_string(producer))
+                                        : std::string("fused_skip");
+                    }
+                    else
+                    {
                         call_path = "runtime_router.dispatchForwardLayer";
                     }
 
-                    const char* fusion = "NONE";
-                    if (i < plan.ops.size()) {
+                    const char *fusion = "NONE";
+                    if (i < plan.ops.size())
+                    {
                         fusion = fusion_to_string(plan.ops[i].fusion);
                     }
 
@@ -2655,34 +4596,40 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     emit_planner_line(planner_line.str());
                 }
                 emit_planner_line("[runtime] planner_map end");
-            } else {
+            }
+            else
+            {
                 emit_planner_line("[runtime] planner_map unavailable (planner disabled)");
             }
         }
     }
-    
-    if (!planner_enabled) RuntimeRouter::instance().planForwardLayerRoutes(layers);
+
+    if (!planner_enabled)
+        RuntimeRouter::instance().planForwardLayerRoutes(layers);
 
     // État du forward
-    if (training) {
+    if (training)
+    {
         forward_state.clear();
         forward_state.skip_connections_enabled = skip_connections_enabled;
         forward_state.is_valid = true;
     }
 
     const bool has_branches = training && std::any_of(
-        layers.begin(), layers.end(),
-        [](const Layer& l) { return l.requiresBranchComputation(); }
-    );
+                                              layers.begin(), layers.end(),
+                                              [](const Layer &l)
+                                              { return l.requiresBranchComputation(); });
 
     std::vector<std::vector<float>> all_layer_outputs;
-    if (training && has_branches) {
+    if (training && has_branches)
+    {
         // Preserve physical layer indices when fused consumers skip the main loop.
         all_layer_outputs.resize(layers.size());
     }
-    
+
     // Conservation pour backward (à migrer vers TensorStore)
-    if (training) {
+    if (training)
+    {
         forward_state.layer_outputs.clear();
         forward_state.layer_outputs.reserve(layers.size());
         forward_state.layer_output_masks.clear();
@@ -2695,37 +4642,46 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         forward_state.layer_input_sizes_multi.reserve(layers.size());
     }
 
-    auto needs_input_value_snapshot = [](const Layer& layer) -> bool {
+    auto needs_input_value_snapshot = [](const Layer &layer) -> bool
+    {
         // Par défaut: snapshot valeurs (sécurité), sauf si le backward n'utilise que des tailles.
         // Important: pour Add/Concat/Split/Subtract/TokenMeanPool/Upsample/Identity, on évite la copie.
         if (layer.type == "Add" || layer.type == "Concat" || layer.type == "Split" || layer.type == "Subtract" ||
-            layer.type == "TokenMeanPool" || layer.type == "UpsampleNearest" || layer.type == "Identity" || layer.type == "Constant") {
+            layer.type == "TokenMeanPool" || layer.type == "UpsampleNearest" || layer.type == "Identity" || layer.type == "Constant")
+        {
             return false;
         }
         // Dropout backward se base sur un masque (output), pas sur l'input.
-        if (layer.type == "Dropout" || layer.type == "Dropout2d" || layer.type == "AlphaDropout") {
+        if (layer.type == "Dropout" || layer.type == "Dropout2d" || layer.type == "AlphaDropout")
+        {
             return false;
         }
         return true;
     };
 
-    auto needs_output_mask = [](const Layer& layer) -> bool {
-        if (layer.type == "Dropout" || layer.type == "Dropout2d" || layer.type == "AlphaDropout") return true;
-        if ((layer.type == "Conv2d" || layer.type == "ConvTranspose2d") && layer.activation != ActivationType::NONE) return true;
+    auto needs_output_mask = [](const Layer &layer) -> bool
+    {
+        if (layer.type == "Dropout" || layer.type == "Dropout2d" || layer.type == "AlphaDropout")
+            return true;
+        if ((layer.type == "Conv2d" || layer.type == "ConvTranspose2d" ||
+             layer.type == "Conv3d" || layer.type == "Conv4d") && layer.activation != ActivationType::NONE)
+            return true;
         return false;
     };
 
-    auto needs_output_snapshot = [](const Layer& layer) -> bool {
+    auto needs_output_snapshot = [](const Layer &layer) -> bool
+    {
         // Reparameterize backward a besoin de z (output) pour reconstruire eps.
-        if (layer.type == "Reparameterize") return true;
+        if (layer.type == "Reparameterize")
+            return true;
         return false;
     };
-    
+
     // ========================================================================
     // FORWARD PASS: Routing via TensorStore
     // ========================================================================
 
-    MemoryGuard& guard = MemoryGuard::instance();
+    MemoryGuard &guard = MemoryGuard::instance();
     const size_t guard_mb = guard.getLimit() / (1024ULL * 1024ULL);
     const size_t cap_mb = (max_ram_mb_ > 0) ? max_ram_mb_ : guard_mb;
     RuntimeAllocator allocator(guard, cap_mb);
@@ -2740,17 +4696,23 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     int viz_last_w = 0;
     int viz_last_h = 0;
 
-    auto record_fused_inputs = [&](const Layer& layer,const std::vector<const std::vector<float>*>& inputs,
-        std::vector<float>* movable=nullptr) {
-        if(!training)return;
+    auto record_fused_inputs = [&](const Layer &layer, const std::vector<const std::vector<float> *> &inputs,
+                                   std::vector<float> *movable = nullptr)
+    {
+        if (!training)
+            return;
         forward_state.layer_input_names.push_back(Mimir::Planning::planner_inputs_for(layer));
         std::vector<size_t> sizes;
         std::vector<std::vector<float>> snapshots;
-        for(const auto* input:inputs) {
+        for (const auto *input : inputs)
+        {
             sizes.push_back(input->size());
-            if(needs_input_value_snapshot(layer)) {
-                if(input==movable)snapshots.push_back(std::move(*movable));
-                else snapshots.push_back(*input);
+            if (needs_input_value_snapshot(layer))
+            {
+                if (input == movable)
+                    snapshots.push_back(std::move(*movable));
+                else
+                    snapshots.push_back(*input);
             }
         }
         forward_state.layer_input_sizes_multi.push_back(std::move(sizes));
@@ -2758,46 +4720,79 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         forward_state.layer_outputs.emplace_back();
         forward_state.layer_output_masks.emplace_back();
     };
-    auto apply_fused_layer = [&](std::vector<float>& data, Layer& fused_layer,const std::string& data_name) {
-        if(!fused_layer.shared_weights_from.empty()) {
-            Layer* owner=getLayerByName(fused_layer.shared_weights_from);
-            if(!owner || !owner->weight_block)throw std::runtime_error("Shared weight source unavailable: "+fused_layer.name);
-            fused_layer.weight_block=owner->weight_block;
+    auto apply_fused_layer = [&](std::vector<float> &data, Layer &fused_layer, const std::string &data_name)
+    {
+        if (!fused_layer.shared_weights_from.empty())
+        {
+            Layer *owner = getLayerByName(fused_layer.shared_weights_from);
+            if (!owner || !owner->weight_block)
+                throw std::runtime_error("Shared weight source unavailable: " + fused_layer.name);
+            fused_layer.weight_block = owner->weight_block;
         }
-        std::vector<const std::vector<float>*> inputs;
-        for(const auto& name:Mimir::Planning::planner_inputs_for(fused_layer))
-            inputs.push_back(name==data_name?&data:&getTensor(name));
-        record_fused_inputs(fused_layer,inputs);
+        std::vector<const std::vector<float> *> inputs;
+        for (const auto &name : Mimir::Planning::planner_inputs_for(fused_layer))
+            inputs.push_back(name == data_name ? &data : &getTensor(name));
+        record_fused_inputs(fused_layer, inputs);
         RuntimeForwardContext context;
-        context.skip_connections_enabled=skip_connections_enabled;
-        if(fused_layer.type_enum==LayerType::Reparameterize) {
-            if(modelConfig.contains("stochastic_latent"))context.stochastic_latent=modelConfig["stochastic_latent"].get<bool>();
-            else if(modelConfig.contains("vae_stochastic_latent"))context.stochastic_latent=modelConfig["vae_stochastic_latent"].get<bool>();
+        context.skip_connections_enabled = skip_connections_enabled;
+        context.autocast_dtype = Mimir::parse_dtype(autocast_dtype_);
+        if (fused_layer.type_enum == LayerType::Reparameterize)
+        {
+            if (modelConfig.contains("stochastic_latent"))
+                context.stochastic_latent = modelConfig["stochastic_latent"].get<bool>();
+            else if (modelConfig.contains("vae_stochastic_latent"))
+                context.stochastic_latent = modelConfig["vae_stochastic_latent"].get<bool>();
         }
-        if(training)context.output_mask=&forward_state.layer_output_masks.back();
+        if (training)
+            context.output_mask = &forward_state.layer_output_masks.back();
         std::vector<std::vector<float>> outputs;
-        if(!RuntimeRouter::instance().dispatchForwardLayer(inputs,outputs,fused_layer,training,nullptr,context))
-            throw std::runtime_error("Runtime fused layer failed: "+fused_layer.name);
+        auto& router = RuntimeRouter::instance();
+        AbstractRuntime* planned_runtime = nullptr;
+        const size_t index = static_cast<size_t>(&fused_layer - layers.data());
+        if (planner_enabled && static_plan_.built && planner_mode != Mimir::Planning::PlannerMode::Legacy &&
+            index < static_plan_.execution.layers.size()) {
+            const auto kind = static_plan_.execution.layers[index].runtime;
+            for (auto* runtime : router.configuredRuntimes())
+                if (runtime && Mimir::Planning::runtime_kind_from_name(runtime->name()) == kind) {
+                    planned_runtime = runtime;
+                    break;
+                }
+        }
+        // A fused suffix retains the placement and precision of its ordinary
+        // layer. Falling back to runtime priority can change FP32 rounding.
+        const bool executed = planned_runtime
+            ? router.dispatchForwardLayerPlanned(planned_runtime, inputs, outputs, fused_layer, training, nullptr, context)
+            : router.dispatchForwardLayer(inputs, outputs, fused_layer, training, nullptr, context);
+        if (!executed)
+            throw std::runtime_error("Runtime fused layer failed: " + fused_layer.name);
         // Materialize exactly once per logical edge, matching the unfused
         // TensorStore and dtype semantics without copying data back out again.
-        if(Mimir::Planning::planner_output_name_for(fused_layer)!=data_name)
-            storeTensor(data_name,std::move(data));
-        if(Mimir::Planning::is_fusible_split_layer(fused_layer)) {
-            const auto base=Mimir::Planning::planner_output_name_for(fused_layer);
-            for(size_t i=0;i<outputs.size();++i)storeTensor(base+"_"+std::to_string(i),outputs[i]);
+        if (Mimir::Planning::planner_output_name_for(fused_layer) != data_name)
+            storeTensor(data_name, std::move(data));
+        if (Mimir::Planning::is_fusible_split_layer(fused_layer))
+        {
+            const auto base = Mimir::Planning::planner_output_name_for(fused_layer);
+            for (size_t i = 0; i < outputs.size(); ++i)
+                storeTensor(base + "_" + std::to_string(i), outputs[i]);
         }
-        data=std::move(outputs.at(0));
-        if(training) {
-            if(needs_output_mask(fused_layer) && forward_state.layer_output_masks.back().empty()) {
-                auto& mask=forward_state.layer_output_masks.back();mask.resize(data.size());
-                for(size_t i=0;i<data.size();++i)mask[i]=data[i]!=0.f;
+        data = std::move(outputs.at(0));
+        if (training)
+        {
+            if (needs_output_mask(fused_layer) && forward_state.layer_output_masks.back().empty())
+            {
+                auto &mask = forward_state.layer_output_masks.back();
+                mask.resize(data.size());
+                for (size_t i = 0; i < data.size(); ++i)
+                    mask[i] = data[i] != 0.f;
             }
-            if(needs_output_snapshot(fused_layer))forward_state.layer_outputs.back()=data;
+            if (needs_output_snapshot(fused_layer))
+                forward_state.layer_outputs.back() = data;
         }
     };
 
     const bool exhaustive_model_viz = viz_taps_enabled_ && viz_taps_max_frames_ > 0;
-    if (exhaustive_model_viz && (!modelConfig.is_object() || !modelConfig.value("viz_registered_tips_only", false))) {
+    if (exhaustive_model_viz && (!modelConfig.is_object() || !modelConfig.value("viz_registered_tips_only", false)))
+    {
         viz_taps_max_frames_ = std::max(
             viz_taps_max_frames_,
             static_cast<int>(std::min(layers.size() + static_cast<size_t>(64),
@@ -2809,41 +4804,51 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         !exhaustive_model_viz &&
         std::none_of(static_plan_.execution.skip_layer.begin(),
                      static_plan_.execution.skip_layer.end(),
-                     [](const uint8_t value) { return value != 0; });
+                     [](const uint8_t value)
+                     { return value != 0; });
     const bool poison_reused_buffers = env_flag_true("MIMIR_PLANNER_BUFFER_POISON", false);
     std::unordered_map<size_t, std::vector<float>> planned_host_buffer_pool;
     size_t actual_buffer_reuse_count = 0;
     size_t actual_buffer_reuse_bytes = 0;
 
     std::string forward_output_name = modelConfig.is_object()
-        ? modelConfig.value("forward_output_tensor", std::string("x")) : "x";
+                                          ? modelConfig.value("forward_output_tensor", std::string("x"))
+                                          : "x";
     size_t forward_layer_limit = layers.size();
-    if (!training && modelConfig.contains("inference_output_tensor")) {
+    if (!training && modelConfig.contains("inference_output_tensor"))
+    {
         forward_output_name = modelConfig.value("inference_output_tensor", std::string("x"));
         bool producer_found = false;
-        for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx)
+        {
             const std::string output_name = layers[layer_idx].output.empty() ? "x" : layers[layer_idx].output;
-            if (output_name == forward_output_name) {
+            if (output_name == forward_output_name)
+            {
                 forward_layer_limit = layer_idx + 1;
                 producer_found = true;
             }
         }
-        if (!producer_found) {
+        if (!producer_found)
+        {
             throw std::runtime_error(
                 "Inference output tensor has no producer: " + forward_output_name);
         }
     }
 
-    if(static_plan_.built)
-        for(auto& planned:static_plan_.execution.layers)planned.kernel_fused=false;
-    for (size_t layer_idx = 0; layer_idx < forward_layer_limit; ++layer_idx) {
+    if (static_plan_.built)
+        for (auto &planned : static_plan_.execution.layers)
+            planned.kernel_fused = false;
+    for (size_t layer_idx = 0; layer_idx < forward_layer_limit; ++layer_idx)
+    {
         // Une fusion retire les consumers du parcours. En mode VIZ exhaustif,
         // executer chaque noeud garantit une vignette (L) par layer.
         if (!exhaustive_model_viz && planner_enabled && static_plan_.built &&
             layer_idx < static_plan_.execution.skip_layer.size() &&
-            static_plan_.execution.skip_layer[layer_idx] != 0) {
-            if (runtime_trace) {
-                const auto& skipped_layer = layers[layer_idx];
+            static_plan_.execution.skip_layer[layer_idx] != 0)
+        {
+            if (runtime_trace)
+            {
+                const auto &skipped_layer = layers[layer_idx];
                 std::cerr << "[runtime-trace] layer#" << layer_idx
                           << " name='" << skipped_layer.name
                           << "' type='" << (skipped_layer.type.empty() ? type_to_string(skipped_layer.type_enum) : skipped_layer.type)
@@ -2855,43 +4860,67 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
         const auto layer_profile_start = std::chrono::steady_clock::now();
         auto &layer = layers[layer_idx];
-        if (!layer.shared_weights_from.empty()) {
-            Layer* owner = getLayerByName(layer.shared_weights_from);
-            if (!owner || !owner->weight_block) throw std::runtime_error("Shared weight source unavailable: " + layer.name);
+        if (!layer.shared_weights_from.empty())
+        {
+            Layer *owner = getLayerByName(layer.shared_weights_from);
+            if (!owner || !owner->weight_block)
+                throw std::runtime_error("Shared weight source unavailable: " + layer.name);
             layer.weight_block = owner->weight_block;
         }
 
         // ====================================================================
         // RETRIEVE INPUTS (multi-input support)
         // ====================================================================
-        
-        const std::vector<std::string>& input_names =
+
+        const std::vector<std::string> &input_names =
             (layer.inputs.empty() && layer.type_enum != LayerType::Constant) ? kDefaultInputNameX : layer.inputs;
 
-        auto& inputs = scratch_input_ptrs_;
+        auto &inputs = scratch_input_ptrs_;
         inputs.clear();
         inputs.reserve(input_names.size());
 
         // Pour Embedding: accepter un input fourni en int (tensor_store_int) et le projeter en float ids.
         // IMPORTANT: on évite d'appeler getTensor() en premier (qui loggue une erreur) car
         // le chemin normal pour Embedding peut être via tensor_store_int.
-        auto& embedding_ids_tmp = scratch_embedding_ids_tmp_;
-        auto& embedding_ids_fallback = scratch_embedding_ids_fallback_;
+        auto &embedding_ids_tmp = scratch_embedding_ids_tmp_;
+        auto &embedding_ids_fallback = scratch_embedding_ids_fallback_;
 
-        for (size_t in_i = 0; in_i < input_names.size(); ++in_i) {
-            const auto& name = input_names[in_i];
+        for (size_t in_i = 0; in_i < input_names.size(); ++in_i)
+        {
+            const auto &name = input_names[in_i];
+
+            // Les couches Embedding consomment des IDs entiers. Un forward
+            // nommé peut aussi avoir installé un alias flottant vide sous
+            // `__input__`; dans ce cas les IDs doivent rester prioritaires.
+            if (layer.type_enum == LayerType::Embedding && in_i == 0)
+            {
+                auto iti = tensor_store_int.find(name);
+                if (iti != tensor_store_int.end())
+                {
+                    const std::vector<int> &ids = iti->second;
+                    embedding_ids_tmp.clear();
+                    embedding_ids_tmp.reserve(ids.size());
+                    for (int v : ids)
+                        embedding_ids_tmp.push_back(static_cast<float>(v));
+                    inputs.push_back(&embedding_ids_tmp);
+                    continue;
+                }
+            }
 
             // 1) Chemin standard: float TensorStore
             auto itf = tensor_store.find(name);
-            if (itf != tensor_store.end()) {
+            if (itf != tensor_store.end())
+            {
                 inputs.push_back(&itf->second);
                 continue;
             }
 
             // 2) Cas spécial Embedding: ids int -> float
-            if (layer.type_enum == LayerType::Embedding && in_i == 0) {
+            if (layer.type_enum == LayerType::Embedding && in_i == 0)
+            {
                 auto iti = tensor_store_int.find(name);
-                if (iti == tensor_store_int.end()) {
+                if (iti == tensor_store_int.end())
+                {
                     // Fallback: si text_ids n'est pas fourni (ex: smoke tests / entraînement sans prompt),
                     // on génère des ids de padding de longueur seq_len pour stabiliser les shapes.
                     const int L = (layer.seq_len > 0) ? layer.seq_len : 1;
@@ -2900,10 +4929,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     iti = tensor_store_int.emplace(name, embedding_ids_fallback).first;
                 }
 
-                const std::vector<int>& ids = iti->second;
+                const std::vector<int> &ids = iti->second;
                 embedding_ids_tmp.clear();
                 embedding_ids_tmp.reserve(ids.size());
-                for (int v : ids) embedding_ids_tmp.push_back(static_cast<float>(v));
+                for (int v : ids)
+                    embedding_ids_tmp.push_back(static_cast<float>(v));
                 inputs.push_back(&embedding_ids_tmp);
                 continue;
             }
@@ -2913,29 +4943,43 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                       << "): Cannot find input tensor '" << name << "'" << std::endl;
             std::cerr << "Available tensors: ";
             auto available = getAvailableTensors();
-            for (const auto& t : available) std::cerr << "'" << t << "' ";
+            for (const auto &t : available)
+                std::cerr << "'" << t << "' ";
             std::cerr << std::endl;
             std::cerr << "Available int tensors: ";
             auto available_i = getAvailableIntTensors();
-            for (const auto& t : available_i) std::cerr << "'" << t << "' ";
+            for (const auto &t : available_i)
+                std::cerr << "'" << t << "' ";
             std::cerr << std::endl;
             throw std::runtime_error("Missing input tensor: " + name);
         }
-        
+
         // Snapshot inputs for backward (multi-input)
-        if (training) {
+        if (training)
+        {
             forward_state.layer_input_names.push_back(input_names);
 
             std::vector<size_t> sizes;
             sizes.reserve(inputs.size());
-            for (const auto* inp : inputs) sizes.push_back(inp ? inp->size() : 0ULL);
+            for (const auto *inp : inputs)
+                sizes.push_back(inp ? inp->size() : 0ULL);
             forward_state.layer_input_sizes_multi.push_back(std::move(sizes));
 
             std::vector<std::vector<float>> snap;
-            if (needs_input_value_snapshot(layer)) {
+            if (needs_input_value_snapshot(layer))
+            {
                 snap.reserve(inputs.size());
-                for (const auto* inp : inputs) {
+                for (const auto *inp : inputs)
+                {
                     snap.push_back(*inp);
+                }
+                if (layer.type_enum == LayerType::Linear && !snap.empty() &&
+                    Mimir::parse_dtype(autocast_dtype_) != Mimir::DType::F32)
+                {
+                    // The backward linear kernel consumes the same rounded
+                    // activations that the autocast forward kernel saw.
+                    snap[0] = castFloatVector(snap[0],
+                                              Mimir::parse_dtype(autocast_dtype_));
                 }
             }
             forward_state.layer_inputs_multi.push_back(std::move(snap));
@@ -2947,66 +4991,79 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
         // Pour compatibilité: x est généralement inputs[0], sauf pour des layers sans entrée comme Constant.
         static const std::vector<float> kEmptyInput;
-        const std::vector<float>& x = (!inputs.empty() && inputs[0] != nullptr) ? *inputs[0] : kEmptyInput;
+        const std::vector<float> &x = (!inputs.empty() && inputs[0] != nullptr) ? *inputs[0] : kEmptyInput;
 
         std::string executed_backend = "CPU";
         std::string executed_call = "runtime_router.dispatchForwardLayer";
-        
+
         std::vector<float> layer_output;
         bool resident_chain_executed = false;
         std::string resident_final_output_name;
 
-        if(planner_enabled && fusion_enabled && static_plan_.built && !exhaustive_model_viz &&
-            Mimir::Planning::FusionCalibration::pointwiseCandidate(layer.type_enum)) {
-            const auto& plan=static_plan_.execution;
-            std::vector<const Layer*> chain;
-            size_t cursor=layer_idx;
-            int next=-1;
-            while(cursor<forward_layer_limit && Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[cursor].type_enum) &&
-                Mimir::Planning::planner_inputs_for(layers[cursor]).size()==1 && layers[cursor].getWeightsSize()==0) {
+        if (planner_enabled && fusion_enabled && static_plan_.built && !exhaustive_model_viz &&
+            Mimir::Planning::FusionCalibration::pointwiseCandidate(layer.type_enum))
+        {
+            const auto &plan = static_plan_.execution;
+            std::vector<const Layer *> chain;
+            size_t cursor = layer_idx;
+            int next = -1;
+            while (cursor < forward_layer_limit && Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[cursor].type_enum) &&
+                   Mimir::Planning::planner_inputs_for(layers[cursor]).size() == 1 && layers[cursor].getWeightsSize() == 0)
+            {
                 chain.push_back(&layers[cursor]);
-                next=plan.fuse_chain_next[cursor];
-                if(next<0 || static_cast<size_t>(next)>=forward_layer_limit)break;
-                cursor=static_cast<size_t>(next);
+                next = plan.fuse_chain_next[cursor];
+                if (next < 0 || static_cast<size_t>(next) >= forward_layer_limit)
+                    break;
+                cursor = static_cast<size_t>(next);
             }
-            const auto final_name=chain.empty()?std::string():Mimir::Planning::planner_output_name_for(*chain.back());
-            const bool aliases=std::all_of(chain.begin(),chain.end(),[&](const Layer* operation) {
-                return Mimir::Planning::planner_output_name_for(*operation)==final_name;
-            });
+            const auto final_name = chain.empty() ? std::string() : Mimir::Planning::planner_output_name_for(*chain.back());
+            const bool aliases = std::all_of(chain.begin(), chain.end(), [&](const Layer *operation)
+                                             { return Mimir::Planning::planner_output_name_for(*operation) == final_name; });
             std::vector<std::vector<float>> values;
-            AbstractRuntime* fused_runtime=nullptr;
-            if(chain.size()>=2 && (next<0 || static_cast<size_t>(next)>=forward_layer_limit) &&
-                RuntimeRouter::instance().dispatchPointwiseForward(chain,x,values,training || !aliases,&fused_runtime,
-                    training,Mimir::parse_dtype(default_dtype_))) {
-                if(!training && aliases)layer_output=std::move(values[0]);
-                else {
-                    layer_output=std::move(values[0]);
-                    std::string name=Mimir::Planning::planner_output_name_for(layer);
-                    for(size_t j=1;j<chain.size();++j) {
-                        record_fused_inputs(*chain[j],{&layer_output},aliases?&layer_output:nullptr);
-                        if(!aliases)storeTensor(name,std::move(layer_output));
-                        layer_output=std::move(values[j]);
-                        name=Mimir::Planning::planner_output_name_for(*chain[j]);
+            AbstractRuntime *fused_runtime = nullptr;
+            if (chain.size() >= 2 && (next < 0 || static_cast<size_t>(next) >= forward_layer_limit) &&
+                RuntimeRouter::instance().dispatchPointwiseForward(chain, x, values, training || !aliases, &fused_runtime,
+                                                                   training, Mimir::parse_dtype(default_dtype_)))
+            {
+                if (!training && aliases)
+                    layer_output = std::move(values[0]);
+                else
+                {
+                    layer_output = std::move(values[0]);
+                    std::string name = Mimir::Planning::planner_output_name_for(layer);
+                    for (size_t j = 1; j < chain.size(); ++j)
+                    {
+                        record_fused_inputs(*chain[j], {&layer_output}, aliases ? &layer_output : nullptr);
+                        if (!aliases)
+                            storeTensor(name, std::move(layer_output));
+                        layer_output = std::move(values[j]);
+                        name = Mimir::Planning::planner_output_name_for(*chain[j]);
                     }
                 }
-                if(fused_runtime)for(const auto* operation:chain) {
-                    auto& planned=static_plan_.execution.layers[static_cast<size_t>(operation-layers.data())];
-                    planned.kernel_fused=true;planned.runtime=Mimir::Planning::runtime_kind_from_name(fused_runtime->name());
-                    planned.capability=RuntimeCapabilityLevel::NativeOptimized;
-                }
-                resident_chain_executed=true;resident_final_output_name=final_name;
-                executed_backend=fused_runtime?fused_runtime->name():"ROUTED";
-                executed_call=fused_runtime?"planner.native_pointwise_fusion":"planner.ordinary_pointwise_program";
+                if (fused_runtime)
+                    for (const auto *operation : chain)
+                    {
+                        auto &planned = static_plan_.execution.layers[static_cast<size_t>(operation - layers.data())];
+                        planned.kernel_fused = true;
+                        planned.runtime = Mimir::Planning::runtime_kind_from_name(fused_runtime->name());
+                        planned.capability = RuntimeCapabilityLevel::NativeOptimized;
+                    }
+                resident_chain_executed = true;
+                resident_final_output_name = final_name;
+                executed_backend = fused_runtime ? fused_runtime->name() : "ROUTED";
+                executed_call = fused_runtime ? "planner.native_pointwise_fusion" : "planner.ordinary_pointwise_program";
             }
         }
 
-
         // Dispatch runtime générique (CUDA/ROCm) pour les layers supportés via forwardLayer().
         // Retourne true si un runtime a produit une sortie valide (outputs[0]).
-        auto try_runtime_forward_layer = [&](std::vector<float>& out) -> bool {
+        auto try_runtime_forward_layer = [&](std::vector<float> &out) -> bool
+        {
             const bool has_preplanned_route = RuntimeRouter::instance().hasForwardRouteForLayer(layer);
-            if (!has_preplanned_route) {
-                if (runtime_trace) {
+            if (!has_preplanned_route)
+            {
+                if (runtime_trace)
+                {
                     std::cerr << "[runtime-fallback] layer#" << layer_idx
                               << " name='" << layer.name
                               << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
@@ -3017,81 +5074,127 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             }
 
             std::vector<std::vector<float>> runtime_outputs;
-            AbstractRuntime* selected_runtime = nullptr;
-            AbstractRuntime* planned_runtime = nullptr;
+            AbstractRuntime *selected_runtime = nullptr;
+            AbstractRuntime *planned_runtime = nullptr;
             if (planner_enabled && static_plan_.built &&
                 planner_mode != Mimir::Planning::PlannerMode::Legacy &&
-                layer_idx < static_plan_.execution.layers.size()) {
-                switch (static_plan_.execution.layers[layer_idx].runtime) {
+                layer_idx < static_plan_.execution.layers.size())
+            {
+                switch (static_plan_.execution.layers[layer_idx].runtime)
+                {
 #ifdef ENABLE_ROCM
-                    case RuntimeKind::ROCm: planned_runtime = g_rocm_engine.get(); break;
+                case RuntimeKind::ROCm:
+                    planned_runtime = g_rocm_engine.get();
+                    break;
 #endif
 #ifdef ENABLE_CUDA
-                    case RuntimeKind::CUDA: planned_runtime = g_cuda_engine.get(); break;
+                case RuntimeKind::CUDA:
+                    planned_runtime = g_cuda_engine.get();
+                    break;
 #endif
 #ifdef ENABLE_VULKAN
-                    case RuntimeKind::Vulkan: planned_runtime = g_compute_engine.get(); break;
+                case RuntimeKind::Vulkan:
+                    planned_runtime = g_compute_engine.get();
+                    break;
 #endif
 #ifdef ENABLE_OPENCL
-                    case RuntimeKind::OpenCL: planned_runtime = g_opencl_engine.get(); break;
+                case RuntimeKind::OpenCL:
+                    planned_runtime = g_opencl_engine.get();
+                    break;
 #endif
-                    case RuntimeKind::TPU: planned_runtime = Mimir::tpuSessionRuntime(); break;
-                    case RuntimeKind::CPU: planned_runtime = g_cpu_engine.get(); break;
-                    default: break;
+                case RuntimeKind::TPU:
+                    planned_runtime = Mimir::tpuSessionRuntime();
+                    break;
+                case RuntimeKind::CPU:
+                    planned_runtime = g_cpu_engine.get();
+                    break;
+                default:
+                    break;
                 }
             }
             RuntimeForwardContext context;
             context.skip_connections_enabled = skip_connections_enabled;
-            if (layer.type_enum == LayerType::Reparameterize) {
-                if (modelConfig.contains("stochastic_latent")) {
-                    try { context.stochastic_latent = modelConfig["stochastic_latent"].get<bool>(); } catch (...) {}
-                } else if (modelConfig.contains("vae_stochastic_latent")) {
-                    try { context.stochastic_latent = modelConfig["vae_stochastic_latent"].get<bool>(); } catch (...) {}
+            context.autocast_dtype = Mimir::parse_dtype(autocast_dtype_);
+            if (layer.type_enum == LayerType::Reparameterize)
+            {
+                if (modelConfig.contains("stochastic_latent"))
+                {
+                    try
+                    {
+                        context.stochastic_latent = modelConfig["stochastic_latent"].get<bool>();
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+                else if (modelConfig.contains("vae_stochastic_latent"))
+                {
+                    try
+                    {
+                        context.stochastic_latent = modelConfig["vae_stochastic_latent"].get<bool>();
+                    }
+                    catch (...)
+                    {
+                    }
                 }
             }
-            if (training) context.output_mask=&forward_state.layer_output_masks.back();
+            if (training)
+                context.output_mask = &forward_state.layer_output_masks.back();
             const bool runtime_ok = planned_runtime
-                ? RuntimeRouter::instance().dispatchForwardLayerPlanned(
-                    planned_runtime, inputs, runtime_outputs, layer, training, &selected_runtime, context)
-                : RuntimeRouter::instance().dispatchForwardLayer(
-                    inputs, runtime_outputs, layer, training, &selected_runtime, context);
-            if (!runtime_ok) {
-                if (runtime_trace) {
+                                        ? RuntimeRouter::instance().dispatchForwardLayerPlanned(
+                                              planned_runtime, inputs, runtime_outputs, layer, training, &selected_runtime, context)
+                                        : RuntimeRouter::instance().dispatchForwardLayer(
+                                              inputs, runtime_outputs, layer, training, &selected_runtime, context);
+            if (!runtime_ok)
+            {
+                if (runtime_trace)
+                {
                     std::vector<std::string> active_runtimes;
                     active_runtimes.reserve(5);
 #ifdef ENABLE_ROCM
-                    if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized()) active_runtimes.emplace_back(g_rocm_engine->name());
+                    if (g_rocm_available && g_rocm_engine && g_rocm_engine->isInitialized())
+                        active_runtimes.emplace_back(g_rocm_engine->name());
 #endif
 #ifdef ENABLE_CUDA
-                    if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized()) active_runtimes.emplace_back(g_cuda_engine->name());
+                    if (g_cuda_available && g_cuda_engine && g_cuda_engine->isInitialized())
+                        active_runtimes.emplace_back(g_cuda_engine->name());
 #endif
 #ifdef ENABLE_VULKAN
-                    if (g_compute_available && g_compute_engine && g_compute_engine->isInitialized()) active_runtimes.emplace_back(g_compute_engine->name());
+                    if (g_compute_available && g_compute_engine && g_compute_engine->isInitialized())
+                        active_runtimes.emplace_back(g_compute_engine->name());
 #endif
 #ifdef ENABLE_OPENCL
-                    if (g_opencl_available && g_opencl_engine && g_opencl_engine->isInitialized()) active_runtimes.emplace_back(g_opencl_engine->name());
+                    if (g_opencl_available && g_opencl_engine && g_opencl_engine->isInitialized())
+                        active_runtimes.emplace_back(g_opencl_engine->name());
 #endif
-                    if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized()) active_runtimes.emplace_back(g_cpu_engine->name());
+                    if (g_cpu_available && g_cpu_engine && g_cpu_engine->isInitialized())
+                        active_runtimes.emplace_back(g_cpu_engine->name());
 
-                    auto join_runtime_names = [](const std::vector<std::string>& names) -> std::string {
-                        if (names.empty()) return std::string();
+                    auto join_runtime_names = [](const std::vector<std::string> &names) -> std::string
+                    {
+                        if (names.empty())
+                            return std::string();
                         std::ostringstream oss;
-                        for (size_t i = 0; i < names.size(); ++i) {
-                            if (i) oss << ",";
+                        for (size_t i = 0; i < names.size(); ++i)
+                        {
+                            if (i)
+                                oss << ",";
                             oss << names[i];
                         }
                         return oss.str();
                     };
 
                     std::ostringstream input_sizes;
-                    for (size_t input_index = 0; input_index < inputs.size(); ++input_index) {
-                        if (input_index) input_sizes << ",";
+                    for (size_t input_index = 0; input_index < inputs.size(); ++input_index)
+                    {
+                        if (input_index)
+                            input_sizes << ",";
                         input_sizes << (inputs[input_index] ? inputs[input_index]->size() : 0);
                     }
 
-                    const char* reason = active_runtimes.empty()
-                        ? "no_active_runtime"
-                        : "runtime_execution_error_route_pruned";
+                    const char *reason = active_runtimes.empty()
+                                             ? "no_active_runtime"
+                                             : "runtime_execution_error_route_pruned";
 
                     std::cerr << "[runtime-fallback] layer#" << layer_idx
                               << " name='" << layer.name
@@ -3103,43 +5206,59 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 }
                 return false;
             }
-            if(planner_enabled && static_plan_.built && planner_mode==Mimir::Planning::PlannerMode::Cost && layer_idx<static_plan_.execution.layers.size()){
-                const auto profile=Mimir::Planning::Calibration::forward_profiles.find(&layer);
-                auto& planned=static_plan_.execution.layers[layer_idx];
-                const auto kind=Mimir::Planning::runtime_kind_from_name(selected_runtime->name());
-                if(planned.runtime!=kind)static_plan_.dumped=false;
-                planned.runtime=kind;
-                static_plan_.execution.tensors.at(planned.output).preferred_location=Mimir::Planning::MemoryLocation::Host;
-                if(profile!=Mimir::Planning::Calibration::forward_profiles.end()){
-                    if(!planned.measured_host_roundtrip)static_plan_.dumped=false;
-                    planned.measured_costs=profile->second;
-                    planned.capability=selected_runtime->queryForwardOperationCapability(layer,inputs,training);
-                    planned.measured_host_roundtrip=true;
-                    for(const auto& m:profile->second)if(m.runtime==selected_runtime)planned.estimated_compute_cost=m.seconds;
-                }else{planned.measured_costs.clear();planned.measured_host_roundtrip=false;}
+            if (planner_enabled && static_plan_.built && planner_mode == Mimir::Planning::PlannerMode::Cost && layer_idx < static_plan_.execution.layers.size())
+            {
+                const auto profile = Mimir::Planning::Calibration::forward_profiles.find(&layer);
+                auto &planned = static_plan_.execution.layers[layer_idx];
+                const auto kind = Mimir::Planning::runtime_kind_from_name(selected_runtime->name());
+                if (planned.runtime != kind)
+                    static_plan_.dumped = false;
+                planned.runtime = kind;
+                static_plan_.execution.tensors.at(planned.output).preferred_location = Mimir::Planning::MemoryLocation::Host;
+                if (profile != Mimir::Planning::Calibration::forward_profiles.end())
+                {
+                    if (!planned.measured_host_roundtrip)
+                        static_plan_.dumped = false;
+                    planned.measured_costs = profile->second;
+                    planned.capability = selected_runtime->queryForwardOperationCapability(layer, inputs, training);
+                    planned.measured_host_roundtrip = true;
+                    for (const auto &m : profile->second)
+                        if (m.runtime == selected_runtime)
+                            planned.estimated_compute_cost = m.seconds;
+                }
+                else
+                {
+                    planned.measured_costs.clear();
+                    planned.measured_host_roundtrip = false;
+                }
             }
-            if (layer.type_enum == LayerType::Split || layer.type_enum == LayerType::Chunk) {
+            if (layer.type_enum == LayerType::Split || layer.type_enum == LayerType::Chunk)
+            {
                 const std::string base = layer.output.empty() ? "x" : layer.output;
                 for (size_t i = 0; i < runtime_outputs.size(); ++i)
                     storeTensor(base + "_" + std::to_string(i), runtime_outputs[i]);
             }
             out = std::move(runtime_outputs[0]);
             executed_call = planned_runtime
-                ? "runtime_router.dispatchForwardLayerPlanned"
-                : "runtime_router.dispatchForwardLayer";
+                                ? "runtime_router.dispatchForwardLayerPlanned"
+                                : "runtime_router.dispatchForwardLayer";
             executed_backend = selected_runtime ? std::string(selected_runtime->name()) : std::string("runtime_router(unknown)");
             return true;
         };
-        
+
         // ====================================================================
         // DISPATCH PRINCIPAL VIA SWITCH/CASE SUR LayerType (MODE STRICT)
         // ====================================================================
-        
-        try {
-            if (!resident_chain_executed && !try_runtime_forward_layer(layer_output)) {
+
+        try
+        {
+            if (!resident_chain_executed && !try_runtime_forward_layer(layer_output))
+            {
                 throw std::runtime_error("No runtime could execute layer '" + layer.name + "' (" + layer.type + ")");
             }
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception &e)
+        {
             std::cerr << "❌ ERROR in layer " << layer_idx << " (" << layer.name
                       << ", type: " << type_to_string(layer.type_enum) << "): "
                       << e.what() << std::endl;
@@ -3152,80 +5271,105 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // NOTE: Beaucoup d'archis ne renseignent pas output_w/output_h pour tous les layers
         // (ex: activations). On garde un "dernier HxW connu" pour afficher plus de blocs
         // sans modifier les builders.
-        if (viz_capture_allowed && viz_taps_enabled_ && viz_taps_max_frames_ > 0) {
-            if (!viz_tips_init_done_) {
+        if (viz_capture_allowed && viz_taps_enabled_ && viz_taps_max_frames_ > 0)
+        {
+            if (!viz_tips_init_done_)
+            {
                 clearVizTipsRegistry();
                 viz_tips_custom_enabled_ = InitVizTips();
                 viz_tips_init_done_ = true;
             }
 
-            auto is_viz_candidate_layer = [&](LayerType t) {
-                switch (t) {
-                    // Spatial ops (déjà supportés)
-                    case LayerType::Conv2d:
-                    case LayerType::ConvTranspose2d:
-                    case LayerType::DepthwiseConv2d:
-                    case LayerType::Reparameterize:
-                    case LayerType::MaxPool2d:
-                    case LayerType::AvgPool2d:
-                    case LayerType::AdaptiveAvgPool2d:
-                    case LayerType::GlobalAvgPool2d:
-                    case LayerType::UpsampleNearest:
-                    case LayerType::UpsampleBilinear:
-                    case LayerType::UpsampleBicubic:
-                    case LayerType::PixelShuffle:
-                    case LayerType::ZeroPad2d:
-                    case LayerType::ReflectionPad2d:
-                    case LayerType::ReplicationPad2d:
-                        return true;
+            auto is_viz_candidate_layer = [&](LayerType t)
+            {
+                switch (t)
+                {
+                case LayerType::SquaredReLU:
+                case LayerType::Square:
+                case LayerType::SqrtAbs:
+                case LayerType::Exp:
+                case LayerType::LogAbs:
+                case LayerType::Abs:
+                case LayerType::ReciprocalNoNan:
+                case LayerType::Sign:
+                case LayerType::Sin:
+                case LayerType::Cos:
+                case LayerType::Maximum:
+                case LayerType::Minimum:
+                case LayerType::ReduceSum:
+                case LayerType::ReduceMean:
+                case LayerType::ReduceMin:
+                case LayerType::ReduceMax:
+                case LayerType::ReduceProd:
+                case LayerType::LowerTriangular:
+                    return true;
+                // Spatial ops (déjà supportés)
+                case LayerType::Conv2d:
+                case LayerType::ConvTranspose2d:
+                case LayerType::DepthwiseConv2d:
+                case LayerType::Reparameterize:
+                case LayerType::MaxPool2d:
+                case LayerType::AvgPool2d:
+                case LayerType::AdaptiveAvgPool2d:
+                case LayerType::GlobalAvgPool2d:
+                case LayerType::UpsampleNearest:
+                case LayerType::UpsampleBilinear:
+                case LayerType::UpsampleBicubic:
+                case LayerType::PixelShuffle:
+                case LayerType::ZeroPad2d:
+                case LayerType::ReflectionPad2d:
+                case LayerType::ReplicationPad2d:
+                    return true;
 
-                    // Layers qui conservent souvent la forme spatiale (permet d'afficher + de blocs)
-                    case LayerType::BatchNorm2d:
-                    case LayerType::InstanceNorm2d:
-                    case LayerType::GroupNorm:
-                    case LayerType::LayerNorm:
-                    case LayerType::RMSNorm:
-                    case LayerType::Dropout2d:
-                    case LayerType::Dropout:
-                    case LayerType::AlphaDropout:
-                    case LayerType::Identity:
-                    case LayerType::Permute:
-                    case LayerType::Transpose:
-                    case LayerType::Reshape:
-                    case LayerType::View:
-                    case LayerType::Squeeze:
-                    case LayerType::Unsqueeze:
-                    case LayerType::Concat:
-                    case LayerType::Add:
-                    case LayerType::Subtract:
-                    case LayerType::Multiply:
-                    case LayerType::Divide:
+                // Layers qui conservent souvent la forme spatiale (permet d'afficher + de blocs)
+                case LayerType::BatchNorm2d:
+                case LayerType::InstanceNorm2d:
+                case LayerType::GroupNorm:
+                case LayerType::LayerNorm:
+                case LayerType::RMSNorm:
+                case LayerType::CausalDepthwiseConv1d:
+                case LayerType::Dropout2d:
+                case LayerType::Dropout:
+                case LayerType::AlphaDropout:
+                case LayerType::Identity:
+                case LayerType::Permute:
+                case LayerType::Transpose:
+                case LayerType::Reshape:
+                case LayerType::View:
+                case LayerType::Squeeze:
+                case LayerType::Unsqueeze:
+                case LayerType::Concat:
+                case LayerType::Add:
+                case LayerType::Subtract:
+                case LayerType::Multiply:
+                case LayerType::Divide:
 
-                    // Attention (affichage best-effort; utile pour diagnostiquer la mémoire K/V)
-                    case LayerType::SelfAttention:
-                    case LayerType::MultiHeadAttention:
-                    case LayerType::CrossAttention:
+                // Attention (affichage best-effort; utile pour diagnostiquer la mémoire K/V)
+                case LayerType::SelfAttention:
+                case LayerType::MultiHeadAttention:
+                case LayerType::CrossAttention:
 
-                    // Activations (souvent omettent output_w/output_h dans les builders)
-                    case LayerType::ReLU:
-                    case LayerType::LeakyReLU:
-                    case LayerType::GELU:
-                    case LayerType::GEGLU:
-                    case LayerType::SiLU:
-                    case LayerType::Tanh:
-                    case LayerType::Sigmoid:
-                    case LayerType::Softmax:
-                    case LayerType::LogSoftmax:
-                    case LayerType::Softplus:
-                    case LayerType::Mish:
-                    case LayerType::HardSigmoid:
-                    case LayerType::HardSwish:
-                        return true;
+                // Activations (souvent omettent output_w/output_h dans les builders)
+                case LayerType::ReLU:
+                case LayerType::LeakyReLU:
+                case LayerType::GELU:
+                case LayerType::GEGLU:
+                case LayerType::SwiGLU:
+                case LayerType::SiLU:
+                case LayerType::Tanh:
+                case LayerType::Sigmoid:
+                case LayerType::Softmax:
+                case LayerType::LogSoftmax:
+                case LayerType::Softplus:
+                case LayerType::Mish:
+                case LayerType::HardSigmoid:
+                case LayerType::HardSwish:
+                    return true;
 
-                    default:
-                        // La VIZ demande une vue exhaustive du graphe. Les
-                        // sorties non spatiales utiliseront la heatmap vectorielle.
-                        return exhaustive_model_viz && t != LayerType::UNKNOWN;
+                default:
+                    // La VIZ demande une vue exhaustive du graphe. Les
+                    // sorties non spatiales utiliseront la heatmap vectorielle.
+                    return exhaustive_model_viz && t != LayerType::UNKNOWN;
                 }
             };
 
@@ -3240,190 +5384,247 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             const bool registered_tip = viz_tips_by_layer_name_.count(layer.name) != 0;
             if ((!registered_tips_only || registered_tip) &&
                 (is_viz_candidate_layer(layer.type_enum) || registered_tip) &&
-                (!is_packed_output_concat || exhaustive_model_viz)) {
+                (!is_packed_output_concat || exhaustive_model_viz))
+            {
 
-                auto canonical_viz_label = [&]() -> std::string {
+                auto canonical_viz_label = [&]() -> std::string
+                {
                     std::string model_key = modelConfig.value("type", std::string());
-                    if (model_key.empty()) model_key = getModelName();
-                    if (model_key.empty()) model_key = "model";
+                    if (model_key.empty())
+                        model_key = getModelName();
+                    if (model_key.empty())
+                        model_key = "model";
                     const std::string layer_key = layer.name.empty()
-                        ? ("layer_" + std::to_string(layer_idx))
-                        : layer.name;
+                                                      ? ("layer_" + std::to_string(layer_idx))
+                                                      : layer.name;
                     return model_key + "/blocks/" + layer_key + "/" +
                            type_to_string(layer.type_enum);
                 };
 
-                auto resize_viz_frame_nearest = [&](VizFrame& vf, int target_w, int target_h) {
-                    if (target_w <= 0 || target_h <= 0) return;
-                    if (vf.w <= 0 || vf.h <= 0 || vf.channels <= 0) return;
-                    if (vf.w == target_w && vf.h == target_h) return;
+                auto resize_viz_frame_nearest = [&](VizFrame &vf, int target_w, int target_h)
+                {
+                    if (target_w <= 0 || target_h <= 0)
+                        return;
+                    if (vf.w <= 0 || vf.h <= 0 || vf.channels <= 0)
+                        return;
+                    if (vf.w == target_w && vf.h == target_h)
+                        return;
 
                     const int ch = vf.channels;
                     const size_t expected = static_cast<size_t>(vf.w) * static_cast<size_t>(vf.h) * static_cast<size_t>(ch);
-                    if (vf.pixels.size() != expected) return;
+                    if (vf.pixels.size() != expected)
+                        return;
 
                     std::vector<uint8_t> up;
                     up.resize(static_cast<size_t>(target_w) * static_cast<size_t>(target_h) * static_cast<size_t>(ch));
-                    for (int y = 0; y < target_h; ++y) {
+                    for (int y = 0; y < target_h; ++y)
+                    {
                         const int sy = (target_h > 1) ? ((y * vf.h) / target_h) : 0;
-                        for (int x = 0; x < target_w; ++x) {
+                        for (int x = 0; x < target_w; ++x)
+                        {
                             const int sx = (target_w > 1) ? ((x * vf.w) / target_w) : 0;
                             const size_t src_base = (static_cast<size_t>(sy) * static_cast<size_t>(vf.w) + static_cast<size_t>(sx)) * static_cast<size_t>(ch);
                             const size_t dst_base = (static_cast<size_t>(y) * static_cast<size_t>(target_w) + static_cast<size_t>(x)) * static_cast<size_t>(ch);
-                            for (int cidx = 0; cidx < ch; ++cidx) {
+                            for (int cidx = 0; cidx < ch; ++cidx)
+                            {
                                 up[dst_base + static_cast<size_t>(cidx)] = vf.pixels[src_base + static_cast<size_t>(cidx)];
                             }
                         }
                     }
 
-                    if (!vf.pixels_real.empty()) {
+                    if (!vf.pixels_real.empty())
+                    {
                         const size_t rc = vf.pixels_real.size() / (static_cast<size_t>(vf.w) * vf.h);
                         std::vector<uint8_t> real(static_cast<size_t>(target_w) * target_h * rc);
-                        for (int y = 0; y < target_h; ++y) for (int x = 0; x < target_w; ++x)
-                            for (size_t channel = 0; channel < rc; ++channel)
-                                real[(static_cast<size_t>(y) * target_w + x) * rc + channel] =
-                                    vf.pixels_real[(static_cast<size_t>(y * vf.h / target_h) * vf.w + x * vf.w / target_w) * rc + channel];
+                        for (int y = 0; y < target_h; ++y)
+                            for (int x = 0; x < target_w; ++x)
+                                for (size_t channel = 0; channel < rc; ++channel)
+                                    real[(static_cast<size_t>(y) * target_w + x) * rc + channel] =
+                                        vf.pixels_real[(static_cast<size_t>(y * vf.h / target_h) * vf.w + x * vf.w / target_w) * rc + channel];
                         vf.pixels_real = std::move(real);
                     }
-                    if (vf.tensor_sample_channels > 0) {
+                    if (vf.tensor_sample_channels > 0)
+                    {
                         const size_t tc = static_cast<size_t>(vf.tensor_sample_channels);
                         std::vector<float> values(static_cast<size_t>(target_w) * target_h * tc);
                         std::vector<size_t> indices(values.size());
-                        for (int y = 0; y < target_h; ++y) for (int x = 0; x < target_w; ++x)
-                            for (size_t channel = 0; channel < tc; ++channel) {
-                                const size_t src = (static_cast<size_t>(y * vf.h / target_h) * vf.w + x * vf.w / target_w) * tc + channel;
-                                const size_t dst = (static_cast<size_t>(y) * target_w + x) * tc + channel;
-                                values[dst] = vf.tensor_values[src]; indices[dst] = vf.tensor_indices[src];
-                            }
-                        vf.tensor_values = std::move(values); vf.tensor_indices = std::move(indices);
+                        for (int y = 0; y < target_h; ++y)
+                            for (int x = 0; x < target_w; ++x)
+                                for (size_t channel = 0; channel < tc; ++channel)
+                                {
+                                    const size_t src = (static_cast<size_t>(y * vf.h / target_h) * vf.w + x * vf.w / target_w) * tc + channel;
+                                    const size_t dst = (static_cast<size_t>(y) * target_w + x) * tc + channel;
+                                    values[dst] = vf.tensor_values[src];
+                                    indices[dst] = vf.tensor_indices[src];
+                                }
+                        vf.tensor_values = std::move(values);
+                        vf.tensor_indices = std::move(indices);
                     }
                     vf.pixels = std::move(up);
                     vf.w = target_w;
                     vf.h = target_h;
                 };
 
-                auto describe_tensor = [&]() {
+                auto describe_tensor = [&]()
+                {
                     double sum = 0.0;
                     float lo = std::numeric_limits<float>::infinity(), hi = -lo;
                     size_t finite = 0;
-                    for (float value : layer_output) if (std::isfinite(value)) {
-                        lo = std::min(lo, value); hi = std::max(hi, value); sum += value; ++finite;
-                    }
+                    for (float value : layer_output)
+                        if (std::isfinite(value))
+                        {
+                            lo = std::min(lo, value);
+                            hi = std::max(hi, value);
+                            sum += value;
+                            ++finite;
+                        }
                     std::ostringstream info;
                     info << (training ? "Capture: entrainement" : "Capture: inference")
                          << "\nValeurs: " << layer_output.size() << "; non finies: " << (layer_output.size() - finite);
-                    if (finite) info << "\nMin / max: " << lo << " / " << hi << "\nMoyenne: " << sum / finite;
+                    if (finite)
+                        info << "\nMin / max: " << lo << " / " << hi << "\nMoyenne: " << sum / finite;
                     return info.str();
                 };
 
-                auto viz_preview_prefers_chw = [&](const Layer& lyr) -> bool {
-                    switch (lyr.type_enum) {
-                        case LayerType::Conv2d:
-                        case LayerType::ConvTranspose2d:
-                        case LayerType::DepthwiseConv2d:
-                        case LayerType::GroupNorm:
-                        case LayerType::BatchNorm2d:
-                        case LayerType::InstanceNorm2d:
-                        case LayerType::UpsampleNearest:
-                        case LayerType::UpsampleBilinear:
-                        case LayerType::UpsampleBicubic:
-                        case LayerType::PixelShuffle:
-                            return true;
-                        case LayerType::LayerNorm:
-                            return lyr.in_channels > 0 && lyr.input_height > 0 && lyr.input_width > 0;
-                        default:
-                            break;
+                auto viz_preview_prefers_chw = [&](const Layer &lyr) -> bool
+                {
+                    switch (lyr.type_enum)
+                    {
+                    case LayerType::Conv2d:
+                    case LayerType::ConvTranspose2d:
+                    case LayerType::DepthwiseConv2d:
+                    case LayerType::GroupNorm:
+                    case LayerType::BatchNorm2d:
+                    case LayerType::InstanceNorm2d:
+                    case LayerType::UpsampleNearest:
+                    case LayerType::UpsampleBilinear:
+                    case LayerType::UpsampleBicubic:
+                    case LayerType::PixelShuffle:
+                        return true;
+                    case LayerType::LayerNorm:
+                        return lyr.in_channels > 0 && lyr.input_height > 0 && lyr.input_width > 0;
+                    default:
+                        break;
                     }
 
-                    if (lyr.name.find("_chw") != std::string::npos || lyr.name.find("/chw") != std::string::npos) {
+                    if (lyr.name.find("_chw") != std::string::npos || lyr.name.find("/chw") != std::string::npos)
+                    {
                         return true;
                     }
-                    if (lyr.output.find("_chw") != std::string::npos || lyr.output.find("/chw") != std::string::npos) {
+                    if (lyr.output.find("_chw") != std::string::npos || lyr.output.find("/chw") != std::string::npos)
+                    {
                         return true;
                     }
-                    if (lyr.name.find("_hwc") != std::string::npos || lyr.name.find("/hwc") != std::string::npos) {
+                    if (lyr.name.find("_hwc") != std::string::npos || lyr.name.find("/hwc") != std::string::npos)
+                    {
                         return false;
                     }
-                    if (lyr.output.find("_hwc") != std::string::npos || lyr.output.find("/hwc") != std::string::npos) {
+                    if (lyr.output.find("_hwc") != std::string::npos || lyr.output.find("/hwc") != std::string::npos)
+                    {
                         return false;
                     }
                     return false;
                 };
 
-                auto infer_hw = [&](const Layer& lyr, size_t out_size, int& ow, int& oh, int& c, bool& channels_first) -> bool {
+                auto infer_hw = [&](const Layer &lyr, size_t out_size, int &ow, int &oh, int &c, bool &channels_first) -> bool
+                {
                     channels_first = viz_preview_prefers_chw(lyr);
 
-                    auto ok = [&](int w, int h) -> bool {
-                        if (w <= 0 || h <= 0) return false;
+                    auto ok = [&](int w, int h) -> bool
+                    {
+                        if (w <= 0 || h <= 0)
+                            return false;
                         const size_t spatial = static_cast<size_t>(w) * static_cast<size_t>(h);
-                        if (spatial == 0) return false;
-                        if (out_size < spatial) return false;
-                        if ((out_size % spatial) != 0) return false;
+                        if (spatial == 0)
+                            return false;
+                        if (out_size < spatial)
+                            return false;
+                        if ((out_size % spatial) != 0)
+                            return false;
                         c = static_cast<int>(out_size / spatial);
                         ow = w;
                         oh = h;
                         return true;
                     };
 
-                    auto ok_derived_conv2d = [&]() -> bool {
-                        if (lyr.input_width <= 0 || lyr.input_height <= 0) return false;
+                    auto ok_derived_conv2d = [&]() -> bool
+                    {
+                        if (lyr.input_width <= 0 || lyr.input_height <= 0)
+                            return false;
                         const int kw = lyr.get_kernel_w();
                         const int kh = lyr.get_kernel_h();
                         const int sw = lyr.get_stride_w();
                         const int sh = lyr.get_stride_h();
                         const int pw = lyr.get_pad_w();
                         const int ph = lyr.get_pad_h();
-                        if (kw <= 0 || kh <= 0 || sw <= 0 || sh <= 0) return false;
+                        if (kw <= 0 || kh <= 0 || sw <= 0 || sh <= 0)
+                            return false;
                         const int w = (lyr.input_width + 2 * pw - kw) / sw + 1;
                         const int h = (lyr.input_height + 2 * ph - kh) / sh + 1;
                         return ok(w, h);
                     };
 
-                    auto ok_derived_deconv2d = [&]() -> bool {
-                        if (lyr.input_width <= 0 || lyr.input_height <= 0) return false;
+                    auto ok_derived_deconv2d = [&]() -> bool
+                    {
+                        if (lyr.input_width <= 0 || lyr.input_height <= 0)
+                            return false;
                         const int kw = lyr.get_kernel_w();
                         const int kh = lyr.get_kernel_h();
                         const int sw = lyr.get_stride_w();
                         const int sh = lyr.get_stride_h();
                         const int pw = lyr.get_pad_w();
                         const int ph = lyr.get_pad_h();
-                        if (kw <= 0 || kh <= 0 || sw <= 0 || sh <= 0) return false;
+                        if (kw <= 0 || kh <= 0 || sw <= 0 || sh <= 0)
+                            return false;
                         const int w = (lyr.input_width - 1) * sw - 2 * pw + kw;
                         const int h = (lyr.input_height - 1) * sh - 2 * ph + kh;
                         return ok(w, h);
                     };
 
-                    auto ok_derived_upsample = [&]() -> bool {
-                        if (lyr.out_w > 0 && lyr.out_h > 0) return ok(lyr.out_w, lyr.out_h);
-                        if (lyr.input_width <= 0 || lyr.input_height <= 0) return false;
+                    auto ok_derived_upsample = [&]() -> bool
+                    {
+                        if (lyr.out_w > 0 && lyr.out_h > 0)
+                            return ok(lyr.out_w, lyr.out_h);
+                        if (lyr.input_width <= 0 || lyr.input_height <= 0)
+                            return false;
                         const int w = std::max(1, static_cast<int>(std::lround(static_cast<double>(lyr.input_width) * std::max(0.0f, lyr.scale_w))));
                         const int h = std::max(1, static_cast<int>(std::lround(static_cast<double>(lyr.input_height) * std::max(0.0f, lyr.scale_h))));
                         return ok(w, h);
                     };
 
                     // 1) Métadonnées explicites
-                    if (ok(lyr.output_width, lyr.output_height)) return true;
-                    if (ok(lyr.out_w, lyr.out_h)) return true;
+                    if (ok(lyr.output_width, lyr.output_height))
+                        return true;
+                    if (ok(lyr.out_w, lyr.out_h))
+                        return true;
 
                     // 2) Dérivation à partir des paramètres spatiaux du layer.
-                    if (lyr.type_enum == LayerType::ConvTranspose2d && ok_derived_deconv2d()) return true;
-                    if (lyr.type_enum == LayerType::Conv2d && ok_derived_conv2d()) return true;
+                    if (lyr.type_enum == LayerType::ConvTranspose2d && ok_derived_deconv2d())
+                        return true;
+                    if (lyr.type_enum == LayerType::Conv2d && ok_derived_conv2d())
+                        return true;
                     if ((lyr.type_enum == LayerType::UpsampleNearest ||
                          lyr.type_enum == LayerType::UpsampleBilinear ||
-                         lyr.type_enum == LayerType::UpsampleBicubic) && ok_derived_upsample()) return true;
+                         lyr.type_enum == LayerType::UpsampleBicubic) &&
+                        ok_derived_upsample())
+                        return true;
 
                     // 3) Shapes connues (si elles matchent exactement la taille).
                     // Priorité: ces shapes reflètent souvent les dimensions réelles
                     // du tenseur, alors que input_width/input_height peut rester une
                     // valeur de config (ex: 1024x1024) et fausser la première vignette.
-                    auto try_shape = [&](const std::vector<int>& s) -> bool {
-                        if (s.size() != 3) return false;
+                    auto try_shape = [&](const std::vector<int> &s) -> bool
+                    {
+                        if (s.size() != 3)
+                            return false;
                         const int a = s[0];
                         const int b = s[1];
                         const int d = s[2];
-                        if (a <= 0 || b <= 0 || d <= 0) return false;
+                        if (a <= 0 || b <= 0 || d <= 0)
+                            return false;
                         const size_t n = static_cast<size_t>(a) * static_cast<size_t>(b) * static_cast<size_t>(d);
-                        if (n != out_size) return false;
+                        if (n != out_size)
+                            return false;
 
                         // Cas fréquent: Permute CHW->HWC avec shape stockée en CHW
                         // (ex: recon_to_hwc avec shape={C,H,W}, permute={1,2,0}).
@@ -3432,7 +5633,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             lyr.permute_dims.size() == 3 &&
                             lyr.permute_dims[0] == 1 &&
                             lyr.permute_dims[1] == 2 &&
-                            lyr.permute_dims[2] == 0) {
+                            lyr.permute_dims[2] == 0)
+                        {
                             channels_first = false;
                             c = a;
                             ow = d;
@@ -3445,7 +5647,8 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             lyr.permute_dims.size() == 3 &&
                             lyr.permute_dims[0] == 2 &&
                             lyr.permute_dims[1] == 0 &&
-                            lyr.permute_dims[2] == 1) {
+                            lyr.permute_dims[2] == 1)
+                        {
                             channels_first = true;
                             c = d;
                             ow = b;
@@ -3457,15 +5660,18 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         const int out_c = lyr.out_channels;
 
                         // Si out_channels est renseigné, on choisit celle qui match.
-                        if (out_c > 0) {
-                            if (out_c == d) {
+                        if (out_c > 0)
+                        {
+                            if (out_c == d)
+                            {
                                 channels_first = false;
                                 c = d;
                                 ow = b;
                                 oh = a;
                                 return true;
                             }
-                            if (out_c == a) {
+                            if (out_c == a)
+                            {
                                 channels_first = true;
                                 c = a;
                                 ow = d;
@@ -3475,14 +5681,16 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         }
 
                         // Sinon, essayer de coller aux dims input si dispo.
-                        if (lyr.input_height == a && lyr.input_width == b) {
+                        if (lyr.input_height == a && lyr.input_width == b)
+                        {
                             channels_first = false;
                             c = d;
                             ow = b;
                             oh = a;
                             return true;
                         }
-                        if (lyr.input_height == b && lyr.input_width == d) {
+                        if (lyr.input_height == b && lyr.input_width == d)
+                        {
                             channels_first = true;
                             c = a;
                             ow = d;
@@ -3490,43 +5698,59 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             return true;
                         }
 
-                        if (channels_first) {
+                        if (channels_first)
+                        {
                             c = a;
                             ow = d;
                             oh = b;
-                        } else {
+                        }
+                        else
+                        {
                             c = d;
                             ow = b;
                             oh = a;
                         }
                         return true;
                     };
-                    if (try_shape(lyr.shape)) return true;
-                    if (try_shape(lyr.target_shape)) return true;
+                    if (try_shape(lyr.shape))
+                        return true;
+                    if (try_shape(lyr.target_shape))
+                        return true;
 
                     // 4) Heuristique auto-calibrée pour les entrées "raw" et tenseurs plats:
                     // tenter de reconstruire HxW via la config image + canaux usuels.
-                    auto try_common_channels = [&](int w, int h, bool force_hwc = true) -> bool {
-                        if (w <= 0 || h <= 0) return false;
+                    auto try_common_channels = [&](int w, int h, bool force_hwc = true) -> bool
+                    {
+                        if (w <= 0 || h <= 0)
+                            return false;
                         const size_t spatial = static_cast<size_t>(w) * static_cast<size_t>(h);
-                        if (spatial == 0) return false;
-                        for (int cc : {3, 4, 1}) {
-                            if (out_size == spatial * static_cast<size_t>(cc)) {
+                        if (spatial == 0)
+                            return false;
+                        for (int cc : {3, 4, 1})
+                        {
+                            if (out_size == spatial * static_cast<size_t>(cc))
+                            {
                                 ow = w;
                                 oh = h;
                                 c = cc;
-                                if (force_hwc) channels_first = false;
+                                if (force_hwc)
+                                    channels_first = false;
                                 return true;
                             }
                         }
                         return false;
                     };
 
-                    auto cfg_int = [&](const char* k) -> int {
-                        if (!modelConfig.contains(k)) return 0;
-                        try {
+                    auto cfg_int = [&](const char *k) -> int
+                    {
+                        if (!modelConfig.contains(k))
+                            return 0;
+                        try
+                        {
                             return std::max(0, modelConfig[k].get<int>());
-                        } catch (...) {
+                        }
+                        catch (...)
+                        {
                             return 0;
                         }
                     };
@@ -3536,15 +5760,20 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                     // Cas idéal: largeur/hauteur connues dans la config dataset/modèle.
                     // Conserver CHW lorsqu'il est connu (ex: recon_chw après Tanh).
-                    if (try_common_channels(cfg_w, cfg_h, false)) return true;
+                    if (try_common_channels(cfg_w, cfg_h, false))
+                        return true;
 
                     // Si une seule dimension est connue, inférer l'autre avec un canal usuel.
-                    if (cfg_w > 0) {
-                        for (int cc : {3, 4, 1}) {
+                    if (cfg_w > 0)
+                    {
+                        for (int cc : {3, 4, 1})
+                        {
                             const size_t denom = static_cast<size_t>(cfg_w) * static_cast<size_t>(cc);
-                            if (denom > 0 && (out_size % denom) == 0) {
+                            if (denom > 0 && (out_size % denom) == 0)
+                            {
                                 const int h = static_cast<int>(out_size / denom);
-                                if (h > 0) {
+                                if (h > 0)
+                                {
                                     ow = cfg_w;
                                     oh = h;
                                     c = cc;
@@ -3554,12 +5783,16 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             }
                         }
                     }
-                    if (cfg_h > 0) {
-                        for (int cc : {3, 4, 1}) {
+                    if (cfg_h > 0)
+                    {
+                        for (int cc : {3, 4, 1})
+                        {
                             const size_t denom = static_cast<size_t>(cfg_h) * static_cast<size_t>(cc);
-                            if (denom > 0 && (out_size % denom) == 0) {
+                            if (denom > 0 && (out_size % denom) == 0)
+                            {
                                 const int w = static_cast<int>(out_size / denom);
-                                if (w > 0) {
+                                if (w > 0)
+                                {
                                     ow = w;
                                     oh = cfg_h;
                                     c = cc;
@@ -3571,11 +5804,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     }
 
                     // Dernière tentative stable: image carrée pour 3/4/1 canaux.
-                    for (int cc : {3, 4, 1}) {
-                        if ((out_size % static_cast<size_t>(cc)) != 0) continue;
+                    for (int cc : {3, 4, 1})
+                    {
+                        if ((out_size % static_cast<size_t>(cc)) != 0)
+                            continue;
                         const size_t hw = out_size / static_cast<size_t>(cc);
                         const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
-                        if (s > 0 && s * s == hw) {
+                        if (s > 0 && s * s == hw)
+                        {
                             ow = static_cast<int>(s);
                             oh = static_cast<int>(s);
                             c = cc;
@@ -3585,11 +5821,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     }
 
                     // 5) En dernier recours: réutiliser les dims d'entrée déclarées.
-                    if (ok(lyr.input_width, lyr.input_height)) return true;
+                    if (ok(lyr.input_width, lyr.input_height))
+                        return true;
 
                     // 6) Fallback final: dernier HxW connu dans ce thread
                     // (souvent valable pour activations/norm).
-                    if (ok(viz_last_w, viz_last_h)) return true;
+                    if (ok(viz_last_w, viz_last_h))
+                        return true;
 
                     return false;
                 };
@@ -3600,9 +5838,11 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                 bool channels_first = false;
                 const bool has_hw = infer_hw(layer, layer_output.size(), ow, oh, c, channels_first);
 
-                if (has_hw && ow > 0 && oh > 0) {
+                if (has_hw && ow > 0 && oh > 0)
+                {
                     const size_t spatial = static_cast<size_t>(ow) * static_cast<size_t>(oh);
-                    if (spatial > 0 && layer_output.size() >= spatial) {
+                    if (spatial > 0 && layer_output.size() >= spatial)
+                    {
                         // Mémoriser pour les layers suivants (activations, etc.).
                         viz_last_w = ow;
                         viz_last_h = oh;
@@ -3615,11 +5855,13 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                         VizFrame vf;
 
-                        auto sample_value = [&](int sample_c, size_t base) -> float {
-                            if (sample_c < 0) return 0.0f;
+                        auto sample_value = [&](int sample_c, size_t base) -> float
+                        {
+                            if (sample_c < 0)
+                                return 0.0f;
                             const size_t idx = channels_first
-                                ? (static_cast<size_t>(sample_c) * spatial + base)
-                                : (base * static_cast<size_t>(std::max(1, c)) + static_cast<size_t>(sample_c));
+                                                   ? (static_cast<size_t>(sample_c) * spatial + base)
+                                                   : (base * static_cast<size_t>(std::max(1, c)) + static_cast<size_t>(sample_c));
                             return (idx < layer_output.size()) ? layer_output[idx] : 0.0f;
                         };
 
@@ -3632,40 +5874,48 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             layer.output.find("raw") != std::string::npos;
 
                         const bool image_like_preview = (c == 3 || c == 4) &&
-                            (layer.out_channels == 3 || layer.out_channels == 4 ||
-                             name_input_like ||
-                             layer.name.find("recon") != std::string::npos ||
-                             layer.name.find("/out") != std::string::npos ||
-                             layer.name.find("output") != std::string::npos ||
-                             layer.output.find("recon") != std::string::npos ||
-                             layer.output.find("/out") != std::string::npos ||
-                             layer.output.find("output") != std::string::npos);
+                                                        (layer.out_channels == 3 || layer.out_channels == 4 ||
+                                                         name_input_like ||
+                                                         layer.name.find("recon") != std::string::npos ||
+                                                         layer.name.find("/out") != std::string::npos ||
+                                                         layer.name.find("output") != std::string::npos ||
+                                                         layer.output.find("recon") != std::string::npos ||
+                                                         layer.output.find("/out") != std::string::npos ||
+                                                         layer.output.find("output") != std::string::npos);
 
                         // UX: toutes les vignettes de tips sont rendues en RGB.
                         // - image_like_preview: rendu "naturel" (canaux image)
                         // - sinon: rendu faux-couleur (signed mean / énergie)
                         const bool prefer_rgb_preview = true;
 
-                        if (prefer_rgb_preview) {
+                        if (prefer_rgb_preview)
+                        {
                             std::vector<float> map;
                             map.resize(static_cast<size_t>(vw) * static_cast<size_t>(vh) * 3, 0.0f);
 
-                            for (int y = 0; y < vh; ++y) {
+                            for (int y = 0; y < vh; ++y)
+                            {
                                 const int yy = y * sy;
-                                for (int x = 0; x < vw; ++x) {
+                                for (int x = 0; x < vw; ++x)
+                                {
                                     const int xx = x * sx;
                                     const size_t base = (static_cast<size_t>(yy) * static_cast<size_t>(ow) + static_cast<size_t>(xx));
 
-                                    if (image_like_preview) {
-                                        for (int cc = 0; cc < 3; ++cc) {
+                                    if (image_like_preview)
+                                    {
+                                        for (int cc = 0; cc < 3; ++cc)
+                                        {
                                             const float v = sample_value(cc, base);
                                             map[(static_cast<size_t>(y) * static_cast<size_t>(vw) + static_cast<size_t>(x)) * 3ULL + static_cast<size_t>(cc)] = v;
                                         }
-                                    } else {
+                                    }
+                                    else
+                                    {
                                         const int c_take = std::max(1, std::min(c, 32));
                                         double sum = 0.0;
                                         double energy = 0.0;
-                                        for (int chan = 0; chan < c_take; ++chan) {
+                                        for (int chan = 0; chan < c_take; ++chan)
+                                        {
                                             const double v = static_cast<double>(sample_value(chan, base));
                                             sum += v;
                                             energy += std::fabs(v);
@@ -3683,10 +5933,15 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                             float max_abs = 0.0f;
                             float max_energy = 0.0f;
-                            if (image_like_preview) {
-                                for (float v : map) max_abs = std::max(max_abs, std::fabs(v));
-                            } else {
-                                for (size_t i = 0; i < map.size(); i += 3) {
+                            if (image_like_preview)
+                            {
+                                for (float v : map)
+                                    max_abs = std::max(max_abs, std::fabs(v));
+                            }
+                            else
+                            {
+                                for (size_t i = 0; i < map.size(); i += 3)
+                                {
                                     max_abs = std::max(max_abs, std::max(std::fabs(map[i + 0]), std::fabs(map[i + 2])));
                                     max_energy = std::max(max_energy, std::fabs(map[i + 1]));
                                 }
@@ -3696,30 +5951,38 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                             std::vector<uint8_t> px;
                             px.resize(map.size());
-                            if (image_like_preview) {
-                                for (size_t i = 0; i < map.size(); ++i) {
+                            if (image_like_preview)
+                            {
+                                for (size_t i = 0; i < map.size(); ++i)
+                                {
                                     const float s = map[i] * inv;
                                     const float t = 0.5f + 0.5f * std::tanh(s);
                                     const int p = static_cast<int>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
                                     px[i] = static_cast<uint8_t>(std::clamp(p, 0, 255));
                                 }
-                            } else {
-                                for (size_t i = 0; i < map.size(); i += 3) {
+                            }
+                            else
+                            {
+                                for (size_t i = 0; i < map.size(); i += 3)
+                                {
                                     const float signed_mean = map[i + 0] * inv;
                                     const float energy_norm = std::clamp(std::tanh(map[i + 1] * inv_energy), 0.0f, 1.0f);
                                     const float t = std::clamp(0.5f + 0.5f * std::tanh(signed_mean), 0.0f, 1.0f);
 
-                                    const float neg_r = 70.0f,  neg_g = 120.0f, neg_b = 210.0f;
+                                    const float neg_r = 70.0f, neg_g = 120.0f, neg_b = 210.0f;
                                     const float mid_r = 175.0f, mid_g = 175.0f, mid_b = 175.0f;
-                                    const float pos_r = 220.0f, pos_g = 65.0f,  pos_b = 65.0f;
+                                    const float pos_r = 220.0f, pos_g = 65.0f, pos_b = 65.0f;
 
                                     float r = 0.0f, g = 0.0f, b = 0.0f;
-                                    if (t < 0.5f) {
+                                    if (t < 0.5f)
+                                    {
                                         const float u = t / 0.5f;
                                         r = neg_r + (mid_r - neg_r) * u;
                                         g = neg_g + (mid_g - neg_g) * u;
                                         b = neg_b + (mid_b - neg_b) * u;
-                                    } else {
+                                    }
+                                    else
+                                    {
                                         const float u = (t - 0.5f) / 0.5f;
                                         r = mid_r + (pos_r - mid_r) * u;
                                         g = mid_g + (pos_g - mid_g) * u;
@@ -3733,43 +5996,54 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             }
 
                             // RGB naturel: conserver trois canaux distincts, jamais leur moyenne.
-                            if (!image_like_preview) {
+                            if (!image_like_preview)
+                            {
                                 vf.heatmap_kind = 1; // moyenne signée + énergie
                                 vf.pixels_real.resize(static_cast<size_t>(vw) * vh * 3);
                                 float real_max = 0.0f;
-                                for (int y = 0; y < vh; ++y) for (int x = 0; x < vw; ++x) {
-                                    const size_t base = static_cast<size_t>(y * sy) * ow + x * sx;
-                                    for (int cc = 0; cc < std::min(c, 3); ++cc)
-                                        real_max = std::max(real_max, std::fabs(sample_value(cc, base)));
-                                }
-                                for (int y = 0; y < vh; ++y) for (int x = 0; x < vw; ++x) {
-                                    const size_t base = static_cast<size_t>(y * sy) * ow + x * sx;
-                                    for (int cc = 0; cc < 3; ++cc) {
-                                        const float value = sample_value(std::min(cc, c - 1), base);
-                                        const float t = 0.5f + 0.5f * std::tanh(value / (real_max + 1e-6f));
-                                        vf.pixels_real[(static_cast<size_t>(y) * vw + x) * 3 + cc] =
-                                            static_cast<uint8_t>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
+                                for (int y = 0; y < vh; ++y)
+                                    for (int x = 0; x < vw; ++x)
+                                    {
+                                        const size_t base = static_cast<size_t>(y * sy) * ow + x * sx;
+                                        for (int cc = 0; cc < std::min(c, 3); ++cc)
+                                            real_max = std::max(real_max, std::fabs(sample_value(cc, base)));
                                     }
-                                }
+                                for (int y = 0; y < vh; ++y)
+                                    for (int x = 0; x < vw; ++x)
+                                    {
+                                        const size_t base = static_cast<size_t>(y * sy) * ow + x * sx;
+                                        for (int cc = 0; cc < 3; ++cc)
+                                        {
+                                            const float value = sample_value(std::min(cc, c - 1), base);
+                                            const float t = 0.5f + 0.5f * std::tanh(value / (real_max + 1e-6f));
+                                            vf.pixels_real[(static_cast<size_t>(y) * vw + x) * 3 + cc] =
+                                                static_cast<uint8_t>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
+                                        }
+                                    }
                             }
 
                             vf.pixels = std::move(px);
                             vf.w = vw;
                             vf.h = vh;
                             vf.channels = 3;
-                        } else {
+                        }
+                        else
+                        {
                             // Fallback: heatmap 1 canal (moyenne de quelques canaux)
                             std::vector<float> map;
                             map.resize(static_cast<size_t>(vw) * static_cast<size_t>(vh), 0.0f);
 
                             const int c_take = std::max(1, std::min(c, 16));
-                            for (int y = 0; y < vh; ++y) {
+                            for (int y = 0; y < vh; ++y)
+                            {
                                 const int yy = y * sy;
-                                for (int x = 0; x < vw; ++x) {
+                                for (int x = 0; x < vw; ++x)
+                                {
                                     const int xx = x * sx;
                                     const size_t base = (static_cast<size_t>(yy) * static_cast<size_t>(ow) + static_cast<size_t>(xx));
                                     double acc = 0.0;
-                                    for (int cc = 0; cc < c_take; ++cc) {
+                                    for (int cc = 0; cc < c_take; ++cc)
+                                    {
                                         acc += static_cast<double>(sample_value(cc, base));
                                     }
                                     map[static_cast<size_t>(y) * static_cast<size_t>(vw) + static_cast<size_t>(x)] = static_cast<float>(acc / static_cast<double>(c_take));
@@ -3777,12 +6051,14 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                             }
 
                             float max_abs = 0.0f;
-                            for (float v : map) max_abs = std::max(max_abs, std::fabs(v));
+                            for (float v : map)
+                                max_abs = std::max(max_abs, std::fabs(v));
                             const float inv = 1.0f / (max_abs + 1e-6f);
 
                             std::vector<uint8_t> px;
                             px.resize(map.size());
-                            for (size_t i = 0; i < map.size(); ++i) {
+                            for (size_t i = 0; i < map.size(); ++i)
+                            {
                                 const float s = map[i] * inv;
                                 const float t = 0.5f + 0.5f * std::tanh(s);
                                 const int p = static_cast<int>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
@@ -3796,33 +6072,40 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                         }
 
                         vf.tensor_sample_channels = std::max(1, std::min(c, 16));
-                        for (int y = 0; y < vh; ++y) for (int x = 0; x < vw; ++x) {
-                            const size_t base = static_cast<size_t>(y * sy) * ow + x * sx;
-                            for (int channel = 0; channel < vf.tensor_sample_channels; ++channel) {
-                                vf.tensor_values.push_back(sample_value(channel, base));
-                                vf.tensor_indices.push_back(channels_first
-                                    ? static_cast<size_t>(channel) * spatial + base
-                                    : base * std::max(1, c) + channel);
+                        for (int y = 0; y < vh; ++y)
+                            for (int x = 0; x < vw; ++x)
+                            {
+                                const size_t base = static_cast<size_t>(y * sy) * ow + x * sx;
+                                for (int channel = 0; channel < vf.tensor_sample_channels; ++channel)
+                                {
+                                    vf.tensor_values.push_back(sample_value(channel, base));
+                                    vf.tensor_indices.push_back(channels_first
+                                                                    ? static_cast<size_t>(channel) * spatial + base
+                                                                    : base * std::max(1, c) + channel);
+                                }
                             }
-                        }
 
                         // UX: forcer toutes les vignettes tips en format carré XxX,
                         // avec X = largeur courante de la preview.
                         // Exemples: 32x3x3 -> 32x32x3, 128x36x3 -> 128x128x3.
-                        if (vf.w > 0 && vf.h != vf.w) {
+                        if (vf.w > 0 && vf.h != vf.w)
+                        {
                             resize_viz_frame_nearest(vf, vf.w, vf.w);
                         }
 
                         vf.tensor_info = describe_tensor();
                         vf.label = canonical_viz_label();
 
-                        if (viz_tips_custom_enabled_) {
+                        if (viz_tips_custom_enabled_)
+                        {
                             (void)UpdateVizTips(layer, vf);
                         }
 
                         addVizTapFrame(std::move(vf));
                     }
-                } else {
+                }
+                else
+                {
                     // Fallback vectoriel: projeter le tenseur 1D sur une petite heatmap 2D.
                     // Une bande 1xN devient quasiment invisible une fois mise à l'échelle dans la VIZ,
                     // ce qui donne l'impression d'une vignette noire.
@@ -3838,20 +6121,23 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                     map.resize(static_cast<size_t>(vw) * static_cast<size_t>(vh), 0.0f);
 
                     const size_t map_count = map.size();
-                    for (size_t i = 0; i < map_count; ++i) {
+                    for (size_t i = 0; i < map_count; ++i)
+                    {
                         const size_t src_idx = (nvals <= map_count)
-                            ? std::min(i, nvals - 1)
-                            : ((i * nvals) / map_count);
+                                                   ? std::min(i, nvals - 1)
+                                                   : ((i * nvals) / map_count);
                         map[i] = layer_output[std::min(src_idx, nvals - 1)];
                     }
 
                     float max_abs = 0.0f;
-                    for (float v : map) max_abs = std::max(max_abs, std::fabs(v));
+                    for (float v : map)
+                        max_abs = std::max(max_abs, std::fabs(v));
                     const float inv = 1.0f / (max_abs + 1e-6f);
 
                     VizFrame vf;
                     vf.pixels.resize(map.size());
-                    for (size_t i = 0; i < map.size(); ++i) {
+                    for (size_t i = 0; i < map.size(); ++i)
+                    {
                         const float s = map[i] * inv;
                         const float t = 0.5f + 0.5f * std::tanh(s);
                         const int p = static_cast<int>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
@@ -3863,14 +6149,17 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
                     vf.tensor_values = map;
                     vf.tensor_sample_channels = 1;
-                    for (size_t i = 0; i < map.size(); ++i) {
+                    for (size_t i = 0; i < map.size(); ++i)
+                    {
                         vf.tensor_indices.push_back(nvals <= map.size()
-                            ? std::min(i, nvals - 1) : (i * nvals) / map.size());
+                                                        ? std::min(i, nvals - 1)
+                                                        : (i * nvals) / map.size());
                     }
                     vf.tensor_info = describe_tensor();
                     vf.label = canonical_viz_label() + "/vec";
 
-                    if (viz_tips_custom_enabled_) {
+                    if (viz_tips_custom_enabled_)
+                    {
                         (void)UpdateVizTips(layer, vf);
                     }
 
@@ -3884,105 +6173,137 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // ====================================================================
 
         std::string output_name = resident_chain_executed
-            ? resident_final_output_name
-            : (layer.output.empty() ? "x" : layer.output);
+                                      ? resident_final_output_name
+                                      : (layer.output.empty() ? "x" : layer.output);
 
         // Masque (ReLU/Dropout) ou snapshot output (Reparameterize) selon besoins.
-        if (training) {
-            if (needs_output_mask(layer) && forward_state.layer_output_masks.back().empty()) {
+        if (training)
+        {
+            if (needs_output_mask(layer) && forward_state.layer_output_masks.back().empty())
+            {
                 std::vector<uint8_t> mask;
                 mask.resize(layer_output.size());
-                if ((layer.type == "Conv2d" || layer.type == "ConvTranspose2d") && layer.activation != ActivationType::NONE) {
-                    for (size_t i = 0; i < layer_output.size(); ++i) mask[i] = (layer_output[i] > 0.0f) ? 1 : 0;
-                } else {
-                    for (size_t i = 0; i < layer_output.size(); ++i) mask[i] = (layer_output[i] != 0.0f) ? 1 : 0;
+                if ((layer.type == "Conv2d" || layer.type == "ConvTranspose2d" ||
+                     layer.type == "Conv3d" || layer.type == "Conv4d") && layer.activation != ActivationType::NONE)
+                {
+                    for (size_t i = 0; i < layer_output.size(); ++i)
+                        mask[i] = (layer_output[i] > 0.0f) ? 1 : 0;
+                }
+                else
+                {
+                    for (size_t i = 0; i < layer_output.size(); ++i)
+                        mask[i] = (layer_output[i] != 0.0f) ? 1 : 0;
                 }
                 forward_state.layer_output_masks.back() = std::move(mask);
             }
-            if (needs_output_snapshot(layer)) {
+            if (needs_output_snapshot(layer))
+            {
                 forward_state.layer_outputs.back() = layer_output;
             }
         }
 
-        if (!resident_chain_executed && !exhaustive_model_viz && planner_enabled && fusion_enabled && static_plan_.built && ((!training) || fusion_in_training)) {
-            const auto& plan = static_plan_.execution;
-            int chain_idx=layer_idx<plan.fuse_chain_next.size()?plan.fuse_chain_next[layer_idx]:-1;
-            while(chain_idx>=0 && static_cast<size_t>(chain_idx)<forward_layer_limit) {
-                const size_t fused_idx=static_cast<size_t>(chain_idx);
-                std::vector<const Layer*> pointwise;
-                size_t cursor=fused_idx;
-                while(cursor<forward_layer_limit && Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[cursor].type_enum) &&
-                    Mimir::Planning::planner_inputs_for(layers[cursor]).size()==1 && layers[cursor].getWeightsSize()==0) {
+        if (!resident_chain_executed && !exhaustive_model_viz && planner_enabled && fusion_enabled && static_plan_.built && ((!training) || fusion_in_training))
+        {
+            const auto &plan = static_plan_.execution;
+            int chain_idx = layer_idx < plan.fuse_chain_next.size() ? plan.fuse_chain_next[layer_idx] : -1;
+            while (chain_idx >= 0 && static_cast<size_t>(chain_idx) < forward_layer_limit)
+            {
+                const size_t fused_idx = static_cast<size_t>(chain_idx);
+                std::vector<const Layer *> pointwise;
+                size_t cursor = fused_idx;
+                while (cursor < forward_layer_limit && Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[cursor].type_enum) &&
+                       Mimir::Planning::planner_inputs_for(layers[cursor]).size() == 1 && layers[cursor].getWeightsSize() == 0)
+                {
                     pointwise.push_back(&layers[cursor]);
-                    const int next=plan.fuse_chain_next[cursor];
-                    if(next<0)break;
-                    cursor=static_cast<size_t>(next);
+                    const int next = plan.fuse_chain_next[cursor];
+                    if (next < 0)
+                        break;
+                    cursor = static_cast<size_t>(next);
                 }
-                const bool aliases=!pointwise.empty() && std::all_of(pointwise.begin(),pointwise.end(),[&](const Layer* operation) {
-                    return Mimir::Planning::planner_output_name_for(*operation)==output_name;
-                });
+                const bool aliases = !pointwise.empty() && std::all_of(pointwise.begin(), pointwise.end(), [&](const Layer *operation)
+                                                                       { return Mimir::Planning::planner_output_name_for(*operation) == output_name; });
                 std::vector<std::vector<float>> values;
-                AbstractRuntime* suffix_runtime=nullptr;
-                if(!pointwise.empty() && RuntimeRouter::instance().dispatchPointwiseForward(
-                    pointwise,layer_output,values,training || !aliases,&suffix_runtime,training,Mimir::parse_dtype(default_dtype_))) {
-                    if(!training && aliases) {
-                        layer_output=std::move(values[0]);
-                        if(suffix_runtime)for(const auto* operation:pointwise) {
-                            auto& planned=static_plan_.execution.layers[static_cast<size_t>(operation-layers.data())];
-                            planned.kernel_fused=true;planned.runtime=Mimir::Planning::runtime_kind_from_name(suffix_runtime->name());
-                            planned.capability=RuntimeCapabilityLevel::NativeOptimized;
-                        }
-                    } else for(size_t j=0;j<pointwise.size();++j) {
-                        record_fused_inputs(*pointwise[j],{&layer_output},aliases?&layer_output:nullptr);
-                        if(!aliases)storeTensor(output_name,std::move(layer_output));
-                        layer_output=std::move(values[j]);
-                        output_name=Mimir::Planning::planner_output_name_for(*pointwise[j]);
-                        if(suffix_runtime) {
-                            auto& planned=static_plan_.execution.layers[static_cast<size_t>(pointwise[j]-layers.data())];
-                            planned.kernel_fused=true;planned.runtime=Mimir::Planning::runtime_kind_from_name(suffix_runtime->name());
-                            planned.capability=RuntimeCapabilityLevel::NativeOptimized;
-                        }
+                AbstractRuntime *suffix_runtime = nullptr;
+                if (!pointwise.empty() && RuntimeRouter::instance().dispatchPointwiseForward(
+                                              pointwise, layer_output, values, training || !aliases, &suffix_runtime, training, Mimir::parse_dtype(default_dtype_)))
+                {
+                    if (!training && aliases)
+                    {
+                        layer_output = std::move(values[0]);
+                        if (suffix_runtime)
+                            for (const auto *operation : pointwise)
+                            {
+                                auto &planned = static_plan_.execution.layers[static_cast<size_t>(operation - layers.data())];
+                                planned.kernel_fused = true;
+                                planned.runtime = Mimir::Planning::runtime_kind_from_name(suffix_runtime->name());
+                                planned.capability = RuntimeCapabilityLevel::NativeOptimized;
+                            }
                     }
-                    const size_t last=static_cast<size_t>(pointwise.back()-layers.data());
-                    chain_idx=plan.fuse_chain_next[last];
-                } else {
-                    auto& fused_layer=layers[fused_idx];
-                    apply_fused_layer(layer_output,fused_layer,output_name);
-                    output_name=Mimir::Planning::planner_output_name_for(fused_layer);
-                    chain_idx=plan.fuse_chain_next[fused_idx];
+                    else
+                        for (size_t j = 0; j < pointwise.size(); ++j)
+                        {
+                            record_fused_inputs(*pointwise[j], {&layer_output}, aliases ? &layer_output : nullptr);
+                            if (!aliases)
+                                storeTensor(output_name, std::move(layer_output));
+                            layer_output = std::move(values[j]);
+                            output_name = Mimir::Planning::planner_output_name_for(*pointwise[j]);
+                            if (suffix_runtime)
+                            {
+                                auto &planned = static_plan_.execution.layers[static_cast<size_t>(pointwise[j] - layers.data())];
+                                planned.kernel_fused = true;
+                                planned.runtime = Mimir::Planning::runtime_kind_from_name(suffix_runtime->name());
+                                planned.capability = RuntimeCapabilityLevel::NativeOptimized;
+                            }
+                        }
+                    const size_t last = static_cast<size_t>(pointwise.back() - layers.data());
+                    chain_idx = plan.fuse_chain_next[last];
+                }
+                else
+                {
+                    auto &fused_layer = layers[fused_idx];
+                    apply_fused_layer(layer_output, fused_layer, output_name);
+                    output_name = Mimir::Planning::planner_output_name_for(fused_layer);
+                    chain_idx = plan.fuse_chain_next[fused_idx];
                 }
             }
         }
 
-
-        if (planned_host_reuse_enabled && !resident_chain_executed && layer_idx < static_plan_.execution.layers.size()) {
-            const auto& planned_layer = static_plan_.execution.layers[layer_idx];
+        if (planned_host_reuse_enabled && !resident_chain_executed && layer_idx < static_plan_.execution.layers.size())
+        {
+            const auto &planned_layer = static_plan_.execution.layers[layer_idx];
             // Inputs whose last logical use is this layer can be returned to
             // their planned physical slot before the output is materialized.
-            for (const auto& input_id : planned_layer.inputs) {
+            for (const auto &input_id : planned_layer.inputs)
+            {
                 const auto tensor_it = static_plan_.execution.tensors.find(input_id);
-                if (tensor_it == static_plan_.execution.tensors.end()) continue;
-                const auto& planned_tensor = tensor_it->second;
+                if (tensor_it == static_plan_.execution.tensors.end())
+                    continue;
+                const auto &planned_tensor = tensor_it->second;
                 if (planned_tensor.last_use != layer_idx || planned_tensor.persistent ||
                     planned_tensor.required_for_backward ||
-                    planned_tensor.physical_buffer_id == std::numeric_limits<size_t>::max()) continue;
+                    planned_tensor.physical_buffer_id == std::numeric_limits<size_t>::max())
+                    continue;
                 auto live = tensor_store.find(planned_tensor.name);
-                if (live == tensor_store.end()) continue;
+                if (live == tensor_store.end())
+                    continue;
                 std::vector<float> released = std::move(live->second);
                 tensor_store.erase(live);
                 typed_tensor_store.erase(planned_tensor.name);
-                if (poison_reused_buffers) {
+                if (poison_reused_buffers)
+                {
                     std::fill(released.begin(), released.end(), std::numeric_limits<float>::quiet_NaN());
                 }
                 planned_host_buffer_pool[planned_tensor.physical_buffer_id] = std::move(released);
             }
 
             const auto output_it = static_plan_.execution.tensors.find(planned_layer.output);
-            if (output_it != static_plan_.execution.tensors.end()) {
+            if (output_it != static_plan_.execution.tensors.end())
+            {
                 const size_t slot = output_it->second.physical_buffer_id;
                 auto reusable = planned_host_buffer_pool.find(slot);
                 if (slot != std::numeric_limits<size_t>::max() && reusable != planned_host_buffer_pool.end() &&
-                    reusable->second.capacity() >= layer_output.size()) {
+                    reusable->second.capacity() >= layer_output.size())
+                {
                     std::vector<float> recycled = std::move(reusable->second);
                     planned_host_buffer_pool.erase(reusable);
                     recycled.assign(layer_output.begin(), layer_output.end());
@@ -3995,28 +6316,39 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
 
         storeTensor(output_name, std::move(layer_output));
 
-        const auto& layer_out_view = getTensor(output_name);
+        const auto &layer_out_view = getTensor(output_name);
 
         const size_t layer_out_bytes = hasTypedTensor(output_name)
-            ? getTypedTensor(output_name).size_bytes()
-            : layer_out_view.size() * sizeof(float);
-        if (executed_backend.find("VULKAN") != std::string::npos) {
+                                           ? getTypedTensor(output_name).size_bytes()
+                                           : layer_out_view.size() * sizeof(float);
+        if (executed_backend.find("VULKAN") != std::string::npos)
+        {
             backend_mem_attrib.vulkan_bytes += layer_out_bytes;
-        } else if (executed_backend.find("CUDA") != std::string::npos) {
+        }
+        else if (executed_backend.find("CUDA") != std::string::npos)
+        {
             backend_mem_attrib.cuda_bytes += layer_out_bytes;
-        } else if (executed_backend.find("ROCM") != std::string::npos) {
+        }
+        else if (executed_backend.find("ROCM") != std::string::npos)
+        {
             backend_mem_attrib.rocm_bytes += layer_out_bytes;
-        } else if (executed_backend.find("CPU") != std::string::npos || executed_backend == "cpu_switch_kernel") {
+        }
+        else if (executed_backend.find("CPU") != std::string::npos || executed_backend == "cpu_switch_kernel")
+        {
             backend_mem_attrib.cpu_bytes += layer_out_bytes;
-        } else {
+        }
+        else
+        {
             backend_mem_attrib.other_bytes += layer_out_bytes;
         }
 
-        if (training && has_branches) {
+        if (training && has_branches)
+        {
             all_layer_outputs[layer_idx] = layer_out_view;
         }
 
-        if (runtime_trace) {
+        if (runtime_trace)
+        {
             std::cerr << "[runtime-trace] layer#" << layer_idx
                       << " name='" << layer.name
                       << "' type='" << (layer.type.empty() ? type_to_string(layer.type_enum) : layer.type)
@@ -4025,28 +6357,30 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
                       << " output_size=" << layer_out_view.size()
                       << std::endl;
         }
-        if (layer_profile) {
+        if (layer_profile)
+        {
             const double elapsed_ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - layer_profile_start).count();
-            json sample = {{"layer", layer_idx}, {"name", layer.name},
-                {"type", layer.type.empty() ? type_to_string(layer.type_enum) : layer.type},
-                {"runtime", executed_backend}, {"call", executed_call},
-                {"elapsed_ms", elapsed_ms}, {"output_size", layer_out_view.size()}};
+                                          std::chrono::steady_clock::now() - layer_profile_start)
+                                          .count();
+            json sample = {{"layer", layer_idx}, {"name", layer.name}, {"type", layer.type.empty() ? type_to_string(layer.type_enum) : layer.type}, {"runtime", executed_backend}, {"call", executed_call}, {"elapsed_ms", elapsed_ms}, {"output_size", layer_out_view.size()}};
             std::cerr << "[layer-profile] " << sample.dump() << std::endl;
         }
 
         // Gestion des branches
-        if (layer.requiresBranchComputation() && training) {
+        if (layer.requiresBranchComputation() && training)
+        {
             executeBranchComputation(layer_idx, all_layer_outputs, training);
             // Update tensor store avec le résultat mergé
             storeTensor(output_name, all_layer_outputs[layer_idx]);
         }
     }
 
-    if (planned_host_reuse_enabled) {
+    if (planned_host_reuse_enabled)
+    {
         static_plan_.execution.stats.buffer_reuse_count = actual_buffer_reuse_count;
         static_plan_.execution.stats.buffer_reuse_bytes = actual_buffer_reuse_bytes;
-        if (planner_to_terminal) {
+        if (planner_to_terminal)
+        {
             std::cerr << "[planner] host_buffer_reuse_count=" << actual_buffer_reuse_count
                       << " host_buffer_reuse_bytes=" << actual_buffer_reuse_bytes << std::endl;
         }
@@ -4059,20 +6393,23 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
     // ====================================================================
     // Objectif UX: dans la Viz VAE_conv, toujours montrer le latent MU et
     // une heatmap d'erreur de reconstruction (|recon - input|).
-    if (viz_taps_enabled_ && viz_taps_max_frames_ > 0) {
+    if (viz_taps_enabled_ && viz_taps_max_frames_ > 0)
+    {
         auto downsample_mean_chw_to_gray = [&](
-            const std::vector<float>& tensor,
-            int W,
-            int H,
-            int C,
-            int max_side,
-            bool take_abs,
-            bool symmetric
-        ) -> VizFrame {
+                                               const std::vector<float> &tensor,
+                                               int W,
+                                               int H,
+                                               int C,
+                                               int max_side,
+                                               bool take_abs,
+                                               bool symmetric) -> VizFrame
+        {
             VizFrame vf;
-            if (W <= 0 || H <= 0 || C <= 0) return vf;
+            if (W <= 0 || H <= 0 || C <= 0)
+                return vf;
             const size_t expected = static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C);
-            if (tensor.size() != expected) return vf;
+            if (tensor.size() != expected)
+                return vf;
 
             const int vw = std::max(1, std::min(max_side, W));
             const int vh = std::max(1, std::min(max_side, H));
@@ -4080,15 +6417,19 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             std::vector<float> map;
             map.resize(static_cast<size_t>(vw) * static_cast<size_t>(vh), 0.0f);
 
-            for (int y = 0; y < vh; ++y) {
+            for (int y = 0; y < vh; ++y)
+            {
                 const int sy = (vh > 1) ? (y * H) / vh : 0;
-                for (int x = 0; x < vw; ++x) {
+                for (int x = 0; x < vw; ++x)
+                {
                     const int sx = (vw > 1) ? (x * W) / vw : 0;
                     double acc = 0.0;
                     const size_t base = (static_cast<size_t>(sy) * static_cast<size_t>(W) + static_cast<size_t>(sx)) * static_cast<size_t>(C);
-                    for (int c = 0; c < C; ++c) {
+                    for (int c = 0; c < C; ++c)
+                    {
                         float v = tensor[base + static_cast<size_t>(c)];
-                        if (take_abs) v = std::fabs(v);
+                        if (take_abs)
+                            v = std::fabs(v);
                         acc += static_cast<double>(v);
                     }
                     map[static_cast<size_t>(y) * static_cast<size_t>(vw) + static_cast<size_t>(x)] = static_cast<float>(acc / static_cast<double>(C));
@@ -4096,19 +6437,24 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             }
 
             float max_abs = 0.0f;
-            for (float v : map) {
+            for (float v : map)
+            {
                 max_abs = std::max(max_abs, std::fabs(v));
             }
             const float inv = 1.0f / (max_abs + 1e-6f);
 
             vf.pixels.resize(map.size());
-            for (size_t i = 0; i < map.size(); ++i) {
+            for (size_t i = 0; i < map.size(); ++i)
+            {
                 const float s = map[i] * inv;
                 float t = 0.0f;
-                if (symmetric) {
+                if (symmetric)
+                {
                     // [-1, 1] -> [0, 1]
                     t = 0.5f + 0.5f * std::tanh(s);
-                } else {
+                }
+                else
+                {
                     // [0, +] -> [0, 1]
                     t = std::clamp(s, 0.0f, 1.0f);
                 }
@@ -4121,33 +6467,40 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
             return vf;
         };
 
-        auto add_mu_frame = [&](const char* prefix) {
+        auto add_mu_frame = [&](const char *prefix)
+        {
             const std::string mu_name = std::string(prefix) + "/mu";
             const std::string mu_layer = std::string(prefix) + "/enc/mu";
             const bool has_canonical_mu_frame = std::any_of(
-                viz_taps_.begin(), viz_taps_.end(), [&](const VizFrame& frame) {
-                    return frame.label.find(mu_layer + "/") != std::string::npos;
-                });
-            if (has_canonical_mu_frame) return;
-            if (!hasTensor(mu_name)) return;
-            const auto& mu = getTensor(mu_name);
+                viz_taps_.begin(), viz_taps_.end(), [&](const VizFrame &frame)
+                { return frame.label.find(mu_layer + "/") != std::string::npos; });
+            if (has_canonical_mu_frame)
+                return;
+            if (!hasTensor(mu_name))
+                return;
+            const auto &mu = getTensor(mu_name);
             int muW = 0, muH = 0, muC = 0;
-            if (Layer* L = getLayerByName(mu_layer)) {
+            if (Layer *L = getLayerByName(mu_layer))
+            {
                 muC = std::max(0, L->out_channels);
                 muH = std::max(0, L->input_height);
                 muW = std::max(0, L->input_width);
             }
-            if (muC > 0 && (muW <= 0 || muH <= 0)) {
+            if (muC > 0 && (muW <= 0 || muH <= 0))
+            {
                 const size_t hw = mu.size() / static_cast<size_t>(muC);
                 const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
-                if (s > 0 && s * s == hw) {
+                if (s > 0 && s * s == hw)
+                {
                     muH = static_cast<int>(s);
                     muW = static_cast<int>(s);
                 }
             }
-            if (muW > 0 && muH > 0 && muC > 0 && mu.size() == static_cast<size_t>(muW) * static_cast<size_t>(muH) * static_cast<size_t>(muC)) {
-                VizFrame vf = downsample_mean_chw_to_gray(mu, muW, muH, muC, std::max(1, viz_taps_max_side_), /*take_abs*/false, /*symmetric*/true);
-                if (!vf.pixels.empty()) {
+            if (muW > 0 && muH > 0 && muC > 0 && mu.size() == static_cast<size_t>(muW) * static_cast<size_t>(muH) * static_cast<size_t>(muC))
+            {
+                VizFrame vf = downsample_mean_chw_to_gray(mu, muW, muH, muC, std::max(1, viz_taps_max_side_), /*take_abs*/ false, /*symmetric*/ true);
+                if (!vf.pixels.empty())
+                {
                     vf.label = std::string(prefix) + "/latent/mu";
                     addVizTapFrame(std::move(vf));
                 }
@@ -4157,43 +6510,54 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         // MU: tensor spatial CHW (best-effort via layer config)
         add_mu_frame("vae_conv");
 
-        auto add_resdiff_frame = [&](const char* prefix) {
+        auto add_resdiff_frame = [&](const char *prefix)
+        {
             const std::string recon_name = std::string(prefix) + "/recon";
             const std::string in_name = std::string(prefix) + "/in_hwc";
             const std::string recon_to_hwc = std::string(prefix) + "/recon_to_hwc";
-            if (!hasTensor(recon_name) || !hasTensor(in_name)) return;
-            const auto& recon = getTensor(recon_name);
-            const auto& in_hwc = getTensor(in_name);
-            if (recon.size() != in_hwc.size() || recon.empty()) return;
+            if (!hasTensor(recon_name) || !hasTensor(in_name))
+                return;
+            const auto &recon = getTensor(recon_name);
+            const auto &in_hwc = getTensor(in_name);
+            if (recon.size() != in_hwc.size() || recon.empty())
+                return;
 
             int W = 0, H = 0, C = 0;
-            if (Layer* P = getLayerByName(recon_to_hwc)) {
-                if (P->shape.size() == 3) {
+            if (Layer *P = getLayerByName(recon_to_hwc))
+            {
+                if (P->shape.size() == 3)
+                {
                     C = std::max(0, P->shape[0]);
                     H = std::max(0, P->shape[1]);
                     W = std::max(0, P->shape[2]);
                 }
             }
-            if ((W <= 0 || H <= 0 || C <= 0) && recon.size() % 3 == 0) {
+            if ((W <= 0 || H <= 0 || C <= 0) && recon.size() % 3 == 0)
+            {
                 C = 3;
                 const size_t hw = recon.size() / 3ULL;
                 const size_t s = static_cast<size_t>(std::llround(std::sqrt(static_cast<double>(hw))));
-                if (s > 0 && s * s == hw) {
+                if (s > 0 && s * s == hw)
+                {
                     H = static_cast<int>(s);
                     W = static_cast<int>(s);
                 }
             }
-            if (W <= 0 || H <= 0 || C <= 0) return;
-            if (recon.size() != static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C)) return;
+            if (W <= 0 || H <= 0 || C <= 0)
+                return;
+            if (recon.size() != static_cast<size_t>(W) * static_cast<size_t>(H) * static_cast<size_t>(C))
+                return;
 
             std::vector<float> diff;
             diff.resize(recon.size());
-            #pragma omp simd
-            for (size_t i = 0; i < diff.size(); ++i) {
+#pragma omp simd
+            for (size_t i = 0; i < diff.size(); ++i)
+            {
                 diff[i] = std::fabs(recon[i] - in_hwc[i]);
             }
-            VizFrame vf = downsample_mean_chw_to_gray(diff, W, H, C, std::max(1, viz_taps_max_side_), /*take_abs*/false, /*symmetric*/false);
-            if (!vf.pixels.empty()) {
+            VizFrame vf = downsample_mean_chw_to_gray(diff, W, H, C, std::max(1, viz_taps_max_side_), /*take_abs*/ false, /*symmetric*/ false);
+            if (!vf.pixels.empty())
+            {
                 vf.label = std::string(prefix) + "/err/resdiff_abs";
                 addVizTapFrame(std::move(vf));
             }
@@ -4203,32 +6567,43 @@ const std::vector<float>& Model::forwardPassView(const std::vector<float> &input
         add_resdiff_frame("vae_conv");
     }
 
-    if (allocator_log) {
+    if (allocator_log)
+    {
         allocator.log_stats(training ? "forward(training)" : "forward(inference)", allocator_log_verbose, &backend_mem_attrib);
     }
 
-    if (nested_viz_model && viz_capture_root != nullptr) {
+    if (nested_viz_model && viz_capture_root != nullptr)
+    {
         auto child_frames = std::move(viz_taps_);
         viz_taps_.clear();
-        for (auto& frame : child_frames) {
+        for (auto &frame : child_frames)
+        {
             viz_capture_root->addVizTapFrame(std::move(frame));
         }
     }
 
-    if(static_plan_.built) {
-        for(auto& group:static_plan_.execution.fusion_groups) {
-            group.kernel_fused=!group.layers.empty();
-            for(size_t member:group.layers)group.kernel_fused &= static_plan_.execution.layers[member].kernel_fused;
-            for(size_t child:group.children)group.kernel_fused &= static_plan_.execution.fusion_groups[child].kernel_fused;
+    if (static_plan_.built)
+    {
+        for (auto &group : static_plan_.execution.fusion_groups)
+        {
+            group.kernel_fused = !group.layers.empty();
+            for (size_t member : group.layers)
+                group.kernel_fused &= static_plan_.execution.layers[member].kernel_fused;
+            for (size_t child : group.children)
+                group.kernel_fused &= static_plan_.execution.fusion_groups[child].kernel_fused;
         }
     }
-    return getTensor(forward_output_name);
+    const auto& completed_output = getTensor(forward_output_name);
+    observeCompletedForwardCorrelations(training);
+    if (!training) captureRequestedLatentSpace(latent_space_optimizer_step_);
+    return completed_output;
 }
 
-std::vector<float> Model::forwardPromptImageSeed(const std::vector<float>& prompt_vec,
-                                                 const std::vector<float>& image_vec,
+std::vector<float> Model::forwardPromptImageSeed(const std::vector<float> &prompt_vec,
+                                                 const std::vector<float> &image_vec,
                                                  uint32_t seed,
-                                                 bool training) {
+                                                 bool training)
+{
     std::vector<float> packed;
     packed.reserve(prompt_vec.size() + image_vec.size());
     packed.insert(packed.end(), prompt_vec.begin(), prompt_vec.end());
@@ -4238,66 +6613,91 @@ std::vector<float> Model::forwardPromptImageSeed(const std::vector<float>& promp
     return forwardPass(packed, training);
 }
 
-Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
+Gradients Model::backwardPass(const std::vector<float> &loss_gradient)
+{
     const auto model_dtype = Mimir::parse_dtype(default_dtype_);
-    if (!Mimir::dtype_is_floating(model_dtype)) {
+    if (!Mimir::dtype_is_floating(model_dtype))
+    {
         throw std::runtime_error(
             std::string("Model::backwardPass: dtype '") +
             Mimir::dtype_to_string(model_dtype) + "' is not differentiable");
     }
-    if (params_frozen_) {
+    if (params_frozen_)
+    {
         throw std::runtime_error("Model::backwardPass: parameters are frozen");
     }
     Gradients grads;
 
-    if (!forward_state.is_valid) {
+    if (!forward_state.is_valid)
+    {
         std::cerr << "⚠️  Cannot perform backward pass: no valid forward state" << std::endl;
         std::cerr << "    Call forwardPass() in training mode first" << std::endl;
         return grads;
     }
 
-    if (layers.empty()) {
+    if (layers.empty())
+    {
         std::cerr << "⚠️  Cannot perform backward pass: layers or weights not initialized" << std::endl;
         return grads;
     }
 
-    auto accumulate_grad = [](std::vector<float>& dst, const std::vector<float>& src) {
-        if (dst.empty()) { dst = src; return; }
-        if (dst.size() != src.size()) throw std::runtime_error("Gradient accumulate: size mismatch");
-        for (size_t i = 0; i < dst.size(); ++i) dst[i] += src[i];
+    auto accumulate_grad = [](std::vector<float> &dst, const std::vector<float> &src)
+    {
+        if (dst.empty())
+        {
+            dst = src;
+            return;
+        }
+        if (dst.size() != src.size())
+            throw std::runtime_error("Gradient accumulate: size mismatch");
+        for (size_t i = 0; i < dst.size(); ++i)
+            dst[i] += src[i];
     };
     std::unordered_map<std::string, std::vector<float>> grad_store;
     grad_store.reserve(layers.size() + 2);
     grad_store["x"] = loss_gradient;
-    for (size_t index = layers.size(); index-- > 0;) {
-        Layer& layer = layers[index];
-        if (!layer.shared_weights_from.empty()) {
-            Layer* owner = getLayerByName(layer.shared_weights_from);
-            if (!owner || !owner->weight_block) throw std::runtime_error("Shared weight source unavailable: " + layer.name);
+    for (size_t index = layers.size(); index-- > 0;)
+    {
+        Layer &layer = layers[index];
+        if (!layer.shared_weights_from.empty())
+        {
+            Layer *owner = getLayerByName(layer.shared_weights_from);
+            if (!owner || !owner->weight_block)
+                throw std::runtime_error("Shared weight source unavailable: " + layer.name);
             layer.weight_block = owner->weight_block;
         }
         const std::string output = layer.output.empty() ? "x" : layer.output;
-        if(static_plan_.built && static_plan_.built_for_training && static_plan_.built_with_fusion &&
-            Mimir::Planning::FusionCalibration::pointwiseCandidate(layer.type_enum) && grad_store.count(output)) {
-            size_t begin=index;
-            while(begin>0 && static_plan_.execution.fuse_chain_next[begin-1]==static_cast<int>(begin) &&
-                Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[begin-1].type_enum) && layers[begin-1].getWeightsSize()==0) --begin;
-            if(begin<index) {
-                std::vector<const Layer*> chain;
-                std::vector<const std::vector<float>*> snapshots;
-                for(size_t j=begin;j<=index;++j) {
+        if (static_plan_.built && static_plan_.built_for_training && static_plan_.built_with_fusion &&
+            Mimir::Planning::FusionCalibration::pointwiseCandidate(layer.type_enum) && grad_store.count(output))
+        {
+            size_t begin = index;
+            while (begin > 0 && static_plan_.execution.fuse_chain_next[begin - 1] == static_cast<int>(begin) &&
+                   Mimir::Planning::FusionCalibration::pointwiseCandidate(layers[begin - 1].type_enum) && layers[begin - 1].getWeightsSize() == 0)
+                --begin;
+            if (begin < index)
+            {
+                std::vector<const Layer *> chain;
+                std::vector<const std::vector<float> *> snapshots;
+                for (size_t j = begin; j <= index; ++j)
+                {
                     chain.push_back(&layers[j]);
-                    const auto& values=forward_state.layer_inputs_multi.at(j);
-                    snapshots.push_back(values.empty()?nullptr:&values[0]);
+                    const auto &values = forward_state.layer_inputs_multi.at(j);
+                    snapshots.push_back(values.empty() ? nullptr : &values[0]);
                 }
                 std::vector<float> dx;
-                if(RuntimeRouter::instance().dispatchPointwiseBackward(chain,snapshots,grad_store.at(output),dx,nullptr,model_dtype)) {
+                if (RuntimeRouter::instance().dispatchPointwiseBackward(chain, snapshots, grad_store.at(output), dx, nullptr, model_dtype))
+                {
                     grad_store.erase(output);
-                    const auto& names=forward_state.layer_input_names.at(begin);
-                    if(names.size()!=1)throw std::runtime_error("Pointwise fusion input count mismatch");
-                    accumulate_grad(grad_store[names[0]],dx);
-                    for(size_t j=begin;j<=index;++j) {layers[j].grad_weights.clear();layers[j].grad_bias.clear();}
-                    index=begin;
+                    const auto &names = forward_state.layer_input_names.at(begin);
+                    if (names.size() != 1)
+                        throw std::runtime_error("Pointwise fusion input count mismatch");
+                    accumulate_grad(grad_store[names[0]], dx);
+                    for (size_t j = begin; j <= index; ++j)
+                    {
+                        layers[j].grad_weights.clear();
+                        layers[j].grad_bias.clear();
+                    }
+                    index = begin;
                     continue;
                 }
             }
@@ -4305,67 +6705,93 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
         const bool split = layer.type_enum == LayerType::Split || layer.type_enum == LayerType::Chunk;
         std::vector<std::vector<float>> owned_grad_outputs;
         std::vector<std::string> consumed_outputs;
-        if (split) {
+        if (split)
+        {
             const bool explicit_split = layer.type_enum == LayerType::Split && !layer.split_sizes.empty();
-            const size_t count = explicit_split ? layer.split_sizes.size() :
-                static_cast<size_t>(std::max(0, layer.type_enum == LayerType::Split ? layer.num_splits : layer.num_chunks));
+            const size_t count = explicit_split ? layer.split_sizes.size() : static_cast<size_t>(std::max(0, layer.type_enum == LayerType::Split ? layer.num_splits : layer.num_chunks));
             bool active = grad_store.count(output) != 0;
-            for (size_t i = 0; i < count; ++i) active |= grad_store.count(output + "_" + std::to_string(i)) != 0;
-            if (!active) continue;
+            for (size_t i = 0; i < count; ++i)
+                active |= grad_store.count(output + "_" + std::to_string(i)) != 0;
+            if (!active)
+                continue;
             const size_t total = forward_state.layer_input_sizes_multi.at(index).at(0);
-            for (size_t i = 0; i < count; ++i) {
+            for (size_t i = 0; i < count; ++i)
+            {
                 const std::string name = output + "_" + std::to_string(i);
-                const size_t n = explicit_split ? static_cast<size_t>(layer.split_sizes[i]) :
-                    total / count + (i < total % count ? 1 : 0);
+                const size_t n = explicit_split ? static_cast<size_t>(layer.split_sizes[i]) : total / count + (i < total % count ? 1 : 0);
                 owned_grad_outputs.emplace_back(n, 0.0f);
                 auto it = grad_store.find(name);
-                if (it != grad_store.end()) accumulate_grad(owned_grad_outputs.back(), it->second);
-                if (i == 0 && grad_store.count(output)) accumulate_grad(owned_grad_outputs.back(), grad_store.at(output));
+                if (it != grad_store.end())
+                    accumulate_grad(owned_grad_outputs.back(), it->second);
+                if (i == 0 && grad_store.count(output))
+                    accumulate_grad(owned_grad_outputs.back(), grad_store.at(output));
                 consumed_outputs.push_back(name);
             }
-        } else {
+        }
+        else
+        {
             auto it = grad_store.find(output);
-            if (it == grad_store.end()) continue;
+            if (it == grad_store.end())
+                continue;
             owned_grad_outputs.push_back(std::move(it->second));
         }
         consumed_outputs.push_back(output);
         // Consume this tensor version before accumulating into its producers.
         // This matters when input and output are both named "x".
-        for (const auto& name : consumed_outputs) grad_store.erase(name);
-        const auto& input_names = forward_state.layer_input_names.at(index);
-        const auto& snapshots = forward_state.layer_inputs_multi.at(index);
-        const auto& sizes = forward_state.layer_input_sizes_multi.at(index);
+        for (const auto &name : consumed_outputs)
+            grad_store.erase(name);
+        const auto &input_names = forward_state.layer_input_names.at(index);
+        const auto &snapshots = forward_state.layer_inputs_multi.at(index);
+        const auto &sizes = forward_state.layer_input_sizes_multi.at(index);
         std::vector<std::vector<float>> shape_only_inputs;
-        std::vector<const std::vector<float>*> inputs, grad_outputs;
-        if (snapshots.size() == input_names.size()) {
-            for (const auto& value : snapshots) inputs.push_back(&value);
-        } else {
+        std::vector<const std::vector<float> *> inputs, grad_outputs;
+        if (snapshots.size() == input_names.size())
+        {
+            for (const auto &value : snapshots)
+                inputs.push_back(&value);
+        }
+        else
+        {
             // Shape-only backward kernels do not read these values. Never read
             // TensorStore here: later layers may have overwritten its contents.
             shape_only_inputs.reserve(sizes.size());
             inputs.reserve(sizes.size());
-            for (size_t size : sizes) {
-                const std::vector<float>* shape = nullptr;
-                for (const auto& value : owned_grad_outputs)
-                    if (value.size() == size) { shape = &value; break; }
-                if (!shape) {
-                    for (const auto& value : shape_only_inputs)
-                        if (value.size() == size) { shape = &value; break; }
+            for (size_t size : sizes)
+            {
+                const std::vector<float> *shape = nullptr;
+                for (const auto &value : owned_grad_outputs)
+                    if (value.size() == size)
+                    {
+                        shape = &value;
+                        break;
+                    }
+                if (!shape)
+                {
+                    for (const auto &value : shape_only_inputs)
+                        if (value.size() == size)
+                        {
+                            shape = &value;
+                            break;
+                        }
                 }
-                if (!shape) {
+                if (!shape)
+                {
                     shape_only_inputs.emplace_back(size, 0.0f);
                     shape = &shape_only_inputs.back();
                 }
                 inputs.push_back(shape);
             }
         }
-        for (const auto& value : owned_grad_outputs) grad_outputs.push_back(&value);
+        for (const auto &value : owned_grad_outputs)
+            grad_outputs.push_back(&value);
         RuntimeBackwardContext context;
         context.skip_connections_enabled = forward_state.skip_connections_enabled;
-        const auto& saved_output = forward_state.layer_outputs.at(index);
-        const auto& saved_mask = forward_state.layer_output_masks.at(index);
-        if (!saved_output.empty()) context.output = &saved_output;
-        if (!saved_mask.empty()) context.output_mask = &saved_mask;
+        const auto &saved_output = forward_state.layer_outputs.at(index);
+        const auto &saved_mask = forward_state.layer_output_masks.at(index);
+        if (!saved_output.empty())
+            context.output = &saved_output;
+        if (!saved_mask.empty())
+            context.output_mask = &saved_mask;
         std::vector<std::vector<float>> grad_inputs;
         if (!RuntimeRouter::instance().dispatchBackwardLayer(inputs, grad_outputs, grad_inputs, layer, true, nullptr, context))
             throw std::runtime_error("Runtime backward failed for layer '" + layer.name + "' (" + layer.type + ")");
@@ -4374,16 +6800,21 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
         layer.grad_bias.clear();
         if (grad_inputs.size() != input_names.size() && layer.type_enum != LayerType::Constant)
             throw std::runtime_error("Runtime backward input count mismatch: " + layer.name);
-        if (!layer.shared_weights_from.empty()) {
-            Layer* owner = getLayerByName(layer.shared_weights_from);
-            if (!owner) throw std::runtime_error("Shared parameter owner unavailable: " + layer.name);
+        if (!layer.shared_weights_from.empty())
+        {
+            Layer *owner = getLayerByName(layer.shared_weights_from);
+            if (!owner)
+                throw std::runtime_error("Shared parameter owner unavailable: " + layer.name);
             accumulate_grad(owner->grad_weights, layer.grad_weights);
             layer.grad_weights.clear();
         }
-        for (size_t i = 0; i < grad_inputs.size(); ++i) {
-            auto& destination = grad_store[input_names[i]];
-            if (destination.empty()) destination = std::move(grad_inputs[i]);
-            else accumulate_grad(destination, grad_inputs[i]);
+        for (size_t i = 0; i < grad_inputs.size(); ++i)
+        {
+            auto &destination = grad_store[input_names[i]];
+            if (destination.empty())
+                destination = std::move(grad_inputs[i]);
+            else
+                accumulate_grad(destination, grad_inputs[i]);
         }
     }
 
@@ -4391,19 +6822,21 @@ Gradients Model::backwardPass(const std::vector<float> &loss_gradient) {
     has_last_input_gradient_ = false;
     last_input_gradient_.clear();
     auto it_in = grad_store.find("__input__");
-    if (it_in != grad_store.end()) {
+    if (it_in != grad_store.end())
+    {
         last_input_gradient_ = std::move(it_in->second);
         has_last_input_gradient_ = true;
     }
 
-
     return grads;
 }
 
-float Model::computeLoss(const std::vector<float> &prediction, 
-                        const std::vector<float> &target, 
-                        const std::string &loss_type) {
-    if (prediction.size() != target.size()) {
+float Model::computeLoss(const std::vector<float> &prediction,
+                         const std::vector<float> &target,
+                         const std::string &loss_type)
+{
+    if (prediction.size() != target.size())
+    {
         std::cerr << "⚠️  Prediction and target size mismatch" << std::endl;
         return 0.0f;
     }
@@ -4413,7 +6846,8 @@ float Model::computeLoss(const std::vector<float> &prediction,
 
 std::vector<float> Model::computeLossGradient(const std::vector<float> &prediction,
                                               const std::vector<float> &target,
-                                              const std::string &loss_type) {
+                                              const std::string &loss_type)
+{
     std::vector<float> gradient;
     computeLossGradientInto(prediction, target, gradient, loss_type);
     return gradient;
@@ -4422,14 +6856,17 @@ std::vector<float> Model::computeLossGradient(const std::vector<float> &predicti
 void Model::computeLossGradientInto(const std::vector<float> &prediction,
                                     const std::vector<float> &target,
                                     std::vector<float> &gradient,
-                                    const std::string &loss_type) {
-    if (prediction.size() != target.size()) {
+                                    const std::string &loss_type)
+{
+    if (prediction.size() != target.size())
+    {
         gradient.resize(prediction.size());
         std::fill(gradient.begin(), gradient.end(), 0.0f);
         return;
     }
     gradient = RuntimeLossGrad::pixel_loss_and_grad(
-        prediction, target, loss_type).grad;
+                   prediction, target, loss_type)
+                   .grad;
 }
 
 // === build & autoBuildFromDataset ===
@@ -4438,21 +6875,22 @@ void Model::build()
 {
     // Construction générique du modèle
     // Peut être surchargée pour définir une architecture spécifique
-    
+
     // Exemple: backbone U-Net simple
-    buildBackboneUNet(4, 2, 3);  // 4 stages, 2 blocs par stage, 3 blocs bottleneck
-    
+    buildBackboneUNet(4, 2, 3); // 4 stages, 2 blocs par stage, 3 blocs bottleneck
+
     std::cerr << "Model::build() - Architecture construite" << std::endl;
     std::cerr << "  Couches: " << layers.size() << std::endl;
     std::cerr << "  Paramètres totaux: " << totalParamCount() << std::endl;
-    
+
     // Allocation automatique des paramètres
     size_t total = totalParamCount();
-    if (total > 0) {
+    if (total > 0)
+    {
         std::cerr << "  Allocation des paramètres..." << std::endl;
         allocateParams();
         std::cerr << "  ✓ " << layer_weight_blocks.size() << " blocs de poids alloués" << std::endl;
-        
+
         // Initialisation automatique des poids (méthode He par défaut)
         std::cerr << "  Initialisation des poids (He)..." << std::endl;
         initializeWeights("he", 0);
@@ -4463,100 +6901,118 @@ void Model::build()
 void Model::autoBuildFromDataset(const std::string &dataset_dir)
 {
     // Analyse automatique du dataset pour construire l'architecture appropriée
-    
+
     std::cerr << "Model::autoBuildFromDataset(" << dataset_dir << ")" << std::endl;
-    
+
     // Charger le dataset avec cache et validation flexible (min 1 modalité)
     std::vector<DatasetItem> items;
-    try {
-        items = loadDatasetCached(dataset_dir, 64, 64, 1);  // min_modalities = 1
-    } catch (const std::exception &e) {
+    try
+    {
+        items = loadDatasetCached(dataset_dir, 64, 64, 1); // min_modalities = 1
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "Erreur chargement dataset: " << e.what() << std::endl;
         // Fallback: construction par défaut
         build();
         return;
     }
-    
-    if (items.empty()) {
+
+    if (items.empty())
+    {
         std::cerr << "Dataset vide, construction par défaut" << std::endl;
         build();
         return;
     }
-    
+
     std::cerr << "  Items trouvés: " << items.size() << std::endl;
-    
+
     // Analyser les modalités présentes et les linkables
     bool has_text = false;
     bool has_image = false;
     bool has_audio = false;
     bool has_video = false;
     size_t linkable_count = 0;
-    
-    for (const auto &item : items) {
-        if (!item.text_file.empty()) has_text = true;
-        if (!item.image_file.empty()) has_image = true;
-        if (!item.audio_file.empty()) has_audio = true;
-        if (!item.video_file.empty()) has_video = true;
-        if (item.is_linked && item.countModalities() >= 2) linkable_count++;
+
+    for (const auto &item : items)
+    {
+        if (!item.text_file.empty())
+            has_text = true;
+        if (!item.image_file.empty())
+            has_image = true;
+        if (!item.audio_file.empty())
+            has_audio = true;
+        if (!item.video_file.empty())
+            has_video = true;
+        if (item.is_linked && item.countModalities() >= 2)
+            linkable_count++;
     }
-    
+
     std::cerr << "  Modalités détectées:" << std::endl;
     std::cerr << "    - Texte:  " << (has_text ? "✓" : "✗") << std::endl;
     std::cerr << "    - Image:  " << (has_image ? "✓" : "✗") << std::endl;
     std::cerr << "    - Audio:  " << (has_audio ? "✓" : "✗") << std::endl;
     std::cerr << "    - Vidéo:  " << (has_video ? "✓" : "✗") << std::endl;
     std::cerr << "    - Linkables validés: " << linkable_count << std::endl;
-    
+
     // Construire le backbone de base
     buildBackboneUNet(4, 2, 3);
-    
+
     // Créer les magic tokens pour chaque modalité détectée
     std::vector<MagicToken> magic_tokens;
-    
-    if (has_text) {
+
+    if (has_text)
+    {
         MagicToken tok;
-        tok.modality_mask = 0x01;  // bit 0 = text
+        tok.modality_mask = 0x01; // bit 0 = text
         tok.seed = 42;
-        for (int i = 0; i < 8; ++i) tok.embed[i] = 0.1f * (i + 1);
+        for (int i = 0; i < 8; ++i)
+            tok.embed[i] = 0.1f * (i + 1);
         magic_tokens.push_back(tok);
         buildTextBranch(tok);
         injectMagicToken(tok);
         std::cerr << "  → Branche texte ajoutée" << std::endl;
     }
-    
-    if (has_image) {
+
+    if (has_image)
+    {
         MagicToken tok;
-        tok.modality_mask = 0x02;  // bit 1 = image
+        tok.modality_mask = 0x02; // bit 1 = image
         tok.seed = 43;
-        for (int i = 0; i < 8; ++i) tok.embed[i] = 0.2f * (i + 1);
+        for (int i = 0; i < 8; ++i)
+            tok.embed[i] = 0.2f * (i + 1);
         magic_tokens.push_back(tok);
         buildImageBranch(tok);
         injectMagicToken(tok);
         std::cerr << "  → Branche image ajoutée" << std::endl;
     }
-    
-    if (has_audio) {
+
+    if (has_audio)
+    {
         MagicToken tok;
-        tok.modality_mask = 0x04;  // bit 2 = audio
+        tok.modality_mask = 0x04; // bit 2 = audio
         tok.seed = 44;
-        for (int i = 0; i < 8; ++i) tok.embed[i] = 0.3f * (i + 1);
+        for (int i = 0; i < 8; ++i)
+            tok.embed[i] = 0.3f * (i + 1);
         magic_tokens.push_back(tok);
         buildAudioBranch(tok);
         injectMagicToken(tok);
         std::cerr << "  → Branche audio ajoutée" << std::endl;
     }
-    
-    if (has_video) {
+
+    if (has_video)
+    {
         MagicToken tok;
-        tok.modality_mask = 0x08;  // bit 3 = video
+        tok.modality_mask = 0x08; // bit 3 = video
         tok.seed = 45;
-        for (int i = 0; i < 8; ++i) tok.embed[i] = 0.4f * (i + 1);
+        for (int i = 0; i < 8; ++i)
+            tok.embed[i] = 0.4f * (i + 1);
         magic_tokens.push_back(tok);
         buildVideoBranch(tok);
         injectMagicToken(tok);
         std::cerr << "  → Branche vidéo ajoutée" << std::endl;
     }
-    
+
     std::cerr << "  Architecture auto-construite:" << std::endl;
     std::cerr << "    - Couches: " << layers.size() << std::endl;
     std::cerr << "    - Paramètres: " << totalParamCount() << std::endl;

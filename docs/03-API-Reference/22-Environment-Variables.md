@@ -9,6 +9,8 @@ limites propres à chaque backend sans recompiler le projet.
 - [1) Runtime global et dispatch](#1-runtime-global-et-dispatch)
 - [Configuration JSON `env`](#configuration-json-env)
 - [2) Configuration par backend (CPU/CUDA/ROCM)](#2-configuration-par-backend-cpucudarocm)
+- [Sélection SIMD CPU](#sélection-simd-cpu)
+- [Sessions TPU et FPGA](#sessions-tpu-et-fpga)
 - [3) Vulkan/OpenCL (offload Linear/MatMul + Conv2d/ConvTranspose2d)](#3-vulkanopencl-offload-linearmatmul-conv2dconvtranspose2d)
 - [4) Planner et fusion](#4-planner-et-fusion)
 - [4.1) Verbose runtime et cartographie planner](#41-verbose-runtime-et-cartographie-planner)
@@ -68,6 +70,8 @@ plus `omp_set_num_threads()` dans les builds OpenMP.
 | `MIMIR_DISABLE_ROCM` | bool | `0` | Désactive explicitement le runtime ROCm. |
 | `MIMIR_DISABLE_VULKAN` | bool | `0` | Désactive le backend Vulkan Compute. |
 | `MIMIR_DISABLE_OPENCL` | bool | `0` | Désactive le backend OpenCL Compute. |
+| `MIMIR_DISABLE_TPU` | bool | `0` | Désactive la session TPU, même si elle a été demandée. |
+| `MIMIR_DISABLE_FPGA` | bool | `0` | Désactive la détection/session FPGA. |
 
 Notes sur les colonnes allocator (quand `MIMIR_ALLOCATOR_LOG=1`) :
 
@@ -111,7 +115,47 @@ Notes CPU:
 Important:
 
 - Il n'existe pas de variable globale `MIMIR_CUDA=1` ou `MIMIR_ROCM=1` dans le code actuel. L'activation se fait par les flags de fast-path (`MIMIR_CUDA_*`, `MIMIR_ROCM_*`) et les kill-switch `MIMIR_DISABLE_*`.
-- Par défaut, les fast-paths sont auto-activés. Pour forcer un mode CPU-only, utilisez `MIMIR_DISABLE_CUDA=1`, `MIMIR_DISABLE_ROCM=1`, `MIMIR_DISABLE_VULKAN=1`, `MIMIR_DISABLE_OPENCL=1`.
+- Par défaut, les fast-paths sont auto-activés. Pour forcer un mode CPU-only,
+  utilisez `MIMIR_DISABLE_CUDA=1`, `MIMIR_DISABLE_ROCM=1`,
+  `MIMIR_DISABLE_VULKAN=1`, `MIMIR_DISABLE_OPENCL=1` et `MIMIR_TPU=0`.
+
+### Sélection SIMD CPU
+
+`MIMIR_CPU_ISA` sélectionne une variante disponible dans le build et supportée
+par le CPU et son OS :
+
+| Valeur | Sélection |
+| --- | --- |
+| `auto` ou absence | meilleure variante disponible |
+| `scalar` | calcul scalaire |
+| `sse2` / `sse` | SSE2 |
+| `avx` / `avx256` | AVX, vecteurs de 256 bits |
+| `avx2` | AVX2 |
+| `avx512` / `avx512f` | AVX512 |
+
+Une valeur inconnue ou indisponible est refusée, sans exécuter une instruction
+non supportée. La sélection est lue une fois ; définissez-la avant le lancement.
+`Model.hardware_caps().simd` permet d'inspecter la variante sélectionnée et les
+sous-capacités détectées. Un flag SSE3, AVX512BW ou F16C détecté n'implique pas
+un kernel indépendant pour chaque opération du framework.
+
+### Sessions TPU et FPGA
+
+| Variable | Défaut | Usage |
+| --- | --- | --- |
+| `MIMIR_TPU` | désactivé | La valeur exacte `1` demande la session JAX/XLA/PJRT sur un vrai device TPU. Une demande indisponible est une erreur. |
+| `MIMIR_TPU_DEVICE` | `0` | Index du device TPU sélectionné par le worker. |
+| `MIMIR_TPU_TARGET` | `auto` | Cible `auto`, `TPU-v5e1` ou `TPU-v6e1`, validée par le worker. |
+| `MIMIR_TPU_PYTHON` | `python3` | Exécutable Python du worker. |
+| `MIMIR_TPU_WORKER` | chemin fourni par le build | Chemin explicite de `src/runtimes/tpu/worker.py`. |
+| `MIMIR_FPGA_IO` | actif si le firmware le permet | La valeur exacte `0` désactive le staging dataset et la conversion/contrôle de checkpoints FPGA. |
+| `MIMIR_FPGA_DEVICE` | tty détecté | Remplacement du chemin tty pour un périphérique identifié par la détection. |
+| `MIMIR_FPGA_SYSFS_ROOT` | `/sys/bus/usb/devices` | Racine sysfs utilisée par la détection FPGA. |
+
+La session TPU actuelle utilise un worker POSIX et les dépendances JAX adaptées.
+FPGA fournit un chemin d'I/O et de diagnostics selon le firmware ; ses couches
+neuronales restent sur CPU/GPU. Ces variables ne constituent pas une preuve
+d'exécution matérielle. `Model.hardware_caps()` expose les états des sessions.
 
 ## 3) Vulkan/OpenCL (offload Linear/MatMul + Conv2d/ConvTranspose2d)
 
@@ -127,8 +171,12 @@ Important:
 
 Notes Vulkan SPIR-V:
 
-- Le build compile aussi `add_forward.comp.spv`, `mul_forward.comp.spv`, `relu_forward.comp.spv`, `conv2d_forward.comp.spv` et `conv_transpose2d_forward.comp.spv`.
-- Ces shaders sont chargés automatiquement depuis `bin/shaders`/`build/shaders` (pas de variable d'environnement dédiée nécessaire pour ces trois kernels).
+- Le build compile les shaders listés par CMake, notamment les opérations
+  pointwise, convolutions 2D/ND et primitives Primer. Cette liste dépasse les
+  seuls kernels Linear/Conv2d.
+- Les shaders sont recherchés dans les emplacements du build et de l'installation,
+  dont `bin/shaders` et `build/shaders`. Le réglage `MIMIR_VULKAN_LINEAR_SPV`
+  remplace spécifiquement le chemin du shader Linear, pas tous les kernels.
 
 ## 4) Planner et fusion
 
@@ -195,7 +243,7 @@ Exemple rapide:
 ```bash
 export MIMIR_ACCEL_VERBOSE=1
 export MIMIR_RUNTIME_TRACE=1
-./bin/mimir --lua scripts/benchmarks/benchmark.lua
+./run_mimir.sh --lua scripts/benchmarks/benchmark.lua
 ```
 
 ## 5) Bridge scripting (injectées par Mímir)
@@ -221,6 +269,7 @@ export MIMIR_RUNTIME_TRACE=1
 | `MIMIR_CONF_PATH` | string | injectée | Chemin de conf courant (si applicable). |
 | `MIMIR_CONF_DIR` | string | injectée | Dossier de conf courant (si applicable). |
 | `MIMIR_GLOBAL_NAMESPACE` | string | injectée | Namespace racine exposé au script (ex: `Mimir`). |
+| `ROOTWORK` | path | normalisée | Racine de travail explicite, ou répertoire courant si absente ; également exposée comme global Lua. |
 
 ### Aliases injectés
 
@@ -301,6 +350,9 @@ mémoire et ne lit aucun dataset.
 ## 9) Références code
 
 - `src/runtimes/AbstractRuntime.cpp`
+- `src/runtimes/cpu/SimdDispatch.cpp`
+- `src/runtimes/tpu/TpuRuntime.cpp`
+- `src/runtimes/fpga/FpgaSession.cpp`, `src/runtimes/fpga/FpgaIo.cpp`
 - `src/Model.cpp`
 - `src/Planning/ExecutionCalibration.cpp`
 - `src/Planning/FusionCalibration.cpp`

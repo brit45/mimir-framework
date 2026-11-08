@@ -1,5 +1,7 @@
 #include "runtimes/FiniteCheck.hpp"
 #include "runtimes/RuntimeRouter.hpp"
+#include "runtimes/cpu/CpuRuntime.hpp"
+#include "tensors.hpp"
 #include "Planning/FusionCalibration.hpp"
 
 #include "Layers.hpp"
@@ -8,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <array>
+#include <algorithm>
 
 namespace {
 
@@ -32,6 +35,30 @@ auto rankForward(const std::vector<AbstractRuntime*>& candidates,const Layer& la
 RuntimeRouter& RuntimeRouter::instance() {
     static RuntimeRouter router;
     return router;
+}
+
+bool RuntimeRouter::dispatchTensorWeights(const std::vector<tensor>& tensors,
+    std::vector<uint16_t>& output,AbstractRuntime** selected) const {
+    if(selected)*selected=nullptr;
+    ensureActivatedAndComposed();
+    auto candidates=runtime_priority_;
+    static thread_local CpuRuntime standalone;
+    // Match reconstruction-loss dispatch: standalone APIs work without a model,
+    // while an explicitly configured runtime set remains authoritative.
+    if(candidates.empty()) {
+        if(!standalone.isInitialized() && !standalone.initialize(RuntimeConfig{}))return false;
+        candidates.push_back(&standalone);
+    }
+    for(auto* runtime:candidates) {
+        if(!runtime || !runtime->isInitialized() || runtime->config().disabled ||
+           !runtime->supportsTensorWeights())continue;
+        std::vector<uint16_t> result;
+        if(!runtime->computeTensorWeights(tensors,result) || result.size()!=tensors.size())continue;
+        output=std::move(result);
+        if(selected)*selected=runtime;
+        return true;
+    }
+    return false;
 }
 
 size_t RuntimeRouter::layerTypeIndex(const LayerType type) {
@@ -316,6 +343,31 @@ bool RuntimeRouter::dispatchForwardLayer(
     if (selected_runtime) *selected_runtime = nullptr;
     outputs.clear();
 
+    // Autocast is capability-routed independently of the regular FP32 planner
+    // route. A backend must explicitly advertise the requested precision.
+    if (context.autocast_dtype != Mimir::DType::F32) {
+        for (AbstractRuntime* runtime : runtime_priority_) {
+            if (!runtime || !runtime->isInitialized() ||
+                !runtime->supportsAutocast(layer, context.autocast_dtype)) continue;
+            std::vector<std::vector<float>> local_outputs;
+            if (runtime->forwardLayerWithContext(inputs, local_outputs, layer,
+                    training, context) && !local_outputs.empty() &&
+                tensorsAreFinite(local_outputs)) {
+                outputs = std::move(local_outputs);
+                if (selected_runtime) *selected_runtime = runtime;
+                return true;
+            }
+        }
+        // Only use ordinary FP32 dispatch when this operation has no AMP-capable
+        // backend; a failed AMP-capable kernel is treated as a real failure.
+        if (std::any_of(runtime_priority_.begin(), runtime_priority_.end(),
+                [&](AbstractRuntime* runtime) {
+                    return runtime && runtime->isInitialized() &&
+                        runtime->supportsAutocast(layer, context.autocast_dtype);
+                })) return false;
+        if (layer.type_enum == LayerType::Linear) return false;
+    }
+
     auto it = forward_layer_routes_.find(&layer);
     if (it == forward_layer_routes_.end()) {
         auto inserted = forward_layer_routes_.emplace(&layer, buildForwardRouteForLayer(layer));
@@ -380,6 +432,11 @@ bool RuntimeRouter::dispatchForwardLayerPlanned(
         return dispatchForwardLayerPlanned(preferred, gated_inputs, outputs, layer, training, selected_runtime, gated_context);
     }
     ensureActivatedAndComposed();
+    if (context.autocast_dtype != Mimir::DType::F32 &&
+        layer.type_enum == LayerType::Linear) {
+        return dispatchForwardLayer(inputs, outputs, layer, training,
+                                    selected_runtime, context);
+    }
     if (selected_runtime) *selected_runtime = nullptr;
     outputs.clear();
 

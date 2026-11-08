@@ -153,6 +153,15 @@ externe ou un backend matériel particulier.
 
 ## Conventions Mímir
 
+Une architecture DL est définie en C/C++ par une classe dérivée de `Model`.
+Les exemples Lua/JSON doivent sélectionner et piloter une architecture du
+registre, pas empiler ses couches. MPK est l’alternative expérimentale : tout
+tutoriel MPK indique qu’elle n’est pas entièrement exploitable en production.
+Les API de construction bas niveau utilisées par des tests ou l’importeur MPK
+ne doivent pas être présentées comme une troisième voie d’architecture.
+
+Voir le [contrat des architectures](07-Devs/08-Architecture-Contract.md).
+
 | Nom | Convention |
 | --- | --- |
 | `__input__` | Entrée par défaut |

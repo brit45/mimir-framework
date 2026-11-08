@@ -1,36 +1,147 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="620" viewBox="0 0 1700 620" role="img" aria-labelledby="title desc">
-<title id="title">Analyse de checkpoint</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1239" viewBox="0 0 1200 1239" role="img" aria-labelledby="title desc">
+<title id="title">Analyser un checkpoint identifié</title>
+<desc id="desc">L’analyse détecte le format, lit les métadonnées et les tenseurs disponibles, puis produit statistiques et représentation du graphe observé. L’absence de topologie ou des valeurs tronquées limite les conclusions. Les CSV d’entraînement doivent appartenir au même run. Sources : scripts/tools/analyze_model.lua, scripts/tools/show-graph.lua, src/Serialization/Serialization.hpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;scripts/tools/analyze_model.lua&quot;, &quot;scripts/tools/show-graph.lua&quot;, &quot;src/Serialization/Serialization.hpp&quot;], &quot;related_docs&quot;: [&quot;docs/02-User-Guide/08-Checkpoints.md&quot;, &quot;docs/02-User-Guide/16-Show-Graph-Metrics.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Analyse de checkpoint</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">De checkpoint vers rapport, graphe et export SVG.</text>
-<line x1="60" y1="112" x2="1640" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="236.66666666666666" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="188.33333333333331" y="265" class="label" text-anchor="middle">Checkpoint</text>
-<text x="188.33333333333331" y="322" class="small" text-anchor="middle">JSON/folder/st</text>
-<rect x="334.66666666666663" y="240" width="236.66666666666666" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="452.99999999999994" y="265" class="label" text-anchor="middle">Loader</text>
-<text x="452.99999999999994" y="322" class="small" text-anchor="middle">config + tensors</text>
-<path d="M306.66666666666663,295.0 L334.66666666666663,295.0" class="edgeB"/>
-<rect x="599.3333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="717.6666666666666" y="265" class="label" text-anchor="middle">Analyzer</text>
-<text x="717.6666666666666" y="322" class="small" text-anchor="middle">layers + params</text>
-<path d="M571.3333333333333,295.0 L599.3333333333333,295.0" class="edgeB"/>
-<rect x="863.9999999999999" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="982.3333333333333" y="265" class="label" text-anchor="middle">Graph builder</text>
-<text x="982.3333333333333" y="322" class="small" text-anchor="middle">nodes + edges</text>
-<path d="M835.9999999999999,295.0 L863.9999999999999,295.0" class="edgeB"/>
-<rect x="1128.6666666666665" y="240" width="236.66666666666666" height="110" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1246.9999999999998" y="265" class="label" text-anchor="middle">graph-out</text>
-<text x="1246.9999999999998" y="322" class="small" text-anchor="middle">SVG</text>
-<path d="M1100.6666666666665,295.0 L1128.6666666666665,295.0" class="edgeB"/>
-<rect x="1393.333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1511.6666666666663" y="265" class="label" text-anchor="middle">Report</text>
-<text x="1511.6666666666663" y="322" class="small" text-anchor="middle">tables + stats</text>
-<path d="M1365.3333333333333,295.0 L1393.333333333333,295.0" class="edgeB"/>
-<text x="1640" y="596" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1239" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Analyser un checkpoint identifié</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Le rapport doit conserver le contexte et les limites de l’artefact.</tspan>
+</text>
+<path d="M 369.33,264 L 437.33,264" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,264 L 830.67,264" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 993.33,365 L 993.33,465" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,579 L 762.67,579" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 921.76,365 L 921.76,415 L 278.24,415 L 278.24,465" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 528.43,693 L 528.43,743 L 278.24,743 L 278.24,793" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 206.67,693 L 206.67,793" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 278.24,693 L 278.24,743 L 528.43,743 L 528.43,793" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 206.67,793 L 206.67,761 L 993.33,761 L 993.33,793" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,907 L 830.67,907" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="artifact">
+<rect x="44" y="163" width="325.33" height="202" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Artefact sélectionné</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">RawFolder / SafeTensors</tspan>
+<tspan x="66" dy="26">Ou DebugJSON</tspan>
+<tspan x="66" dy="26">d’inspection</tspan>
+</text>
+</g>
+<g data-node="format">
+<rect x="437.33" y="163" width="325.33" height="202" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Format et options</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Détection / format</tspan>
+<tspan x="459.33" dy="26">explicite</tspan>
+<tspan x="459.33" dy="26">Limites et contrôles du</tspan>
+<tspan x="459.33" dy="26">loader</tspan>
+</text>
+</g>
+<g data-node="metadata">
+<rect x="830.67" y="163" width="325.33" height="202" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Métadonnées</tspan>
+<tspan x="852.67" dy="29">disponibles</tspan>
+</text>
+<text x="852.67" y="266" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Nom, configuration,</tspan>
+<tspan x="852.67" dy="26">couches</tspan>
+<tspan x="852.67" dy="26">Connexions si sérialisées</tspan>
+</text>
+</g>
+<g data-node="graph">
+<rect x="44" y="465" width="325.33" height="228" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Graphe observé</tspan>
+</text>
+<text x="66" y="539" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Nœuds et arêtes</tspan>
+<tspan x="66" dy="26">disponibles</tspan>
+<tspan x="66" dy="26">Pas de topologie inventée</tspan>
+</text>
+</g>
+<g data-node="stats">
+<rect x="437.33" y="465" width="325.33" height="228" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Statistiques</tspan>
+<tspan x="459.33" dy="29">calculables</tspan>
+</text>
+<text x="459.33" y="568" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Formes, dtype et</tspan>
+<tspan x="459.33" dy="26">paramètres</tspan>
+<tspan x="459.33" dy="26">Valeurs réellement</tspan>
+<tspan x="459.33" dy="26">présentes</tspan>
+</text>
+</g>
+<g data-node="weights">
+<rect x="830.67" y="465" width="325.33" height="228" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Poids et valeurs</tspan>
+</text>
+<text x="852.67" y="539" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Tenseurs selon le format</tspan>
+<tspan x="852.67" dy="26">Données complètes ou</tspan>
+<tspan x="852.67" dy="26">limitées</tspan>
+</text>
+</g>
+<g data-node="report">
+<rect x="44" y="793" width="325.33" height="228" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="824" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Rapport d’analyse</tspan>
+</text>
+<text x="66" y="867" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Tables et limites</tspan>
+<tspan x="66" dy="26">explicites</tspan>
+<tspan x="66" dy="26">Chemin de l’artefact</tspan>
+<tspan x="66" dy="26">choisi</tspan>
+</text>
+</g>
+<g data-node="svg">
+<rect x="437.33" y="793" width="325.33" height="228" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="824" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Graphe exporté</tspan>
+</text>
+<text x="459.33" y="867" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">SVG / Mermaid selon</tspan>
+<tspan x="459.33" dy="26">options</tspan>
+<tspan x="459.33" dy="26">Description de ce</tspan>
+<tspan x="459.33" dy="26">checkpoint</tspan>
+</text>
+</g>
+<g data-node="context">
+<rect x="830.67" y="793" width="325.33" height="228" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="852.67" y="824" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Contrôler le</tspan>
+<tspan x="852.67" dy="29">contexte</tspan>
+</text>
+<text x="852.67" y="896" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Même run pour CSV et</tspan>
+<tspan x="852.67" dy="26">checkpoint</tspan>
+<tspan x="852.67" dy="26">Profil et progression</tspan>
+<tspan x="852.67" dy="26">identifiés</tspan>
+</text>
+</g>
+<rect x="44" y="1069" width="1112" height="84" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1097" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Des poids externes seuls ne suffisent pas à reconstruire un graphe natif entraînable.</tspan>
+<tspan x="66" dy="26">• DebugJSON peut tronquer les valeurs ; un rapport de métriques ne recalcule pas la qualité du modèle.</tspan>
+</text>
+<text x="44" y="1188" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : analyze_model.lua · show-graph.lua · Serialization.hpp</tspan>
+</text>
+</g>
 </svg>

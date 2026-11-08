@@ -1,4 +1,6 @@
 #include "DebugJsonDump.hpp"
+#include "LayerMetadata.hpp"
+#include "runtimes/ConvolutionND.hpp"
 #include "../Model.hpp"
 #include "CheckpointState.hpp"
 #include "../Tokenizer.hpp"
@@ -426,6 +428,11 @@ json DebugJsonDump::extract_layer_config(const Layer& layer) {
     
     // Type-specific configurations
     switch (layer.type_enum) {
+        case LayerType::Conv3d:
+        case LayerType::Conv4d:
+            LayerMetadata::writeConvolutionND(config, layer);
+            config["has_bias"] = layer.use_bias;
+            break;
         case LayerType::Conv2d:
         case LayerType::ConvTranspose2d:
         case LayerType::Conv1d:
@@ -587,6 +594,15 @@ std::vector<size_t> DebugJsonDump::get_tensor_shape(const Layer& layer, bool is_
     
     // Weight shapes depend on layer type
     switch (layer.type_enum) {
+        case LayerType::Conv3d:
+        case LayerType::Conv4d: {
+            const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+            shape = {static_cast<size_t>(geometry.out_channels),
+                     static_cast<size_t>(geometry.in_per_group)};
+            for (int axis = 0; axis < geometry.rank; ++axis)
+                shape.push_back(static_cast<size_t>(geometry.kernel[axis]));
+            break;
+        }
         case LayerType::Conv2d:
         case LayerType::ConvTranspose2d:
             // [out_channels, in_channels, kernel_h, kernel_w]

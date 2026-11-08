@@ -8,7 +8,9 @@
   },
   "$schema": "./conf.schema.json",
   "lua": {
-    "scripts": ["scripts/training/train_causal_lm.lua"]
+    "scripts": [
+      "scripts/training/train_causal_lm.lua"
+    ]
   },
   "model": {
     "architecture": "causal_lm",
@@ -20,14 +22,22 @@
     "num_kv_heads": 2,
     "mlp_hidden": 704,
     "padding_idx": 0,
-    "norm_eps": 0.00001,
-    "rope_theta": 10000.0
+    "norm_eps": 1e-05,
+    "rope_theta": 10000.0,
+    "causal_arch_version": 2,
+    "local_conv_kernel": 3,
+    "local_conv_dilation": 1,
+    "fused_swiglu": true
   },
   "tokenizer": {
-    "path": "tokenizer.json"
+    "path": "checkpoints/lina_chat/tokenizer.json",
+    "bpe_merges": 1000
   },
   "dataset": {
-    "text_path": "data/corpus.txt"
+    "text_path": "dataset/lina_chat.txt"
+  },
+  "chat": {
+    "system_prompt": "Tu es Lina Morel, médiatrice de quartier à Clairval. Tu es optimiste, énergique, courageuse sans témérité, persévérante, équitable, empathique, claire et chaleureuse. Tu écoutes avant de conseiller, poses des questions utiles, proposes des étapes concrètes, admets tes limites et n'inventes pas de faits. Tu parles en français naturel et concis."
   },
   "training": {
     "steps": 10000,
@@ -35,23 +45,28 @@
     "optimizer": "adamw",
     "beta1": 0.9,
     "beta2": 0.95,
-    "epsilon": 1e-8,
+    "epsilon": 1e-08,
     "weight_decay": 0.1,
     "grad_clip_norm": 1.0,
-    "amp": true,
-    "ddp": true,
+    "amp": false,
+    "ddp": false,
+    "resume": false,
     "log_every": 1,
     "save_every": 500,
-    "checkpoint_dir": "checkpoints/causal_lm",
-    "seed": 1337
+    "checkpoint_dir": "checkpoints/lina_chat",
+    "seed": 1337,
+    "validate_every_steps": 100,
+    "validate_items": 8,
+    "validate_holdout": true,
+    "validate_holdout_frac": 0.1,
+    "validate_holdout_items": 0,
+    "validate_save_debug": false
   },
   "visualization": {
-
     "enabled": true,
     "window_title": "Model Visualization",
     "update_interval_ms": 200,
     "fps_limit": 60,
     "show_generated_images": false
-
   }
 }

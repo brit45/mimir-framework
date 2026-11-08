@@ -43,6 +43,10 @@ Methodes centrales :
 - `isInitialized()`
 - `linearForward(...)`
 - `forwardLayer(...)`
+- `backwardLayer(...)` et les variantes `*WithContext(...)` pour les états
+  capturés au forward (par exemple les masques de dropout)
+- `queryForwardCapability(...)` / `queryBackwardCapability(...)`, puis les
+  votes par opération qui vérifient formes, flags et limites numériques
 
 Et la config runtime est harmonisee par `RuntimeConfig::fromEnv(...)`.
 
@@ -65,9 +69,12 @@ Procedure type :
 1. Creer un dossier backend dans `src/runtimes/<backend>/`.
 2. Implementer une classe derivee de `AbstractRuntime`.
 3. Brancher `initialize/shutdown/isInitialized`.
-4. Implementer au minimum `linearForward` puis `forwardLayer`.
+4. Implémenter les entrées requises par l'interface et annoncer uniquement les
+   capacités réellement calculées ; une méthode non couverte retourne `false`.
 5. Ajouter la config env (`RuntimeConfig::fromEnv` conventions).
 6. Integrer le backend au build (CMake) et au chemin d'initialisation runtime.
+7. Fournir le backend à `RuntimeRouter` et vérifier `selected_runtime` dans les
+   tests. Un vote `HostFallback` ne constitue pas une exécution native du backend.
 
 ## 4. Conventions de qualite
 
@@ -114,7 +121,7 @@ bool MyRuntime::forwardLayer(
 	const Layer& layer,
 	bool training) {
 	if (!isInitialized()) return false;
-	if (layer.type != LayerType::Add) return false;
+	if (layer.type_enum != LayerType::Add) return false;
 	if (inputs.size() != 2 || !inputs[0] || !inputs[1]) return false;
 
 	const auto& a = *inputs[0];
@@ -133,6 +140,11 @@ Lecture metier :
 1. Si le runtime ne sait pas faire, il retourne `false` sans casser le run.
 2. Si les shapes ne matchent pas, il refuse proprement.
 3. En succes, il produit une sortie complete et deterministic.
+
+La boucle de cet exemple est un kernel hôte pédagogique. Pour un runtime GPU,
+la remplacer par un lancement device avant de déclarer `Native` ; déclarer
+ce code hôte comme une accélération GPU serait incorrect. Les calculs restent
+dans le runtime, jamais dans `Layers.hpp`.
 
 ### Programmes de fusion pointwise
 

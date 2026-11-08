@@ -1,426 +1,210 @@
 # Installation et compilation
 
-Installer les dépendances et compiler selon votre environnement.
+Mímir nécessite CMake 3.15+, un compilateur C++17 et Lua 5.3+ avec ses fichiers
+de développement. Les options ci-dessous correspondent à `CMakeLists.txt`,
+`config.sh` et `CMakePresets.json` du dépôt. La présence d'un chemin de build
+pour une plateforme ne remplace pas une exécution de ses tests sur cette plateforme.
 
-**Public concerné :** Débutant qui veut une installation stable et reproductible.
+## Dépendances et fonctionnalités
 
-> **Prérequis**
->
-> Accès internet + installation de paquets système.
+| Dépendance | Usage | Option CMake |
+| --- | --- | --- |
+| CMake 3.15+, compilateur C++17, Lua 5.3+ | Compilation et scripting natif | Obligatoires |
+| OpenMP | Parallélisme CPU | `ENABLE_OPENMP`, activé par défaut |
+| SFML **3** | Interface native par défaut | `MIMIR_VIZ_BACKEND=SFML` |
+| Qt / GTK / hôte Web | Autres interfaces | `MIMIR_VIZ_BACKEND=QT\|GTK\|WEB`, hôtes Linux actuels |
+| Vulkan et glslangValidator | Calcul et compilation des shaders SPIR-V | `ENABLE_VULKAN`, activé par défaut |
+| OpenCL | Calcul OpenCL | `ENABLE_OPENCL`, activé par défaut |
+| CUDA Toolkit / ROCm | Calcul NVIDIA / AMD | `ENABLE_CUDA` / `ENABLE_ROCM`, désactivés par défaut |
+| LZ4 | Compression disponible dans les chemins qui l'utilisent | `ENABLE_LZ4`, activé si trouvé |
+| FFmpeg | Chargement audio et vidéo | `ENABLE_FFMPEG`, activé si trouvé |
+| MPI et ses en-têtes C++ | Collectives DDP | `ENABLE_MPI`, désactivé par défaut |
 
+Le nom du paquet SFML dépend du système et de ses dépôts : vérifiez qu'il
+fournit la version **3**, exigée par `find_package(SFML 3 ...)`. Un paquet
+SFML 2 ne satisfait pas cette dépendance. Le profil `NONE` évite toute GUI.
+OpenMP est optionnel ; un build CPU sans OpenMP reste possible.
 
-Pour compiler Mímir, il faut CMake, C++17 et quelques dépendances. Cette page couvre tout ce qu'il faut savoir.
+## Premier build CPU sans interface
 
----
-
-## Sur cette page
-
-- [Dépendances](#dépendances)
-- [Google Colab](#google-colab-cuda)
-- [🔨 Build — Guide par OS](#build-guide-par-os)
-- [📋 Options CMake principales](#options-cmake-principales)
-- [🧪 Vérifier l'installation](#vérifier-linstallation)
-- [🐛 Troubleshooting](#troubleshooting)
-- [💡 Tips avancés](#tips-avancés)
-- [Checklist de déploiement en production](#checklist-de-déploiement-en-production)
-- [Étapes suivantes](#étapes-suivantes)
-
-## Dépendances
-
-### Obligatoires
-
-| Dépendance | Version min | Rôle | Installation |
-| --- | --- | --- | --- |
-| **CMake** | 3.15+ | Build system | `apt install cmake` ou [cmake.org](https://cmake.org) |
-| **C++ compiler** | C++17 compatible | Compilation | GCC 7+, Clang 7+, MSVC 2017+ |
-| **Lua** | 5.3+ | API scripting | `apt install lua5.3 liblua5.3-dev` |
-| **OpenMP** | (bundled) | Parallelisation CPU | Généralement inclus avec le compilateur |
-
-### Optionnelles (à bas bruit)
-
-| Dépendance | Rôle | Défaut | Désactiver avec |
-| --- | --- | --- | --- |
-| **Vulkan SDK** | GPU Compute (SPIR-V shaders) | ON | `-DENABLE_VULKAN=OFF` |
-| **glslangValidator** | Compilation shaders Vulkan | Auto-build | `-DMIMIR_FETCH_GLSLANG=OFF` |
-| **SFML** | Visualisation graphique | ON | `-DENABLE_SFML=OFF` |
-| **OpenCL** | GPU Compute (OpenCL) | ON | `-DENABLE_OPENCL=OFF` |
-| **LZ4** | Compression checkpoints | ON | `-DENABLE_LZ4=OFF` |
-
-### Extras (à haute spécialisation)
-
-| Dépendance | Rôle | Utilité | Installer si |
-| --- | --- | --- | --- |
-| **CUDA Toolkit** | GPU NVIDIA (cuBLAS) | Runtime NVIDIA cuBLAS | Vous avez GPU NVIDIA + `-DENABLE_CUDA=ON` |
-| **ROCm** | GPU AMD (rocBLAS) | Inférence AMD rapide | Vous avez GPU AMD + `-DENABLE_ROCM=ON` |
-
----
-
-## 🔨 Build — Guide par OS
-
-### Google Colab (CUDA)
-
-Sélectionnez d'abord un environnement d'exécution avec GPU dans Colab, puis
-vérifiez que le GPU NVIDIA est visible:
+Les commandes shell supposent un environnement POSIX et des dépendances déjà
+installées. Sur Debian/Ubuntu, la base est par exemple :
 
 ```bash
+sudo apt-get update
+sudo apt-get install cmake build-essential lua5.3 liblua5.3-dev
+```
+
+Depuis la racine du dépôt :
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DMIMIR_VIZ_BACKEND=NONE \
+  -DENABLE_VULKAN=OFF -DENABLE_OPENCL=OFF \
+  -DENABLE_CUDA=OFF -DENABLE_ROCM=OFF \
+  -DMIMIR_ENABLE_TESTS=ON
+cmake --build build --parallel 2
+./run_mimir.sh --help
+./run_mimir.sh --lua scripts/tests/test_serialization_smoke.lua
+```
+
+Ce smoke test vérifie la création et la sérialisation d'un petit modèle. Il
+ne valide pas toutes les architectures ni tous les backends.
+`MIMIR_ENABLE_TESTS=ON` est l'option du projet qui crée les cibles CTest ;
+`BUILD_TESTING=ON` seul ne les active pas.
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+### Emplacement des exécutables
+
+Le build principal `build/` produit `bin/mimir` dans le dépôt. Par défaut, un
+build secondaire comme `build-cpu/` produit **`build-cpu/bin/mimir`**.
+`MIMIR_RUNTIME_OUTPUT_DIRECTORY` permet de modifier cette destination ; les
+générateurs multi-configuration peuvent ajouter `Release` ou `Debug`.
+
+Pour utiliser un build secondaire avec le lanceur :
+
+```bash
+MIMIR_EXECUTABLE="$PWD/build-cpu/bin/mimir" ./run_mimir.sh --help
+```
+
+N'utilisez ce chemin qu'après avoir effectivement construit ce profil.
+
+## Configuration assistée et portable
+
+```bash
+./config.sh --help
+```
+
+`config.sh` détecte l'OS et le gestionnaire de paquets, puis configure CMake.
+Sans `--skip-system-deps`, il peut installer les dépendances et demander des
+droits administrateur. Les chemins prévus couvrent Linux, macOS, plusieurs BSD
+et MSYS2/MinGW ; chaque combinaison de système, SDK et compilateur doit être
+validée séparément.
+
+Exemple reproductible si les dépendances sont déjà présentes :
+
+```bash
+./config.sh --gui NONE --non-interactive --skip-system-deps \
+  --build-dir build-cpu --generator Ninja \
+  --enable MIMIR_ENABLE_TESTS --amp --no-ddp \
+  --disable ENABLE_VULKAN --disable ENABLE_OPENCL
+cmake --build build-cpu --parallel 2
+```
+
+| Option du script | Effet |
+| --- | --- |
+| `--gui SFML\|QT\|GTK\|WEB\|NONE` | Sélection de l'interface, indépendante du runtime de calcul |
+| `--enable FEATURE` / `--disable FEATURE` | Valeur explicite d'une option CMake |
+| `--amp` / `--no-amp` | Active / désactive `ENABLE_AMP` |
+| `--ddp` / `--no-ddp` | Active / désactive `ENABLE_MPI` |
+| `--build-dir CHEMIN`, `--generator Ninja` | Arbre de build et générateur |
+| `--build-type Debug` | Configuration de débogage |
+| `--cmake-arg ARG` | Argument CMake supplémentaire |
+| `--skip-system-deps` | Saute l'installation des paquets système |
+| `WORKROOT=/chemin/source` | Racine source explicite |
+
+Les variables d'environnement `ENABLE_VULKAN=1` ou `ENABLE_OPENCL=0` ne
+remplacent pas les flags `--enable` / `--disable` du script.
+
+## Variantes par plateforme
+
+### macOS
+
+Avec Homebrew, installez CMake et Lua, puis configurez le profil headless
+ci-dessus. OpenMP nécessite généralement `libomp` ; utilisez
+`-DENABLE_OPENMP=OFF` si vous n'en disposez pas. Le dispatch SIMD est protégé
+par l'architecture de compilation : un hôte ARM n'exécute pas des instructions
+x86. La disponibilité Vulkan/OpenCL dépend des bibliothèques et pilotes de l'hôte.
+
+### Windows natif
+
+CMake possède des branches MSVC. Installez un compilateur C++17 et une
+bibliothèque Lua compatible avec ce compilateur. Exemple PowerShell headless,
+avec chemins Lua à adapter :
+
+```powershell
+cmake -S . -B build -DMIMIR_VIZ_BACKEND=NONE `
+  -DENABLE_VULKAN=OFF -DENABLE_OPENCL=OFF `
+  -DENABLE_SCRIPTING_JS=OFF `
+  -DLUA_INCLUDE_DIR="C:/Lua/include" -DLUA_LIBRARY="C:/Lua/lib/lua53.lib"
+cmake --build build --config Release --parallel 2
+```
+
+Le bridge JavaScript utilise des primitives POSIX et est désactivé par défaut
+sous Windows. Les runtimes GPU ont leurs propres SDK et contraintes ; ne pas
+assimiler une option CMake à une validation matérielle. `config.sh` et
+`run_mimir.sh` sont des scripts Bash, utilisables depuis un environnement
+adapté tel que MSYS2, pas des commandes PowerShell natives.
+
+### Google Colab
+
+Choisissez un environnement GPU, clonez le dépôt sous `/content/tensor-2` et
+installez les dépendances de compilation du preset :
+
+```python
 !nvidia-smi
-```
-
-Après avoir cloné le dépôt dans `/content/tensor-2`, installez les dépendances
-de compilation:
-
-```bash
 !apt-get update -qq
-!apt-get install -y ninja-build build-essential pkg-config \
-  liblua5.3-dev liblz4-dev \
-  libavcodec-dev libavformat-dev libavutil-dev \
-  libswresample-dev libswscale-dev
-```
-
-Compilez ensuite le binaire headless. Le preset détecte automatiquement CUDA
-ou ROCm selon le toolkit disponible et limite la compilation à deux tâches
-parallèles afin de rester compatible avec la mémoire des sessions Colab
-gratuites:
-
-```bash
+!apt-get install -y ninja-build build-essential pkg-config liblua5.3-dev liblz4-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
 %cd /content/tensor-2
 !cmake --preset colab-cuda
 !cmake --build --preset build-colab-cuda
 !./build-colab/bin/mimir --version
 ```
 
-Le preset `colab-cuda` active l'auto-détection CUDA/ROCm, OpenMP, SIMD, FFmpeg
-et LZ4. Il désactive Vulkan, OpenCL, l'interface graphique, les bridges
-externes, les exemples et les tests. Vérifiez les lignes `CUDA Compute` et
-`ROCm Compute` du résumé CMake. Si les deux valent `OFF`, vérifiez que le
-notebook utilise bien un environnement GPU et que `nvcc` ou `hipcc` est
-accessible.
-
-### Linux (Ubuntu/Debian)
-
-**Script automatique recommande:**
-
-```bash
-cd ~/path/to/tensor-2
-
-# Installe les dependances systeme et configure CMake dans build/
-./config.sh
-
-# Compile le projet
-cmake --build build -j$(nproc)
-```
-
-Le script installe les dépendances nécessaires aux fonctionnalités choisies,
-puis configure CMake. En mode interactif, sélectionnez les fonctionnalités et
-le backend Viz dans les menus. Pour un profil reproductible sans menu :
-
-```bash
-./config.sh --gui NONE --non-interactive --build-dir build_ci_linux \
-  --generator Ninja --enable MIMIR_ENABLE_TESTS \
-  --disable ENABLE_VULKAN --disable ENABLE_OPENCL
-cmake --build build_ci_linux --parallel 2
-ctest --test-dir build_ci_linux --output-on-failure --timeout 120
-```
-
-Options utiles :
-
-- `--gui SFML|QT|GTK|WEB|NONE` : interface graphique à compiler.
-- `--enable FEATURE` / `--disable FEATURE` : choix explicite des options CMake.
-- `--build-type Debug` : build de débogage (Release par défaut).
-- `--build-dir CHEMIN` et `--generator Ninja` : arbre et générateur du build.
-- `--cmake-arg ARG` : argument CMake supplémentaire, notamment pour la compilation croisée.
-- `--skip-system-deps` : omet apt/sudo uniquement si les dépendances sont déjà installées.
-- `WORKROOT=/chemin/vers/mimir` : racine source explicite ; `MIMIR_VIZ_BACKEND`
-  propose le choix Viz initial. Les fonctionnalités se sélectionnent avec les
-  options `--enable` et `--disable`, pas avec `ENABLE_VULKAN=0` dans l’environnement.
-
-Consultez `./config.sh --help` et la [validation de version](../06-Contributing/08-Release-Validation.md)
-pour les profils Linux et Windows croisés utilisés par les workflows.
-
-**Installation des dépendances:**
-
-```bash
-# Dépendances obligatoires
-sudo apt-get update
-sudo apt-get install -y \
-  cmake \
-  build-essential \
-  lua5.3 liblua5.3-dev \
-  libomp-dev
-
-# Optionnel: Vulkan Compute
-sudo apt-get install -y \
-  vulkan-tools libvulkan-dev \
-  glslang-tools
-
-# Optionnel: SFML visualisation
-sudo apt-get install -y \
-  libsfml-dev
-
-# Optionnel: OpenCL GPU
-sudo apt-get install -y \
-  ocl-icd-opencl-dev
-```
-
-**Compilation:**
-
-```bash
-cd ~/path/to/tensor-2
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_SIMD=ON \
-  -DENABLE_OPENMP=ON
-cmake --build build -j$(nproc)
-
-# Résultat
-ls -la bin/mimir
-```
-
-**Tests (optionnel):**
-```bash
-ctest --test-dir build --output-on-failure
-```
-
----
-
-### macOS
-
-**Installation des dépendances:**
-
-```bash
-# Installer Homebrew si absent
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Dépendances
-brew install cmake lua@5.3 libomp
-
-# Optionnel: Vulkan (moins courant sur macOS)
-brew install vulkan-loader molten-vk
-
-# Optionnel: SFML
-brew install sfml
-```
-
-**Compilation:**
-
-```bash
-cd ~/path/to/tensor-2
-
-# Pour Intel Mac (x86_64):
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_SIMD=ON
-
-# Pour Apple Silicon (arm64):
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_SIMD=OFF
-
-cmake --build build -j$(sysctl -n hw.ncpu)
-```
-
----
-
-### Windows (MSVC)
-
-**Requirements:**
-- Visual Studio 2017+ ou Build Tools
-- CMake (via installer ou `choco install cmake`)
-- Lua 5.3+ (via installer ou prebuilt binaries)
-
-**Compilation (PowerShell):**
-
-```powershell
-cd C:\path\to\tensor-2
-
-# Configure
-cmake -S . -B build `
-  -G "Visual Studio 16 2019" `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DLUA_INCLUDE_DIR="C:\Program Files\Lua\include" `
-  -DLUA_LIBRARY="C:\Program Files\Lua\lua53.lib"
-
-# Build
-cmake --build build --config Release -j
-```
-
-⚠️ **Note:** OpenMP et SIMD sont généralement détectés automatiquement. Les GPUs ne sont pas (encore) supportés sur Windows.
-
----
-
-## 📋 Options CMake principales
-
-```bash
-# Syntaxe générale:
-cmake -S . -B build [OPTIONS]
-
-# Exemples:
-
-# Release optimisé (défaut)
--DCMAKE_BUILD_TYPE=Release
-
-# Debug (symbols + no optimizations)
--DCMAKE_BUILD_TYPE=Debug
-
-# Désactiver SIMD (utile pour débogage ou CPU ancien)
--DENABLE_SIMD=OFF
-
-# Désactiver Vulkan (si problèmes de build)
--DENABLE_VULKAN=OFF
-
-# Désactiver SFML (si dépendance problématique)
--DENABLE_SFML=OFF
-
-# Activer CUDA (NVIDIA GPU)
--DENABLE_CUDA=ON -DCUDAToolkit_ROOT=/usr/local/cuda
-
-# Activer ROCm (AMD GPU)
--DENABLE_ROCM=ON -DMIMIR_ROCM_ROOT=/opt/rocm
-
-# Détecter automatiquement CUDA et ROCm
--DMIMIR_AUTO_DETECT_GPU_BACKENDS=ON
-
-# Build static (pas de dépendances dynamiques)
--DBUILD_MIMIR_STATIC=ON
-
-# Build exemples (dans build/examples/)
--DBUILD_EXAMPLES=ON
-
-# Mode legacy params (attention: très RAM-intensive!)
--DMIMIR_ENABLE_LEGACY_PARAMS=ON
-```
-
----
-
-## 🧪 Vérifier l'installation
-
-```bash
-# Afficher l'aide + capacités hardware
-./bin/mimir --help
-
-# Expected output:
-# ========== Mímir v3.5.0 ==========
-# Capabilities: [AVX2] [FMA] [F16C] [BMI2] [OpenMP] [Vulkan] ...
-# Usage: ./bin/mimir [OPTIONS]
-
-# Exécuter un smoke test
-./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
-
-# Si pas d'erreur → tout fonctionne!
-```
-
----
-
-## 🐛 Troubleshooting
-
-### CMake error: "Lua not found"
-
-```bash
-# Solution 1: Installer Lua
-sudo apt-get install lua5.3 liblua5.3-dev
-
-# Solution 2: Spécifier le chemin manuellement
-cmake -S . -B build \
-  -DLUA_INCLUDE_DIR=/usr/include/lua5.3 \
-  -DLUA_LIBRARY=/usr/lib/x86_64-linux-gnu/liblua5.3.so
-```
-
-### Compilation error: "OpenMP not found"
-
-```bash
-# Solution 1: Installer OpenMP
-sudo apt-get install libomp-dev
-
-# Solution 2: Compiler sans OpenMP
-cmake -S . -B build -DENABLE_OPENMP=OFF
-```
-
-### Error: "glslangValidator not found" (Vulkan)
-
-```bash
-# Solution 1: Installer glslang
-sudo apt-get install glslang-tools
-
-# Solution 2: Désactiver Vulkan
-cmake -S . -B build -DENABLE_VULKAN=OFF
-
-# Solution 3: Auto-build glslang (défaut)
-# CMake téléchargera et compilera glslang lui-même
-```
-
-### SFML compilation errors
-
-```bash
-# Solution: Désactiver SFML
-cmake -S . -B build -DENABLE_SFML=OFF
-```
-
-### Build hangs or super slow
-
-```bash
-# Réduire parallélisation
-cmake --build build -j2
-
-# Ou nettoyer et recommencer
-rm -rf build
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j4
-```
-
----
-
-## 💡 Tips avancés
-
-### Cross-compilation pour CPU plus ancien
-
-```bash
-# Pour CPU sans AVX2 (ex: Atom, Celeron):
-cmake -S . -B build \
-  -DENABLE_SIMD=OFF \
-  -DCMAKE_CXX_FLAGS="-mtune=generic"
-```
-
-### Build completement statique (Linux)
-
-```bash
-cmake -S . -B build \
-  -DBUILD_MIMIR_STATIC=ON \
-  -DCMAKE_EXE_LINKER_FLAGS="-static"
-
-cmake --build build -j
-
-# Résultat: ./bin/mimir_static (pas de dépendances système)
-```
-
-### Benchmark compilation
-
-```bash
-# Temps de build avec output détaillé:
-time cmake --build build -j --verbose 2>&1 | tee build.log
-```
-
-### Nettoyer complètement (cache CMake)
-
-```bash
-rm -rf build
-cmake -S . -B build --fresh
-cmake --build build -j
-```
-
----
-
-## Checklist de déploiement en production
-
-- [ ] Compiler en `-DCMAKE_BUILD_TYPE=Release`
-- [ ] Vérifier capacités: `./bin/mimir --help`
-- [ ] Exécuter smoke test: `./bin/mimir --lua scripts/tests/test_serialization_smoke.lua`
-- [ ] Tester le modèle qu'on va utiliser
-- [ ] Si CPU ancien: compiler sans `-DENABLE_SIMD`
-- [ ] Si GPU requis: `-DENABLE_CUDA=ON` ou `-DENABLE_ROCM=ON`
-- [ ] Archiver le binaire + config utilisée
+Le preset active la détection automatique CUDA/ROCm et désactive la GUI,
+Vulkan, OpenCL et les tests. Vérifiez le résumé CMake et le périphérique
+sélectionné à l'exécution. L'auto-détection ne fournit pas un toolkit absent.
+Les presets nécessitent une version de CMake qui prend en charge leur schéma,
+supérieure au minimum du build manuel ; voir `CMakePresets.json`.
+
+## Options CMake utiles
+
+Ces valeurs sont des **arguments à ajouter à la commande `cmake -S ... -B ...`** :
+
+| Argument | Effet |
+| --- | --- |
+| `-DENABLE_SIMD=OFF` | Désactive les chemins SIMD pour un diagnostic |
+| `-DMIMIR_PORTABLE_BUILD=ON` | Profil portable, valeur par défaut |
+| `-DENABLE_OPENMP=OFF` | Désactive le parallélisme OpenMP |
+| `-DMIMIR_VIZ_BACKEND=NONE` | Compile sans interface graphique |
+| `-DENABLE_CUDA=ON` | Demande CUDA ; toolkit requis |
+| `-DENABLE_ROCM=ON` | Demande ROCm ; toolkit requis |
+| `-DMIMIR_AUTO_DETECT_GPU_BACKENDS=ON` | Détecte les toolkits CUDA/ROCm disponibles |
+| `-DENABLE_AMP=ON` | Compile le support d'autocast, activé par défaut |
+| `-DENABLE_MPI=ON` | Compile DDP, bibliothèque MPI requise |
+| `-DMIMIR_ENABLE_TESTS=ON` | Active les cibles de tests |
+| `-DBUILD_EXAMPLES=ON` | Ajoute les exécutables d'exemple |
+| `-DBUILD_MIMIR_STATIC=ON` | Tente un binaire Linux statique ; versions statiques des dépendances requises |
+
+Le CPU choisit les kernels disponibles à l'exécution après détection des
+capacités et du support des registres par l'OS : scalaire, SSE2, AVX/256,
+AVX2, AVX-512, avec variantes FMA/F16C selon le chemin. Il n'est pas nécessaire
+de désactiver tout SIMD parce qu'une machine ne possède pas AVX2. Voir
+[les runtimes](../04-Architecture-Internals/21-GPU-Runtimes.md) pour les limites
+et le diagnostic de la sélection.
+
+## Dépannage
+
+| Symptôme | Action |
+| --- | --- |
+| Lua introuvable | Installer ses en-têtes et bibliothèque de développement ; au besoin fournir `LUA_INCLUDE_DIR` et `LUA_LIBRARY` |
+| SFML incompatible | Fournir SFML 3 ou sélectionner `MIMIR_VIZ_BACKEND=NONE` |
+| glslangValidator absent | Installer l'outil ; le fetch est proposé si `MIMIR_FETCH_GLSLANG=ON`, sinon les shaders ne sont pas compilés |
+| OpenMP indisponible | Installer la bibliothèque correspondante ou définir `ENABLE_OPENMP=OFF` |
+| Build lent ou à court de mémoire | Réduire `--parallel` et lire la première erreur |
+| Cache ou générateur incompatible | Utiliser un nouveau dossier de build et vérifier le chemin du binaire produit |
+| Aucun test trouvé | Reconfigurer avec `MIMIR_ENABLE_TESTS=ON`, puis compiler les tests |
+
+Avant un déploiement, conservez la version, le profil CMake, les dépendances,
+la configuration et les résultats des tests du modèle et du backend utilisés.
+La [validation de version](../06-Contributing/08-Release-Validation.md) décrit
+les contrôles de livraison.
 
 ## Étapes suivantes
 
-- [Page précédente : Quick start](01-Quick-Start.md)
-- [Index de la documentation](../00-INDEX.md)
-- [Page suivante : CLI (binaire `mimir`)](03-CLI.md)
+- [Première exécution](01-Quick-Start.md)
+- [CLI et arguments des scripts](03-CLI.md)
+- [Compilation, AMP et DDP](../08-Tuto/16-Tuto-Compilation-Portabilite-AMP-DDP.md)

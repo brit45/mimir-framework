@@ -1,10 +1,65 @@
 #include "VAEConvModel.hpp"
 #include "training/BBoxSupervision.hpp"
+#include "runtimes/ConvolutionND.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 
 namespace {
+std::string normalizedConvMode(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (mode == "2" || mode == "conv2d") mode = "2d";
+    if (mode == "3" || mode == "conv3d") mode = "3d";
+    if (mode == "4" || mode == "conv4d") mode = "4d";
+    if (mode != "2d" && mode != "3d" && mode != "4d")
+        throw std::invalid_argument("VAEConvModel: conv_mode must be 2d, 3d or 4d (got '" + mode + "')");
+    return mode;
+}
+
+std::string decoderUpsample(const VAEConvModel::Config& cfg, const std::string& mode) {
+    const auto requested = cfg.decoder_upsample.empty() ? std::string("conv_transpose") : cfg.decoder_upsample;
+    // The framework has no transposed ND convolution. Build an explicit
+    // resize+convolution decoder; never retain hidden ConvTranspose2d layers.
+    return mode != "2d" && requested == "conv_transpose" ? "nearest_conv" : requested;
+}
+
+// Complete every convolution branch before allocation/planning, including
+// ResNet, skip projections, mu/logvar, dilated context and subpixel details.
+// Singleton leading axes preserve the existing CHW image/latent contracts.
+void configureConvolutionMode(Model& model, const std::string& mode) {
+    model.modelConfig["conv_mode"] = mode;
+    if (mode == "2d") return;
+    const int rank = mode == "3d" ? 3 : 4;
+    for (auto& layer : model.getMutableLayers()) {
+        if (layer.type_enum != LayerType::Conv2d) continue;
+        layer.type = rank == 3 ? "Conv3d" : "Conv4d";
+        layer.type_enum = rank == 3 ? LayerType::Conv3d : LayerType::Conv4d;
+        auto axes = [rank](int leading, int h, int w) {
+            std::vector<int> result(rank, leading);
+            result[rank - 2] = h;
+            result[rank - 1] = w;
+            return result;
+        };
+        const int k = layer.kernel_size;
+        layer.input_spatial_shape = axes(1, layer.input_height, layer.input_width);
+        layer.kernel_shape = axes(1, layer.kernel_h > 0 ? layer.kernel_h : k,
+                                     layer.kernel_w > 0 ? layer.kernel_w : k);
+        layer.stride_shape = axes(1, layer.stride_h != 1 ? layer.stride_h : layer.stride,
+                                     layer.stride_w != 1 ? layer.stride_w : layer.stride);
+        layer.padding_shape = axes(0, layer.pad_h != 0 ? layer.pad_h : layer.padding,
+                                      layer.pad_w != 0 ? layer.pad_w : layer.padding);
+        layer.dilation_shape = axes(1, layer.dilation_h != 1 ? layer.dilation_h : layer.dilation,
+                                       layer.dilation_w != 1 ? layer.dilation_w : layer.dilation);
+        layer.input_depth = layer.output_depth = 1;
+        if (rank == 4) layer.input_time = layer.output_time = 1;
+        const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+        layer.output_height = geometry.output[rank - 2];
+        layer.output_width = geometry.output[rank - 1];
+    }
+}
+
 std::string latentConv(Model& model, const std::string& name, const std::string& input,
                        int in_c, int out_c, int h, int w, int kernel = 1, int dilation = 1,
                        bool activate = false) {
@@ -185,6 +240,8 @@ bool VAEConvModel::UpdateVizTips(const Layer& layer, VizFrame& frame) {
 
 void VAEConvModel::buildFromConfig(const Config& cfg) {
     cfg_ = cfg;
+    cfg_.conv_mode = normalizedConvMode(cfg_.conv_mode);
+    cfg_.decoder_upsample = decoderUpsample(cfg_, cfg_.conv_mode);
     buildInto(*this, cfg_);
     // ConditioningEncoder externe : embeddings mag/mod/seq appris de dimension d_model.
     // dim=d_model << latent_dim => ensureVocabSize raisonnable (~200 Mo max).
@@ -202,6 +259,7 @@ static inline void check_divisible(int a, int b, const std::string& msg) {
 }
 
 void VAEConvModel::buildInto(Model& model, const Config& cfg) {
+    const std::string conv_mode = normalizedConvMode(cfg.conv_mode);
     model.getMutableLayers().clear();
     model.setModelName("VAEConvModel");
     model.modelConfig["type"] = "vae_conv";
@@ -235,7 +293,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     const int enc_gn_groups_val    = std::max(1, cfg.enc_gn_groups);
     const std::string dec_norm_str = cfg.dec_norm.empty() ? enc_norm_str : cfg.dec_norm;
     const int dec_gn_groups_val    = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
-    const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
+    const std::string dec_upsample = decoderUpsample(cfg, conv_mode);
     if (dec_upsample != "conv_transpose" && dec_upsample != "nearest_conv" &&
         dec_upsample != "bilinear_conv" && dec_upsample != "pixel_shuffle") {
         throw std::runtime_error("VAEConvModel: unsupported decoder_upsample '" + dec_upsample + "'");
@@ -293,7 +351,8 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     configureLatent(model, cfg);
     model.modelConfig["downsamples"] = downsamples;
     model.modelConfig["input_dim"] = image_dim;
-    model.modelConfig["inference_output_tensor"] = "vae_conv/recon";
+    model.modelConfig["inference_output_tensor"] = cfg.inference_output_tensor.empty()
+        ? "vae_conv/recon" : cfg.inference_output_tensor;
     // Recon loss: avoid MSE for VAEConv (better behaved on images in [-1,1]).
     model.modelConfig["recon_loss"] = "l1";
     model.modelConfig["text_cond"] = text_cond;
@@ -303,6 +362,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["proj_dim"] = proj_dim;
     model.modelConfig["padding_idx"] = 0;
     model.modelConfig["stochastic_latent"] = stochastic_latent;
+    model.modelConfig["logvar_head_bias"] = cfg.logvar_head_bias;
     model.modelConfig["enc_norm"] = enc_norm_str;
     model.modelConfig["enc_gn_groups"] = enc_gn_groups_val;
     model.modelConfig["dec_norm"] = dec_norm_str;
@@ -695,7 +755,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         "vae_conv/enc/logvar_pre_norm", logvar_features, cur_c, cur_h, cur_w);
 
     model.push("vae_conv/enc/logvar", "Conv2d",
-               sat_mul(static_cast<size_t>(LC), sat_mul(static_cast<size_t>(cur_c), sat_mul(static_cast<size_t>(1), static_cast<size_t>(1)))));
+               sat_mul(static_cast<size_t>(LC), static_cast<size_t>(cur_c) + (cfg.logvar_head_bias ? 1 : 0)));
     if (auto* L = model.getLayerByName("vae_conv/enc/logvar")) {
         L->inputs = {logvar_features};
         L->output = "vae_conv/logvar";
@@ -706,7 +766,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         L->kernel_size = 1;
         L->stride = 1;
         L->padding = 0;
-        L->use_bias = false;
+        L->use_bias = cfg.logvar_head_bias;
     }
 
     // Reparameterize (spatial latent CHW)
@@ -891,6 +951,7 @@ void VAEConvModel::buildInto(Model& model, const Config& cfg) {
         L->output = "x";
         L->concat_axis = 0;
     }
+    configureConvolutionMode(model, conv_mode);
 }
 
 std::optional<Model::TrainStepResult> VAEConvModel::trainStep(const TrainStepRequest& request) {
@@ -935,6 +996,7 @@ std::optional<Model::TrainStepResult> VAEConvModel::trainStep(const TrainStepReq
 }
 
 void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
+    const std::string conv_mode = normalizedConvMode(cfg.conv_mode);
 
     model.getMutableLayers().clear();
     model.setModelName("VAEConvModel");
@@ -975,7 +1037,7 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     const std::string dec_norm_str =
         cfg.dec_norm.empty() ? (cfg.enc_norm.empty() ? "none" : cfg.enc_norm) : cfg.dec_norm;
     const int dec_gn_groups_val = std::max(1, cfg.dec_gn_groups > 0 ? cfg.dec_gn_groups : cfg.enc_gn_groups);
-    const std::string dec_upsample = cfg.decoder_upsample.empty() ? "conv_transpose" : cfg.decoder_upsample;
+    const std::string dec_upsample = decoderUpsample(cfg, conv_mode);
     if (dec_upsample != "conv_transpose" && dec_upsample != "nearest_conv" &&
         dec_upsample != "bilinear_conv" && dec_upsample != "pixel_shuffle") {
         throw std::runtime_error("VAEConvModel(decode): unsupported decoder_upsample '" + dec_upsample + "'");
@@ -995,7 +1057,8 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
     model.modelConfig["downsamples"] = downsamples;
     model.modelConfig["input_dim"] = latent_dim;
     model.modelConfig["output_dim"] = image_dim;
-    model.modelConfig["inference_output_tensor"] = "x";
+    model.modelConfig["inference_output_tensor"] = cfg.inference_output_tensor.empty()
+        ? "x" : cfg.inference_output_tensor;
     model.modelConfig["dec_norm"] = dec_norm_str;
     model.modelConfig["dec_gn_groups"] = dec_gn_groups_val;
     model.modelConfig["decoder_upsample"] = dec_upsample;
@@ -1369,4 +1432,5 @@ void VAEConvModel::buildDecoderInto(Model& model, const Config& cfg) {
         P->shape = {C, H, W};
         P->permute_dims = {1, 2, 0};
     }
+    configureConvolutionMode(model, conv_mode);
 }

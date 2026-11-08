@@ -1,41 +1,144 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="700" viewBox="0 0 1900 700" role="img" aria-labelledby="title desc">
-<title id="title">Vue globale du framework</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1198" viewBox="0 0 1200 1198" role="img" aria-labelledby="title desc">
+<title id="title">Vue d’ensemble de Mímir</title>
+<desc id="desc">La topologie native appartient à une classe C++ dérivée de Model. Les scripts et configurations sélectionnent le modèle ; le routeur, les runtimes et les services de suivi exécutent le run. MPK est une alternative expérimentale. Sources : src/Models/Registry/ModelArchitectures.cpp, src/Model.hpp, src/runtimes/RuntimeRouter.cpp, src/AsyncMonitor.hpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Models/Registry/ModelArchitectures.cpp&quot;, &quot;src/Model.hpp&quot;, &quot;src/runtimes/RuntimeRouter.cpp&quot;, &quot;src/AsyncMonitor.hpp&quot;], &quot;related_docs&quot;: [&quot;README.md&quot;, &quot;docs/00-Framework-Philosophy.md&quot;, &quot;docs/08-Tuto/06-Parcours-Complet-Framework.md&quot;, &quot;docs/07-Devs/08-Architecture-Contract.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Vue globale du framework</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Cœur C++ CPU-first, orchestration Lua/JSON, registre central et runtime de graphe.</text>
-<line x1="60" y1="112" x2="1840" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="227.42857142857142" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="183.71428571428572" y="265" class="label" text-anchor="middle">Interface utilisateur</text>
-<text x="183.71428571428572" y="322" class="small" text-anchor="middle">CLI • Lua • JSON • API C++</text>
-<rect x="325.42857142857144" y="240" width="227.42857142857142" height="110" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="439.14285714285717" y="265" class="label" text-anchor="middle">Orchestration</text>
-<text x="439.14285714285717" y="322" class="small" text-anchor="middle">chargement config • scripts</text>
-<text x="439.14285714285717" y="336" class="small" text-anchor="middle">• args</text>
-<path d="M297.42857142857144,295.0 L325.42857142857144,295.0" class="edgeB"/>
-<rect x="580.8571428571429" y="240" width="227.42857142857142" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="694.5714285714286" y="265" class="label" text-anchor="middle">Registre</text>
-<text x="694.5714285714286" y="322" class="small" text-anchor="middle">create(name, config)</text>
-<path d="M552.8571428571429,295.0 L580.8571428571429,295.0" class="edgeB"/>
-<rect x="836.2857142857142" y="240" width="227.42857142857142" height="110" rx="14" fill="#cffafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="949.9999999999999" y="265" class="label" text-anchor="middle">Model Builder</text>
-<text x="949.9999999999999" y="322" class="small" text-anchor="middle">construction graphe</text>
-<path d="M808.2857142857143,295.0 L836.2857142857142,295.0" class="edgeB"/>
-<rect x="1091.7142857142858" y="240" width="227.42857142857142" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1205.4285714285716" y="265" class="label" text-anchor="middle">Runtime C++</text>
-<text x="1205.4285714285716" y="322" class="small" text-anchor="middle">forward • backward • planner</text>
-<path d="M1063.7142857142856,295.0 L1091.7142857142858,295.0" class="edgeB"/>
-<rect x="1347.142857142857" y="240" width="227.42857142857142" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1460.857142857143" y="265" class="label" text-anchor="middle">Mémoire &amp; IO</text>
-<text x="1460.857142857143" y="322" class="small" text-anchor="middle">allocateur • checkpoints</text>
-<path d="M1319.142857142857,295.0 L1347.142857142857,295.0" class="edgeB"/>
-<rect x="1602.5714285714284" y="240" width="227.42857142857142" height="110" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1716.2857142857142" y="265" class="label" text-anchor="middle">Backend CPU</text>
-<text x="1716.2857142857142" y="322" class="small" text-anchor="middle">AVX2 • FMA • robuste</text>
-<path d="M1574.5714285714284,295.0 L1602.5714285714284,295.0" class="edgeB"/>
-<text x="1840" y="676" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1198" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Vue d’ensemble de Mímir</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Définir le graphe en C++, piloter le run, exécuter et observer.</tspan>
+</text>
+<path d="M 369.33,249.5 L 437.33,249.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,249.5 L 762.67,249.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 278.24,436 L 278.24,386 L 528.43,386 L 528.43,336" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 600,336 L 600,436" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,532.5 L 762.67,532.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 600,629 L 600,729" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 369.33,828.5 L 437.33,828.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,828.5 L 830.67,828.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="native">
+<rect x="44" y="163" width="325.33" height="173" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Architecture native</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Classe C++ : public Model</tspan>
+<tspan x="66" dy="26">Couches, connexions et</tspan>
+<tspan x="66" dy="26">Config</tspan>
+</text>
+</g>
+<g data-node="registry">
+<rect x="437.33" y="163" width="325.33" height="173" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Registre</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">ModelArchitectures</tspan>
+<tspan x="459.33" dy="26">Nom, défauts et fabrique</tspan>
+</text>
+</g>
+<g data-node="scripts">
+<rect x="830.67" y="163" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Pilotage du run</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">CLI, Lua et JSON</tspan>
+<tspan x="852.67" dy="26">Arguments, données et</tspan>
+<tspan x="852.67" dy="26">options</tspan>
+</text>
+</g>
+<g data-node="mpk">
+<rect x="44" y="436" width="325.33" height="193" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="66" y="467" font-size="14" fill="#b45309" font-weight="700">
+<tspan x="66" dy="0">EXPÉRIMENTAL</tspan>
+</text>
+<text x="66" y="494" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Alternative MPK</tspan>
+</text>
+<text x="66" y="537" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Description de graphe</tspan>
+<tspan x="66" dy="26">Compatibilité encore</tspan>
+<tspan x="66" dy="26">partielle</tspan>
+</text>
+</g>
+<g data-node="model">
+<rect x="437.33" y="436" width="325.33" height="193" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Instance du modèle</tspan>
+</text>
+<text x="459.33" y="510" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Topologie construite en</tspan>
+<tspan x="459.33" dy="26">C++</tspan>
+<tspan x="459.33" dy="26">Poids et état du run</tspan>
+</text>
+</g>
+<g data-node="data">
+<rect x="830.67" y="436" width="325.33" height="193" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="852.67" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Données préparées</tspan>
+</text>
+<text x="852.67" y="510" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Tenseurs / identifiants</tspan>
+<tspan x="852.67" dy="26">Format propre au modèle</tspan>
+</text>
+</g>
+<g data-node="runtimes">
+<rect x="44" y="729" width="325.33" height="199" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="66" y="760" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Runtimes de calcul</tspan>
+</text>
+<text x="66" y="803" font-size="19" fill="#334155">
+<tspan x="66" dy="0">CPU et backends</tspan>
+<tspan x="66" dy="26">disponibles</tspan>
+<tspan x="66" dy="26">Kernels forward et</tspan>
+<tspan x="66" dy="26">backward</tspan>
+</text>
+</g>
+<g data-node="execution">
+<rect x="437.33" y="729" width="325.33" height="199" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="760" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Exécution du graphe</tspan>
+</text>
+<text x="459.33" y="803" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Planner et RuntimeRouter</tspan>
+<tspan x="459.33" dy="26">Loss, gradients,</tspan>
+<tspan x="459.33" dy="26">optimiseur</tspan>
+</text>
+</g>
+<g data-node="artifacts">
+<rect x="830.67" y="729" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="760" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Suivi et résultats</tspan>
+</text>
+<text x="852.67" y="803" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Viz, Htop et métriques</tspan>
+<tspan x="852.67" dy="26">Checkpoints et rapports</tspan>
+</text>
+</g>
+<rect x="242.69" y="396.5" width="71.1" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="251.69" y="415.5" font-size="15" fill="#475569">
+<tspan x="251.69" dy="0">import</tspan>
+</text>
+<rect x="44" y="976" width="1112" height="136" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1004" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Lua/JSON ne définissent pas le graphe DL. MPK n’est pas entièrement exploitable en production.</tspan>
+<tspan x="66" dy="26">• CPU-first désigne une référence et un repli : le backend effectif dépend des capacités et du plan.</tspan>
+<tspan x="66" dy="26">• Pilotage du run → Registre : sélection</tspan>
+<tspan x="66" dy="26">• Données préparées → Instance du modèle : entrées</tspan>
+</text>
+<text x="44" y="1147" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : ModelArchitectures.cpp · Model.hpp · RuntimeRouter.cpp · AsyncMonitor.hpp</tspan>
+</text>
+</g>
 </svg>

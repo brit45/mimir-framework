@@ -2,6 +2,10 @@
 #define specializedOperation -1
 #endif
 #define truth(v) ((v)!=0)
+typedef struct { int rows; int columns; int values; } GPrimerTriangle;
+typedef struct { int outer; int axis_size; int inner; int values; int outputs; } GPrimerReduction;
+typedef struct { int steps; int channels; int taps; int dilation; int values; int weights; int parameters; bool bias; } GCausalSequence;
+typedef struct { int batch; int ic; int oc; int ig; int og; int i0; int i1; int i2; int i3; int o0; int o1; int o2; int o3; int k0; int k1; int k2; int k3; int s0; int s1; int s2; int s3; int p0; int p1; int p2; int p3; int d0; int d1; int d2; int d3; int input_spatial; int output_spatial; int kernel_spatial; int parameters; bool bias; } GConvND;
 typedef struct { int steps; int input_value; int hidden; int gates; int parameters; int workspace; } GRecurrent;
 typedef struct { int ed; int ked; int heads; int q; int k; bool cross; bool causal; int qbias; int obias; int mainParameters; int output_value; } GAttention;
 typedef struct { int channels; int spatial; int batch; bool affine; bool bias; bool running; } GBatchNorm;
@@ -1335,6 +1339,275 @@ void pointwise_fusion_backward(int gradient,int snapshots,int program,int output
     }
     memory[output_value+(i)]=value;
 }
+void convolution_nd_forward(int x,int w,int y,GConvND g,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;if(index>=count)return;
+    int spatial=index%g.output_spatial,oc=(index/g.output_spatial)%g.oc,n=index/(g.output_spatial*g.oc);
+    int a0=spatial/(g.o1*g.o2*g.o3),a1=(spatial/(g.o2*g.o3))%g.o1,a2=(spatial/g.o3)%g.o2,a3=spatial%g.o3;
+    int first=(oc/g.og)*g.ig;
+    float sum=0.f;
+    for(int c=0;c<g.ig;++c)for(int k=0;k<g.kernel_spatial;++k){
+        int z0=a0*g.s0-g.p0+(k/(g.k1*g.k2*g.k3))*g.d0;
+        int z1=a1*g.s1-g.p1+((k/(g.k2*g.k3))%g.k1)*g.d1;
+        int z2=a2*g.s2-g.p2+((k/g.k3)%g.k2)*g.d2;
+        int z3=a3*g.s3-g.p3+(k%g.k3)*g.d3;
+        if(z0<0 || z0>=g.i0 || z1<0 || z1>=g.i1 || z2<0 || z2>=g.i2 || z3<0 || z3>=g.i3)continue;
+        int source=(n*g.ic+first+c)*g.input_spatial+((z0*g.i1+z1)*g.i2+z2)*g.i3+z3;
+        sum=fma(memory[x+(source)],memory[w+((oc*g.ig+c)*g.kernel_spatial+k)],sum);
+    }
+    memory[y+(index)]=sum+( truth(g.bias) ?memory[w+(g.parameters+oc)]:0.f);
+}
+void convolution_nd_input_grad(int w,int dy,int dx,GConvND g,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;if(index>=count)return;
+    int spatial=index%g.input_spatial,ic=(index/g.input_spatial)%g.ic,n=index/(g.input_spatial*g.ic);
+    int a0=spatial/(g.i1*g.i2*g.i3),a1=(spatial/(g.i2*g.i3))%g.i1,a2=(spatial/g.i3)%g.i2,a3=spatial%g.i3;
+    int first=(ic/g.ig)*g.og,channel=ic%g.ig;
+    float sum=0.f;
+    for(int oc=first;oc<first+g.og;++oc)for(int k=0;k<g.kernel_spatial;++k){
+        int z0=a0+g.p0-(k/(g.k1*g.k2*g.k3))*g.d0;
+        int z1=a1+g.p1-((k/(g.k2*g.k3))%g.k1)*g.d1;
+        int z2=a2+g.p2-((k/g.k3)%g.k2)*g.d2;
+        int z3=a3+g.p3-(k%g.k3)*g.d3;
+        if(z0<0 || z1<0 || z2<0 || z3<0 || z0%g.s0!=0 || z1%g.s1!=0 || z2%g.s2!=0 || z3%g.s3!=0)continue;
+        int b0=z0/g.s0,b1=z1/g.s1,b2=z2/g.s2,b3=z3/g.s3;
+        if(b0>=g.o0 || b1>=g.o1 || b2>=g.o2 || b3>=g.o3)continue;
+        int dest=(n*g.oc+oc)*g.output_spatial+((b0*g.o1+b1)*g.o2+b2)*g.o3+b3;
+        sum=fma(memory[dy+(dest)],memory[w+((oc*g.ig+channel)*g.kernel_spatial+k)],sum);
+    }
+    memory[dx+(index)]=sum;
+}
+void convolution_nd_weight_grad(int x,int dy,int dw,GConvND g,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;if(index>=count)return;
+    bool bias=index>=g.parameters;
+    int oc=truth(bias) ?index-g.parameters:index/(g.ig*g.kernel_spatial);
+    int channel=truth(bias) ?0:(index/g.kernel_spatial)%g.ig,k=truth(bias) ?0:index%g.kernel_spatial;
+    int ic=(oc/g.og)*g.ig+channel;
+    float sum=0.f;
+    for(int n=0;n<g.batch;++n)for(int o=0;o<g.output_spatial;++o){
+        int dest=(n*g.oc+oc)*g.output_spatial+o;
+        if(truth(bias)){sum+=memory[dy+(dest)];continue;}
+        int z0=(o/(g.o1*g.o2*g.o3))*g.s0-g.p0+(k/(g.k1*g.k2*g.k3))*g.d0;
+        int z1=((o/(g.o2*g.o3))%g.o1)*g.s1-g.p1+((k/(g.k2*g.k3))%g.k1)*g.d1;
+        int z2=((o/g.o3)%g.o2)*g.s2-g.p2+((k/g.k3)%g.k2)*g.d2;
+        int z3=(o%g.o3)*g.s3-g.p3+(k%g.k3)*g.d3;
+        if(z0<0 || z0>=g.i0 || z1<0 || z1>=g.i1 || z2<0 || z2>=g.i2 || z3<0 || z3>=g.i3)continue;
+        int source=(n*g.ic+ic)*g.input_spatial+((z0*g.i1+z1)*g.i2+z2)*g.i3+z3;
+        sum=fma(memory[dy+(dest)],memory[x+(source)],sum);
+    }
+    memory[dw+(index)]=sum;
+}
+void causal_depthwise_forward(int x,int w,int y,GCausalSequence g,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    int t=index/g.channels,c=index%g.channels;
+    int last=min(g.taps-1,t/g.dilation);
+    float sum=0.f;
+    for(int i=0;i<=last;++i)
+        sum=fma(memory[w+(c*g.taps+i)],memory[x+((t-i*g.dilation)*g.channels+c)],sum);
+    memory[y+(index)]=sum+( truth(g.bias) ?memory[w+(g.weights+c)]:0.f);
+}
+void causal_depthwise_input_grad(int w,int dy,int dx,GCausalSequence g,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    int t=index/g.channels,c=index%g.channels;
+    int last=min(g.taps-1,(g.steps-1-t)/g.dilation);
+    float sum=0.f;
+    for(int i=0;i<=last;++i)
+        sum=fma(memory[w+(c*g.taps+i)],memory[dy+((t+i*g.dilation)*g.channels+c)],sum);
+    memory[dx+(index)]=sum;
+}
+void causal_depthwise_weight_grad(int x,int dy,int dw,GCausalSequence g,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    bool is_bias=index>=g.weights;
+    int c=truth(is_bias) ?index-g.weights:index/g.taps;
+    int i=truth(is_bias) ?0:index%g.taps;
+    float sum=0.f;
+    // Division before multiplication keeps even very large dilations safe.
+    if(!truth(is_bias) && i>(g.steps-1)/g.dilation){memory[dw+(index)]=0.f;return;}
+    int first=truth(is_bias) ?0:i*g.dilation;
+    for(int t=first;t<g.steps;++t){
+        if(truth(is_bias))sum+=memory[dy+(t*g.channels+c)];
+        else sum=fma(memory[dy+(t*g.channels+c)],memory[x+((t-first)*g.channels+c)],sum);
+    }
+    memory[dw+(index)]=sum;
+}
+float causal_sequence_sigmoid(float gate,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    if(gate>=0.f)return 1.f/(1.f+exp(-gate));
+    float exponential=exp(gate);
+    return exponential/(1.f+exponential);
+}
+void swiglu_forward(int gate,int value,int output_value,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    float sig=causal_sequence_sigmoid(memory[gate+(index)],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+    memory[output_value+(index)]=(memory[gate+(index)]*sig)*memory[value+(index)];
+}
+void swiglu_backward(int gate,int value,int dy,int dgate,int dvalue,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    float g=memory[gate+(index)],sig=causal_sequence_sigmoid(g,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+    float silu=g*sig,derivative=sig+g*sig*(1.f-sig);
+    memory[dgate+(index)]=(memory[dy+(index)]*memory[value+(index)])*derivative;
+    memory[dvalue+(index)]=memory[dy+(index)]*silu;
+}
+float primer_quiet_nan(__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    return as_float(0x7fc00000);
+}
+float primer_zero_guard(float result,bool expected_nonzero,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    return result==0.f && expected_nonzero?primer_quiet_nan(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch):result;
+}
+void primer_unary_forward(int x,int y,int count,int op,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    float value=memory[x+(index)];
+    float result=0.f;
+    switch(op){
+        case 0:if(value>0.f)result=value*value;break;
+        case 1:result=value*value;break;
+        case 2:result=sqrt(fabs(value));break;
+        case 3:result=exp(value);break;
+        case 4:result=log(fabs(value));break;
+        case 5:result=fabs(value);break;
+        case 6:if(value!=0.f)result=1.f/value;break;
+        case 7:result=value>0.f?1.f:value<0.f?-1.f:0.f;break;
+        case 8:result=sin(value);break;
+        case 9:result=cos(value);break;
+    }
+    bool expected_nonzero=value!=0.f;
+    if(op==0)expected_nonzero=value>0.f;
+    else if(op==3 || op==9)expected_nonzero=true;
+    else if(op==4)expected_nonzero=fabs(value)!=1.f;
+    memory[y+(index)]=primer_zero_guard(result,expected_nonzero,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+}
+void primer_unary_backward(int x,int dy,int dx,int count,int op,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    float value=memory[x+(index)],grad=memory[dy+(index)];
+    float result=0.f;
+    switch(op){
+        case 0:if(value>0.f)result=grad*(2.f*value);break;
+        case 1:result=grad*(2.f*value);break;
+        case 2:result=((0.5f*grad)*(value>0.f?1.f:-1.f))/sqrt(fabs(value));break;
+        case 3:result=grad*exp(value);break;
+        case 4:result=grad/value;break;
+        case 5:result=grad*(value>0.f?1.f:value<0.f?-1.f:0.f);break;
+        case 6:if(value!=0.f)result=-(grad/value)/value;break;
+        case 7:break;
+        case 8:result=grad*cos(value);break;
+        case 9:result=(-grad)*sin(value);break;
+    }
+    bool expected_nonzero=grad!=0.f;
+    if(op==7)expected_nonzero=false;
+    else if(op==0)expected_nonzero=grad!=0.f && value>0.f;
+    else if(op==1 || op==5 || op==6 || op==9)expected_nonzero=grad!=0.f && value!=0.f;
+    memory[dx+(index)]=primer_zero_guard(result,expected_nonzero,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+}
+float primer_binary_gradient(float a,float b,float gradient,int op,bool first,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    if(a==b)return primer_zero_guard(gradient*0.5f,gradient!=0.f,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+    bool select_first=op==0?a>b:a<b;
+    return select_first==first?gradient:0.f;
+}
+void primer_binary_forward(int a,int b,int y,int na,int nb,int count,int op,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    float av=memory[a+(na==1?0:index)],bv=memory[b+(nb==1?0:index)];
+    memory[y+(index)]=op==0?(av>=bv?av:bv):(av<=bv?av:bv);
+}
+void primer_binary_backward(int a,int b,int dy,int da,int db,int na,int nb,int count,int op,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    if(index<na){
+        float sum=0.f;
+        bool any_nonzero=false;
+        if(na==1){
+            for(int j=0;j<count;++j){
+                float contribution=primer_binary_gradient(memory[a+(0)],memory[b+(nb==1?0:j)],memory[dy+(j)],op,true,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+                any_nonzero=truth(any_nonzero) || contribution!=0.f;
+                sum+=contribution;
+            }
+        }else{
+            float contribution=primer_binary_gradient(memory[a+(index)],memory[b+(nb==1?0:index)],memory[dy+(index)],op,true,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+            any_nonzero=contribution!=0.f;
+            sum+=contribution;
+        }
+        memory[da+(index)]=primer_zero_guard(sum,any_nonzero,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+    }
+    if(index<nb){
+        float sum=0.f;
+        bool any_nonzero=false;
+        if(nb==1){
+            for(int j=0;j<count;++j){
+                float contribution=primer_binary_gradient(memory[a+(na==1?0:j)],memory[b+(0)],memory[dy+(j)],op,false,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+                any_nonzero=truth(any_nonzero) || contribution!=0.f;
+                sum+=contribution;
+            }
+        }else{
+            float contribution=primer_binary_gradient(memory[a+(na==1?0:index)],memory[b+(index)],memory[dy+(index)],op,false,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+            any_nonzero=contribution!=0.f;
+            sum+=contribution;
+        }
+        memory[db+(index)]=primer_zero_guard(sum,any_nonzero,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+    }
+}
+void primer_reduce_forward(int x,int y,GPrimerReduction g,int op,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=g.outputs)return;
+    int base=(index/g.inner)*g.axis_size*g.inner+index%g.inner;
+    float result=op==4?1.f:0.f;
+    bool any_nonzero=false,zero_factor=false;
+    if(op==2 || op==3)result=memory[x+(base)];
+    for(int a=0;a<g.axis_size;++a){
+        float value=memory[x+(base+a*g.inner)];
+        any_nonzero=truth(any_nonzero) || value!=0.f;
+        zero_factor=truth(zero_factor) || value==0.f;
+        if(op==0 || op==1)result+=value;
+        else if(op==2){if(value<result)result=value;}
+        else if(op==3){if(value>result)result=value;}
+        else result*=value;
+    }
+    if(op==1)result/=(float)(g.axis_size);
+    bool expected_nonzero=op==4?!truth(zero_factor):(op<=1 && truth(any_nonzero));
+    memory[y+(index)]=primer_zero_guard(result,expected_nonzero,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+}
+void primer_reduce_backward(int x,int dy,int dx,GPrimerReduction g,int op,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=g.values)return;
+    int axis=(index/g.inner)%g.axis_size;
+    int group=(index/(g.axis_size*g.inner))*g.inner+index%g.inner;
+    int base=(group/g.inner)*g.axis_size*g.inner+group%g.inner;
+    float result=memory[dy+(group)];
+    bool expected_nonzero=result!=0.f;
+    if(op==1)result/=(float)(g.axis_size);
+    else if(op==2 || op==3){
+        float extreme=memory[x+(base)];
+        for(int a=1;a<g.axis_size;++a){
+            float value=memory[x+(base+a*g.inner)];
+            if(op==2?value<extreme:value>extreme)extreme=value;
+        }
+        int ties=0;
+        for(int a=0;a<g.axis_size;++a)if(memory[x+(base+a*g.inner)]==extreme)++ties;
+        result=memory[x+(index)]==extreme?result/(float)(ties):0.f;
+        expected_nonzero=memory[x+(index)]==extreme && memory[dy+(group)]!=0.f;
+    }else if(op==4){
+        // Recompute every other factor, preserving zero and underflow behavior.
+        float product=1.f;
+        bool zero_factor=false;
+        for(int a=0;a<g.axis_size;++a)if(a!=axis){
+            float value=memory[x+(base+a*g.inner)];
+            zero_factor=truth(zero_factor) || value==0.f;
+            product*=value;
+        }
+        result*=product;
+        expected_nonzero=memory[dy+(group)]!=0.f && !truth(zero_factor);
+    }
+    memory[dx+(index)]=primer_zero_guard(result,expected_nonzero,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);
+}
+void primer_triangle(int x,int y,int rows,int columns,int count,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
+    int index=blockIdx_x*blockDim_x+threadIdx_x;
+    if(index>=count)return;
+    int row=(index/columns)%rows,column=index%columns;
+    memory[y+(index)]=column<=row?memory[x+(index)]:0.f;
+}
 void tiled_gemm(int a,int b,int c,int m,int n,int k,int lda,int ldb,int ldc,bool ta,bool tb,float alpha,float beta,__global float* memory,int threadIdx_x,int blockIdx_x,int blockDim_x,int gridDim_x,__local float* normScratch){
  int local_value=(int)(get_local_id(0)),group=(int)(get_group_id(0));
  if(m<16 || n<16){
@@ -1360,7 +1633,7 @@ int invocation_id(__global float* memory,int threadIdx_x,int blockIdx_x,int bloc
 __kernel void reference(__global float* memory,__global const int* arguments){__local float normScratch[512];int threadIdx_x=0,blockIdx_x=0,blockDim_x=1,gridDim_x=1;
  blockDim_x=arguments[1];gridDim_x=arguments[2];
  int selected=specializedOperation>=0?specializedOperation:arguments[0];if(selected==0){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));norm_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],as_float(arguments[11]),arguments[12]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==1){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));norm_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==2){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));channel_gradient(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==7){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));softmax_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==10){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));row_norm_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],as_float(arguments[9]),arguments[10]!=0,arguments[11]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==15){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GPool g=(GPool){arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13],arguments[14],arguments[15],arguments[16],arguments[17],arguments[18]!=0,arguments[19]!=0};pool_kernel(arguments[3],arguments[4],arguments[5],arguments[6],g,arguments[20],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==21){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GBatchNorm g=(GBatchNorm){arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,arguments[14]!=0};batch_norm_kernel(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],g,as_float(arguments[15]),arguments[16]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==24){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GAttention g=(GAttention){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11]!=0,arguments[12]!=0,arguments[13],arguments[14],arguments[15],arguments[16]};attention_probabilities(arguments[3],arguments[4],arguments[5],g,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==27){blockDim_x=256;blockIdx_x=group_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);threadIdx_x=(int)(get_local_id(0));GAttention g=(GAttention){arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,arguments[14],arguments[15],arguments[16],arguments[17]};attention_score_grad(arguments[3],arguments[4],arguments[5],arguments[6],g,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}if(selected==39){tiled_gemm(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12]!=0,arguments[13]!=0,as_float(arguments[14]),as_float(arguments[15]),memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);return;}
- int id=selected;bool parallel=(id>=0 && id<=44 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch):0;if(!parallel && invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch)!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){
+ int id=selected;bool parallel=(id>=0 && id<60 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch):0;if(!parallel && invocation_id(memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch)!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){
 case 0: {norm_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],as_float(arguments[11]),arguments[12]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 1: {norm_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 2: {channel_gradient(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
@@ -1406,4 +1679,19 @@ case 41: {portable_sequence_constant_forward(arguments[3],arguments[4],arguments
 case 42: {portable_sequence_constant_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 43: {pointwise_fusion_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8]!=0,memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 case 44: {pointwise_fusion_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 45: {GConvND g=(GConvND){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13],arguments[14],arguments[15],arguments[16],arguments[17],arguments[18],arguments[19],arguments[20],arguments[21],arguments[22],arguments[23],arguments[24],arguments[25],arguments[26],arguments[27],arguments[28],arguments[29],arguments[30],arguments[31],arguments[32],arguments[33],arguments[34],arguments[35],arguments[36],arguments[37],arguments[38],arguments[39]!=0};convolution_nd_forward(arguments[3],arguments[4],arguments[5],g,arguments[40],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 46: {GConvND g=(GConvND){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13],arguments[14],arguments[15],arguments[16],arguments[17],arguments[18],arguments[19],arguments[20],arguments[21],arguments[22],arguments[23],arguments[24],arguments[25],arguments[26],arguments[27],arguments[28],arguments[29],arguments[30],arguments[31],arguments[32],arguments[33],arguments[34],arguments[35],arguments[36],arguments[37],arguments[38],arguments[39]!=0};convolution_nd_input_grad(arguments[3],arguments[4],arguments[5],g,arguments[40],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 47: {GConvND g=(GConvND){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13],arguments[14],arguments[15],arguments[16],arguments[17],arguments[18],arguments[19],arguments[20],arguments[21],arguments[22],arguments[23],arguments[24],arguments[25],arguments[26],arguments[27],arguments[28],arguments[29],arguments[30],arguments[31],arguments[32],arguments[33],arguments[34],arguments[35],arguments[36],arguments[37],arguments[38],arguments[39]!=0};convolution_nd_weight_grad(arguments[3],arguments[4],arguments[5],g,arguments[40],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 48: {GCausalSequence g=(GCausalSequence){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13]!=0};causal_depthwise_forward(arguments[3],arguments[4],arguments[5],g,arguments[14],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 49: {GCausalSequence g=(GCausalSequence){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13]!=0};causal_depthwise_input_grad(arguments[3],arguments[4],arguments[5],g,arguments[14],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 50: {GCausalSequence g=(GCausalSequence){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],arguments[12],arguments[13]!=0};causal_depthwise_weight_grad(arguments[3],arguments[4],arguments[5],g,arguments[14],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 51: {swiglu_forward(arguments[3],arguments[4],arguments[5],arguments[6],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 52: {swiglu_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 53: {primer_unary_forward(arguments[3],arguments[4],arguments[5],arguments[6],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 54: {primer_unary_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 55: {primer_binary_forward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 56: {primer_binary_backward(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],arguments[8],arguments[9],arguments[10],arguments[11],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 57: {GPrimerReduction g=(GPrimerReduction){arguments[5],arguments[6],arguments[7],arguments[8],arguments[9]};primer_reduce_forward(arguments[3],arguments[4],g,arguments[10],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 58: {GPrimerReduction g=(GPrimerReduction){arguments[6],arguments[7],arguments[8],arguments[9],arguments[10]};primer_reduce_backward(arguments[3],arguments[4],arguments[5],g,arguments[11],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
+case 59: {primer_triangle(arguments[3],arguments[4],arguments[5],arguments[6],arguments[7],memory,threadIdx_x,blockIdx_x,blockDim_x,gridDim_x,normScratch);break;}
 default:break;}}}

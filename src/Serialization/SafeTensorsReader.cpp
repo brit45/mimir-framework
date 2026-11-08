@@ -1,5 +1,6 @@
 #include "runtimes/fpga/FpgaIo.hpp"
 #include "SafeTensorsReader.hpp"
+#include "LayerMetadata.hpp"
 #include "../Model.hpp"
 #include "CheckpointState.hpp"
 #include "../Encoder.hpp"
@@ -508,60 +509,76 @@ bool SafeTensorsReader::apply_tensors_to_model(
                 if (tensor->dtype == DType::Uint8) {
                     const size_t n = tensor->data_end - tensor->data_begin;
                     std::vector<uint8_t> buf(n);
-                    if (!load_tensor_data(path, data_offset, *tensor, buf.data(), buf.size(), error)) {
+                    if (!load_tensor_data(path, data_offset, *tensor, buf.data(), buf.size(), error))
                         return false;
-                    }
+                    bool nd_architecture = false;
+                    bool versioned_architecture = false;
                     try {
-                        std::string s(reinterpret_cast<const char*>(buf.data()), buf.size());
-                        json arch = json::parse(s);
+                        const std::string encoded(reinterpret_cast<const char*>(buf.data()), buf.size());
+                        const json arch = json::parse(encoded);
+                        versioned_architecture = arch.contains("layer_metadata_version");
                         if (!options.metadata_only && arch.contains("layers")) {
-                            for (const auto& entry : arch["layers"]) {
-                                if (entry.contains("skip_input_index")) {
-                                    if (auto* layer = model.getLayerByName(entry.value("name", "")))
-                                        layer->skip_input_index = entry["skip_input_index"].get<int>();
+                            nd_architecture = LayerMetadata::requiresCompleteArchitecture(arch["layers"]);
+                            const bool complete = LayerMetadata::completeArchitecture(arch);
+                            if (model.getLayers().empty() && nd_architecture) {
+                                // Partial legacy metadata must never silently
+                                // reconstruct a different mixed ND function.
+                                if (!complete) {
+                                    if (error) *error = "Incomplete layer metadata for automatic ND graph reconstruction; provide a prebuilt architecture";
+                                    return false;
+                                }
+                                std::vector<Layer> restored;
+                                restored.reserve(arch["layers"].size());
+                                for (const auto& entry : arch["layers"]) {
+                                    Layer layer(entry.value("name", ""), entry.value("type", ""),
+                                                entry.value("params_count", size_t{0}));
+                                    LayerMetadata::readCommon(layer, entry);
+                                    restored.push_back(std::move(layer));
+                                }
+                                model.getMutableLayers() = std::move(restored);
+                                model.allocateParams();
+                            }
+                            if (options.load_layer_metadata) {
+                                const bool authoritative = nd_architecture && complete;
+                                for (const auto& entry : arch["layers"]) {
+                                    if (auto* layer = model.getLayerByName(entry.value("name", ""))) {
+                                        if (authoritative) LayerMetadata::readCommon(*layer, entry);
+                                        else LayerMetadata::readConvolutionND(*layer, entry);
+                                        if (entry.contains("skip_input_index"))
+                                            layer->skip_input_index = entry["skip_input_index"].get<int>();
+                                    }
                                 }
                             }
                         }
-                        if (options.apply_model_name && arch.contains("model_name")) {
+                        if (options.apply_model_name && arch.contains("model_name"))
                             model.setModelName(arch["model_name"].get<std::string>());
-                        }
                         if (options.apply_model_config && arch.contains("model_config")) {
                             model.modelConfig = arch["model_config"];
-
-                            // Keep runtime default dtype consistent with the loaded config.
-                            // This ensures subsequent saves use the same float storage policy.
+                            // Preserve the caller's legacy config override policy.
                             try {
                                 if (model.modelConfig.contains("dtype") && model.modelConfig["dtype"].is_string()) {
-                                    const std::string raw_dtype = model.modelConfig["dtype"].get<std::string>();
-                                    const auto dt = ::Mimir::parse_dtype_safetensors(raw_dtype);
-                                    if (dt == ::Mimir::DType::UNKNOWN) {
-                                        throw std::runtime_error("unknown dtype in model_config: " + raw_dtype);
-                                    }
-                                    const std::string canonical_dtype = ::Mimir::dtype_to_string(dt);
-                                    model.setDefaultDType(canonical_dtype);
+                                    const std::string encoded_dtype = model.modelConfig["dtype"].get<std::string>();
+                                    const auto dtype = ::Mimir::parse_dtype_safetensors(encoded_dtype);
+                                    if (dtype == ::Mimir::DType::UNKNOWN)
+                                        throw std::runtime_error("unknown dtype in model_config: " + encoded_dtype);
+                                    model.setDefaultDType(::Mimir::dtype_to_string(dtype));
                                 }
                             } catch (...) {
                                 if (options.strict_mode) {
-                                    if (error) {
-                                        *error = "Invalid dtype in model_config";
-                                    }
+                                    if (error) *error = "Invalid dtype in model_config";
                                     return false;
                                 }
                             }
                         }
-                    } catch (...) {
-                        if (options.strict_mode) {
-                            if (error) {
-                                *error = "Invalid model/architecture_json";
-                            }
+                    } catch (const std::exception& e) {
+                        if (options.strict_mode || nd_architecture || versioned_architecture) {
+                            if (error) *error = std::string("Invalid model/architecture_json: ") + e.what();
                             return false;
                         }
-                        // Backward compatibility: ignore invalid JSON in non-strict mode
+                        // Unversioned legacy JSON retains non-strict behavior.
                     }
                 } else if (options.strict_mode) {
-                    if (error) {
-                        *error = "Invalid dtype for model/architecture_json";
-                    }
+                    if (error) *error = "Invalid dtype for model/architecture_json";
                     return false;
                 }
             }

@@ -77,7 +77,7 @@ inline size_t parallelInvocationCount(const std::vector<int>& a) {
     }
     if(id==40)return a.size()>7 && a[6]>0 && a[7]>0?size_t(a[6])*size_t(a[7]):0;
     switch(id){case 0:case 1:case 2:case 7:case 10:case 15:case 21:case 24:case 27:return size_t(a[2])*256;default:break;}
-    if(id>=0 && id<=44 && id!=31 && id!=32)return size_t(a[1])*size_t(a[2]);
+    if(id>=0 && id<=59 && id!=31 && id!=32)return size_t(a[1])*size_t(a[2]);
     return 0;
 }
 inline bool parallelDispatchFits(size_t elements,const std::vector<int>& a) {
@@ -111,6 +111,31 @@ inline bool parallelDispatchFits(size_t elements,const std::vector<int>& a) {
         loops=std::max({positive(g),positive(g+1),positive(g+3),positive(g+4)});break;
       }
       case 24:case 27:{size_t g=a[0]==24?6:7;const auto heads=positive(g+2);if(!heads)return false;loops=positive(g+4)*(positive(g)/heads+4);break;}
+      case 45:case 46:case 47:
+        if(a.size()!=41)return false;
+        loops=a[0]==45?positive(9)*positive(37):a[0]==46?positive(10)*positive(37):positive(6)*positive(36);
+        break;
+      case 48:case 49:case 50:
+        if(a.size()!=15 || !positive(6) || !positive(8) || !positive(9))return false;
+        loops=a[0]==50?positive(6):std::min(positive(8),1+(positive(6)-1)/positive(9));
+        break;
+      case 51:if(a.size()!=7)return false;loops=32;break;
+      case 52:if(a.size()!=9)return false;loops=32;break;
+      case 53:if(a.size()!=7)return false;loops=32;break;
+      case 54:if(a.size()!=8)return false;loops=32;break;
+      case 55:if(a.size()!=10)return false;break;
+      case 56:
+        if(a.size()!=12 || !positive(8) || !positive(9) || !positive(10))return false;
+        if(a[8]==1 || a[9]==1)
+            return positive(10)<=Mimir::Planning::ExecutionPolicy::Limits::portable_reduction_span &&
+                positive(10)<=limit/3;
+        break;
+      case 57:if(a.size()!=11)return false;loops=positive(6);break;
+      case 58:
+        if(a.size()!=12)return false;
+        loops=a[11]<=1?1:a[11]<=3?2*positive(7):positive(7);
+        break;
+      case 59:if(a.size()!=8)return false;break;
       case 43:if(a.size()!=9)return false;loops=positive(7);break;
       case 44:if(a.size()!=9)return false;loops=positive(8);break;
       case 42:if(a.size()<9 || !positive(6) || positive(8)/positive(6)>Mimir::Planning::ExecutionPolicy::Limits::portable_serial_elements)return false;break;

@@ -15,7 +15,8 @@ Source de vérité :
 
 - Tokenizer : `src/Tokenizer.hpp`, `src/Tokenizer.cpp`
 - ConditioningEncoder : `src/Encoder.hpp`, `src/Encoder.cpp`
-- Runtime forward tokens : `src/Model.cpp` (`forwardPassView(const std::vector<int>&)`)
+- Runtime forward tokens : `src/Model.cpp` (`forwardPassNamedView`)
+- Corpus causal : `src/Models/NLP/CausalLMModel.hpp` et `.cpp`
 - Bindings Lua : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` et `src/scriptings/Lua/luaScripting/LuaScripting.hpp`
 
 ## 1) Tokenizer : responsabilités
@@ -25,7 +26,8 @@ Source de vérité :
 - construire/maintenir un vocab (`vocab`, `reverse_vocab`),
 - tokeniser/dé-tokeniser (`tokenize`, `decode`),
 - sérialiser (`to_json`, `from_json`),
-- gérer les IDs spéciaux (pad/unk/bos/eos/seq/mag/mod),
+- gérer les IDs spéciaux (pad/unk/bos/eos/seq/mag/mod) et les tokens de
+  contrôle enregistrés avec `addSpecialToken`,
 - fournir des utilitaires (split, normalisation, accents, ponctuation),
 - optionnel : apprentissage BPE (`learnBPEFromCorpus`) et tokenisation BPE (`tokenizeBPE`).
 
@@ -45,32 +47,47 @@ Points importants :
 
 - si la config contient `d_model` ou `text_d_model`, le runtime vérifie que `mag/mod` respectent la dimension attendue.
 
-## 3) Int path vs float path
+## 3) Entrées entières nommées et compatibilité
 
-Le modèle supporte deux entrées “principales” :
+Le chemin courant `forwardPassNamedView(float_inputs, int_inputs, training)`
+injecte les deux dictionnaires dans leurs stores, puis exécute le graphe
+complet par le forward principal. `Embedding` peut consommer le store entier ;
+les opérations suivantes restent des calculs float routés normalement.
 
-- float path : `forwardPassView(const std::vector<float>&)`
-- int path : `forwardPassView(const std::vector<int>&)`
+La surcharge historique `forwardPassView(const std::vector<int>&)` convertit
+les valeurs en floats avant délégation. Elle ne constitue pas à elle seule
+un store entier distinct. Pour conserver explicitement les IDs entiers,
+utiliser le dictionnaire `int_inputs` avec le nom attendu par le modèle :
+`__input__` pour `causal_lm`, `text_ids` pour les architectures qui le déclarent.
 
-Dans l’int path :
+## 4) Préparation BPE du modèle causal
 
-- les ids sont stockés dans un store séparé (`tensor_store_int`), sous les clés `"x"` et `"__input__"`.
-- seuls certains layers sont dispatchés (notamment `Embedding` et un sous-ensemble de layers float qui suivent).
+`CausalLMModel::prepareTrainingCorpus` possède la préparation du corpus et du
+tokenizer. Le script d'entraînement configure l'appel ; il ne doit pas relancer
+une seconde étude BPE indépendante. Si un tokenizer chargé couvre le corpus
+sans `<UNK>`, l'étude est réutilisée. En l'absence de tokenizer ou de couverture,
+le modèle appelle `learnBPEFromCorpus`. En reprise stricte, une modification du
+vocabulaire du checkpoint est refusée.
 
-Conséquence :
+La capacité demandée et le vocabulaire effectivement appris sont distincts :
+les merges ne remplissent pas nécessairement la capacité maximale. Le modèle
+dimensionne ses embeddings et sa sortie d'après le vocabulaire effectif.
+`seq_len` borne les fenêtres d'entraînement ; la génération dimensionne son
+graphe au prompt complet et au budget de sortie. Voir
+[les capacités et limites du modèle causal](../05-Advanced/03-LLM-Readiness.md).
 
-- une architecture NLP doit respecter cette contrainte (Embedding en tête, puis layers compatibles).
-
-## 4) Sérialisation
+## 5) Sérialisation
 
 Le Tokenizer expose une sérialisation JSON (voir `to_json/from_json`). Lors d’un checkpoint, le writer peut décider d’inclure le tokenizer selon `SaveOptions.save_tokenizer`.
 
-## 5) Tests utiles
+## 6) Tests utiles
 
 - Tokenizer : `FrameworkTest.TokenizerBasics`,
   `FrameworkTest.TokenizerBPE` et `FrameworkTest.TokenizerJsonControlChars`.
 - API Lua : `LuaTest.ApiBasics`, `LuaTest.CreateFromConfig` et
   `LuaTest.CreateFromConfigErrors`.
+- Corpus/tokenizer causal : `LuaTest.CausalLMTokenizer` et
+  `LuaTest.CausalLMTrainingSmoke`.
 
 ```bash
 ctest --test-dir build --output-on-failure \

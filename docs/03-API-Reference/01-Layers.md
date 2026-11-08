@@ -17,6 +17,8 @@ Trouver rapidement le contrat API réel et les paramètres utilisables.
 - [Exemple guidé](#exemple-guidé)
 - [Vérifier ce qui est réellement utilisé](#vérifier-ce-qui-est-réellement-utilisé)
 - [Catalogue des types (LayerType)](#catalogue-des-types-layertype)
+- [Primitives Primer](#primitives-primer)
+- [Contrat de NMS](#contrat-de-nms)
 - [Reparameterize](#reparameterize)
 - [Constant et paramètres sans entrée](#constant-et-paramètres-sans-entrée)
 - [Dépannage rapide](#dépannage-rapide)
@@ -62,6 +64,8 @@ Ces champs existent sur la structure `Layer` et sont généralement remplis depu
 | --- | --- | --- |
 | `in_features`, `out_features` | `Linear`, `Bilinear` | Dimensions du layer dense. |
 | `in_channels`, `out_channels` | `Conv2d`, `ConvTranspose2d`, `BatchNorm2d`, `GroupNorm` | Dimensions canaux. |
+| `input_spatial_shape`, `kernel_shape`, `stride_shape`, `padding_shape`, `dilation_shape` | `Conv3d`, `Conv4d` | Paramètres ND explicites, dans l'ordre D/H/W ou T/D/H/W ; prioritaires sur les champs scalaires. |
+| `groups` | Convolutions groupées | Groupes de canaux ; divisent les canaux d'entrée et de sortie. |
 | `kernel_size` (ou `kernel_h`, `kernel_w`) | Conv/Pool | Taille du noyau. |
 | `stride` (ou `stride_h`, `stride_w`) | Conv/Pool | Stride. |
 | `padding` (ou `pad_h`, `pad_w`) | Conv/Pool/Pad | Padding. |
@@ -70,6 +74,8 @@ Ces champs existent sur la structure `Layer` et sont généralement remplis depu
 | `dropout_p` | `Dropout`, `Dropout2d`, attention | Probabilité de dropout. |
 | `vocab_size`, `embed_dim` | `Embedding`, `EmbeddingBag` | Dimensions vocab/embedding. |
 | `axis` | `Softmax`, `LogSoftmax` | Axe de réduction. |
+| `shape`, `axis` | `ReduceSum`, `ReduceMean`, `ReduceMin`, `ReduceMax`, `ReduceProd` | Forme d'entrée et axe indexé depuis zéro ; la dimension réduite reste présente, de taille 1. |
+| `shape` | `LowerTriangular` | Forme explicite de rang au moins 2 ; masque les deux derniers axes. |
 | `target_shape` | `Reshape`, `View` | Shape cible. |
 | `permute_dims` | `Permute` | Ordre des dimensions. |
 | `concat_axis` | `Concat` | Axe de concaténation. |
@@ -86,16 +92,27 @@ Objectif: obtenir un premier forward fiable avec une architecture du registre.
 local cfg, err = Mimir.Architectures.default_config("transformer")
 assert(cfg, err)
 
-cfg.vocab_size = 8000
-cfg.seq_len = 64
+cfg.vocab_size = 128
+cfg.seq_len = 8
+cfg.d_model = 32
+cfg.num_layers = 2
+cfg.num_heads = 4
+cfg.mlp_hidden = 64
+cfg.output_dim = 16
 
 assert(Mimir.Model.create("transformer", cfg))
 local ok_alloc, nparams_or_err = Mimir.Model.allocate_params()
 assert(ok_alloc, nparams_or_err)
 assert(Mimir.Model.init_weights("xavier", 0))
 
-local out, ferr = Mimir.Model.forward({ __input__ = { 1, 2, 3, 4 } }, false)
+local ids, zeros = {}, {}
+for i = 1, cfg.seq_len do ids[i] = 1 end
+for i = 1, cfg.d_model do zeros[i] = 0.0 end
+local out, ferr = Mimir.Model.forward({
+    __input__ = ids, mag = zeros, mod = zeros,
+}, false)
 assert(out, ferr)
+assert(#out == cfg.output_dim)
 print("out_len=", #out)
 ```
 
@@ -112,6 +129,12 @@ Pourquoi ce flux aide :
 
 ## Catalogue des types (`LayerType`)
 
+![Familles de couches natives, convolutions ND et primitives Primer](../graphs/13_layer_registry.svg)
+
+Le schéma regroupe des familles et exemples canoniques. La présence d’un type
+ne garantit pas son exécution native sur chaque backend ; le routeur vérifie
+la capacité de l’opération réelle.
+
 Les `type` des configs sont normalisés via `LayerRegistry::normalize_type`.
 
 | Type (canonique) | Alias normalisés (exemples) | Effet |
@@ -119,7 +142,9 @@ Les `type` des configs sont normalisés via `LayerRegistry::normalize_type`.
 | `Conv2d` | - | Convolution 2D. |
 | `ConvTranspose2d` | `ConvTranspose`, `Deconv2d` | Convolution transposée 2D. |
 | `Conv1d` | - | Convolution 1D. |
+| `Conv3d`, `Conv4d` | `Conv3D`, `Conv4D`, `Convolution3D`, `Convolution4D` | Convolutions à trois ou quatre axes spatiaux. |
 | `DepthwiseConv2d` | - | Convolution depthwise 2D. |
+| `CausalDepthwiseConv1d` | `causal_depthwise_conv1d` | Convolution causale par canal sur une séquence token-major `[T,C]`. |
 | `Linear` | - | Layer dense (GEMM). |
 | `Bilinear` | - | Transformation bilinéaire. |
 | `Embedding` | - | Embedding (ids int vers vecteurs). |
@@ -133,6 +158,8 @@ Les `type` des configs sont normalisés via `LayerRegistry::normalize_type`.
 | `ReLU` | `ReLu`, `Relu`, `RELU` | Activation ReLU. |
 | `LeakyReLU` | - | Activation LeakyReLU. |
 | `GELU` | `Gelu` | Activation GELU. |
+| `GEGLU` | `Geglu` | Activation gated GELU. |
+| `SwiGLU` | `SwiGlu`, `swiglu` | Deux entrées de mêmes tailles : `SiLU(gate)*value`. |
 | `SiLU` | `Swish`, `silu`, `swish`, `Silu` | Activation SiLU/Swish. |
 | `Tanh` | - | Activation tanh. |
 | `Sigmoid` | - | Activation sigmoid. |
@@ -171,8 +198,76 @@ Les `type` des configs sont normalisés via `LayerRegistry::normalize_type`.
 | `MatMul` | - | MatMul. |
 | `BatchMatMul` | - | Batch MatMul. |
 | `NMS` | `NonMaxSuppression` | Supprime les boîtes redondantes selon leur IoU et leur score. |
+| `SelfAttention` | - | Self-attention. |
+| `MultiHeadAttention` | - | Multi-head attention. |
+| `CrossAttention` | - | Cross-attention. |
+| `UpsampleNearest` | - | Upsample nearest. |
+| `UpsampleBilinear` | - | Upsample bilinear. |
+| `UpsampleBicubic` | - | Upsample bicubic. |
+| `PixelShuffle` | - | Pixel shuffle. |
+| `LSTM` | - | LSTM. |
+| `GRU` | - | GRU. |
+| `RNN` | - | RNN. |
+| `ZeroPad2d` | - | Padding zero 2D. |
+| `ReflectionPad2d` | - | Padding reflection 2D. |
+| `ReplicationPad2d` | - | Padding replication 2D. |
+| `Identity` | - | Identity. |
+| `Constant` | - | Tenseur sans entrée, fixe par défaut ou paramètre appris si explicitement marqué. |
+| `Lambda` | - | Lambda custom. |
+| `PatchEmbed` | `PatchProjection` | Patch embedding/projection. |
 
-### Contrat de `NMS`
+## Primitives Primer
+
+Ces 18 types complètent le catalogue. Ils sont sans poids : utiliser
+`params_count=0` lors de leur ajout. Les tenseurs sont aplatis dans l'API Lua ;
+`shape` décrit leur géométrie lorsque l'opération en a besoin.
+
+| Types canoniques | Calcul et paramètres |
+| --- | --- |
+| `SquaredReLU`, `Square` | `max(0,x)^2` et `x*x`, élément par élément. Alias de `SquaredReLU` : `ReLU2`, `ReLUSquared`. |
+| `SqrtAbs`, `LogAbs` | `sqrt(abs(x))` et `log(abs(x))`. Alias `AbsRoot` et `log_abs`, respectivement. |
+| `Exp`, `Abs`, `ReciprocalNoNan`, `Sign`, `Sin`, `Cos` | Exponentielle, valeur absolue, inverse avec zéro conservé, signe, sinus et cosinus. |
+| `Maximum`, `Minimum` | Deux entrées de mêmes tailles, ou une entrée scalaire diffusée sur l'autre. Pas de broadcasting de rang supérieur. |
+| `ReduceSum`, `ReduceMean`, `ReduceMin`, `ReduceMax`, `ReduceProd` | Un axe de `shape`, désigné par `axis` ; indices négatifs acceptés. Sans `shape`, réduction du vecteur entier avec `axis=0` ou `-1`. |
+| `LowerTriangular` | `shape` obligatoire de rang au moins 2 ; conserve `col<=row` sur les deux derniers axes et met le reste à zéro. |
+
+Les réductions conservent la dimension réduite à 1. `Maximum`/`Minimum` partagent
+le gradient à égalité ; les réductions min/max le partagent entre tous les
+extrema égaux. `ReduceProd` calcule son gradient sans diviser par le produit
+total, afin de prendre en compte les facteurs nuls.
+
+`LogAbs` refuse zéro. `SqrtAbs` accepte zéro en forward mais refuse son gradient
+singulier ; aucun epsilon n'est ajouté implicitement. Les gradients de `Abs`,
+`Sign` et `ReciprocalNoNan` en zéro sont définis nuls. Les tenseurs vides ou
+non finis et les résultats non finis sont refusés.
+
+`LowerTriangular` ne remplace pas le masque adapté aux logits d'une attention
+causale : un logit mis à zéro peut encore recevoir une probabilité après softmax.
+
+La topologie est définie en C/C++ dans une classe dérivée de `Model`.
+La classe `PrimerReductionModel` du [contrat des architectures](../07-Devs/08-Architecture-Contract.md)
+illustre `SquaredReLU` puis `ReduceMean`. Après sa définition, cet extrait C++
+exécute le graphe et son backward :
+
+```cpp
+PrimerReductionModel model;
+model.allocateParams();
+model.zeroGradients();
+const auto output = model.forwardPass(
+    std::vector<float>{-1.f, 2.f, 3.f, 4.f, -5.f, 6.f}, true);
+model.backwardPass({1.f, 1.f});
+// Deux valeurs de sortie, de forme [2,1] : 13/3 et 52/3.
+```
+
+Les contrats runtime, gradients et limites numériques sont détaillés dans
+[Layers et opérations](../04-Architecture-Internals/14-Layers-And-Ops.md#primitives-issues-de-létude-primer).
+L'accès aux nouvelles primitives ne modifie pas automatiquement les architectures
+existantes. `scripts/tests/test_primer_ops.lua` exerce les bindings internes
+utilisés par les tests et l'import MPK ; il ne constitue pas un modèle de
+définition d'architecture depuis Lua. MPK reste expérimental et partiel pour
+la production.
+
+## Contrat de `NMS`
 
 `NMS` possède un forward de sélection discrète et un backward explicite de
 stop-gradient. Elle reçoit :
@@ -207,24 +302,6 @@ sur les prédictions avant NMS.
 Le test `RuntimeTest.NMS` couvre le contrat CPU et le routage ; les tests
 `RuntimeTest.OPENCLNativeOps` et `RuntimeTest.VULKANNativeOps` comparent les
 gradients au CPU et vérifient la sélection effective du backend GPU.
-
-| `SelfAttention` | - | Self-attention. |
-| `MultiHeadAttention` | - | Multi-head attention. |
-| `CrossAttention` | - | Cross-attention. |
-| `UpsampleNearest` | - | Upsample nearest. |
-| `UpsampleBilinear` | - | Upsample bilinear. |
-| `UpsampleBicubic` | - | Upsample bicubic. |
-| `PixelShuffle` | - | Pixel shuffle. |
-| `LSTM` | - | LSTM. |
-| `GRU` | - | GRU. |
-| `RNN` | - | RNN. |
-| `ZeroPad2d` | - | Padding zero 2D. |
-| `ReflectionPad2d` | - | Padding reflection 2D. |
-| `ReplicationPad2d` | - | Padding replication 2D. |
-| `Identity` | - | Identity. |
-| `Constant` | - | Tenseur sans entrée, fixe par défaut ou paramètre appris si explicitement marqué. |
-| `Lambda` | - | Lambda custom. |
-| `PatchEmbed` | `PatchProjection` | Patch embedding/projection. |
 
 ## `Reparameterize`
 
@@ -291,7 +368,7 @@ Si vous voyez une erreur de shape :
 Si un type semble ignoré :
 
 1. Vérifier son nom normalisé.
-2. Vérifier le `case LayerType::...` dans le forward runtime.
+2. Vérifier les capacités via `Model.runtime_ops()` puis le dispatcher du runtime.
 3. Vérifier s'il est stable ou expérimental.
 
 ## Étapes suivantes

@@ -1,36 +1,142 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="620" viewBox="0 0 1700 620" role="img" aria-labelledby="title desc">
-<title id="title">Pipeline d’inférence</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1187" viewBox="0 0 1200 1187" role="img" aria-labelledby="title desc">
+<title id="title">Inférence depuis un checkpoint</title>
+<desc id="desc">La configuration et le checkpoint déterminent une architecture native compatible. Après construction et allocation, les poids et assets sont chargés sans réinitialisation. Les entrées sont préparées, le forward d’évaluation est exécuté et la sortie est décodée selon l’architecture. Sources : src/Model.hpp, src/Serialization/Serialization.hpp, scripts/inferences/causal_lm_generate.lua</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Model.hpp&quot;, &quot;src/Serialization/Serialization.hpp&quot;, &quot;scripts/inferences/causal_lm_generate.lua&quot;], &quot;related_docs&quot;: [&quot;docs/02-User-Guide/05-Inference.md&quot;, &quot;docs/08-Tuto/12-Tuto-Entrainement-Validation-Reprise-Inference.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Pipeline d’inférence</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Chemin minimal pour exécuter un modèle chargé.</text>
-<line x1="60" y1="112" x2="1640" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="236.66666666666666" height="110" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="188.33333333333331" y="265" class="label" text-anchor="middle">Load config</text>
-<text x="188.33333333333331" y="322" class="small" text-anchor="middle">JSON/Lua args</text>
-<rect x="334.66666666666663" y="240" width="236.66666666666666" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="452.99999999999994" y="265" class="label" text-anchor="middle">Load checkpoint</text>
-<text x="452.99999999999994" y="322" class="small" text-anchor="middle">params</text>
-<path d="M306.66666666666663,295.0 L334.66666666666663,295.0" class="edgeB"/>
-<rect x="599.3333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="717.6666666666666" y="265" class="label" text-anchor="middle">Allocate</text>
-<text x="717.6666666666666" y="322" class="small" text-anchor="middle">runtime tensors</text>
-<path d="M571.3333333333333,295.0 L599.3333333333333,295.0" class="edgeB"/>
-<rect x="863.9999999999999" y="240" width="236.66666666666666" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="982.3333333333333" y="265" class="label" text-anchor="middle">Forward</text>
-<text x="982.3333333333333" y="322" class="small" text-anchor="middle">graph execution</text>
-<path d="M835.9999999999999,295.0 L863.9999999999999,295.0" class="edgeB"/>
-<rect x="1128.6666666666665" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1246.9999999999998" y="265" class="label" text-anchor="middle">Postprocess</text>
-<text x="1246.9999999999998" y="322" class="small" text-anchor="middle">format output</text>
-<path d="M1100.6666666666665,295.0 L1128.6666666666665,295.0" class="edgeB"/>
-<rect x="1393.333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1511.6666666666663" y="265" class="label" text-anchor="middle">Export</text>
-<text x="1511.6666666666663" y="322" class="small" text-anchor="middle">result/log</text>
-<path d="M1365.3333333333333,295.0 L1393.333333333333,295.0" class="edgeB"/>
-<text x="1640" y="596" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1187" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Inférence depuis un checkpoint</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Résoudre la topologie, allouer et charger avant le premier forward.</tspan>
+</text>
+<path d="M 369.33,264 L 437.33,264" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,264 L 830.67,264" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 993.33,365 L 993.33,465" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,553 L 762.67,553" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 437.33,553 L 369.33,553" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 206.67,641 L 206.67,741" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 369.33,855 L 437.33,855" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,855 L 830.67,855" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="resolve">
+<rect x="44" y="163" width="325.33" height="202" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Résoudre le contexte</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Checkpoint et</tspan>
+<tspan x="66" dy="26">configuration</tspan>
+<tspan x="66" dy="26">Même expérience / mêmes</tspan>
+<tspan x="66" dy="26">assets</tspan>
+</text>
+</g>
+<g data-node="construct">
+<rect x="437.33" y="163" width="325.33" height="202" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Construire la classe</tspan>
+<tspan x="459.33" dy="29">native</tspan>
+</text>
+<text x="459.33" y="266" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Model.create(name, cfg)</tspan>
+<tspan x="459.33" dy="26">Topologie compatible</tspan>
+</text>
+</g>
+<g data-node="allocate">
+<rect x="830.67" y="163" width="325.33" height="202" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Allouer les</tspan>
+<tspan x="852.67" dy="29">paramètres</tspan>
+</text>
+<text x="852.67" y="266" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">allocate_params()</tspan>
+<tspan x="852.67" dy="26">Avant chargement des</tspan>
+<tspan x="852.67" dy="26">poids</tspan>
+</text>
+</g>
+<g data-node="forward">
+<rect x="44" y="465" width="325.33" height="176" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Forward d’évaluation</tspan>
+</text>
+<text x="66" y="539" font-size="19" fill="#334155">
+<tspan x="66" dy="0">training = false</tspan>
+<tspan x="66" dy="26">Sans backward ni pas</tspan>
+<tspan x="66" dy="26">optimiseur</tspan>
+</text>
+</g>
+<g data-node="input">
+<rect x="437.33" y="465" width="325.33" height="176" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Préparer les entrées</tspan>
+</text>
+<text x="459.33" y="539" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Tokens, images, latent…</tspan>
+<tspan x="459.33" dy="26">Formes et tokenizer</tspan>
+<tspan x="459.33" dy="26">compatibles</tspan>
+</text>
+</g>
+<g data-node="load">
+<rect x="830.67" y="465" width="325.33" height="176" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Charger poids et</tspan>
+<tspan x="852.67" dy="29">assets</tspan>
+</text>
+<text x="852.67" y="568" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Serialization.load(...)</tspan>
+<tspan x="852.67" dy="26">Ne pas init après load</tspan>
+</text>
+</g>
+<g data-node="post">
+<rect x="44" y="741" width="325.33" height="228" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="772" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Post-traiter</tspan>
+</text>
+<text x="66" y="815" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Décoder le texte / l’image</tspan>
+<tspan x="66" dy="26">Selon les sorties du</tspan>
+<tspan x="66" dy="26">modèle</tspan>
+</text>
+</g>
+<g data-node="result">
+<rect x="437.33" y="741" width="325.33" height="228" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="459.33" y="772" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Résultat et</tspan>
+<tspan x="459.33" dy="29">contrôles</tspan>
+</text>
+<text x="459.33" y="844" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Forme, finitude et</tspan>
+<tspan x="459.33" dy="26">cohérence</tspan>
+<tspan x="459.33" dy="26">Mesure de qualité</tspan>
+<tspan x="459.33" dy="26">séparée</tspan>
+</text>
+</g>
+<g data-node="export">
+<rect x="830.67" y="741" width="325.33" height="228" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="772" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Enregistrer si</tspan>
+<tspan x="852.67" dy="29">nécessaire</tspan>
+</text>
+<text x="852.67" y="844" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Sortie, contexte et</tspan>
+<tspan x="852.67" dy="26">journaux</tspan>
+<tspan x="852.67" dy="26">Destination explicite</tspan>
+</text>
+</g>
+<rect x="44" y="1017" width="1112" height="84" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1045" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Le chargement ne remplace pas une topologie correcte ; les overrides incompatibles sont à refuser.</tspan>
+<tspan x="66" dy="26">• La sortie du forward est un tenseur : son décodage dépend de l’architecture choisie.</tspan>
+</text>
+<text x="44" y="1136" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : Model.hpp · Serialization.hpp · causal_lm_generate.lua</tspan>
+</text>
+</g>
 </svg>

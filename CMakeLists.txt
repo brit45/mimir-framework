@@ -15,7 +15,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options de compilation
-option(ENABLE_SIMD "Enable SIMD optimizations (AVX2, FMA, F16C, BMI2)" ON)
+option(ENABLE_SIMD "Enable runtime CPU dispatch (SSE2, AVX/256, AVX2, AVX-512, FMA, F16C)" ON)
 option(ENABLE_OPENMP "Enable OpenMP parallel processing" ON)
 option(ENABLE_VULKAN "Enable Vulkan Compute acceleration" ON)
 option(ENABLE_OPENCL "Enable OpenCL GPU compute" ON)
@@ -43,7 +43,12 @@ endif()
 option(ENABLE_SCRIPTING_CSHARP "Enable C# scripting bridge" ON)
 option(BUILD_EXAMPLES "Build example executables" OFF)
 option(MIMIR_ENABLE_FACE_RECOGNITION_TOOL "Build OpenCV face detection/recognition tool" OFF)
-option(MIMIR_PORTABLE_BUILD "Disable host-specific CPU optimizations for portable binaries" OFF)
+option(MIMIR_PORTABLE_BUILD "Disable host-specific CPU optimizations for portable binaries" ON)
+option(ENABLE_MPI "Enable MPI collectives for Distributed Data Parallel training" OFF)
+option(ENABLE_AMP "Enable mixed-precision autocast support" ON)
+if(ENABLE_MPI)
+    find_package(MPI REQUIRED COMPONENTS CXX)
+endif()
 
 string(TOUPPER "${MIMIR_VIZ_BACKEND}" MIMIR_VIZ_BACKEND)
 set(_MIMIR_VIZ_BACKENDS SFML QT GTK WEB NONE)
@@ -107,36 +112,21 @@ set(MIMIR_RUNTIME_OUTPUT_DIRECTORY
 
 include(CheckCXXCompilerFlag)
 
-# CUDA includes CPU dispatch headers: nvcc must pass SIMD options to its host compiler.
+# Keep the executable at the toolchain baseline. ISA-specific kernels are
+# compiled only in SimdDispatch.cpp using function multiversioning and chosen
+# after CPUID and OS extended-register checks. Global -mavx2/-mfma would let the
+# compiler emit illegal instructions in dispatch/initialization code itself.
 if(ENABLE_SIMD)
-    check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
-    check_cxx_compiler_flag("-mfma" COMPILER_SUPPORTS_FMA)
-    check_cxx_compiler_flag("-mf16c" COMPILER_SUPPORTS_F16C)
-    check_cxx_compiler_flag("-mbmi2" COMPILER_SUPPORTS_BMI2)
-    
-    if(COMPILER_SUPPORTS_AVX2)
-        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
-        add_compile_options("$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CUDA_COMPILER_ID:NVIDIA>>:-Xcompiler=-mavx2>")
-        message(STATUS "AVX2 support: Enabled")
-    endif()
-    
-    if(COMPILER_SUPPORTS_FMA)
-        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-mfma>)
-        add_compile_options("$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CUDA_COMPILER_ID:NVIDIA>>:-Xcompiler=-mfma>")
-        message(STATUS "FMA support: Enabled")
-    endif()
-    
-    if(COMPILER_SUPPORTS_F16C)
-        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-mf16c>)
-        add_compile_options("$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CUDA_COMPILER_ID:NVIDIA>>:-Xcompiler=-mf16c>")
-        message(STATUS "F16C support: Enabled")
-    endif()
-    
-    if(COMPILER_SUPPORTS_BMI2)
-        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-mbmi2>)
-        add_compile_options("$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CUDA_COMPILER_ID:NVIDIA>>:-Xcompiler=-mbmi2>")
-        message(STATUS "BMI2 support: Enabled")
-    endif()
+    add_compile_definitions(MIMIR_SIMD_ENABLED=1)
+    message(STATUS "CPU SIMD: runtime dispatch (SSE2, AVX/256, AVX2, AVX-512, FMA, F16C)")
+else()
+    add_compile_definitions(MIMIR_SIMD_ENABLED=0)
+endif()
+check_cxx_compiler_flag("-ffp-contract=off" COMPILER_SUPPORTS_FP_CONTRACT_OFF)
+if(COMPILER_SUPPORTS_FP_CONTRACT_OFF)
+    # Explicit FMA intrinsics/std::fma remain fused; other operations retain
+    # separate multiply/add rounding across scalar and vector implementations.
+    set_source_files_properties(src/runtimes/cpu/SimdDispatch.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 
 # ============================================================================
@@ -166,7 +156,9 @@ if(MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
 else()
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG")
-    if(NOT MIMIR_PORTABLE_BUILD)
+    if(NOT MIMIR_PORTABLE_BUILD AND NOT ENABLE_SIMD)
+        # Runtime-dispatched builds always keep their baseline ISA; -march=native
+        # would defeat the scalar fallback even outside the specialized kernels.
         set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
     endif()
 endif()
@@ -443,14 +435,7 @@ if(ENABLE_ROCM)
                 set(CMAKE_HIP_STANDARD 17)
                 set(CMAKE_HIP_STANDARD_REQUIRED ON)
                 set_source_files_properties(src/runtimes/rocm/RocmRuntime.cpp PROPERTIES LANGUAGE HIP)
-                if(ENABLE_SIMD)
-                    foreach(flag AVX2 FMA F16C BMI2)
-                        if(COMPILER_SUPPORTS_${flag})
-                            string(TOLOWER "${flag}" hip_simd_flag)
-                            add_compile_options("$<$<COMPILE_LANGUAGE:HIP>:-m${hip_simd_flag}>")
-                        endif()
-                    endforeach()
-                endif()
+
             else()
                 message(WARNING "HIP compiler unavailable: native ROCm pointwise fusion disabled")
             endif()
@@ -492,6 +477,7 @@ set(MIMIR_SOURCES
     src/runtimes/losses/LossDispatch.cpp
     src/Model.cpp
     src/ModelRuntimeConfig.cpp
+    src/runtimes/DistributedRuntime.cpp
     src/Models/VAETraining.cpp
     src/Encoder.cpp
     src/Tokenizer.cpp
@@ -662,7 +648,7 @@ if(ENABLE_OPENCL AND OPENCL_LIBRARY)
     list(APPEND MIMIR_SOURCES src/runtimes/opencl/OpenCLRuntime.cpp)
 endif()
 
-list(APPEND MIMIR_SOURCES src/runtimes/LayerOps.cpp)
+list(APPEND MIMIR_SOURCES src/runtimes/LayerOps.cpp src/runtimes/cpu/SimdDispatch.cpp)
 
 # Variante de sources sans Viz (utile pour builds headless / statiques)
 set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})
@@ -779,6 +765,10 @@ target_include_directories(mimir_core PUBLIC
 
 target_compile_definitions(mimir_core PUBLIC MIMIR_PROJECT_VERSION="${PROJECT_VERSION}")
 
+if(ENABLE_AMP)
+    target_compile_definitions(mimir_core PUBLIC MIMIR_ENABLE_AMP)
+endif()
+
 if(ENABLE_SCRIPTING_RUST)
     target_compile_definitions(mimir_core PUBLIC MIMIR_ENABLE_SCRIPTING_RUST)
 endif()
@@ -802,6 +792,10 @@ target_link_libraries(mimir_core PUBLIC
     ${LUA_LIBRARIES}
     Threads::Threads
 )
+if(ENABLE_MPI)
+    target_compile_definitions(mimir_core PUBLIC MIMIR_HAS_MPI)
+    target_link_libraries(mimir_core PUBLIC MPI::MPI_CXX)
+endif()
 
 if(ENABLE_OPENMP AND OpenMP_CXX_FOUND)
     target_link_libraries(mimir_core PUBLIC OpenMP::OpenMP_CXX)
@@ -914,6 +908,10 @@ if(BUILD_MIMIR_STATIC)
 
     target_compile_definitions(mimir_core_static PUBLIC MIMIR_PROJECT_VERSION="${PROJECT_VERSION}")
 
+    if(ENABLE_AMP)
+        target_compile_definitions(mimir_core_static PUBLIC MIMIR_ENABLE_AMP)
+    endif()
+
     if(ENABLE_SCRIPTING_RUST)
         target_compile_definitions(mimir_core_static PUBLIC MIMIR_ENABLE_SCRIPTING_RUST)
     endif()
@@ -943,6 +941,11 @@ if(BUILD_MIMIR_STATIC)
             ${LUA_LIBRARIES}
             Threads::Threads
         )
+    endif()
+
+    if(ENABLE_MPI)
+        target_compile_definitions(mimir_core_static PUBLIC MIMIR_HAS_MPI)
+        target_link_libraries(mimir_core_static PUBLIC MPI::MPI_CXX)
     endif()
 
     add_executable(mimir_static src/main.cpp)
@@ -1155,7 +1158,7 @@ message(STATUS "C++ Compiler:        ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPIL
 message(STATUS "C++ Standard:        C++${CMAKE_CXX_STANDARD}")
 message(STATUS "")
 message(STATUS "Features:")
-message(STATUS "  SIMD (AVX2/FMA):   ${ENABLE_SIMD}")
+message(STATUS "  SIMD (runtime ISA):   ${ENABLE_SIMD}")
 message(STATUS "  OpenMP:            ${ENABLE_OPENMP}")
 message(STATUS "  Vulkan Compute:    ${ENABLE_VULKAN}")
 message(STATUS "  OpenCL Compute:    ${ENABLE_OPENCL}")

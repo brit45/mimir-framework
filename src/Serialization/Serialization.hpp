@@ -75,6 +75,9 @@ struct LoadOptions {
     // standalone VAE checkpoint into a composite model).
     bool apply_model_name = true;
     bool apply_model_config = true;
+    // Preserve caller-built layer topology when importing only matching weights.
+    // Empty graphs still reconstruct their required checkpoint metadata.
+    bool load_layer_metadata = true;
     bool metadata_only = false;     // Load architecture/config without tensors or auxiliary state
 };
 

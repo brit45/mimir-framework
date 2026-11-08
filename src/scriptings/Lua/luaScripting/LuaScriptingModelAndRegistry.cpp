@@ -1,6 +1,7 @@
 #include "LuaScripting.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Models/Diffusion/LumenLatentDiffusionModel.hpp"
+#include "Models/NLP/CausalLMModel.hpp"
 #include "Models/Vision/CNN/MedicalDetectorModel.hpp"
 #include "Serialization/Serialization.hpp"
 #include "Serialization/DebugJsonDump.hpp"
@@ -9,6 +10,7 @@
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
+#include "scriptings/ModelVizProjection.hpp"
 #include "VizTextPayload.hpp"
 #include "Helpers.hpp"
 #include "runtimes/ops_loss_and_grad.hpp"
@@ -19,6 +21,7 @@
 #include "training/VaeValidationFeedback.hpp"
 #include "training/BBoxSupervision.hpp"
 #include "training/TagAnnotation.hpp"
+#include "runtimes/DistributedRuntime.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -47,6 +50,54 @@ static LumenLatentDiffusionModel& _mimir_current_lumen_model() {
             "Le modèle courant n'est pas un LumenLatentDiffusionModel");
     }
     return *lumen;
+}
+
+static CausalLMModel& _mimir_current_causal_lm() {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentModel) throw std::runtime_error("Aucun modèle créé");
+    auto* causal_lm = dynamic_cast<CausalLMModel*>(ctx.currentModel.get());
+    if (!causal_lm) {
+        throw std::runtime_error("Le modèle courant n'est pas un CausalLMModel");
+    }
+    return *causal_lm;
+}
+
+static CausalLMModel::GenerationOptions _mimir_causal_lm_generation_options(
+    lua_State* L, const int table_index) {
+    CausalLMModel::GenerationOptions options;
+    if (!lua_istable(L, table_index)) return options;
+    auto integer = [L, table_index](const char* key, int fallback) {
+        lua_getfield(L, table_index, key);
+        const int value = lua_isnumber(L, -1)
+            ? static_cast<int>(lua_tointeger(L, -1)) : fallback;
+        lua_pop(L, 1);
+        return value;
+    };
+    auto number = [L, table_index](const char* key, float fallback) {
+        lua_getfield(L, table_index, key);
+        const float value = lua_isnumber(L, -1)
+            ? static_cast<float>(lua_tonumber(L, -1)) : fallback;
+        lua_pop(L, 1);
+        return value;
+    };
+    auto string = [L, table_index](const char* key) {
+        lua_getfield(L, table_index, key);
+        const char* value = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+        const std::string result(value ? value : "");
+        lua_pop(L, 1);
+        return result;
+    };
+    lua_getfield(L, table_index, "use_memory");
+    if (!lua_isnil(L, -1)) options.use_memory = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+    options.max_new_tokens = integer("max_new_tokens", options.max_new_tokens);
+    options.top_k = integer("top_k", options.top_k);
+    options.seed = integer("seed", options.seed);
+    options.stop_id = integer("stop_id", options.stop_id);
+    options.temperature = number("temperature", options.temperature);
+    options.top_p = number("top_p", options.top_p);
+    options.system_prompt = string("system_prompt");
+    return options;
 }
 
 static std::vector<unsigned char> _mimir_lua_u8_array(lua_State* L, int index) {
@@ -571,7 +622,8 @@ int LuaScripting::lua_createModel(lua_State* L) {
                 ctx.modelType = arch;
                 ctx.modelConfig = cfg;
 
-                ctx.addLog("Modèle créé depuis MPK: " + model_type_str);
+                Mimir::Scripting::bindModelProjection(ctx, true);
+        ctx.addLog("Modèle créé depuis MPK: " + model_type_str);
                 lua_pushboolean(L, true);
                 return 1;
             } catch (const std::exception& e) {
@@ -631,6 +683,7 @@ int LuaScripting::lua_createModel(lua_State* L) {
             }
         }
 
+        Mimir::Scripting::bindModelProjection(ctx, true);
         ctx.addLog("Modèle créé via registre: " + name);
         lua_pushboolean(L, true);
     } catch (const std::exception& e) {
@@ -688,6 +741,7 @@ int LuaScripting::lua_createEmptyModel(lua_State* L) {
             ctx.currentModel->setEncoder(*ctx.currentEncoder);
         }
 
+        Mimir::Scripting::bindModelProjection(ctx, true);
         ctx.addLog("Modele vide cree: " + name);
         lua_pushboolean(L, true);
         return 1;
@@ -729,6 +783,7 @@ int LuaScripting::lua_createModelFromConfig(lua_State* L) {
         ctx.modelType = arch;
         ctx.modelConfig = cfg;
 
+        Mimir::Scripting::bindModelProjection(ctx, true);
         ctx.addLog("Modèle créé via registre depuis config: " + arch);
 
         lua_pushboolean(L, true);
@@ -799,6 +854,32 @@ int LuaScripting::lua_modelDType(lua_State* L) {
         } catch (...) {
         }
         ctx.addLog(std::string("Model.dtype = '") + dtype + "'");
+        lua_pushboolean(L, true);
+        lua_pushstring(L, dtype);
+        return 2;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_modelAutocast(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentModel) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Aucun modèle créé");
+        return 2;
+    }
+    const int nargs = lua_gettop(L);
+    if (nargs <= 0) {
+        lua_pushstring(L, ctx.currentModel->getAutocastDType().c_str());
+        return 1;
+    }
+    const char* dtype = luaL_checkstring(L, 1);
+    try {
+        ctx.currentModel->setAutocastDType(dtype);
+        ctx.addLog(std::string("Model.autocast = '") + dtype + "'");
         lua_pushboolean(L, true);
         lua_pushstring(L, dtype);
         return 2;
@@ -880,6 +961,7 @@ int LuaScripting::lua_lumenTrainStep(lua_State* L) {
         ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
         ctx.currentModel->publishRuntimeConfiguration();
         ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+        Mimir::Scripting::bindModelProjection(ctx);
     }
 
         if (ctx.asyncMonitor) ctx.asyncMonitor->waitWhileTrainingPaused();
@@ -1039,6 +1121,7 @@ int LuaScripting::lua_lumenValidateStep(lua_State* L) {
 
 int LuaScripting::lua_visionTrainStep(lua_State* L) {
     auto& ctx=LuaContext::getInstance();
+    Mimir::Scripting::bindModelProjection(ctx);
     if (ctx.asyncMonitor) ctx.asyncMonitor->waitWhileTrainingPaused();
     luaL_checktype(L,1,LUA_TTABLE);
     luaL_checktype(L,2,LUA_TTABLE);
@@ -1098,6 +1181,405 @@ int LuaScripting::lua_visionTrainStep(lua_State* L) {
     }
 }
 
+int LuaScripting::lua_causalLmPrepareCorpus(lua_State* L) {
+    try {
+        auto& ctx = LuaContext::getInstance();
+        CausalLMModel& model = _mimir_current_causal_lm();
+        const std::string corpus_path = luaL_checkstring(L, 1);
+        const std::string tokenizer_path = luaL_optstring(L, 2, "");
+        const int bpe_merges = static_cast<int>(luaL_optinteger(L, 3, 1000));
+        const int seed = static_cast<int>(luaL_optinteger(L, 4, 1337));
+        const size_t vocab_capacity = model.modelConfig.value("vocab_size", 0u);
+
+        std::ifstream input(corpus_path, std::ios::binary);
+        if (!input) throw std::runtime_error("corpus introuvable ou illisible: " + corpus_path);
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        if (!input.good() && !input.eof())
+            throw std::runtime_error("erreur de lecture du corpus: " + corpus_path);
+        model.prepareTrainingCorpus(contents.str(), vocab_capacity, bpe_merges,
+                                    tokenizer_path, seed, false);
+        auto& distributed = Mimir::DistributedRuntime::instance();
+        const bool multi_rank = distributed.initialized() && distributed.worldSize() > 1;
+        if (multi_rank) distributed.barrier();
+
+        int tokenizer_save_failed = 0;
+        std::string tokenizer_save_error;
+        if (distributed.isMainProcess() && !tokenizer_path.empty() &&
+            model.modelConfig.value("tokenizer_updated", false)) {
+            try {
+                model.savePreparedTokenizer(tokenizer_path);
+            } catch (const std::exception& error) {
+                tokenizer_save_failed = 1;
+                tokenizer_save_error = error.what();
+            }
+        }
+        if (multi_rank) {
+            std::vector<int> save_vote{tokenizer_save_failed};
+            distributed.allReduceMax(save_vote);
+            tokenizer_save_failed = save_vote.front();
+        }
+        if (tokenizer_save_failed) {
+            throw std::runtime_error(tokenizer_save_error.empty()
+                ? "échec d'enregistrement du tokenizer sur le processus principal"
+                : tokenizer_save_error);
+        }
+        ctx.currentTokenizer = std::make_shared<Tokenizer>(model.getTokenizer());
+        ctx.modelConfig = model.modelConfig;
+
+        lua_pushboolean(L, true);
+        lua_createtable(L, 0, 12);
+        lua_pushinteger(L, static_cast<lua_Integer>(model.getTokenizer().getVocabSize()));
+        lua_setfield(L, -2, "vocab_size");
+        lua_pushinteger(L, static_cast<lua_Integer>(model.getTokenizer().getMaxVocab()));
+        lua_setfield(L, -2, "vocab_capacity");
+        lua_pushinteger(L, static_cast<lua_Integer>(model.getTokenizer().getBPEMergeCount()));
+        lua_setfield(L, -2, "bpe_merges");
+        lua_pushinteger(L, model.modelConfig.value("training_samples", 0));
+        lua_setfield(L, -2, "samples");
+        lua_pushinteger(L, model.modelConfig.value("validation_samples", 0));
+        lua_setfield(L, -2, "validation_samples");
+        lua_pushinteger(L, model.modelConfig.value("validation_tokens", 0));
+        lua_setfield(L, -2, "validation_tokens");
+        lua_pushboolean(L, model.modelConfig.value("validation_holdout", false));
+        lua_setfield(L, -2, "validation_holdout");
+        const std::string validation_source = model.modelConfig.value(
+            "validation_source", std::string("training"));
+        lua_pushlstring(L, validation_source.data(), validation_source.size());
+        lua_setfield(L, -2, "validation_source");
+        lua_pushinteger(L, model.modelConfig.value("training_tokens", 0));
+        lua_setfield(L, -2, "tokens");
+        lua_pushinteger(L, model.modelConfig.value("dataset_samples", 0));
+        lua_setfield(L, -2, "dataset_samples");
+        lua_pushboolean(L, model.modelConfig.value("tokenizer_reused", false));
+        lua_setfield(L, -2, "tokenizer_reused");
+        lua_pushboolean(L, model.modelConfig.value("tokenizer_bpe_updated", false));
+        lua_setfield(L, -2, "tokenizer_bpe_updated");
+        return 2;
+    } catch (const std::exception& error) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_causalLmTrainCorpus(lua_State* L) {
+    try {
+        auto& ctx = LuaContext::getInstance();
+        CausalLMModel& model = _mimir_current_causal_lm();
+        const int steps = static_cast<int>(luaL_checkinteger(L, 1));
+        const float learning_rate = static_cast<float>(luaL_checknumber(L, 2));
+        const int seed = static_cast<int>(luaL_optinteger(L, 3, 1337));
+        if (steps < 1) throw std::invalid_argument("steps must be positive");
+        if (!model.hasPreparedTrainingCorpus())
+            throw std::logic_error("appelez causal_lm_prepare_corpus avant causal_lm_train");
+        Mimir::Scripting::ProjectionTrainingScope projection_scope(ctx);
+        const bool main_process = Mimir::DistributedRuntime::instance().isMainProcess();
+        const int validate_every_steps = std::max(0,
+            model.modelConfig.value("validate_every_steps", 100));
+        const int validate_items = std::max(0,
+            model.modelConfig.value("validate_items", 8));
+        const bool validation_configured = validate_every_steps > 0 && validate_items > 0 &&
+            model.modelConfig.value("validation_samples", 0) > 0;
+        model.modelConfig["validation_enabled"] = validation_configured;
+
+        if (ctx.asyncMonitor) {
+            ctx.asyncMonitor->updateRuntimeValidationEnabled(validation_configured);
+            ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
+            ctx.currentModel->publishRuntimeConfiguration();
+            ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+        Mimir::Scripting::bindModelProjection(ctx);
+            ctx.asyncMonitor->configureGraphReport(ctx.currentModel->modelConfig);
+        }
+        if (ctx.asyncMonitor && ctx.asyncMonitor->getViz() && !model.isVizTapsEnabled()) {
+            model.setVizTapsEnabled(true);
+            const int max_frames = ctx.modelConfig.value("viz_taps_max_frames", 64);
+            const int max_side = ctx.modelConfig.value("viz_taps_max_side", 64);
+            model.setVizTapsLimits(std::max(16, max_frames), std::max(16, max_side));
+        }
+
+        Optimizer optimizer;
+        optimizer.initial_lr = learning_rate;
+        configureOptimizerFromJson(optimizer, model.modelConfig);
+        const Optimizer* saved_optimizer = model.getSerializedOptimizer();
+        const bool resume_optimizer_loaded = saved_optimizer != nullptr;
+        if (saved_optimizer) {
+            // The serialized optimizer owns its moments and scheduler state.
+            // `learning_rate` remains a multiplicative override in trainCorpus;
+            // do not replace the checkpoint's step, schedule or hyperparameters.
+            optimizer = *saved_optimizer;
+        }
+        if (!resume_optimizer_loaded) optimizer.total_steps = static_cast<size_t>(steps);
+        else if (optimizer.total_steps == 0) optimizer.total_steps = static_cast<size_t>(steps);
+        if (!resume_optimizer_loaded && model.modelConfig.contains("min_lr")) optimizer.min_lr = model.modelConfig["min_lr"].get<float>();
+        if (!resume_optimizer_loaded && model.modelConfig.contains("decay_rate")) optimizer.decay_rate = model.modelConfig["decay_rate"].get<float>();
+        if (!resume_optimizer_loaded && model.modelConfig.contains("decay_steps")) optimizer.decay_steps = model.modelConfig["decay_steps"].get<int>();
+        if (!resume_optimizer_loaded && model.modelConfig.contains("warmup_steps")) optimizer.warmup_steps = model.modelConfig["warmup_steps"].get<int>();
+        if (!resume_optimizer_loaded && model.modelConfig.contains("decay_strategy")) {
+            std::string strategy = model.modelConfig["decay_strategy"].get<std::string>();
+            std::transform(strategy.begin(), strategy.end(), strategy.begin(), [](unsigned char value) {
+                return static_cast<char>(std::tolower(value));
+            });
+            if (strategy == "none") optimizer.decay_strategy = LRDecayStrategy::NONE;
+            else if (strategy == "cosine") optimizer.decay_strategy = LRDecayStrategy::COSINE;
+            else if (strategy == "step") optimizer.decay_strategy = LRDecayStrategy::STEP;
+            else if (strategy == "exponential") optimizer.decay_strategy = LRDecayStrategy::EXPONENTIAL;
+            else if (strategy == "linear") optimizer.decay_strategy = LRDecayStrategy::LINEAR;
+            else throw std::invalid_argument("decay_strategy invalide: " + strategy);
+        }
+
+        const int log_every = std::max(1, model.modelConfig.value("log_every", 10));
+        const int save_every = std::max(0, model.modelConfig.value("save_every", 500));
+        const std::string checkpoint_dir = model.modelConfig.value(
+            "checkpoint_dir", std::string("checkpoints/causal_lm"));
+        auto& training_state = model.modelConfig["training_state"];
+        if (!training_state.is_object()) training_state = json::object();
+        training_state["initial_seed"] = model.modelConfig.value("seed", seed);
+        training_state["world_size"] = Mimir::DistributedRuntime::instance().initialized()
+            ? Mimir::DistributedRuntime::instance().worldSize() : 1;
+        training_state["global_step"] = optimizer.step;
+        training_state["requested_steps"] = steps;
+        const auto checkpoint_save = [&](const Optimizer& current_optimizer, bool force_final) {
+            if (current_optimizer.step == 0) return;
+            if (!force_final && (save_every <= 0 ||
+                current_optimizer.step % static_cast<size_t>(save_every) != 0)) return;
+            const bool main = Mimir::DistributedRuntime::instance().isMainProcess();
+            int failed = 0;
+            std::string save_error;
+            if (main) {
+                try {
+                    model.setSerializedOptimizer(current_optimizer);
+                    std::filesystem::path output;
+                    if (force_final) {
+                        output = std::filesystem::path(checkpoint_dir) / "final";
+                    } else {
+                        std::ostringstream name;
+                        name << "step-" << std::setw(7) << std::setfill('0') << current_optimizer.step;
+                        output = std::filesystem::path(checkpoint_dir) / name.str();
+                    }
+                    Mimir::Serialization::SaveOptions options;
+                    options.format = Mimir::Serialization::CheckpointFormat::RawFolder;
+                    options.save_optimizer = true;
+                    options.save_tokenizer = true;
+                    options.save_encoder = false;
+                    options.include_git_info = true;
+                    options.include_checksums = true;
+                    if (!Mimir::Serialization::save_checkpoint(model, output.string(), options, &save_error)) {
+                        save_error = "échec de sauvegarde du checkpoint " + output.string() + ": " + save_error;
+                        failed = 1;
+                    } else {
+                        ctx.addLog(std::string(force_final ? "✓ Checkpoint final causal LM: " :
+                                                            "✓ Checkpoint causal LM: ") + output.string());
+                    }
+                } catch (const std::exception& error) {
+                    failed = 1;
+                    save_error = error.what();
+                }
+            }
+            auto& distributed = Mimir::DistributedRuntime::instance();
+            if (distributed.initialized() && distributed.worldSize() > 1) {
+                std::vector<int> save_vote{failed};
+                distributed.allReduceMax(save_vote);
+                failed = save_vote.front();
+            }
+            if (failed) {
+                throw std::runtime_error(save_error.empty()
+                    ? "échec de sauvegarde du checkpoint sur le processus principal"
+                    : save_error);
+            }
+        };
+
+        double loss_sum = 0.0;
+        auto step_started = std::chrono::steady_clock::now();
+        const auto continue_training = [&](int) {
+            model.applyRuntimeConfiguration();
+            int stop = 0;
+            int validation_vote = 0;
+            if (main_process && ctx.asyncMonitor) {
+                ctx.asyncMonitor->waitWhileTrainingPaused();
+                stop = ctx.asyncMonitor->consumeStopTrainingRequested() ? 1 : 0;
+                model.modelConfig["validation_enabled"] =
+                    ctx.asyncMonitor->validationEnabledSnapshot();
+            }
+            if (main_process && model.modelConfig.value("validation_enabled", false))
+                validation_vote = 1;
+            auto& distributed = Mimir::DistributedRuntime::instance();
+            if (distributed.initialized() && distributed.worldSize() > 1) {
+                std::vector<int> control_vote{stop, validation_vote};
+                distributed.allReduceMax(control_vote);
+                stop = control_vote[0];
+                validation_vote = control_vote[1];
+            }
+            model.modelConfig["validation_enabled"] = validation_vote != 0;
+            step_started = std::chrono::steady_clock::now();
+            return stop == 0;
+        };
+        const auto on_step = [&](int step, const Model::TrainStepResult& result,
+                                 const Optimizer& current_optimizer) {
+            const auto finished = std::chrono::steady_clock::now();
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                finished - step_started).count();
+            step_started = finished;
+            loss_sum += result.loss;
+            if (main_process) {
+                const float average_loss = static_cast<float>(loss_sum / step);
+                if (ctx.asyncMonitor) {
+                    AsyncMonitor::Metrics metrics;
+                    metrics.epoch = 1;
+                    metrics.total_epochs = 1;
+                    metrics.batch = static_cast<int>(current_optimizer.step);
+                    metrics.total_batches = steps;
+                    metrics.loss = result.loss;
+                    metrics.avg_loss = average_loss;
+                    for (const auto& [name, value] : result.metrics) {
+                        if (std::isfinite(value))
+                            metrics.model_metrics[name] = static_cast<double>(value);
+                    }
+                    metrics.recon_loss_type = "cross_entropy";
+                    const auto validation_performed = result.metrics.find("validation_performed");
+                    const auto validation_cross_entropy = result.metrics.find("validation_cross_entropy");
+                    const auto validation_items = result.metrics.find("validation_items");
+                    const auto validation_step = result.metrics.find("validation_step");
+                    if (validation_performed != result.metrics.end() &&
+                        validation_performed->second > 0.5f &&
+                        validation_cross_entropy != result.metrics.end()) {
+                        metrics.val_has = true;
+                        metrics.val_ok = std::isfinite(validation_cross_entropy->second);
+                        metrics.val_step = validation_step == result.metrics.end()
+                            ? static_cast<int>(current_optimizer.step)
+                            : static_cast<int>(validation_step->second);
+                        metrics.val_items = validation_items == result.metrics.end()
+                            ? 0 : static_cast<int>(validation_items->second);
+                        metrics.val_recon = validation_cross_entropy->second;
+                        metrics.val_feedback = model.modelConfig.value(
+                            "validation_source", std::string("holdout"));
+                    }
+                    const auto effective_lr = result.metrics.find("learning_rate");
+                    metrics.lr = effective_lr == result.metrics.end()
+                        ? learning_rate : effective_lr->second;
+                    metrics.grad_norm = result.grad_norm;
+                    metrics.grad_max = result.grad_max_abs;
+                    metrics.params = model.totalParamCount();
+                    metrics.batch_time_ms = static_cast<int>(std::max<int64_t>(1, elapsed_ms));
+                    metrics.bps = 1000.0f / static_cast<float>(metrics.batch_time_ms);
+                    metrics.memory_mb = _mimir_process_resident_memory_mb();
+                    metrics.allocator_memory_mb = static_cast<double>(
+                        MemoryGuard::instance().getCurrentBytes()) / (1024.0 * 1024.0);
+                    metrics.opt_type = static_cast<int>(current_optimizer.type);
+                    metrics.opt_step = static_cast<int>(current_optimizer.step);
+                    metrics.opt_beta1 = current_optimizer.beta1;
+                    metrics.opt_beta2 = current_optimizer.beta2;
+                    metrics.opt_eps = current_optimizer.eps;
+                    metrics.opt_weight_decay = current_optimizer.weight_decay;
+                    ctx.asyncMonitor->updateMetrics(metrics);
+                    _mimir_publish_viz_taps(ctx, false);
+                }
+                if (step == 1 || step % log_every == 0) {
+                    const float perplexity = std::exp(std::min(result.loss, 20.0f));
+                    std::ostringstream message;
+                    message << "step=" << current_optimizer.step
+                            << " loss=" << std::fixed << std::setprecision(6) << result.loss
+                            << " avg_loss=" << average_loss
+                            << " perplexity=" << std::setprecision(3) << perplexity;
+                    const auto validation_cross_entropy = result.metrics.find(
+                        "validation_cross_entropy");
+                    const auto validation_perplexity = result.metrics.find(
+                        "validation_perplexity");
+                    const auto validation_accuracy = result.metrics.find(
+                        "validation_next_token_accuracy_pct");
+                    if (validation_cross_entropy != result.metrics.end()) {
+                        message << " val_ce=" << std::setprecision(6)
+                                << validation_cross_entropy->second;
+                        if (validation_perplexity != result.metrics.end())
+                            message << " val_ppl=" << std::setprecision(3)
+                                    << validation_perplexity->second;
+                        if (validation_accuracy != result.metrics.end())
+                            message << " val_top1=" << std::setprecision(2)
+                                    << validation_accuracy->second << "%";
+                    }
+                    ctx.addLog(message.str());
+                }
+            }
+            checkpoint_save(current_optimizer, false);
+        };
+
+        const int remaining_steps = optimizer.step >= static_cast<size_t>(steps)
+            ? 0 : steps - static_cast<int>(optimizer.step);
+        const int completed = remaining_steps > 0
+            ? model.trainCorpus(remaining_steps, optimizer, learning_rate, seed,
+                                on_step, continue_training)
+            : 0;
+        model.modelConfig["training_state"]["global_step"] = optimizer.step;
+        model.modelConfig["training_state"]["requested_steps"] = steps;
+        if (optimizer.step > 0) checkpoint_save(optimizer, true);
+        ctx.modelConfig = model.modelConfig;
+        lua_pushboolean(L, true);
+        lua_pushinteger(L, completed);
+        return 2;
+    } catch (const std::exception& error) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_causalLmGenerate(lua_State* L) {
+    try {
+        CausalLMModel& model = _mimir_current_causal_lm();
+        const std::string prompt = luaL_checkstring(L, 1);
+        const auto options = _mimir_causal_lm_generation_options(L, 2);
+        const std::string response = model.generateText(prompt, options);
+        lua_pushlstring(L, response.data(), response.size());
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_causalLmChat(lua_State* L) {
+    try {
+        CausalLMModel& model = _mimir_current_causal_lm();
+        const std::string message = luaL_checkstring(L, 1);
+        const std::string memory_path = luaL_optstring(L, 2, "");
+        const auto options = _mimir_causal_lm_generation_options(L, 3);
+        const std::string response = model.chat(message, memory_path, options);
+        lua_pushlstring(L, response.data(), response.size());
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_causalLmResetMemory(lua_State* L) {
+    try {
+        CausalLMModel& model = _mimir_current_causal_lm();
+        model.resetConversationMemory(luaL_optstring(L, 1, ""));
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_causalLmMemorySize(lua_State* L) {
+    try {
+        CausalLMModel& model = _mimir_current_causal_lm();
+        lua_pushinteger(L, static_cast<lua_Integer>(
+            model.conversationMemorySize(luaL_optstring(L, 1, ""))));
+        return 1;
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+}
+
 int LuaScripting::lua_trainModel(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
@@ -1111,7 +1593,11 @@ int LuaScripting::lua_trainModel(lua_State* L) {
         ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
         ctx.currentModel->publishRuntimeConfiguration();
         ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+        Mimir::Scripting::bindModelProjection(ctx);
+        ctx.asyncMonitor->configureGraphReport(ctx.currentModel->modelConfig);
     }
+
+    Mimir::Scripting::ProjectionTrainingScope projection_scope(ctx);
 
     // Arguments: epochs (number), learning_rate (number)
     int epochs = luaL_checkinteger(L, 1);
@@ -1291,6 +1777,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             if (ctx.asyncMonitor && !csv_viz_file.empty()) {
                 ctx.asyncMonitor->configureMetricsCsv(csv_viz_file, true);
+                ctx.asyncMonitor->configureGraphReport(ctx.currentModel->modelConfig);
                 ctx.addLog("CSV metrics (cfg): " + csv_viz_file);
             }
         }
@@ -1713,6 +2200,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             m.timestep = train_metric(st, "timestep");
             m.grad_norm = st.grad_norm;
             m.grad_max = st.grad_max_abs;
+            for (const auto& [name, value] : st.metrics) {
+                if (std::isfinite(value))
+                    m.model_metrics[name] = static_cast<double>(value);
+            }
             m.ent = train_metric(st, "entropy_diff");
             m.mom = train_metric(st, "moment_mismatch");
             m.params = ctx.currentModel ? ctx.currentModel->totalParamCount() : 0;
@@ -5151,6 +5642,14 @@ int LuaScripting::lua_loadCheckpoint(lua_State* L) {
         if (lua_isboolean(L, -1)) options.validate_checksums = lua_toboolean(L, -1);
         lua_pop(L, 1);
 
+        lua_getfield(L, options_idx, "apply_model_config");
+        if (lua_isboolean(L, -1)) options.apply_model_config = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, options_idx, "load_layer_metadata");
+        if (lua_isboolean(L, -1)) options.load_layer_metadata = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+
         lua_getfield(L, options_idx, "mapping_json");
         if (lua_isstring(L, -1)) options.mapping_json = lua_tostring(L, -1);
         lua_pop(L, 1);
@@ -5177,6 +5676,7 @@ int LuaScripting::lua_loadCheckpoint(lua_State* L) {
                 ? std::make_shared<ConditioningEncoder>(ctx.currentModel->getEncoder()) : nullptr;
         }
 
+        Mimir::Scripting::bindModelProjection(ctx, true);
         ctx.addLog("Checkpoint chargé: " + std::string(path));
         lua_pushboolean(L, true);
         return 1;

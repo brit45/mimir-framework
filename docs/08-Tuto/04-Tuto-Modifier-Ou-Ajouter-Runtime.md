@@ -2,7 +2,18 @@
 
 Ce tutoriel suit le routage actuel des layers :
 `Model` appelle `RuntimeRouter`, qui planifie et essaie les runtimes dans
-l'ordre ROCm, CUDA, Vulkan, OpenCL, CPU.
+l'ordre ROCm, CUDA, Vulkan, OpenCL, TPU (si sa session est fournie), CPU.
+
+Les classes d’architecture dérivées de `Model` décrivent le graphe en C++ ; le
+runtime en exécute les opérations. Les scripts ne déplacent pas la définition
+du graphe dans le langage de pilotage. Voir le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
+
+| Niveau | Objectif | Preuve attendue |
+| --- | --- | --- |
+| Intermédiaire | Tracer une opération du modèle au CPU | Identifier routeur, capacité et dispatcher effectifs. |
+| Avancé | Étendre un backend existant | Vérifier sorties et gradients, puis le refus des formes invalides. |
+| Expert | Intégrer un backend complet | Valider initialisation, routage, capacités, parité et mesures sur le matériel annoncé. |
 
 ## Sources de vérité
 
@@ -73,9 +84,10 @@ Un nouveau backend exige plus qu'une classe :
 7. documentez sa priorité par rapport aux backends existants ;
 8. exposez ses capacités si l'API Lua de diagnostic doit les afficher.
 
-Le routeur actuel a cinq emplacements explicites. Ajouter un sixième backend
-nécessite donc de modifier les signatures et les structures internes du
-routeur ; créer uniquement le dossier backend ne suffit pas.
+Le routeur accepte six emplacements explicites, dont TPU ; la surcharge
+historique à cinq arguments omet TPU. Un backend supplémentaire exige de
+mettre à jour ces signatures et les structures internes. Les activateurs GPU
+restent distincts de la session TPU ; créer un dossier backend ne suffit pas.
 
 ## Exemple : refuser proprement `Add`
 

@@ -92,6 +92,17 @@ la famille MLP MNIST et mesure séparément les architectures décrites ci-desso
 Les résultats d'entraînement MNIST et les résultats d'inférence avant ne doivent
 pas être fusionnés ni présentés comme la même mesure.
 
+Le notebook utilise par défaut le profil `recommended`: une configuration de
+référence, puis des variations ciblées pour le planner, ses options, le mode OpenMP et les runtimes
+GPU validés. Cela représente 12 configurations sur CPU,
+13 avec un runtime validé, 15 avec deux et 16 avec trois (contre 1 536 à 12 288
+combinaisons exhaustives). Le profil est sélectionnable via
+`CONFIGURATION_PROFILE`; choisir `full` conserve le balayage factoriel complet,
+y compris toutes les interactions. Le protocole enregistre le profil choisi et
+le notebook affiche avant les essais les nombres de configurations et de
+processus estimés. Le profil compact réduit les interactions à une seule
+variable par comparaison; `full` reste nécessaire pour explorer celles-ci.
+
 ### Comparaison d'inférence avant par architecture
 
 `colab_architecture_suite.py` compare huit familles enregistrées par Mímir :
@@ -107,9 +118,10 @@ synchronisé ; le rapport porte explicitement la mention
 convergence.
 
 Le notebook active ce passage séparément avec `RUN_ARCHITECTURE_BENCH=True`.
-Il réutilise le produit factoriel des états de configuration et affiche le
-nombre de processus estimé avant exécution. Le produit complet peut représenter
-des dizaines de milliers de processus. Les résultats terminés sont reprenables,
+Il réutilise le profil de configurations choisi pour le benchmark MNIST et
+affiche le nombre de processus estimé avant exécution. Le profil complet peut
+dépasser le million de processus avec les architectures et essais rapides.
+Les résultats terminés sont reprenables,
 mais une note comparative n'est fournie que lorsque tous les frameworks ont
 couvert les mêmes architectures, configurations, périphériques et répétitions,
 et les comptes de paramètres des modèles comparés ne diffèrent pas de plus de

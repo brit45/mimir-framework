@@ -18,19 +18,23 @@ Source : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` et `src/Serializatio
 - `debug_json` (alias: `debug`, `json`)
 
 Les packages `.mpk` sont gérés séparément par `scripts/modules/mpk.lua` et le
-chargeur de modèles. Ils décrivent une architecture/configuration mais ne
-contiennent pas les poids. Voir
+chargeur de modèles. Cette alternative expérimentale, encore partielle pour la
+production, décrit une architecture/configuration sans transporter les poids. Voir
 [MPK : packages d’architecture](../02-User-Guide/15-MPK.md).
 
 ## `save(path: string, format?: string="safetensors", opts?: table) -> bool | (false, err)`
 
 Options (principales) :
 
-- `save_tokenizer` (bool)
-- `save_encoder` (bool)
-- `save_optimizer` (bool)
-- `include_git_info` (bool)
-- `include_checksums` (bool)
+- `save_tokenizer=true`, `save_encoder=true` (bool)
+- `save_optimizer=false` (bool) : nécessaire pour restaurer les moments et le
+  compteur optimiseur lors d'une reprise complète.
+- `include_git_info=true`, `include_checksums=false` (bool)
+- `debug_max_values=100` (int) : limite historique du format DebugJSON.
+- `training_state` (table) : état de boucle ajouté à `model_config.training_state`.
+
+La table d'options de `save` occupe le **troisième** argument : utilisez
+`save(path, "safetensors", options)` ; la forme `save(path, options)` ne la lit pas.
 
 Options DebugJson “enhanced” (v1.4) :
 
@@ -39,6 +43,9 @@ Options DebugJson “enhanced” (v1.4) :
 - `include_activations` (bool)
 - `include_weight_deltas` (bool)
 - `max_values_per_tensor` (int)
+
+`custom_metadata` et `save_dataset_info` existent en C++ dans `SaveOptions`, mais
+ne sont pas lus par le binding Lua `save`.
 
 ## DType (stockage sur disque)
 
@@ -84,9 +91,21 @@ Bon pattern :
 
 Options :
 
-- `load_tokenizer`, `load_encoder`, `load_optimizer`
-- `strict_mode`
-- `validate_checksums`
+- `load_tokenizer=true`, `load_encoder=true`, `load_optimizer=false`
+- `strict_mode=true`
+- `validate_checksums=true`
+- `apply_model_config=true` : applique la configuration enregistrée.
+- `mapping_json` (chemin), alias `tensor_mapping_json` : mapping des tenseurs externes.
+- `load_layer_metadata` : applique les métadonnées des couches aux graphes préconstruits (défaut : `true`). Pour importer les poids d'un VAE complet dans son décodeur seul, utiliser `false` avec `apply_model_config=false` et construire auparavant le décodeur depuis la configuration du checkpoint. Un graphe vide conserve sa reconstruction automatique depuis les métadonnées disponibles.
+
+`load(path, options)` est accepté si le format est omis ; avec un format explicite,
+utilisez le troisième argument. `apply_model_name` et `metadata_only` sont des
+options C++ non exposées par ce binding Lua.
+
+Les assets tokenizer/encodeur chargés sont resynchronisés dans le contexte Lua.
+La topologie doit rester compatible : le chargement n'est pas une conversion
+automatique entre deux architectures. Les scripts de reprise reconstruisent
+d'abord la configuration et conservent l'état de boucle approprié au modèle.
 
 ## `detect_format(path: string) -> string | (nil, err)`
 

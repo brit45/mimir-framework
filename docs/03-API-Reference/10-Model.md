@@ -9,7 +9,11 @@ Trouver rapidement le contrat API réel et les paramètres utilisables.
 > Connaître les commandes de base de Mímir.
 
 
-`Mimir.Model` est le point d'entrée principal du framework. Il regroupe toutes les opérations sur le modèle courant : création, construction du graphe de layers, allocation des poids, exécution du forward/backward, et entraînement haut-niveau.
+`Mimir.Model` pilote le modèle courant : création depuis le registre, allocation
+des poids, forward/backward et entraînement. Le graphe natif est défini en
+C/C++ dans une classe dérivée de `Model`, puis configuré depuis Lua ou JSON.
+MPK est l'alternative expérimentale, encore partielle pour la production ; les
+bindings bas niveau de manipulation de couches servent aux tests et aux imports.
 
 > **Note :** Mímir ne gère qu'un seul modèle actif à la fois par contexte. Toutes les fonctions de ce module opèrent sur ce modèle global.
 
@@ -24,8 +28,10 @@ Source C++ : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` — liaisons Lua
 - [Paramètres (poids)](#paramètres-poids)
 - [Exécution (forward / backward)](#exécution-forward-backward)
 - [Entraînement haut-niveau](#entraînement-haut-niveau)
+- [API native du modèle causal](#api-native-du-modèle-causal)
 - [Recon-Loss supportées (état actuel)](#recon-loss-supportées-état-actuel)
 - [DType (précision des poids)](#dtype-précision-des-poids)
+- [AMP et calcul distribué](#amp-et-calcul-distribué)
 - [Matériel](#matériel)
 - [Exemple complet (nouveau modèle)](#exemple-complet-nouveau-modèle)
 - [API legacy](#api-legacy)
@@ -72,16 +78,25 @@ Enregistre l'architecture `name` comme modèle courant et fusionne `cfg` avec la
 ```lua
 -- Créer un Transformer avec des dimensions réduites
 local ok, err = Mimir.Model.create("transformer", {
-    seq_len    = 128,
-    d_model    = 256,
-    num_layers = 4,
-    vocab_size = 8192,
+    seq_len    = 8,
+    d_model    = 32,
+    num_layers = 2,
+    num_heads  = 4,
+    mlp_hidden = 64,
+    vocab_size = 128,
+    output_dim = 16,
 })
 assert(ok, err)
 ```
 
-Un chemin terminé par `.mpk` est également accepté : le package est décodé,
-vérifié puis créé via le registre.
+Un chemin existant terminé par `.mpk` ou `.mpk.bin` est également accepté : le
+package est décodé, vérifié puis créé via le registre. Ce chemin expérimental
+ne charge pas les poids d'un checkpoint.
+
+`create_from_config(full_config) -> (true, architecture) | (false, err)` sélectionne
+le modèle à partir d'une configuration complète. `get_config() -> table | (nil, err)`
+retourne une copie de `modelConfig` ; modifier cette table ne reconfigure pas le
+modèle courant.
 
 ---
 
@@ -173,7 +188,7 @@ Exécute le forward pass du modèle. `input` peut prendre deux formes :
 **Forme liste** — pour un seul tenseur d'entrée :
 
 ```lua
-local out = Mimir.Model.forward({0.1, 0.2, 0.3, ...}, false)
+local out = Mimir.Model.forward({0.1, 0.2, 0.3}, false)
 ```
 
 **Forme map** — pour les entrées nommées (multi-input) :
@@ -189,6 +204,15 @@ Toutes les clés chaîne associées à un tableau sont transmises comme tenseurs
 nommés en `float`, à l'exception de `text_ids` qui conserve le chemin entier.
 Cela permet notamment d'appeler un graphe NMS avec `boxes`, `scores` et
 `classes`.
+
+Dans une liste, des valeurs toutes entières sélectionnent le chemin des IDs ;
+dans une map, seule la clé `text_ids` conserve le type entier. Respectez le
+contrat du modèle : `t5` et `vae_text` attendent `text_ids`, tandis que
+`causal_lm` et `transformer` utilisent `__input__` pour leurs IDs. Le modèle
+`transformer` est un encodeur avec une sortie de taille `output_dim`, pas une
+tête de génération de logits `seq_len*vocab_size`.
+Son graphe lit aussi `mag` et `mod`, chacun de taille `d_model`. La forme map
+doit les fournir explicitement, avec des zéros si vous ne les utilisez pas.
 
 > **Conseil :** privilégiez toujours la forme **map**, même pour un seul tenseur d'entrée. Elle rend vos scripts compatibles avec les architectures multi-input sans modification.
 
@@ -230,6 +254,11 @@ Applique une étape SGD, Adam, AdamW, Lion, Adafactor, RAdam, NAdam, RMSprop
 ou LAMB. L'état de l'optimiseur est conservé entre les appels et peut être
 inclus dans un checkpoint.
 
+Le nom d'optimiseur est pris en compte lors de la création de son état. Passer
+un autre nom aux appels suivants ne remplace pas l'état déjà chargé ou créé.
+`get_gradients() -> table<float> | (nil, err)` expose les gradients aplatis dans
+l'ordre des couches, poids puis biais pour chaque couche.
+
 ---
 
 ### `Mimir.Model.zero_grads()`
@@ -251,7 +280,10 @@ Mimir.Model.train(epochs: int, lr: number)
     -> (true, step_global: int) | (false, string)
 ```
 
-Lance la boucle d'entraînement complète. Le comportement exact dépend de l'architecture : certains modèles, notamment VAEConv, ont des chemins dédiés dans `LuaScriptingModelAndRegistry.cpp`. Les fonctions mathématiques d’un step VAE vivent dans `Model.cpp`.
+Lance la boucle d'entraînement complète. Le comportement exact dépend de
+l'architecture : des chemins dédiés vivent dans `LuaScriptingModelAndRegistry.cpp`
+et les contrats natifs `trainStep`. Le step VAE est implémenté dans
+`src/Models/VAETraining.cpp`.
 
 **Prérequis :** le dataset doit être chargé avant cet appel (`Mimir.Dataset.load()`).
 
@@ -261,6 +293,41 @@ assert(Mimir.Model.train(50, 1e-4))
 ```
 
 > **Note :** si le processus reçoit `Ctrl+C` pendant l'entraînement, Mímir effectue un checkpoint d'interruption propre avant de terminer (si `cfg.checkpoint_dir` est défini).
+
+## API native du modèle causal
+
+Ces méthodes exigent le modèle courant `causal_lm`. La préparation, le sampler,
+la validation et la génération sont implémentés par `CausalLMModel` ; le script
+d'entraînement configure ces méthodes natives.
+
+| Appel | Retour et rôle |
+| --- | --- |
+| `causal_lm_prepare_corpus(path, tokenizer_path="", bpe_merges=1000, seed=1337)` | `(true, stats)` ou `(false, err)` ; prépare le corpus et son tokenizer **avant allocation** |
+| `causal_lm_train(steps, lr, seed=1337)` | `(true, completed)` ou `(false, err)` ; `steps` est la cible globale de pas optimiseur, `completed` le nombre effectué pendant cet appel |
+| `causal_lm_generate(prompt, opts?)` | texte ou `(nil, err)` ; génération autorégressive |
+| `causal_lm_chat(message, memory_path="", opts?)` | texte ou `(nil, err)` ; conversation avec historique géré par le modèle |
+| `causal_lm_reset_memory(memory_path="")` | `true` ou `(false, err)` |
+| `causal_lm_memory_size(memory_path="")` | nombre de tours ou `(nil, err)` |
+
+Les statistiques de préparation comprennent `samples`, `tokens`, `dataset_samples`,
+`validation_samples`, `validation_tokens`, `validation_holdout`, `validation_source`,
+`vocab_size`, `vocab_capacity`, `bpe_merges`, `tokenizer_reused` et
+`tokenizer_bpe_updated`. Charger un tokenizer déjà étudié ne demande pas à lui
+seul un nouvel apprentissage de merges. Les modes de reconstruction explicite
+restent configurables dans le [guide causal](../02-User-Guide/12-Transformer-GPT.md#tokenizer).
+
+Options de génération : `max_new_tokens=128`, `top_k=40`, `temperature=0.8`,
+`top_p=0.95`, `seed=1337`, `stop_id=-1`, `use_memory=true`, `system_prompt=""`.
+Le contexte d'inférence s'adapte au prompt et au budget de génération ; sa taille
+reste soumise à la mémoire et au coût du calcul. `seq_len` définit la fenêtre
+d'entraînement, sans promettre un contexte physiquement illimité.
+
+L'entraînement publie la cross-entropy, la perplexité et la précision du prochain
+token dans les moniteurs. La validation se configure notamment avec
+`validate_every_steps` et `validate_items`. Pour la reprise, utilisez le script
+officiel qui reconstruit la topologie du checkpoint, charge tokenizer et état
+optimiseur puis conserve son compteur global ; un simple rechargement des poids
+ne restaure pas à lui seul la boucle Lua.
 
 ## Recon-Loss supportées (état actuel)
 
@@ -307,7 +374,7 @@ Selon le type choisi, ces clés de config peuvent s'appliquer :
 
 ```
 Mimir.Model.dtype()             -> string
-Mimir.Model.dtype(dtype: string) -> true | (false, string)
+Mimir.Model.dtype(dtype: string) -> (true, dtype) | (false, string)
 ```
 
 Lit ou fixe le **dtype par défaut** du modèle. Ce dtype est utilisé notamment lors de la sérialisation pour déterminer le format de stockage des poids.
@@ -338,6 +405,24 @@ assert(ok, err)
 
 ---
 
+## AMP et calcul distribué
+
+`set_autocast() -> string` lit le dtype de calcul autocast ;
+`set_autocast(dtype) -> (true, dtype) | (false, err)` accepte `float32`, `float16`
+et `bfloat16` (et leurs alias flottants). Les deux derniers nécessitent un build
+avec `ENABLE_AMP=ON`. Ce réglage est distinct du dtype de stockage des poids ;
+la couverture numérique dépend du runtime et de l'opération.
+
+`Mimir.Distributed` expose `initialize()`, `shutdown()`, `rank()`, `world_size()`,
+`is_main_process()` et `barrier()`. Les opérations de cycle de vie/barrière
+retournent `true` ou `(false, err)` ; les accesseurs retournent un entier ou un
+booléen. `initialize` exige `ENABLE_MPI=ON` et une implémentation MPI C++ ; il ne
+lance pas d'autres processus. Utilisez le lanceur MPI pour un groupe de plusieurs
+rangs. Sans initialisation, les accesseurs décrivent le rang local 0 de taille 1.
+
+`Mimir.Benchmark.now() -> number` fournit l'horloge monotone en secondes utilisée
+par les scripts de mesure.
+
 ## Matériel
 
 ### `Mimir.Model.hardware_caps()`
@@ -346,7 +431,10 @@ assert(ok, err)
 Mimir.Model.hardware_caps() -> table
 ```
 
-Retourne une table avec les capacités matérielles détectées sur le CPU courant :
+Retourne une table de capacités matérielles : flags CPU `avx2`, `fma`, `f16c`,
+`bmi2`, sous-table `simd` avec l'ISA sélectionnée et les variantes SSE/AVX/AVX512,
+ainsi que les états `tpu` et `fpga`. Ces états décrivent une détection/session,
+sans certifier que chaque couche du modèle s'exécute sur ce matériel.
 
 ```lua
 local caps = Mimir.Model.hardware_caps()
@@ -358,7 +446,7 @@ print(caps.avx2, caps.fma, caps.f16c, caps.bmi2)
 ### `Mimir.Model.set_hardware(enabled)`
 
 ```
-Mimir.Model.set_hardware(enabled: bool)
+Mimir.Model.set_hardware(enabled: bool) -> true
 ```
 
 Active ou désactive les optimisations matérielles CPU (SIMD, etc.). Désactiver peut être utile pour déboguer des résultats numériques.
@@ -370,11 +458,13 @@ Active ou désactive les optimisations matérielles CPU (SIMD, etc.). Désactive
 ```lua
 -- 1. Configuration
 local cfg = {
-    seq_len    = 128,
-    d_model    = 256,
-    num_layers = 4,
+    seq_len    = 8,
+    d_model    = 32,
+    num_layers = 2,
     num_heads  = 4,
-    vocab_size = 8192,
+    mlp_hidden = 64,
+    vocab_size = 128,
+    output_dim = 16,
     causal     = true,
 }
 
@@ -390,8 +480,13 @@ assert(Mimir.Model.init_weights("he", 0))
 local ids = {}
 for i = 1, cfg.seq_len do ids[i] = math.random(0, cfg.vocab_size - 1) end
 
-local output, err = Mimir.Model.forward({ __input__ = ids }, false)
+local zeros = {}
+for i = 1, cfg.d_model do zeros[i] = 0.0 end
+local output, err = Mimir.Model.forward({
+    __input__ = ids, mag = zeros, mod = zeros,
+}, false)
 assert(output, err)
+assert(#output == cfg.output_dim)
 print(string.format("Sortie : %d flottants", #output))
 ```
 
@@ -405,20 +500,26 @@ print(string.format("Sortie : %d flottants", #output))
 Mimir.Model.infer(prompt: string) -> string | nil
 ```
 
-Chemin d'inférence historique (texte → texte). Pour les nouveaux scripts,
-utilisez `forward()` avec le contrat d'entrée propre à l'architecture.
+Chemin historique avec résultats de remplacement dans certains cas, sans
+contrat de génération autorégressive. Pour le causal, utilisez
+`causal_lm_generate` ou `causal_lm_chat` ; pour les autres modèles, utilisez
+`forward()` avec leur contrat d'entrée.
 
 ---
 
 ## Calibration par feedback de validation
 
-Quand la validation est activée, Mímir peut automatiquement ajuster le learning rate effectif en fonction de l'évolution de la métrique de validation. Ce mécanisme de **récompense/punition** est décrit en détail dans [Entraînement — Calibration](../02-User-Guide/04-Training.md#calibration-par-feedback-de-validation).
+Les chemins de validation de `Model.train()` peuvent ajuster le learning rate
+effectif. Le contrôleur VAE possède une politique dédiée, distincte du feedback
+générique décrit ci-dessous. Ce réglage n'active pas la validation et ne
+s'applique pas automatiquement à toute boucle d'entraînement. Voir
+[Entraînement — Calibration](../02-User-Guide/04-Training.md#calibration-par-feedback-de-validation).
 
 ### Paramètres dans `modelConfig`
 
 | Paramètre | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `val_feedback_enabled` | bool | `false` | Active le mécanisme |
+| `val_feedback_enabled` | bool | `true` | Active le mécanisme quand ce chemin effectue une validation |
 | `val_reward_factor` | float | `1.05` | Multiplicateur LR si amélioration |
 | `val_penalty_factor` | float | `0.70` | Multiplicateur LR si dégradation |
 | `val_lr_scale_min` | float | `0.10` | Borne inférieure du multiplicateur cumulé |
@@ -434,10 +535,12 @@ Un facteur `val_lr_scale` (initialement `1.0`) est appliqué en permanence au le
 lr_effectif = lr_base × val_lr_scale
 ```
 
-Après chaque validation :
-- Si `métrique_actuelle < meilleure_métrique × (1 - val_improve_thresh)` → **récompense** : `val_lr_scale × val_reward_factor`
-- Sinon → **pénalité** : `val_lr_scale × val_penalty_factor`
-- Dans les deux cas, le résultat est clampé dans `[val_lr_scale_min, val_lr_scale_max]`
+Le premier point initialise la référence. Ensuite, le feedback générique
+récompense une amélioration relative dépassant `val_improve_thresh`, pénalise
+une dégradation dépassant ce seuil et ne change rien sur un plateau. La
+récompense borne le facteur par `val_lr_scale_max` et la pénalité par
+`val_lr_scale_min`. Le contrôleur VAE prend aussi en compte la reconstruction
+et le KL ; sa politique n'est pas résumée par cette seule comparaison.
 
 ```lua
 -- Exemple : feedback agressif

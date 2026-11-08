@@ -18,11 +18,12 @@ Pour la référence complète (formats, options, comportements), voir :
 ## Formats
 
 - SafeTensors : format “production” (interop avec écosystème HF)
-- RawFolder : debug (dossiers + checksums)
-- DebugJson : inspection (statistiques + snapshot framework_state en v1.3)
+- RawFolder : checkpoint natif en dossiers, utilisé aussi pour les reprises
+- DebugJson : inspection (statistiques + snapshot `framework_state`, format enrichi v1.4)
 
 MPK n’est pas un format de checkpoint de `Mimir.Serialization` : il transporte
-une architecture et sa configuration, sans poids. Voir
+une architecture et sa configuration, sans poids. Cette voie reste expérimentale
+et partielle pour la production. Voir
 [MPK : packages d’architecture](../02-User-Guide/15-MPK.md).
 
 ## API Lua (résumé)
@@ -35,6 +36,11 @@ Les fonctions sont exposées sous `Mimir.Serialization`.
 | `Mimir.Serialization.load(path)` | charge un checkpoint | `Mimir.Serialization.load("checkpoint/run1.safetensors")` |
 | `Mimir.Serialization.detect_format(path)` | détecte le format | `Mimir.Serialization.detect_format("...")` |
 | `Mimir.Serialization.save_enhanced_debug(path)` | écrit un debug JSON enrichi (v1.3: inclut `framework_state`) | `Mimir.Serialization.save_enhanced_debug("debug.json")` |
+
+Pour reprendre l'optimiseur, utilisez explicitement `save_optimizer=true` puis
+`load_optimizer=true` dans les tables d'options ; leurs défauts sont `false`.
+La topologie et le tokenizer doivent rester ceux du checkpoint. Les scripts
+d'entraînement gèrent en plus les curseurs, schedules et états propres au modèle.
 
 ## Bonnes pratiques
 

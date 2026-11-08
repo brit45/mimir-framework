@@ -11,12 +11,15 @@ Le monitoring Mímir repose sur 2 interfaces complémentaires :
 
 En pratique, les deux passent par `AsyncMonitor`, qui met à jour l'UI sans bloquer l'entraînement.
 
+La [projection 3D des poids et activations](../02-User-Guide/18-Projection-3D.md)
+utilise le graphe courant de toute architecture native ou personnalisée.
+
 Les options CLI communes sont indépendantes :
 
 ```bash
-./bin/mimir --lua script.lua -- --viz          # Viz uniquement
-./bin/mimir --lua script.lua -- --htop         # Htop uniquement
-./bin/mimir --lua script.lua -- --viz --htop   # Viz et Htop
+./run_mimir.sh --lua script.lua -- --viz          # Viz uniquement
+./run_mimir.sh --lua script.lua -- --htop         # Htop uniquement
+./run_mimir.sh --lua script.lua -- --viz --htop   # Viz et Htop
 ```
 
 Avec le flag `--htop`, l'interface terminal est préparée immédiatement mais
@@ -38,6 +41,13 @@ ainsi visibles jusqu'à la fin de l'initialisation. Viz démarre immédiatement.
 - `clear()`
 - `enable(bool)`
 
+`create` accepte aussi une table : `enable_htop=true`, `enable_viz=false`,
+`defer_htop=false`, `viz_config={...}`, ainsi que les options CSV décrites
+ci-dessous. `update` accepte une table de métriques ; les appels positionnels
+historiques restent compatibles. Ce sont les chemins natifs d'entraînement qui
+publient les métriques spécifiques au modèle, pas une introspection automatique
+de n'importe quelle table passée à `update`.
+
 État réel des méthodes de cycle de vie : `create()` démarre `AsyncMonitor`,
 `render()` est conservée pour compatibilité mais le rendu est automatique, et
 `enable(false)` arrête le monitor. `enable(true)` ne redémarre pas un monitor
@@ -49,6 +59,11 @@ et l’écriture CSV actifs ; htop peut la rouvrir. Le CSV existant est relu au
 démarrage pour restaurer le graphe, puis les nouvelles métriques sont ajoutées
 sans effacer l’historique. Les options `csv`, `csv_enabled`, `csv_path` et
 `csv_file` de `Htop.create()` configurent cet export commun.
+
+Le CSV possède un schéma commun fixe. Les métriques supplémentaires affichées
+dans **Métriques du modèle** ne deviennent pas automatiquement des colonnes CSV.
+Par exemple, les diagnostics posterior de VAEConv sont transmis à HTOP et à la
+Viz par son contrat natif, mais ne sont pas ajoutés au CSV commun.
 
 ### Graphe du modèle dans HTOP
 
@@ -112,16 +127,184 @@ Le choix de l’hôte graphique conserve cette API. Voir [Configurer le backend 
 - `set_validation(state)`
 - `validation_enabled()`
 
-`initialize()` vérifie que la fenêtre existe et est ouverte. `process_events()`
-et `update()` sont des fonctions de compatibilité : `AsyncMonitor` exécute déjà
-ces opérations sur le thread Viz. De même, `add_loss_point()` est un no-op ;
-`update_metrics()` alimente l'historique. `set_enabled(false)` arrête le monitor,
-mais `set_enabled(true)` ne le redémarre pas : utiliser `create()`.
+`initialize()` vérifie que la fenêtre existe et est ouverte.
+`process_events()` est conservée pour compatibilité : les événements sont déjà
+traités par `AsyncMonitor`. `update()` relie le modèle courant au contrôle 3D et
+sert sur le thread Lua une demande de capture ou une actualisation du mode
+**Temps réel** arrivée à échéance ; le rendu reste asynchrone. Sans demande et
+avec ce mode désactivé, cet appel ne force pas de capture.
+
+`add_loss_point()` est un no-op ; `update_metrics()` alimente l'historique.
+`set_enabled(false)` arrête le monitor, mais `set_enabled(true)` ne le redémarre
+pas : utiliser `create()`.
 
 ### Démarrage / activation
 
 - En script/JSON : active la visualisation via la config du run (`visualization.enabled=true`).
 - En C++ : instancie `Visualizer`, puis `initialize()`, ensuite boucle `process_events()` + `update()`.
+
+### Masquer et rouvrir les sections
+
+Dans la vue principale, un **clic droit** ouvre la boîte **Gérer les sections**,
+même si tous les panneaux ont été fermés. Les sept cases correspondent aux
+panneaux de la Viz et reprennent leurs noms actuels, y compris ceux définis par
+un script. Cocher une case rouvre le panneau ; la décocher le masque.
+**Tout afficher** rouvre les sept panneaux.
+
+Les choix s'appliquent immédiatement et sont mémorisés dans la dernière
+disposition de `viz_ui_settings.json`. Les positions et tailles sont conservées ;
+un panneau rouvert est ramené dans les limites de la fenêtre si nécessaire.
+Hors de la boîte, les slots restent accessibles avec `S` + `0–9` pour sauvegarder
+et `0–9` pour charger. Ces actions concernent l'interface et ne changent ni les
+paramètres du modèle ni l'état de pause de l'entraînement.
+
+Dans la boîte, `↑`/`↓` ou `Tab` sélectionnent une ligne et `Espace`/`Entrée`
+l'active. La molette parcourt la liste lorsque la fenêtre est trop petite.
+**Fermer**, la croix, `Échap` ou un clic extérieur ferment la boîte en conservant
+les choix. Les événements de la boîte ne déclenchent pas les contrôles situés
+dessous.
+
+Le zoom et les autres boîtes gardent leurs commandes propres. Dans le picker
+d'un tenseur zoomé, le clic droit continue d'effacer la sélection ; quitter
+d'abord le zoom avec `Échap` pour accéder à la gestion des sections.
+
+### Projection 3D du modèle courant
+
+Le bouton **Générer la projection 3D** de **Pilotage** ouvre le nuage du modèle
+actif. Nom, architecture, familles de vecteurs et dimensions viennent de la
+capture effective. Après une première projection, le bouton permet de
+l'afficher ou de l'actualiser.
+
+Dans le mode structurel des poids, la case **Temps réel** de l'en-tête de la vue
+3D est désactivée par défaut.
+Cochée avec la vue ouverte, elle déclenche des captures aux points sûrs du modèle,
+avec un intervalle d'au moins 250 ms en fonctionnement continu. La capture et
+l'ACP du modèle courant terminent avant la prochaine capture automatique. Fermer la vue
+ou décocher la case suspend ces captures ; la préférence est conservée à la
+réouverture et au changement de modèle. Le libellé **Selon les étapes du modèle**
+indique que la cadence dépend aussi du calcul du modèle.
+
+La capture est commune à `Model` : filtres Conv1d/2d/3d/4d, matrices linéaires,
+embeddings, normalisations, récurrence, paramètres génériques et activations
+disponibles. Les poids partagés sont dédupliqués. Elle utilise au maximum 512
+vecteurs, 262 144 valeurs FP32 au total et 2 048 valeurs par fenêtre de vecteur.
+Ces bornes portent sur les valeurs copiées, pas sur toute la mémoire du worker.
+
+Une demande est servie après une mise à jour d'optimiseur, après un forward avec
+`training=false`, ou par `Viz.update()`. En pause, elle attend le prochain appel
+sur le thread du modèle. La fin de `Model.train()` publie une capture finale
+quand la Viz existe. Pour actualiser après l'entraînement, conserver une boucle
+Lua qui appelle `Viz.update()` et `Viz.poll_events(50)`.
+
+Le worker calcule l'ACP sur des copies immuables. Les échantillons sont
+normalisés, complétés par des zéros lorsque leurs dimensions individuelles
+diffèrent, puis centrés ; une échelle commune conserve les proportions des trois
+axes. Cette projection structurelle ne suppose pas un espace sémantique commun
+à toutes les couches. Un changement de modèle invalide les anciennes captures,
+y compris les résultats d'un calcul encore en cours.
+
+La case **Répartition des neurones**, désactivée par défaut, affiche les unités
+et canaux du graphe effectif, avec ses vraies dépendances. L’axe X suit la
+profondeur du routage ; Y et Z disposent les unités par couche. Cette vue
+topologique n’utilise pas l’ACP. Les marqueurs précisent leur nature et les
+opérations de largeur inconnue sont identifiées sans faux compte de neurones.
+La capture est bornée à 4 096 points et 8 192 liens structurels agrégés, avec
+comptes totaux connus et échantillonnés distincts. Ces liens indiquent le routage
+entre couches ; ils n’expriment pas une intensité de poids apprise.
+La capture manuelle et **Temps réel** suivent les points sûrs du mode des poids.
+Ce mode, **Poids actifs (DL)** et **Corrélations du corpus** sont exclusifs ;
+décocher ces modes revient au nuage des vecteurs.
+
+La case **Poids actifs (DL)**, désactivée par défaut, ouvre une vue topologique
+stable des coefficients réels et active **Temps réel**. Cyan/orange/gris
+distinguent les signes positif/négatif/nul ; épaisseur et luminosité indiquent
+l’amplitude. La variation entre captures de même identité souligne les
+coefficients modifiés, avec les étapes d’optimiseur comparées. La première
+capture n’a pas encore de référence de variation. Les correspondances de
+paramètres fiables sont rendues comme liens pondérés ; les autres coefficients
+restent des marqueurs de paramètres identifiables dans leur couche.
+La capture garde au plus 2 048 coefficients, avec un rendu limité à 4 096 points,
+2 048 liens pondérés et 1 024 flux structurels de contexte. Un changement de
+mode, modèle ou schéma invalide les références de variation.
+La capture suit les points sûrs, après mise à jour des poids pendant
+l’entraînement, sans forward supplémentaire ni chargement de bloc froid.
+La cadence automatique reste bornée à 250 ms ; **Temps réel** décoché fige la
+vue après la capture éventuellement en cours. Le signe d’un poids et sa
+variation décrivent les paramètres ; le mode des corrélations observe les
+activations.
+
+La case facultative **Corrélations du corpus** remplace ce nuage par des
+composantes d’activations internes observées après les forwards réels. Après au
+moins huit observations et deux composantes variables, les liens montrent les
+coefficients de Pearson calculés avant l’ACP : cyan positif, orange négatif.
+Le seuil `|r|` et **Effacer** pilotent le diagnostic. **Tous les candidats valides**
+affiche toutes les paires calculées avec `|r| ≥ 0,30`, jusqu’à 8 128 liens,
+au lieu des 512 plus forts filtrés par le seuil visuel. Décocher cette case
+rétablit le seuil précédent ; le choix est conservé dans les exports 3D.
+La fenêtre garde au plus
+128 observations et 128 composantes ; elle échantillonne les entrées parcourues
+pendant l’activation, sans relire le corpus ni lancer de forward supplémentaire.
+Dans ce mode, **Temps réel** actualise la projection ; la collecte continue
+tant que la vue et le mode sont ouverts. Le premier graphe calculable apparaît
+automatiquement. Les compteurs distinguent la collecte du graphe affiché et
+indiquent sa provenance entraînement/inférence.
+
+Dans la vue : glisser pour tourner, molette pour zoomer, `R` pour rétablir le
+cadrage, survol pour inspecter et `Échap` pour fermer. Les marqueurs sont limités
+au canevas ; la légende reste hors de cette zone.
+
+Le bouton **Exporter 3D**, ou `X` avec la vue 3D ouverte, sauvegarde la dernière
+projection affichée dans un nouveau dossier
+`exports/graph_3d_<mode>_step_<step>_<horodatage>/`. Le dossier contient `vue.png`
+(cadrage courant), `graph.json` (points, liens, valeurs et métadonnées) et
+`graph.html` (rotation, zoom et survol dans un navigateur, hors ligne et sans
+CDN). L'interface affiche le chemin du HTML. Les quatre modes sont pris en charge.
+L'export garde l'échantillon complet
+de la projection, sa caméra, son seuil et ses identifiants de capture ; il ne
+relit pas le modèle actif. Les valeurs des poids actifs restent celles de la
+capture exportée, même si l'entraînement continue. Aucun checkpoint complet
+ni historique futur n'est inclus.
+
+En C++, un `Visualizer` isolé ne branche pas automatiquement les poids : le
+contrôle d'`AsyncMonitor` doit être associé à `Model`. Les wrappers Lua font ce
+branchement à la création, au rechargement et aux points d'exécution communs.
+Voir le [guide complet et son exemple sans dataset](../02-User-Guide/18-Projection-3D.md)
+et le [pipeline interne](../04-Architecture-Internals/04-Monitoring-Htop-Visualizer.md#projection-3d-du-modèle-courant).
+
+### Rapport HTML du run
+
+Dans **Pilotage**, **Générer le rapport HTML** lance
+`scripts/tools/show-graph.lua` en arrière-plan. Le modèle, l'optimiseur, les
+réglages de validation et le dossier de sortie viennent de la configuration
+active. Le générateur reçoit `--strict-context` et un snapshot des métriques du
+moniteur ; il ne complète pas les champs absents avec la configuration d'un
+autre modèle. Un checkpoint RawFolder complet du dossier courant est transmis
+s'il est disponible.
+
+Le rapport produit `<modèle>_graph_report.html`, `<modèle>_graph_report.md`,
+`<modèle>_graph_metrics.csv` et un journal dans le dossier de checkpoints du run.
+L'interface affiche l'état puis le chemin du HTML ; ouvrez ce fichier dans un
+navigateur. Avant la première métrique, la génération ne dispose pas encore de
+données et signale cette absence. Le bouton permet ensuite de régénérer le
+rapport avec un nouveau snapshot, sans arrêter l'entraînement.
+
+### Statistiques lisibles et métriques du modèle
+
+Dans le **TIP INSPECTOR**, chaque partie des **STATISTIQUES DU TENSEUR** possède
+son titre et son encadré : mode, contexte fourni, propositions top-1, accord et
+marges selon le contenu publié par le modèle. Les textes sont renvoyés à la
+ligne et accessibles à la molette, sans raccourcissement dans l'inspecteur. Les
+pixels colorisés restent décrits séparément des valeurs brutes du tenseur.
+Les panneaux réservent une marge aux barres de défilement afin de préserver
+l'accès aux contrôles.
+
+Le causal publie notamment `cross_entropy`, `perplexity`,
+`next_token_accuracy_pct`, les compteurs de tokens, la marge top-1/top-2 et les
+métriques de validation disponibles. La ligne **SIGNAL** suit son objectif de
+cross-entropy. VAEConv publie les statistiques de `mu`, `logvar`, de l'écart-type
+posterior et des gradients de sa tête `logvar` ; la mesure d'échantillonnage
+latent est absente si son tenseur n'est plus disponible. Ces mesures décrivent
+les valeurs et gradients observés, sans attester une compréhension sémantique.
 
 ### Contrôles clavier (UI)
 
@@ -136,6 +319,8 @@ mais `set_enabled(true)` ne le redémarre pas : utiliser `create()`.
 - Dans le graphe : flèches ou molette pour naviguer, clic sur un nœud pour
   afficher ses détails, `R` pour revenir à l’origine et `X` pour exporter le
   graphe complet en PNG.
+- Dans la vue 3D : `R` rétablit le cadrage ; `X` exporte la projection affichée
+  en PNG, JSON et HTML interactif autonome.
 - `E` : ouvre la boîte de sélection du snapshot PNG.
 - `Tab`, `F1..F5`, `←/→` : navigation focus/éléments.
 - `Z`/`Entrée` : zoom, `Esc` : quitter zoom.
@@ -368,15 +553,31 @@ widgets Qt/GTK natifs.
 ### Éditeur d'image VAEConv
 
 ```bash
-./bin/mimir --lua scripts/inferences/edit_vae_conv.lua -- \
+./run_mimir.sh --lua scripts/inferences/edit_vae_conv.lua -- \
   --checkpoint checkpoint/vae/epoch_0010 \
   --input photo.ppm --output outputs/edition.ppm
 ```
 
-Le script accepte un checkpoint **raw_folder** `vae_conv` entraîné et une image
-PNG/JPEG/BMP ou PPM P3/P6 RGB. La géométrie provient du checkpoint.
+Le script accepte un checkpoint `vae_conv` entraîné en **raw_folder** ou en
+**SafeTensors natif**, et une image PNG/JPEG/BMP ou PPM P3/P6 RGB. Il partage
+`scripts/modules/vae_conv_inference.lua` avec `infer_vae_conv.lua` : la
+configuration et les couches sauvegardées déterminent la géométrie et le
+graphe C++ construit par le registre. Pour un ancien SafeTensors sans
+architecture intégrée, `--config chemin/config_du_checkpoint.json` doit
+fournir la configuration exacte. `--format raw_folder|safetensors` et
+`--dtype float32|float16|bfloat16` sont également disponibles.
+
+Les graphes Conv2d, Conv3d et Conv4d conservent le même contrat image RGB HWC
+et latent CHW aplati ; les axes supplémentaires des modes ND sont singleton.
+`--conv-mode 2d|3d|4d` vérifie le mode du checkpoint et refuse une valeur
+incompatible. L’upsampling, les normalisations, le contexte spatial et le
+chemin de détails latents sont repris du graphe sauvegardé, sans activer de
+nouvelles branches sur un ancien checkpoint. La résolution native de
+`conv_transpose` en `nearest_conv` pour les modes ND reste appliquée.
+
 Les formats PNG/JPEG/BMP utilisent le chargement RGB natif Mímir avec
-redimensionnement bicubique ; le PPM utilise le voisin le plus proche si nécessaire. Il encode la moyenne latente, charge
+redimensionnement bicubique ; le PPM utilise le voisin le plus proche si nécessaire. Le script sélectionne directement
+`vae_conv/mu` en inférence déterministe, charge
 `vae_conv_decode`, puis permet de décaler un canal latent, mélanger le résultat
 avec la source, réinitialiser et enregistrer en PPM. La source et le dernier
 résultat sont présentés côte à côte ; `Z` agrandit l'image sélectionnée.
@@ -386,6 +587,12 @@ normalisés indépendamment pour rendre leur structure spatiale inspectable.
 l'éditeur. Le script utilise un sélecteur système (`zenity`, `kdialog` ou `yad`)
 s'il est disponible ; sinon, le chemin peut être saisi directement dans la Viz
 et validé avec `Entrée`.
+
+La galerie et les décalages de canaux portent sur la moyenne `mu`, avant
+ajout du prior, avec le même ordre CHW que le RAW de `infer_vae_conv.lua`
+(float32 little-endian sans en-tête). Si `use_encoder_prior=true`, son biais
+appris est ajouté à une copie du latent avant le forward du décodeur ; il ne
+modifie pas les valeurs affichées dans la galerie.
 
 Ces modifications latentes ne sont pas des commandes sémantiques et leur effet
 dépend de l'entraînement. Le décodeur autonome utilise des skips encodeur nuls
@@ -397,8 +604,10 @@ remplacés à chaque enregistrement.
 
 `--headless --strength 0.2 --channel 1 --mix 0.8` calcule et enregistre une fois,
 sans interface. `--help` détaille les options sans charger de modèle. Le script
-vérifie la présence et la taille des poids requis avant de charger le décodeur
-partiel ; il ne modifie ni les poids ni le checkpoint.
+vérifie la présence et la taille de tous les poids requis avant le forward,
+y compris pour le décodeur partiel. Une topologie incompatible ou un poids
+manquant produit une erreur explicite ; le script ne modifie ni les poids ni
+le checkpoint.
 
 
 ### Préparer une inférence Lumen dans Viz

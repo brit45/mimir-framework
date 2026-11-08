@@ -1,131 +1,105 @@
 # Parcours complet du framework
 
-Apprendre le framework de bout en bout avec un chemin guide qui couvre la compilation, les donnees, les modeles, l'entrainement, l'inference, les checkpoints, le scripting, le runtime et l'extension du code.
+Ce parcours couvre les principaux aspects de Mímir, du lancement d'un modèle
+natif à la contribution au moteur. Il sert de carte de travail : chaque thème
+renvoie à un atelier progressif, avec un résultat concret et ses prérequis.
 
-**Public concerné :** - Debutants qui veulent une vue d'ensemble concrete.
-- Utilisateurs intermediaires qui veulent passer d'un test simple a un workflow complet.
-- Contributeurs qui veulent comprendre ou se situe chaque piece du framework.
+## Poser les responsabilités
 
-> **Prérequis**
->
-> 1. Compiler Mimir.
-> 2. Verifier le smoketest.
-> 3. Ouvrir les pages de reference si besoin:
-> - [docs/00-Framework-Philosophy.md](../00-Framework-Philosophy.md)
-> - [docs/01-Getting-Started/00-GET-STARTED.md](../01-Getting-Started/00-GET-STARTED.md)
-> - [docs/02-User-Guide/01-Core-Concepts.md](../02-User-Guide/01-Core-Concepts.md)
+Le graphe DL doit être défini en C/C++ dans une **classe héritant de `Model`**.
+La configuration et l'exécution appartiennent à Lua, JSON et aux autres bridges.
+Le seul autre moyen de décrire une architecture est **MPK**, encore expérimental
+et pas encore entièrement exploitable en production. Le chargement d'un package
+ne démontre pas l'équivalence de sa reconstruction avec un modèle natif.
 
-## Vue d'ensemble
+Lisez le [contrat des architectures](../07-Devs/08-Architecture-Contract.md)
+avant de commencer un modèle ou de convertir une structure existante.
 
 ![Vue d'ensemble du framework](../graphs/00_framework_overview.svg)
 
-![Architecture en couches](../graphs/01_layered_architecture.svg)
+## Choisir la profondeur de travail
 
-## Parcours recommande
+| Niveau | Travail attendu | Validation |
+| --- | --- | --- |
+| Débutant | Exécuter une commande, reconnaître modèle/config/données | Un résultat et un log expliqués |
+| Autonome | Changer un paramètre, sauvegarder et reproduire un run | Même configuration et résultat de référence |
+| Avancé | Adapter un workflow, évaluer et diagnostiquer | Mesures et checkpoint cohérents |
+| Expert | Ajouter une classe modèle, une opération ou un backend | Tests numériques, intégration et limites explicites |
 
-### 1. Demarrage et philosophie
+Vous n'avez pas besoin d'un GPU, d'un corpus externe ou d'une interface graphique
+pour les premières étapes. Chaque atelier indique quand ces ressources deviennent
+nécessaires.
 
-Commence par poser le cadre technique.
+## Couvrir les domaines dans l'ordre
 
-1. Lire [docs/00-Framework-Philosophy.md](../00-Framework-Philosophy.md).
-2. Lire [docs/01-Getting-Started/00-GET-STARTED.md](../01-Getting-Started/00-GET-STARTED.md).
-3. Suivre [docs/01-Getting-Started/01-Quick-Start.md](../01-Getting-Started/01-Quick-Start.md).
-4. Lancer [docs/01-Getting-Started/05-Smoketest.md](../01-Getting-Started/05-Smoketest.md).
+| Étape | Domaine | Atelier et résultat |
+| --- | --- | --- |
+| 1 | Installation, CLI et configuration | [Installation et configuration](10-Tuto-Installation-Configuration.md) : binaire utilisable et profil de lancement explicite |
+| 2 | Contrat du modèle, registre, lifecycle | [Le framework en trois étapes](01-Cours-Framework-3-Etapes.md) et [du registre au checkpoint](08-Tuto-Registre-Pipeline-Checkpoint.md) : instance native et sauvegarde lisible |
+| 3 | Données, modalités, annotations et BPE | [Données et tokenizer](11-Tuto-Donnees-Tokenizer.md) : entrées conformes et tokenizer compatible avec les checkpoints |
+| 4 | Entraînement, validation, reprise et inférence | [Cycle de travail complet](12-Tuto-Entrainement-Validation-Reprise-Inference.md) : run court, évaluation et continuation contrôlée |
+| 5 | MLP, vision, texte et diffusion | [Familles de modèles](13-Tuto-Familles-De-Modeles.md) : bon script et bon objectif pour une architecture donnée |
+| 6 | Viz, Htop, rapports et projection 3D | [Métriques et diagnostic](14-Tuto-Viz-Metriques-Diagnostic.md) : métriques identifiées et captures interprétées |
+| 7 | Mémoire, runtime, planner et performance | [Mémoire et performance](15-Tuto-Memoire-Performances-Runtimes.md) : mesure CPU de référence et comparaison attribuée au backend réel |
+| 8 | Build, portabilité, AMP et DDP | [Compilation et distribution](16-Tuto-Compilation-Portabilite-AMP-DDP.md) : options compilées et options de run distinguées |
+| 9 | Scripts, exports, tests et contribution | [Workflow de développement](17-Tuto-Scripting-Exports-Tests-Contribution.md) : artefact vérifié et validation reproductible |
+| 10 | Architectures C++ | [Ajouter un modèle](02-Tuto-Ajouter-Modele.md) : classe dérivée de `Model`, factory et test |
+| 11 | Layers, autograd et noyaux | [Ajouter une opération](05-Tuto-Ajouter-Op.md) : contrat de formes, calculs runtime et gradients vérifiés |
+| 12 | Backends et routage | [Ajouter ou modifier un runtime](04-Tuto-Modifier-Ou-Ajouter-Runtime.md) : choix du backend et repli explicites |
+| Option | Packages d'architecture expérimentaux | [Créer un MPK](09-Tuto-Creer-MPK.md) : spécification inspectée, avec limites de reconstruction documentées |
 
-### 2. Donnees et modalites
+## Atelier de départ sans dataset
 
-Apprends comment Mimir voit un dataset et comment il relie texte, image, audio et video.
+Réalisez le [tutoriel registre vers checkpoint](08-Tuto-Registre-Pipeline-Checkpoint.md)
+avec `basic_mlp`, puis le [test du VAE convolutionnel](07-Tuto-VAEConv-Sans-Dataset.md).
+Ces deux exercices permettent de comprendre allocation, poids, sauvegarde et
+vérifications ciblées avant d'ajouter des données réelles.
 
-1. Lire [docs/02-User-Guide/03-Data.md](../02-User-Guide/03-Data.md).
-2. Lire [docs/03-API-Reference/13-Dataset.md](../03-API-Reference/13-Dataset.md).
-3. Lire [docs/02-User-Guide/09-Memory.md](../02-User-Guide/09-Memory.md) pour le comportement mémoire et les évictions.
-4. Ne charger des données qu'après avoir vérifié le format attendu par le
-   script choisi. `Mimir.Dataset.get` expose principalement des chemins et des
-   métadonnées ; il ne constitue pas un décodeur multimédia générique.
+Consignez quatre observations : le nom de la classe native, la configuration
+utilisée, le nombre de paramètres et le résultat vérifié par le test. La présence
+d'un nom dans le registre ou d'une courbe dans Viz ne démontre pas à elle seule
+la qualité du modèle.
 
-### 3. Cycle de vie d'un modele
+## Passer à un workflow réel
 
-Comprenez le chemin moderne : `create` construit le graphe, `build` est un
-no-op de compatibilité, puis `allocate`, `init`, `forward` et `backward`
-exécutent le cycle du modèle.
+Choisissez une seule famille de modèle et son script spécialisé. Vérifiez :
 
-1. Lire [docs/02-User-Guide/02-Model-Lifecycle.md](../02-User-Guide/02-Model-Lifecycle.md).
-2. Lire [docs/03-API-Reference/01-Layers.md](../03-API-Reference/01-Layers.md).
-3. Lire [docs/03-API-Reference/11-Architectures.md](../03-API-Reference/11-Architectures.md).
-4. Lire [docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md](../03-API-Reference/20-Lua-API-Cpp-Mapping.md).
+1. le format et les prérequis des données ;
+2. la correspondance entre entrées, cibles et objectif ;
+3. la provenance du tokenizer et des éventuels sous-modèles gelés ;
+4. la séparation apprentissage/validation ;
+5. la sauvegarde des métadonnées et de l'état optimiseur ;
+6. le chargement en inférence avec la même topologie.
 
-### 4. Entrainement et inference
+Le guide des [modèles disponibles](../03-API-Reference/11-Architectures.md)
+et l'[état du projet](../00-PROJECT-STATUS.md) distinguent les chemins utilisables,
+partiels, expérimentaux et placeholders. Les composants T5, SD3.5, MPK ou FPGA
+ne doivent pas être supposés équivalents à un pipeline complet.
 
-Passe du build au run reproductible.
+## Étendre le framework
 
-1. Lire [docs/02-User-Guide/04-Training.md](../02-User-Guide/04-Training.md).
-2. Lire [docs/02-User-Guide/05-Inference.md](../02-User-Guide/05-Inference.md).
-3. Lire [docs/02-User-Guide/08-Checkpoints.md](../02-User-Guide/08-Checkpoints.md).
-4. Commencer par le tutoriel sans dataset
-   [du registre au checkpoint](08-Tuto-Registre-Pipeline-Checkpoint.md).
-5. Effectuer un entraînement seulement avec un script, un format de données et
-   une loss compatibles avec l'architecture.
+Une nouvelle architecture reste une classe dérivée de `Model`. Un nouveau layer
+reste un type de couche dont le calcul vit dans les runtimes. L'orchestration du
+modèle ne doit pas réimplémenter les kernels dans ses méthodes de description.
 
-### 5. Scripting et automatisation
-
-Utilise Lua pour piloter le framework sans toucher au C++.
-
-1. Lire [docs/02-User-Guide/06-Lua-Scripting.md](../02-User-Guide/06-Lua-Scripting.md).
-2. Lire [docs/02-User-Guide/08-Config-Driven-Scripting.md](../02-User-Guide/08-Config-Driven-Scripting.md).
-3. Tester un template dans [docs/08-Tuto/03-Tuto-Coder-Script.md](03-Tuto-Coder-Script.md).
-
-### 6. Runtime, memoire et performance
-
-Apprends ou le framework peut echouer ou ralentir.
-
-1. Lire [docs/04-Architecture-Internals/01-Engine-Overview.md](../04-Architecture-Internals/01-Engine-Overview.md).
-2. Lire [docs/04-Architecture-Internals/02-Memory.md](../04-Architecture-Internals/02-Memory.md).
-3. Lire [docs/04-Architecture-Internals/03-Hardware-Backends.md](../04-Architecture-Internals/03-Hardware-Backends.md).
-4. Lire [docs/05-Advanced/01-Performance.md](../05-Advanced/01-Performance.md) et [docs/05-Advanced/02-Debugging.md](../05-Advanced/02-Debugging.md).
-
-### 7. Extension du framework
-
-Quand il manque une piece, vous devez savoir la brancher proprement.
-
-1. Ajouter un modele avec [docs/08-Tuto/02-Tuto-Ajouter-Modele.md](02-Tuto-Ajouter-Modele.md).
-2. Modifier un runtime avec [docs/08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md](04-Tuto-Modifier-Ou-Ajouter-Runtime.md).
-3. Ajouter une OP avec [docs/08-Tuto/05-Tuto-Ajouter-Op.md](05-Tuto-Ajouter-Op.md).
-4. Lire [docs/06-Contributing/03-Extending-Models-Runtimes-And-Features.md](../06-Contributing/03-Extending-Models-Runtimes-And-Features.md).
-
-## Atelier pratique
-
-Suivez cette séquence sans dataset pour couvrir les blocs vérifiables :
-
-1. Compilez le projet.
-2. Lancez le smoketest.
-3. Inspectez `basic_mlp` dans le registre.
-4. Construisez-le avec `template_pipeline_args.lua`.
-5. Sauvegardez un checkpoint.
-6. Analysez ce checkpoint.
-7. Exécutez les tests registre et sérialisation.
-8. Lisez la section runtime si la mémoire ou la performance ne correspond pas
-   aux attentes.
-
-## Mini repere visuel
-
-![Carte des composants](../graphs/02_component_map.svg)
+Après chaque modification, choisissez le test qui correspond au comportement
+changé. Contrôlez les sorties et les gradients avant de mesurer une vitesse.
+Une preuve CPU, une compilation CUDA et une exécution GPU sont trois niveaux
+différents. Les tutoriels avancés indiquent leurs limites de validation.
 
 ## En cas de blocage
 
-- Si le probleme est conceptuel, reviens a la philosophie et au cycle de vie.
-- Si le probleme est runtime, regarde la memoire, les backends et le debugging.
-- Si le probleme est d'extension, passe par la couche contrib et les tutos pratiques.
-
-## Suite logique
-
-- Parcours numerote: [docs/08-Tuto/01-Cours-Framework-3-Etapes.md](01-Cours-Framework-3-Etapes.md)
-- Tuto modele: [docs/08-Tuto/02-Tuto-Ajouter-Modele.md](02-Tuto-Ajouter-Modele.md)
-- Tuto scripting: [docs/08-Tuto/03-Tuto-Coder-Script.md](03-Tuto-Coder-Script.md)
-- Tuto runtime: [docs/08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md](04-Tuto-Modifier-Ou-Ajouter-Runtime.md)
-- Tuto op: [docs/08-Tuto/05-Tuto-Ajouter-Op.md](05-Tuto-Ajouter-Op.md)
+| Problème | Première piste |
+| --- | --- |
+| Binaire ou dépendance introuvable | Installation, profil de build, répertoire courant |
+| API ou option inconnue | Aide du script et référence correspondant au checkout |
+| Formes incohérentes | Métadonnées de la classe, noms des tenseurs et format des données |
+| Checkpoint incompatible | Topologie, tokenizer, état optimiseur et options de reprise |
+| GPU lent ou non sélectionné | Trace du routeur, capacités par opération et temps de transfert |
+| MPK partiellement appliqué | Limites expérimentales et comparaison au graphe natif |
 
 ## Étapes suivantes
 
-- [Page précédente : Tuto - Ajouter une OPs](05-Tuto-Ajouter-Op.md)
-- [Index de la documentation](../00-INDEX.md)
-- [Page suivante : Tutoriel : valider VAEConv sans dataset](07-Tuto-VAEConv-Sans-Dataset.md)
+- [Catalogue des tutoriels](00-INDEX.md)
+- [Parcours par niveau](../01-Getting-Started/06-Learning-Paths.md)
+- [Guide développeur](../07-Devs/00-INDEX.md)

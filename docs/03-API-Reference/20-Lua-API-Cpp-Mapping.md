@@ -25,6 +25,8 @@ Le stub IDE synchronisé est `mimir-api.lua`.
 | `Mimir.Allocator` | allocateur dynamique | `lua_allocatorConfigure`, `lua_allocatorGetStats` |
 | `Mimir.Htop` | monitoring asynchrone | bindings `lua_htop*` |
 | `Mimir.Viz` | visualisation | bindings `lua_viz*` |
+| `Mimir.Distributed` | MPI, rangs et barrière | `lua_distributedInitialize`, `lua_distributedShutdown`, `lua_distributedRank`, `lua_distributedWorldSize`, `lua_distributedIsMainProcess`, `lua_distributedBarrier` |
+| `Mimir.Benchmark` | horloge monotone | `lua_benchmarkNow` |
 
 `Mimir.NeuroPulse`, `Mimir.visualiser` et le global `readImageRGBU8` ne sont pas
 enregistrés dans l'API actuelle.
@@ -34,18 +36,23 @@ enregistrés dans l'API actuelle.
 | Appel Lua | Binding C++ | Contrat synthétique |
 | --- | --- | --- |
 | `create(name, cfg?)` | `lua_createModel` | construit via le registre |
-| `create_empty(name, cfg?)` | `lua_createEmptyModel` | modèle vide pour graphe importé |
+| `create_empty(name, cfg?)` | `lua_createEmptyModel` | mécanisme bas niveau des tests et imports, pas une voie utilisateur de définition d’architecture |
 | `create_from_config(cfg)` | `lua_createModelFromConfig` | choisit l'architecture depuis une config complète |
 | `build()` | `lua_buildModel` | no-op moderne, retourne le nombre de paramètres |
 | `allocate_params()` | `lua_allocateParams` | `(true, count)` ou `(false, err)` |
 | `init_weights(method?, seed?)` | `lua_initWeights` | initialise les poids |
 | `get_layers()`, `clear_layers()` | `lua_getModelLayers`, `lua_clearModelLayers` | inspection/modification du graphe |
-| `push_layer(...)`, `set_layer_io(...)` | `lua_pushLayer`, `lua_setLayerIO` | construction nodale bas niveau |
+| `push_layer(...)`, `set_layer_io(...)` | `lua_pushLayer`, `lua_setLayerIO` | mécanismes internes/tests/import MPK expérimental ; architecture native définie dans une classe C++ dérivée de `Model` |
 | `forward(input, training?)` | `lua_forwardPass` | liste int/float ou tenseurs nommés |
 | `backward(gradient)` | `lua_backwardPass` | rétropropagation |
 | `zero_grads()`, `get_gradients()` | `lua_zeroGradients`, `lua_getGradients` | gestion des gradients |
 | `optimizer_step(lr, type?)` | `lua_optimizerStep` | SGD, Adam, AdamW, Lion, Adafactor, RAdam, NAdam, RMSprop ou LAMB |
 | `dtype()`, `dtype(name)` | `lua_modelDType` | lit/fixe le dtype du modèle |
+| `set_autocast()`, `set_autocast(dtype)` | `lua_modelAutocast` | lit/fixe le dtype AMP, distinct du stockage |
+| `get_config()` | `lua_modelGetConfig` | copie de la configuration courante |
+| `causal_lm_prepare_corpus(...)`, `causal_lm_train(...)` | `lua_causalLmPrepareCorpus`, `lua_causalLmTrainCorpus` | corpus/BPE et entraînement natifs du modèle causal |
+| `causal_lm_generate(...)`, `causal_lm_chat(...)` | `lua_causalLmGenerate`, `lua_causalLmChat` | génération et conversation natives |
+| `causal_lm_reset_memory(...)`, `causal_lm_memory_size(...)` | `lua_causalLmResetMemory`, `lua_causalLmMemorySize` | historique conversationnel |
 | `hardware_caps()`, `set_hardware(bool)` | `lua_getHardwareCaps`, `lua_setHardwareAccel` | capacités et activation matérielle |
 
 Les helpers `forward_prompt_image_seed`, `encode_prompt`, `get_optimizer`,
@@ -94,7 +101,11 @@ assert(decoded, err)
 
 Les options de chargement effectivement lues sont `load_tokenizer`,
 `load_encoder`, `load_optimizer`, `strict_mode`, `validate_checksums`,
-`mapping_json` et `tensor_mapping_json`.
+`mapping_json`, `tensor_mapping_json`, `apply_model_config`,
+et `load_layer_metadata`.
+
+`apply_model_name` et `metadata_only` sont des options C++ de `LoadOptions`,
+actuellement non lues par le binding Lua.
 
 ## Fonctions et alias globaux
 

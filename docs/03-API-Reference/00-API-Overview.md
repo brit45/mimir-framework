@@ -28,6 +28,8 @@ La specification officielle du contrat de scripting est ici: [docs/03-API-Refere
 - `Mimir.Layers` : inspection du graphe courant par type
 - `Mimir.Memory`, `Guard`, `MemoryGuard`, `Allocator` : gestion mémoire
 - `Mimir.Htop`, `Mimir.Viz` : monitoring
+- `Mimir.Distributed` : initialisation MPI, rang, taille et synchronisation
+- `Mimir.Benchmark` : horloge monotone pour mesurer les durées
 - Environnement : variables `MIMIR_*` runtime/bridge
 
 Pages de référence associées :
@@ -39,7 +41,7 @@ Pages de référence associées :
 - Mémoire : `docs/03-API-Reference/14-Memory.md`
 - Viz/Htop : `docs/03-API-Reference/15-Viz-Htop.md`
 - Sérialisation (détaillé) : `docs/03-API-Reference/16-Serialization.md`
-- Ops layers : `docs/03-API-Reference/18-Layers-Module.md`
+- Inspection des layers : `docs/03-API-Reference/18-Layers-Module.md`
 - Globals/aliases : `docs/03-API-Reference/19-Globals.md`
 - Mapping Lua ↔ C++ (sommaire) : `docs/03-API-Reference/20-Lua-API-Cpp-Mapping.md`
 - `Mimir.IO` (I/O images) : `docs/03-API-Reference/21-IO.md`

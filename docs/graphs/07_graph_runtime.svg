@@ -1,36 +1,148 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="620" viewBox="0 0 1700 620" role="img" aria-labelledby="title desc">
-<title id="title">Runtime de graphe</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1233" viewBox="0 0 1200 1233" role="img" aria-labelledby="title desc">
+<title id="title">Exécution du graphe et routage</title>
+<desc id="desc">La topologie native est définie dans une classe C++ dérivée de Model. Le plan contient les opérations, durées de vie et groupes. RuntimeRouter sélectionne un backend adapté aux entrées et lui délègue les calculs, en forward et backward. Sources : src/Model.cpp, src/Planning/Planner.hpp, src/runtimes/RuntimeRouter.cpp, src/runtimes/cpu/RuntimeLayerDispatch.hpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Model.cpp&quot;, &quot;src/Planning/Planner.hpp&quot;, &quot;src/runtimes/RuntimeRouter.cpp&quot;, &quot;src/runtimes/cpu/RuntimeLayerDispatch.hpp&quot;], &quot;related_docs&quot;: [&quot;docs/04-Architecture-Internals/01-Engine-Overview.md&quot;, &quot;docs/04-Architecture-Internals/22-Planning.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Runtime de graphe</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Chaque modèle est transformé en graphe exécutable avec planning et gestion des tenseurs.</text>
-<line x1="60" y1="112" x2="1640" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="236.66666666666666" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="188.33333333333331" y="265" class="label" text-anchor="middle">Graph IR</text>
-<text x="188.33333333333331" y="322" class="small" text-anchor="middle">nodes / edges</text>
-<rect x="334.66666666666663" y="240" width="236.66666666666666" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="452.99999999999994" y="265" class="label" text-anchor="middle">Planner</text>
-<text x="452.99999999999994" y="322" class="small" text-anchor="middle">ordre d’exécution</text>
-<path d="M306.66666666666663,295.0 L334.66666666666663,295.0" class="edgeB"/>
-<rect x="599.3333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="717.6666666666666" y="265" class="label" text-anchor="middle">Allocator</text>
-<text x="717.6666666666666" y="322" class="small" text-anchor="middle">tenseurs temporaires</text>
-<path d="M571.3333333333333,295.0 L599.3333333333333,295.0" class="edgeB"/>
-<rect x="863.9999999999999" y="240" width="236.66666666666666" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="982.3333333333333" y="265" class="label" text-anchor="middle">Execute</text>
-<text x="982.3333333333333" y="322" class="small" text-anchor="middle">opérations couches</text>
-<path d="M835.9999999999999,295.0 L863.9999999999999,295.0" class="edgeB"/>
-<rect x="1128.6666666666665" y="240" width="236.66666666666666" height="110" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1246.9999999999998" y="265" class="label" text-anchor="middle">Autograd</text>
-<text x="1246.9999999999998" y="322" class="small" text-anchor="middle">backward si requis</text>
-<path d="M1100.6666666666665,295.0 L1128.6666666666665,295.0" class="edgeB"/>
-<rect x="1393.333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1511.6666666666663" y="265" class="label" text-anchor="middle">Outputs</text>
-<text x="1511.6666666666663" y="322" class="small" text-anchor="middle">loss, logits, recon</text>
-<path d="M1365.3333333333333,295.0 L1393.333333333333,295.0" class="edgeB"/>
-<text x="1640" y="596" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1233" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Exécution du graphe et routage</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Le modèle orchestre ; le planner prépare ; les runtimes calculent.</tspan>
+</text>
+<path d="M 369.33,262.5 L 437.33,262.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,262.5 L 830.67,262.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 993.33,362 L 993.33,462" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,574.5 L 762.67,574.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 437.33,574.5 L 369.33,574.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 206.67,687 L 206.67,787" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 369.33,888 L 437.33,888" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,888 L 830.67,888" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="model">
+<rect x="44" y="163" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Graphe natif</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Couches et connexions</tspan>
+<tspan x="66" dy="26">C++</tspan>
+<tspan x="66" dy="26">Entrées réelles du modèle</tspan>
+</text>
+</g>
+<g data-node="plan">
+<rect x="437.33" y="163" width="325.33" height="199" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Plan d’exécution</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Ordre, durées de vie,</tspan>
+<tspan x="459.33" dy="26">buffers</tspan>
+<tspan x="459.33" dy="26">Fusion et transferts</tspan>
+<tspan x="459.33" dy="26">possibles</tspan>
+</text>
+</g>
+<g data-node="router">
+<rect x="830.67" y="163" width="325.33" height="199" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">RuntimeRouter</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Capacités par opération</tspan>
+<tspan x="852.67" dy="26">Classement et repli</tspan>
+<tspan x="852.67" dy="26">explicite</tspan>
+</text>
+</g>
+<g data-node="output">
+<rect x="44" y="462" width="325.33" height="225" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="66" y="493" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Sorties du modèle</tspan>
+</text>
+<text x="66" y="536" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Logits, reconstructions…</tspan>
+<tspan x="66" dy="26">Selon contrat</tspan>
+<tspan x="66" dy="26">d’architecture</tspan>
+</text>
+</g>
+<g data-node="ops">
+<rect x="437.33" y="462" width="325.33" height="225" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="493" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Dispatcher et</tspan>
+<tspan x="459.33" dy="29">kernels</tspan>
+</text>
+<text x="459.33" y="565" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Contrôles des formes /</tspan>
+<tspan x="459.33" dy="26">valeurs</tspan>
+<tspan x="459.33" dy="26">Forward complet ou refus</tspan>
+</text>
+</g>
+<g data-node="backend">
+<rect x="830.67" y="462" width="325.33" height="225" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="852.67" y="493" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Backend choisi</tspan>
+</text>
+<text x="852.67" y="536" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">ROCm, CUDA, Vulkan,</tspan>
+<tspan x="852.67" dy="26">OpenCL</tspan>
+<tspan x="852.67" dy="26">TPU si sa session est</tspan>
+<tspan x="852.67" dy="26">fournie</tspan>
+<tspan x="852.67" dy="26">Ou CPU selon le plan</tspan>
+</text>
+</g>
+<g data-node="backward">
+<rect x="44" y="787" width="325.33" height="202" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="818" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Backward si</tspan>
+<tspan x="66" dy="29">entraînement</tspan>
+</text>
+<text x="66" y="890" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Activations conservées</tspan>
+<tspan x="66" dy="26">Gradients routés par</tspan>
+<tspan x="66" dy="26">opération</tspan>
+</text>
+</g>
+<g data-node="optim">
+<rect x="437.33" y="787" width="325.33" height="202" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="818" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Optimiseur</tspan>
+</text>
+<text x="459.33" y="861" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">États et mise à jour des</tspan>
+<tspan x="459.33" dy="26">poids</tspan>
+<tspan x="459.33" dy="26">Après calcul des</tspan>
+<tspan x="459.33" dy="26">gradients</tspan>
+</text>
+</g>
+<g data-node="observe">
+<rect x="830.67" y="787" width="325.33" height="202" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="852.67" y="818" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Observabilité</tspan>
+</text>
+<text x="852.67" y="861" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Loss, gradients, temps,</tspan>
+<tspan x="852.67" dy="26">mémoire</tspan>
+<tspan x="852.67" dy="26">Snapshots Viz / Htop</tspan>
+</text>
+</g>
+<rect x="129.87" y="722.5" width="153.6" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="138.87" y="741.5" font-size="15" fill="#475569">
+<tspan x="138.87" dy="0">gradient de loss</tspan>
+</text>
+<rect x="44" y="1037" width="1112" height="110" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1065" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Une capacité déclarée ne prouve pas le backend réellement exécuté : vérifier la trace ou</tspan>
+<tspan x="66" dy="26">selected_runtime.</tspan>
+<tspan x="66" dy="26">• Le backward repasse par le routeur ; les mathématiques des layers restent dans les runtimes.</tspan>
+</text>
+<text x="44" y="1182" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : Model.cpp · Planner.hpp · RuntimeRouter.cpp · RuntimeLayerDispatch.hpp</tspan>
+</text>
+</g>
 </svg>

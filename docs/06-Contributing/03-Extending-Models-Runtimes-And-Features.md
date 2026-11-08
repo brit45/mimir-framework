@@ -74,12 +74,17 @@ Créer le modèle dans un sous-dossier métier de `src/Models/`, par exemple :
 
 Le modèle doit :
 
+- définir le graphe en C/C++ dans une classe dérivée de `Model`,
 - exposer une config avec valeurs par défaut stables,
 - construire explicitement ses layers,
 - supporter allocation des paramètres,
 - supporter initialisation ou chargement des poids,
 - exécuter un forward cohérent,
 - rester sérialisable.
+
+Lua et JSON configurent et exécutent cette classe. MPK est l’alternative
+expérimentale, pas entièrement exploitable en production ; voir le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
 ### 2.3 Enregistrement dans le registre
 
@@ -157,8 +162,10 @@ Exemples de fonctionnalités transverses :
 
 Zone principale :
 
-- `src/Layers.hpp`
-- `src/Model.cpp`
+- `src/LayerTypes.hpp` : type et alias ;
+- `src/Layers.hpp` : métadonnées, sans calcul numérique ;
+- `src/runtimes/` : capacités, géométrie, kernels forward/backward et dispatch ;
+- `src/Serialization/LayerMetadata.hpp` : nouveaux champs structurels à restaurer.
 
 Checklist :
 
@@ -210,7 +217,9 @@ Principe : pour supporter un autre langage (python, ruby, js, perl, java, rust, 
 - `src/scriptings/Lua/luaScripting/LuaScripting.hpp`
 - `src/scriptings/Lua/luaScripting/LuaScripting.cpp`
 
-Note : `src/scriptings/Lua/luaScripting/LuaScripting.hpp` reste un include de compatibilité. Le point d'extension canonique est désormais `src/scriptings/...`.
+`src/scriptings/Lua/luaScripting/LuaScripting.hpp` déclare le bridge Lua et ses
+callbacks. Les nouveaux langages doivent implémenter le contrat commun sous
+`src/scriptings/` ; ils n'ajoutent pas de calcul numérique dans leurs bindings.
 
 ### 5.1 Ce qu'il faut reproduire
 

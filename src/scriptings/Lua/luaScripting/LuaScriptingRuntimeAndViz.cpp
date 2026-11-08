@@ -1,17 +1,21 @@
 #include "runtimes/tpu/TpuRuntime.hpp"
+#include "runtimes/DistributedRuntime.hpp"
 #include "runtimes/fpga/FpgaSession.hpp"
 #include "LuaScripting.hpp"
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "Serialization/Serialization.hpp"
 #include "Serialization/DebugJsonDump.hpp"
+#include "Serialization/LayerMetadata.hpp"
 #include "DType.hpp"
 #include "AdvancedRAMManager.hpp"
 #include "MemoryGuard.hpp"
 #include "DynamicTensorAllocator.hpp"
 #include "AsyncMonitor.hpp"
+#include "scriptings/ModelVizProjection.hpp"
 #include "Helpers.hpp"
 #include "runtimes/LayerOps.hpp"
 #include "runtimes/cpu/CpuRuntime.hpp"
+#include "runtimes/cpu/SimdDispatch.hpp"
 #include "runtimes/cuda/CudaRuntime.hpp"
 #include "runtimes/rocm/RocmRuntime.hpp"
 #include "runtimes/opencl/OpenCLRuntime.hpp"
@@ -141,6 +145,7 @@ int LuaScripting::lua_initWeights(lua_State* L) {
         "Initialisation des poids", !ctx.asyncMonitor || ctx.asyncMonitor->getHtop() == nullptr);
     try {
         ctx.currentModel->initializeWeights(method, seed);
+        Mimir::Scripting::bindModelProjection(ctx, false, true);
         animation.finish(true);
         ctx.addLog("Poids initialisés: méthode=" + std::string(method));
         
@@ -171,6 +176,24 @@ int LuaScripting::lua_totalParams(lua_State* L) {
 //     in_features, out_features, in_channels, out_channels,
 //     kernel_size, stride, padding, seq_len, embed_dim, num_heads,
 //     vocab_size, input_height, input_width }
+static void pushConvolutionNDInfo(lua_State* L, const Layer& layer) {
+    using namespace Mimir::Serialization::LayerMetadata;
+    if (!convolutionND(layer)) return;
+    for (const auto& [name, member] : spatialIntegers()) {
+        lua_pushinteger(L, layer.*member);
+        lua_setfield(L, -2, name);
+    }
+    for (const auto& [name, member] : spatialVectors()) {
+        const auto& values = layer.*member;
+        lua_createtable(L, static_cast<int>(values.size()), 0);
+        for (size_t index = 0; index < values.size(); ++index) {
+            lua_pushinteger(L, values[index]);
+            lua_rawseti(L, -2, static_cast<int>(index + 1));
+        }
+        lua_setfield(L, -2, name);
+    }
+}
+
 int LuaScripting::lua_getModelLayers(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     if (!ctx.currentModel) {
@@ -259,6 +282,7 @@ int LuaScripting::lua_getModelLayers(lua_State* L) {
         push_int_array(la.target_shape, "target_shape");
         push_int_array(la.permute_dims, "permute_dims");
         push_int_array(la.split_sizes, "split_sizes");
+        pushConvolutionNDInfo(L, la);
 
         lua_rawseti(L, -2, static_cast<int>(i + 1));
     }
@@ -386,6 +410,7 @@ int LuaScripting::lua_pushLayer(lua_State* L) {
             set_int("stack_axis", layer->stack_axis);
             set_bool("use_bias", layer->use_bias);
             set_bool("trainable_parameter", layer->trainable_parameter);
+            Mimir::Serialization::LayerMetadata::readConvolutionND(*layer, p);
 
             set_float("nms_iou_threshold", layer->nms_iou_threshold);
             set_float("iou_threshold", layer->nms_iou_threshold);
@@ -471,6 +496,7 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
         ctx.asyncMonitor->bindSkipConnectionControl(ctx.currentModel->skipConnectionControl());
         ctx.currentModel->publishRuntimeConfiguration();
         ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+        Mimir::Scripting::bindModelProjection(ctx);
     }
 
     // Argument 1: input
@@ -686,6 +712,57 @@ int LuaScripting::lua_forwardPass(lua_State* L) {
     }
 }
 
+int LuaScripting::lua_distributedInitialize(lua_State* L) {
+    try {
+        Mimir::DistributedRuntime::instance().initialize();
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_distributedShutdown(lua_State* L) {
+    try {
+        Mimir::DistributedRuntime::instance().shutdown();
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
+int LuaScripting::lua_distributedRank(lua_State* L) {
+    lua_pushinteger(L, Mimir::DistributedRuntime::instance().rank());
+    return 1;
+}
+
+int LuaScripting::lua_distributedWorldSize(lua_State* L) {
+    lua_pushinteger(L, Mimir::DistributedRuntime::instance().worldSize());
+    return 1;
+}
+
+int LuaScripting::lua_distributedIsMainProcess(lua_State* L) {
+    lua_pushboolean(L, Mimir::DistributedRuntime::instance().isMainProcess());
+    return 1;
+}
+
+int LuaScripting::lua_distributedBarrier(lua_State* L) {
+    try {
+        Mimir::DistributedRuntime::instance().barrier();
+        lua_pushboolean(L, true);
+        return 1;
+    } catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+}
+
 int LuaScripting::lua_backwardPass(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
@@ -706,8 +783,7 @@ int LuaScripting::lua_backwardPass(lua_State* L) {
     }
     
     try {
-        Gradients grads = ctx.currentModel->backwardPass(loss_grad);
-        ctx.addLog("Backward pass complété");
+        ctx.currentModel->backwardPass(loss_grad);
         
         lua_pushboolean(L, true);
         return 1;
@@ -811,6 +887,7 @@ int LuaScripting::lua_optimizerStep(lua_State* L) {
         if (ctx.asyncMonitor) {
             ctx.currentModel->publishRuntimeConfiguration(opt);
             ctx.asyncMonitor->bindRuntimeConfiguration(ctx.currentModel->runtimeConfiguration());
+        Mimir::Scripting::bindModelProjection(ctx);
             ctx.asyncMonitor->updateRuntimeTrainParams(static_cast<float>(lr), opt->warmup_steps, 0, 0, "mse");
             const auto live = ctx.asyncMonitor->liveTrainParamsSnapshot();
             if (live.overrides_enabled) { lr = live.lr; opt->initial_lr = live.lr; opt->warmup_steps = live.lr_warmup_steps; }
@@ -833,6 +910,13 @@ int LuaScripting::lua_setHardwareAccel(lua_State* L) {
 }
 
 int LuaScripting::lua_getHardwareCaps(lua_State* L) {
+    const char* selected_isa = nullptr;
+    try { selected_isa = RuntimeSimd::isaName(RuntimeSimd::selectedIsa()); }
+    catch (const std::exception& e) {
+        lua_pushnil(L);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
     lua_newtable(L);
     const char* tpu_enabled = std::getenv("MIMIR_TPU");
     TpuRuntime* tpu = nullptr;
@@ -856,6 +940,17 @@ int LuaScripting::lua_getHardwareCaps(lua_State* L) {
     
     lua_pushboolean(L, Model::hasBMI2());
     lua_setfield(L, -2, "bmi2");
+
+    const auto& simd = RuntimeSimd::features();
+    jsonToLuaTable(L, nlohmann::json{
+        {"selected", selected_isa},
+        {"sse2", simd.sse2}, {"sse3", simd.sse3}, {"ssse3", simd.ssse3},
+        {"sse41", simd.sse41}, {"sse42", simd.sse42}, {"avx", simd.avx},
+        {"avx256", simd.avx}, {"avx2", simd.avx2}, {"avx512f", simd.avx512f},
+        {"avx512dq", simd.avx512dq}, {"avx512bw", simd.avx512bw},
+        {"avx512vl", simd.avx512vl}, {"fma", simd.fma}, {"f16c", simd.f16c},
+        {"bmi1", simd.bmi1}, {"bmi2", simd.bmi2}});
+    lua_setfield(L, -2, "simd");
     
     return 1;
 }
@@ -963,6 +1058,7 @@ static void pushLuaLayerInfo(lua_State* L, const Layer& la, size_t index) {
     lua_pushinteger(L, la.vocab_size);    lua_setfield(L, -2, "vocab_size");
     lua_pushinteger(L, la.input_height);  lua_setfield(L, -2, "input_height");
     lua_pushinteger(L, la.input_width);   lua_setfield(L, -2, "input_width");
+    pushConvolutionNDInfo(L, la);
 }
 
 template <typename Predicate>
@@ -1104,6 +1200,16 @@ int LuaScripting::lua_getVocabSize(lua_State* L) {
     }
     
     lua_pushinteger(L, ctx.currentTokenizer->getVocabSize());
+    return 1;
+}
+
+int LuaScripting::lua_getBPEMergeCount(lua_State* L) {
+    auto& ctx = LuaContext::getInstance();
+    if (!ctx.currentTokenizer) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    lua_pushinteger(L, static_cast<lua_Integer>(ctx.currentTokenizer->getBPEMergeCount()));
     return 1;
 }
 
@@ -1967,6 +2073,8 @@ int LuaScripting::lua_htopCreate(lua_State* L) {
         if (csv_enabled.has_value()) enable_csv = *csv_enabled;
         ctx.asyncMonitor->configureMetricsCsv(
             csv_path.value_or("checkpoints/loss_history.csv"), enable_csv);
+        ctx.asyncMonitor->configureGraphReport(ctx.modelConfig);
+        Mimir::Scripting::bindModelProjection(ctx, true, true);
 
         const char* htop_state = !enable_htop ? "htop disabled"
             : (defer_htop ? "htop pending" : "htop enabled");
@@ -2223,6 +2331,8 @@ int LuaScripting::lua_vizCreate(lua_State* L) {
         
         // Démarrer avec viz activé (et htop désactivé si pas déjà démarré)
         ctx.asyncMonitor->start(false, true, config);
+        ctx.asyncMonitor->configureGraphReport(ctx.modelConfig);
+        Mimir::Scripting::bindModelProjection(ctx, true, true);
 
         if (!ctx.asyncMonitor->vizInitOk()) {
             lua_pushboolean(L, false);
@@ -2281,7 +2391,11 @@ int LuaScripting::lua_vizProcessEvents(lua_State* L) {
 int LuaScripting::lua_vizUpdate(lua_State* L) {
     auto& ctx = LuaContext::getInstance();
     
-    // Update est automatique dans AsyncMonitor, cette fonction est maintenant no-op
+    Mimir::Scripting::bindModelProjection(ctx);
+    if (ctx.currentModel)
+        ctx.currentModel->captureRequestedLatentSpace(ctx.currentModel->latentSpaceOptimizerStep());
+
+    // Drawing remains automatic in AsyncMonitor.
     lua_pushboolean(L, true);
     return 1;
 }

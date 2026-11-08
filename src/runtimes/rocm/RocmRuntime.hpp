@@ -41,6 +41,9 @@ public:
         const Layer& layer,
         const std::vector<const std::vector<float>*>& inputs,
         bool training) const override;
+    RuntimeCapabilityLevel queryBackwardOperationCapability(
+        const Layer&,const std::vector<const std::vector<float>*>&,
+        const std::vector<const std::vector<float>*>&,bool) const override;
 
     bool backwardLayer(
         const std::vector<const std::vector<float>*>& inputs,

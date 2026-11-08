@@ -120,7 +120,7 @@ int main() {
         if ok ~= true then TEST_ERR = "Model.create returned false" return end
         -- Every canonical type has an exact, read-only inspection filter.
         local available = Mimir.Layers.available()
-        assert(#available == 73)
+        assert(#available == 95)
         local seen = {}
         for _, name in ipairs(available) do
             seen[name] = true
@@ -146,7 +146,12 @@ int main() {
             assert(not pcall(function() snapshot[1] = {} end))
             assert(not pcall(function() setmetatable(snapshot, {}) end))
         end
-        assert(seen.PatchEmbed and seen.Reparameterize)
+        assert(seen.PatchEmbed and seen.Reparameterize and seen.Conv3d and seen.Conv4d)
+        assert(seen.CausalDepthwiseConv1d and seen.SwiGLU)
+        assert(seen.SquaredReLU and seen.Square and seen.SqrtAbs and seen.Exp and seen.LogAbs)
+        assert(seen.Abs and seen.ReciprocalNoNan and seen.Sign and seen.Sin and seen.Cos)
+        assert(seen.Maximum and seen.Minimum and seen.ReduceSum and seen.ReduceMean)
+        assert(seen.ReduceMin and seen.ReduceMax and seen.ReduceProd and seen.LowerTriangular)
         assert(not pcall(function() available[1] = "changed" end))
         local backend_ops = Mimir.Model.runtime_ops()
         assert(#backend_ops == 6)

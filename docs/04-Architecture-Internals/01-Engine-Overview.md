@@ -45,10 +45,10 @@ Le modèle accepte des entrées nommées (côté C++ et bindings Lua). Les archi
 
 Chaque layer a typiquement :
 
-- une liste `input_names` (0, 1 ou plusieurs)
+- une liste `Layer::inputs` (0, 1 ou plusieurs noms)
 - un champ `output` (nom sous lequel stocker le résultat)
 
-Si un layer a `input_names` vide, le runtime applique souvent une valeur par défaut (classiquement `x`), mais ce détail dépend du chemin de code exact et du type de layer.
+Si `Layer::inputs` est vide, le runtime utilise l'entrée courante `x`.
 
 ## Étapes d’un forward (haut niveau)
 
@@ -80,10 +80,16 @@ Objectif : éviter les allocations “sauvages” hors contrôle et rendre les O
 Pour chaque layer (dans l’ordre) :
 
 - résoudre ses entrées : pour chaque `input_name`, lire un tensor du store (float ou int selon le type du layer)
-- exécuter l’opération (dispatch par `LayerType`)
+- interroger `RuntimeRouter`, qui sélectionne une implémentation native
+  admissible et appelle le dispatcher du backend pour ce `LayerType`
 - écrire le résultat sous `layer.output` dans le store float (la plupart du temps)
 
 Le runtime supporte le **multi-input** en passant un vecteur d’entrées à certaines opérations (concat/add/attention/cross-attn, etc.).
+
+`Model.cpp` orchestre le stockage, le plan, les versions de tenseurs et les
+snapshots. Les calculs des couches appartiennent aux runtimes, pas à la
+déclaration `Layers.hpp`. Une capacité par type est filtrée à nouveau selon
+la forme et la configuration ; un refus permet d'essayer une autre route.
 
 1) **Sortie**
 

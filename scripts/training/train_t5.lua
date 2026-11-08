@@ -57,6 +57,7 @@ apply_cli(CONF.training, "log_every", "log-every", Args.get_int)
 apply_cli(CONF.training, "save_every", "save-every", Args.get_int)
 apply_cli(CONF.training, "checkpoint_dir", "checkpoint-dir", Args.get_str)
 apply_cli(CONF.training, "amp", "amp", Args.get_bool)
+apply_cli(CONF.training, "amp_dtype", "amp-dtype", Args.get_str)
 apply_cli(CONF.training, "ddp", "ddp", Args.get_bool)
 
 -- Les overrides structurés ont la priorité sur les raccourcis CLI.
@@ -76,10 +77,16 @@ end
 local model_cfg = CONF.model
 local train_cfg = CONF.training
 local tokenizer_cfg = CONF.tokenizer or {}
-assert(train_cfg.amp ~= true,
-       "AMP requested but Mimir has no mixed-precision compute/autocast backend yet")
-assert(train_cfg.ddp ~= true,
-       "DDP requested but Mimir has no collective communication backend yet")
+local distributed_enabled = train_cfg.ddp == true
+local rank, world_size = 0, 1
+if distributed_enabled then
+  local dist_ok, dist_err = Mimir.Distributed.initialize()
+  assert(dist_ok, "DDP initialization failed: " .. tostring(dist_err))
+  rank = Mimir.Distributed.rank()
+  world_size = Mimir.Distributed.world_size()
+  assert(world_size > 1, "DDP needs at least two MPI processes (launch with mpirun)")
+end
+local is_main_process = not distributed_enabled or Mimir.Distributed.is_main_process()
 local seq_len = assert(tonumber(model_cfg.seq_len))
 local vocab_size = assert(tonumber(model_cfg.vocab_size))
 local architecture = "t5"
@@ -105,22 +112,38 @@ local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
 local tokenizer_parent = tokenizer_path:match("^(.*)/[^/]+$")
 if tokenizer_parent and tokenizer_parent ~= "" then FS.mkdir_p(tokenizer_parent) end
 local TextTokenizer = dofile(ROOTWORK.."/scripts/modules/causal_lm_tokenizer.lua")
-local tokens, tokenizer_status = TextTokenizer.ensure({
-  corpus = corpus,
-  path = tokenizer_path,
-  vocab_size = vocab_size,
-  padding_idx = tonumber(model_cfg.padding_idx) or 0,
-  seq_len = seq_len,
-  bpe_merges = tokenizer_cfg.bpe_merges,
-})
-if tokenizer_status.generated then
+local function ensure_tokenizer()
+  return TextTokenizer.ensure({
+    corpus = corpus,
+    path = tokenizer_path,
+    vocab_size = vocab_size,
+    padding_idx = tonumber(model_cfg.padding_idx) or 0,
+    seq_len = seq_len,
+    bpe_merges = tokenizer_cfg.bpe_merges,
+  })
+end
+local tokens, tokenizer_status
+if distributed_enabled then
+  if is_main_process then
+    tokens, tokenizer_status = ensure_tokenizer()
+    local barrier_ok, barrier_err = Mimir.Distributed.barrier()
+    assert(barrier_ok, "DDP tokenizer barrier failed: " .. tostring(barrier_err))
+  else
+    local barrier_ok, barrier_err = Mimir.Distributed.barrier()
+    assert(barrier_ok, "DDP tokenizer barrier failed: " .. tostring(barrier_err))
+    tokens, tokenizer_status = ensure_tokenizer()
+  end
+else
+  tokens, tokenizer_status = ensure_tokenizer()
+end
+if is_main_process and tokenizer_status.generated then
   print(string.format(
     "[t5] tokenizer généré: path=%s vocab=%d/%d reason=%s",
     tostring(tokenizer_status.path),
     tonumber(tokenizer_status.vocab_size) or 0,
     vocab_size,
     tostring(tokenizer_status.reason)))
-else
+elseif is_main_process then
   print(string.format(
     "[t5] tokenizer chargé: path=%s vocab=%d/%d",
     tostring(tokenizer_status.path),
@@ -138,8 +161,20 @@ for _, key in ipairs({"beta1", "beta2", "epsilon", "weight_decay", "grad_clip_no
   if train_cfg[key] ~= nil then cfg[key] = train_cfg[key] end
 end
 assert(Mimir.Model.create(architecture, cfg))
+if train_cfg.amp == true then
+  local amp_dtype = train_cfg.amp_dtype or "bfloat16"
+  local amp_ok, amp_err = Mimir.Model.set_autocast(amp_dtype)
+  assert(amp_ok, "AMP initialization failed: " .. tostring(amp_err))
+  if is_main_process then
+    print(string.format("[t5] AMP=%s (Linear CPU autocast, accumulations float32)", amp_dtype))
+  end
+end
+if distributed_enabled and is_main_process then
+  print(string.format("[t5] DDP=%d ranks (MPI gradient average)", world_size))
+end
 assert(Mimir.Model.allocate_params())
 assert(Mimir.Model.init_weights("xavier", tonumber(train_cfg.seed) or 1337))
+math.randomseed(math.floor(tonumber(train_cfg.seed) or 1337) + rank * 104729)
 
 local mask_ratio = tonumber(train_cfg.mask_ratio) or 0.15
 local mask_id = tonumber(train_cfg.mask_id) or (vocab_size - 1)
@@ -207,11 +242,11 @@ for step = 1, steps do
   local step_ok, step_err = Mimir.Model.optimizer_step(learning_rate, optimizer)
   assert(step_ok, "optimizer step failed: " .. tostring(step_err))
 
-  if step == 1 or step % log_every == 0 then
+  if is_main_process and (step == 1 or step % log_every == 0) then
     print(string.format("step=%d loss=%.6f perplexity=%.3f",
                         step, loss, math.exp(math.min(loss, 20))))
   end
-  if step % save_every == 0 then
+  if is_main_process and step % save_every == 0 then
     local path = string.format("%s/step-%07d", checkpoint_dir, step)
     local save_ok, save_err = Mimir.Serialization.save(path, "raw_folder", {
       save_optimizer = true,
@@ -221,7 +256,14 @@ for step = 1, steps do
   end
 end
 
-assert(Mimir.Serialization.save(checkpoint_dir .. "/final", "raw_folder", {
-  save_optimizer = true, save_tokenizer = true, save_encoder = false
-}))
-print("T5_TRAIN_OK " .. checkpoint_dir .. "/final")
+if is_main_process then
+  assert(Mimir.Serialization.save(checkpoint_dir .. "/final", "raw_folder", {
+    save_optimizer = true, save_tokenizer = true, save_encoder = false
+  }))
+  print("T5_TRAIN_OK " .. checkpoint_dir .. "/final")
+end
+if distributed_enabled then
+  local barrier_ok, barrier_err = Mimir.Distributed.barrier()
+  assert(barrier_ok, "DDP shutdown barrier failed: " .. tostring(barrier_err))
+  assert(Mimir.Distributed.shutdown())
+end

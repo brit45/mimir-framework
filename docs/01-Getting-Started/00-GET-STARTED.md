@@ -36,15 +36,17 @@ Pour installer les dépendances ou activer un backend particulier, consultez le
 Depuis la racine du dépôt :
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DMIMIR_VIZ_BACKEND=NONE -DENABLE_VULKAN=OFF -DENABLE_OPENCL=OFF \
+  -DMIMIR_ENABLE_TESTS=ON
+cmake --build build --parallel 2
 ```
 
 Le binaire produit est `./bin/mimir`. Affichez son aide pour vérifier qu'il
 démarre et connaître les capacités détectées :
 
 ```bash
-./bin/mimir --help
+./run_mimir.sh --help
 ```
 
 > **Note**
@@ -56,7 +58,7 @@ démarre et connaître les capacités détectées :
 Exécutez le test de sérialisation Lua :
 
 ```bash
-./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
+./run_mimir.sh --lua scripts/tests/test_serialization_smoke.lua
 ```
 
 La commande doit se terminer sans erreur. Elle vérifie une chaîne minimale de
@@ -70,25 +72,27 @@ ctest --test-dir build --output-on-failure
 
 ## Créer un premier modèle
 
-Le template minimal construit un modèle, alloue ses paramètres et exécute une
-passe avant :
+L'exemple VAEConv construit une petite architecture native, alloue ses paramètres
+et inspecte ses couches, sans charger d'image :
 
 ```bash
-./bin/mimir --lua scripts/templates/template_new_model.lua
+./run_mimir.sh --lua scripts/examples/inspect_vae_conv.lua
 ```
 
 Le script illustre le cycle de vie commun aux modèles Mímir :
 
 1. choisir une configuration ;
-2. créer les layers ;
+2. demander au registre une classe C++ dérivée de `Model`, qui construit ses couches ;
 3. allouer et initialiser les paramètres ;
-4. fournir les entrées ;
-5. exécuter `forward()`.
+4. inspecter le graphe obtenu.
+
+La [première exécution](01-Quick-Start.md) ajoute une passe avant sur des IDs
+synthétiques. Lua pilote le modèle ; sa topologie est définie en C++.
 
 Pour inspecter une architecture sans écrire de script :
 
 ```bash
-./bin/mimir --lua scripts/tools/inspect_architectures.lua -- \
+./run_mimir.sh --lua scripts/tools/inspect_architectures.lua -- \
   --list basic_mlp --params --layers --stats
 ```
 
@@ -100,7 +104,7 @@ avant ce séparateur appartiennent au binaire `mimir`.
 La Pipeline API réunit la création depuis le registre et la sérialisation :
 
 ```bash
-./bin/mimir --lua scripts/templates/template_pipeline_args.lua -- \
+./run_mimir.sh --lua scripts/templates/template_pipeline_args.lua -- \
   --from-registry \
   --arch basic_mlp \
   --no-train \
@@ -110,7 +114,7 @@ La Pipeline API réunit la création depuis le registre et la sérialisation :
 Vérifiez ensuite le checkpoint :
 
 ```bash
-./bin/mimir --lua scripts/tools/analyze_model.lua -- \
+./run_mimir.sh --lua scripts/tools/analyze_model.lua -- \
   --in /tmp/mimir_basic_mlp.safetensors
 ```
 

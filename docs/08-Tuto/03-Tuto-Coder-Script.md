@@ -4,6 +4,18 @@ Ce tutoriel construit un modèle `basic_mlp` avec la Pipeline API actuelle,
 sans dataset. Il explique aussi la séparation entre les arguments du binaire
 et ceux du script.
 
+La topologie reste définie par `BasicMLPModel`, une classe C++ dérivée de
+`Model`. La Pipeline API choisit et pilote cette architecture ; elle n’est pas
+un langage de définition du graphe. MPK est l’alternative expérimentale,
+pas entièrement exploitable en production. Voir le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
+
+| Niveau | Travail | Vérification |
+| --- | --- | --- |
+| Débutant | Lancer le script registry-first | Reconnaître architecture, configuration et sortie. |
+| Intermédiaire | Passer une option et sauvegarder | Retrouver la valeur effective et le checkpoint. |
+| Avancé | Brancher une configuration JSON reproductible | Rejouer le même modèle sans écrire de couches dans le script. |
+
 ## Sources de vérité
 
 - `scripts/modules/args.lua`

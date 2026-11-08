@@ -36,6 +36,8 @@ void computeAvgPool2D(const std::vector<float>& input, std::vector<float>& outpu
 					  bool use_hardware = true);
 void computeActivation(std::vector<float>& data, const std::string& activation_type,
 					   float param = 0.0f, bool use_hardware = true);
+void computeActivation(std::vector<float>& data, ActivationType activation_type,
+					   float param = 0.0f, bool use_hardware = true);
 void computeBatchNorm(std::vector<float>& data, const std::vector<float>& gamma,
 					  const std::vector<float>& beta, const std::vector<float>& running_mean,
 					  const std::vector<float>& running_var, int batch_size, int channels,

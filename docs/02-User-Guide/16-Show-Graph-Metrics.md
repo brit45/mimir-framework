@@ -2,13 +2,13 @@
 
 `scripts/tools/show-graph.lua` transforme un ou plusieurs CSV d'entraînement en
 rapport HTML et, avec `--out-text`, en rapport Markdown ou texte brut. Cette page
-définit les métriques affichées par le rapport à partir de leur implémentation
-actuelle dans `src/Model.cpp`.
+définit les métriques affichées par le rapport à partir des producteurs natifs,
+notamment `src/Models/VAETraining.cpp` et les losses du runtime.
 
 ```bash
-./bin/mimir --lua scripts/tools/show-graph.lua -- \
+./bin/mimir --lua scripts/tools/show-graph.lua \
   --csv checkpoint/run/loss_history.csv \
-  --checkpoint-dir checkpoint/run \
+  --checkpoint checkpoint/run/final --strict-context \
   --out graph_report.html \
   --out-text graph_report.md \
   --no-interactive
@@ -17,6 +17,13 @@ actuelle dans `src/Model.cpp`.
 Le rapport lit les valeurs déjà enregistrées dans le CSV. Il ne recalcule pas
 les métriques du modèle. Les sections statistiques, corrélations et écarts de
 validation sont en revanche calculées par `show-graph.lua`.
+
+Adaptez les chemins : `--checkpoint` vise un checkpoint réellement sauvegardé,
+avec ses métadonnées, et `--csv` le même run. `--strict-context` empêche la
+récupération d’un contexte global différent. Le parser actuel de cet outil
+refuse le séparateur `--` isolé : ses options suivent directement son nom.
+Le [tutoriel d’observation](../08-Tuto/14-Tuto-Viz-Metriques-Diagnostic.md)
+montre comment produire le CSV avec le moniteur et vérifier les sorties.
 
 ## Notations et moments
 
@@ -39,8 +46,8 @@ Le troisième moment standardisé, ou asymétrie, vaut :
 \]
 
 Quand l'écart-type est inférieur ou égal à `1e-12`, l'asymétrie est fixée à
-zéro. Voir `compute_moments()` et `compute_moments_prefix()` dans
-`src/Model.cpp`.
+zéro. Voir `compute_moments_prefix()` dans `src/Models/VAETraining.cpp` pour
+le chemin VAE.
 
 ## Reconstruction
 
@@ -245,6 +252,15 @@ G_s=L_{\mathrm{val},s}-L_{\mathrm{train},s^*}
 où $s^*$ désigne le step d'entraînement disponible le plus proche du step de
 validation. Un écart positif signifie que la loss de validation est supérieure.
 
+Pour `causal_lm`, la loss est une cross-entropy sur les tokens cibles actifs,
+pas une reconstruction de pixels. La perplexité théorique est
+`exp(cross_entropy)` ; la métrique native exposée vaut
+`exp(min(cross_entropy, 20))` pour borner sa valeur.
+Le top-1 est la proportion de ces cibles dont l'ID a le logit maximal.
+Les diagnostics propres aux modèles affichés dans Viz/HTOP ne sont pas tous
+des colonnes du CSV commun : ce rapport ne peut afficher une mesure qui n'y
+a pas été enregistrée, notamment les diagnostics détaillés du posterior VAE.
+
 ## Calculs propres au rapport
 
 ### Statistiques
@@ -289,7 +305,8 @@ La hauteur d'une barre est le nombre de valeurs affectées à sa classe.
 
 ## Sources de référence
 
-- `src/Model.cpp` : moments, reconstruction, KL et diagnostics ;
+- `src/Models/VAETraining.cpp` : moments, KL et diagnostics VAE ;
+- `src/runtimes/ops_loss_and_grad.cpp` et `src/runtimes/losses/LossDispatch.cpp` : délégation des losses au runtime ;
 - `src/Model.hpp` : contrat des structures de métriques ;
 - `scripts/tools/show-graph.lua` : filtrage des validations, statistiques,
   corrélations, histogrammes et rendu des rapports ;

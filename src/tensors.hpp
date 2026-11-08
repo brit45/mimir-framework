@@ -6,19 +6,6 @@
 #include <cstdint>
 #include <memory>
 
-#ifdef ENABLE_OPENCL
-#define CL_TARGET_OPENCL_VERSION 300 // ou 300 si tu veux explicite 3.0
-#include <CL/cl.h>
-#else
-// Types opaques pour build sans OpenCL.
-using cl_platform_id = void*;
-using cl_device_id = void*;
-using cl_context = void*;
-using cl_command_queue = void*;
-using cl_program = void*;
-using cl_kernel = void*;
-#endif
-
 // Forward declaration
 class DynamicTensorAllocator;
 
@@ -82,27 +69,14 @@ public:
     TensorSystem();
     ~TensorSystem();
 
-    // Initialize OpenCL context and kernel
+    // Prepare the public facade; computation is selected by RuntimeRouter.
     bool initialize();
 
-    // Compute weights for a vector of tensors using OpenCL
+    // Commit weights only after a runtime completes the whole calculation.
     bool computeWeights(std::vector<tensor>& tensors);
 
 private:
-    cl_platform_id platform_id = nullptr;
-    cl_device_id device_id = nullptr;
-    cl_context context = nullptr;
-    cl_command_queue command_queue = nullptr;
-    cl_program program = nullptr;
-    cl_kernel kernel = nullptr;
-
     bool initialized = false;
-
-    // Helper to load and build OpenCL kernel
-    bool buildKernel(const char* kernelSource);
-
-    // OpenCL kernel source for weight calculation (define in .cpp)
-    static const char* weightKernelSource;
 };
 
 

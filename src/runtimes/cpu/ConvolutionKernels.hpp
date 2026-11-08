@@ -1,4 +1,8 @@
 #pragma once
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <vector>
 #include "SIMD_Ops.hpp"
 #include "RuntimeAllocator.hpp"
 #include "runtimes/LayerOps.hpp"
@@ -12,7 +16,7 @@ inline void multiply(float* out,const float* a,const float* b,int m,int n,int k,
     } else {
         for(int i=0;i<m;++i) for(int j=0;j<n;++j) {
             float sum=0;
-            for(int t=0;t<k;++t) sum+=a[static_cast<size_t>(i)*k+t]*b[transpose_b?static_cast<size_t>(j)*k+t:static_cast<size_t>(t)*n+j];
+            for(int t=0;t<k;++t) sum=std::fma(a[static_cast<size_t>(i)*k+t],b[transpose_b?static_cast<size_t>(j)*k+t:static_cast<size_t>(t)*n+j],sum);
             out[static_cast<size_t>(i)*n+j]=sum;
         }
     }
@@ -23,7 +27,7 @@ inline void multiply_add(float* out,const float* a,const float* b,int m,int n,in
     if(!RuntimeLayerOps::hardwareAccelerationEnabled()) {
         for(int row=0;row<m;++row) for(int column=0;column<n;++column) {
             float sum=0;
-            for(int t=0;t<k;++t) sum+=a[static_cast<size_t>(row)*k+t]*b[static_cast<size_t>(t)*n+column];
+            for(int t=0;t<k;++t) sum=std::fma(a[static_cast<size_t>(row)*k+t],b[static_cast<size_t>(t)*n+column],sum);
             out[static_cast<size_t>(row)*n+column]+=sum;
         }
         return;
@@ -76,6 +80,76 @@ inline void forward(const std::vector<float>& x,std::vector<float>& y,const floa
             y[static_cast<size_t>(c)*spatial+start+r]=rows[static_cast<size_t>(r)*out_c+c]+(bias?bias[c]:0.0f);
     }
 }
+
+// CHW transposed convolution with weights laid out [out_c, in_c, kernel, kernel].
+// Keep the scatter accumulation order used by the original CPU implementation.
+inline void transposeForward(const std::vector<float>& input, std::vector<float>& output,
+                             const float* weights, const float* bias,
+                             int h, int w, int in_c, int out_c, int kernel,
+                             int stride, int pad) {
+    if (h <= 0 || w <= 0 || in_c <= 0 || out_c <= 0 || kernel <= 0 ||
+        stride <= 0 || pad < 0 || !weights) {
+        throw std::invalid_argument("ConvTranspose2d: invalid dimensions or weights");
+    }
+    const int64_t out_h64 = (static_cast<int64_t>(h) - 1) * stride -
+        2 * static_cast<int64_t>(pad) + kernel;
+    const int64_t out_w64 = (static_cast<int64_t>(w) - 1) * stride -
+        2 * static_cast<int64_t>(pad) + kernel;
+    if (out_h64 <= 0 || out_w64 <= 0 ||
+        out_h64 > std::numeric_limits<int>::max() ||
+        out_w64 > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("ConvTranspose2d: invalid output dimensions");
+    }
+    const auto checked_product = [](size_t a, size_t b) {
+        if (a != 0 && b > std::numeric_limits<size_t>::max() / a)
+            throw std::invalid_argument("ConvTranspose2d: dimensions overflow");
+        return a * b;
+    };
+    const size_t input_plane = checked_product(static_cast<size_t>(h), static_cast<size_t>(w));
+    const size_t input_size = checked_product(input_plane, static_cast<size_t>(in_c));
+    if (input.size() < input_size)
+        throw std::invalid_argument("ConvTranspose2d: input smaller than configured dimensions");
+    const size_t kernel_plane = checked_product(static_cast<size_t>(kernel), static_cast<size_t>(kernel));
+    (void)checked_product(checked_product(static_cast<size_t>(out_c), static_cast<size_t>(in_c)),
+                          kernel_plane);
+    const int out_h = static_cast<int>(out_h64);
+    const int out_w = static_cast<int>(out_w64);
+    const size_t output_plane = checked_product(static_cast<size_t>(out_h), static_cast<size_t>(out_w));
+    const size_t output_size = checked_product(output_plane, static_cast<size_t>(out_c));
+    if (output_size > output.max_size())
+        throw std::invalid_argument("ConvTranspose2d: output dimensions exceed vector capacity");
+    output.assign(output_size, 0.0f);
+    if (bias) {
+        for (int oc = 0; oc < out_c; ++oc) {
+            for (size_t i = 0; i < output_plane; ++i)
+                output[static_cast<size_t>(oc) * output_plane + i] = bias[oc];
+        }
+    }
+    for (int oc = 0; oc < out_c; ++oc) {
+        for (int ic = 0; ic < in_c; ++ic) {
+            for (int ih = 0; ih < h; ++ih) {
+                for (int iw = 0; iw < w; ++iw) {
+                    const float value = input[(static_cast<size_t>(ic) * h + ih) * w + iw];
+                    for (int kh = 0; kh < kernel; ++kh) {
+                        for (int kw = 0; kw < kernel; ++kw) {
+                            const int64_t oh = static_cast<int64_t>(ih) * stride + kh - pad;
+                            const int64_t ow = static_cast<int64_t>(iw) * stride + kw - pad;
+                            if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
+                                const size_t kernel_index =
+                                    ((static_cast<size_t>(oc) * in_c + ic) * kernel + kh) * kernel + kw;
+                                const size_t output_index =
+                                    (static_cast<size_t>(oc) * out_h + static_cast<size_t>(oh)) * out_w +
+                                    static_cast<size_t>(ow);
+                                output[output_index] += value * weights[kernel_index];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 inline void backward(const std::vector<float>& x,const std::vector<float>& go,std::vector<float>& dx,Layer& layer,
                      int h,int w,int in_c,int out_c,int kernel,int stride,int pad,int dilation) {
     const int oh=(h+2*pad-dilation*(kernel-1)-1)/stride+1;

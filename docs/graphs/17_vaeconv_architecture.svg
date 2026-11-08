@@ -1,43 +1,143 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="780" viewBox="0 0 1800 780" role="img" aria-labelledby="title desc">
-<title id="title">VAEConvModel — architecture</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1363" viewBox="0 0 1200 1363" role="img" aria-labelledby="title desc">
+<title id="title">VAEConv natif : latent et sorties</title>
+<desc id="desc">Le VAE convolutionnel adapte une image HWC à son encodeur, produit mu et logvar, construit un latent spatial puis décode une reconstruction. Le mode entraînement rassemble reconstruction, mu et logvar ; l’inférence sélectionne la reconstruction. Les branches et dimensions sont configurables, sans nombres de paramètres issus d’un ancien dump. Sources : src/Models/Vision/VAEConvModel.hpp, src/Models/Vision/VAEConvModel.cpp, src/runtimes/cpu/RuntimeLayerDispatch.hpp, src/Models/VAETraining.cpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Models/Vision/VAEConvModel.hpp&quot;, &quot;src/Models/Vision/VAEConvModel.cpp&quot;, &quot;src/runtimes/cpu/RuntimeLayerDispatch.hpp&quot;, &quot;src/Models/VAETraining.cpp&quot;], &quot;related_docs&quot;: [&quot;docs/02-User-Guide/13-Diffusion.md&quot;, &quot;docs/02-User-Guide/14-VAEConv.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">VAEConvModel — architecture</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">VAE convolutionnel : encodeur, latent spatial et décodeur avec sorties recon||mu||logvar.</text>
-<line x1="60" y1="112" x2="1740" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="1410" y="135" width="320" height="90" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1570.0" y="160" class="label" text-anchor="middle">Métriques du dump</text>
-<text x="1570.0" y="197" class="small" text-anchor="middle">48 couches • 311.1 k params</text>
-<rect x="70.0" y="330" width="213.14285714285714" height="105" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="176.57142857142856" y="355" class="label" text-anchor="middle">Input image</text>
-<text x="176.57142857142856" y="407" class="small" text-anchor="middle">RGB</text>
-<rect x="311.1428571428571" y="330" width="213.14285714285714" height="105" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="417.71428571428567" y="355" class="label" text-anchor="middle">Encoder</text>
-<text x="417.71428571428567" y="407" class="small" text-anchor="middle">Conv + downsampling</text>
-<path d="M283.1428571428571,382.5 L311.1428571428571,382.5" class="edgeB"/>
-<rect x="552.2857142857142" y="330" width="213.14285714285714" height="105" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="658.8571428571428" y="355" class="label" text-anchor="middle">Residual blocks</text>
-<text x="658.8571428571428" y="407" class="small" text-anchor="middle">stabilisation</text>
-<path d="M524.2857142857142,382.5 L552.2857142857142,382.5" class="edgeB"/>
-<rect x="793.4285714285714" y="330" width="213.14285714285714" height="105" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="900.0" y="355" class="label" text-anchor="middle">μ / logvar</text>
-<text x="900.0" y="407" class="small" text-anchor="middle">latent params</text>
-<path d="M765.4285714285714,382.5 L793.4285714285714,382.5" class="edgeB"/>
-<rect x="1034.5714285714284" y="330" width="213.14285714285714" height="105" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1141.142857142857" y="355" class="label" text-anchor="middle">Reparameterize</text>
-<text x="1141.142857142857" y="407" class="small" text-anchor="middle">sample z</text>
-<path d="M1006.5714285714284,382.5 L1034.5714285714284,382.5" class="edgeB"/>
-<rect x="1275.7142857142858" y="330" width="213.14285714285714" height="105" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1382.2857142857144" y="355" class="label" text-anchor="middle">Decoder</text>
-<text x="1382.2857142857144" y="407" class="small" text-anchor="middle">ConvTranspose + skips</text>
-<path d="M1247.7142857142858,382.5 L1275.7142857142858,382.5" class="edgeB"/>
-<rect x="1516.857142857143" y="330" width="213.14285714285714" height="105" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1623.4285714285716" y="355" class="label" text-anchor="middle">Output</text>
-<text x="1623.4285714285716" y="407" class="small" text-anchor="middle">recon||mu||logvar</text>
-<path d="M1488.857142857143,382.5 L1516.857142857143,382.5" class="edgeB"/>
-<text x="1740" y="756" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1363" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">VAEConv natif : latent et sorties</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Une classe C++ dérivée de Model ; géométrie et branches définies par sa configuration.</tspan>
+</text>
+<path d="M 369.33,288.5 L 437.33,288.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,288.5 L 830.67,288.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 993.33,414 L 993.33,514" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,613.5 L 762.67,613.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 437.33,613.5 L 369.33,613.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 206.67,713 L 206.67,813" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 278.24,713 L 278.24,763 L 528.43,763 L 528.43,813" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 1064.91,414 L 1064.91,444 L 1182,444 L 1182,783 L 671.57,783 L 671.57,813" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="image">
+<rect x="44" y="163" width="325.33" height="251" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Image en entrée</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Vecteur image HWC</tspan>
+<tspan x="66" dy="26">Adaptation vers CHW</tspan>
+</text>
+</g>
+<g data-node="encoder">
+<rect x="437.33" y="163" width="325.33" height="251" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Encodeur</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Convolutions et réduction</tspan>
+<tspan x="459.33" dy="26">spatiale</tspan>
+<tspan x="459.33" dy="26">Normes selon</tspan>
+<tspan x="459.33" dy="26">configuration</tspan>
+<tspan x="459.33" dy="26">ResNet / attention</tspan>
+<tspan x="459.33" dy="26">facultatifs</tspan>
+</text>
+</g>
+<g data-node="parameters">
+<rect x="830.67" y="163" width="325.33" height="251" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Paramètres du latent</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">μ et logvar au format CHW</tspan>
+<tspan x="852.67" dy="26">LH × LW × LC</tspan>
+<tspan x="852.67" dy="26">Biais logvar apprenable</tspan>
+<tspan x="852.67" dy="26">optionnel</tspan>
+</text>
+</g>
+<g data-node="latent">
+<rect x="830.67" y="514" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="545" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Latent opérationnel</tspan>
+</text>
+<text x="852.67" y="588" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Reparameterize : z</tspan>
+<tspan x="852.67" dy="26">z = μ en mode déterministe</tspan>
+<tspan x="852.67" dy="26">Biais appris ajouté si</tspan>
+<tspan x="852.67" dy="26">activé</tspan>
+</text>
+</g>
+<g data-node="decoder">
+<rect x="437.33" y="514" width="325.33" height="199" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="545" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Décodeur</tspan>
+</text>
+<text x="459.33" y="588" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Upsampling puis</tspan>
+<tspan x="459.33" dy="26">convolutions</tspan>
+<tspan x="459.33" dy="26">Mode choisi dans la classe</tspan>
+<tspan x="459.33" dy="26">Skips facultatifs</tspan>
+</text>
+</g>
+<g data-node="recon">
+<rect x="44" y="514" width="325.33" height="199" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="545" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Reconstruction</tspan>
+</text>
+<text x="66" y="588" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Retour à la disposition</tspan>
+<tspan x="66" dy="26">HWC</tspan>
+<tspan x="66" dy="26">Même géométrie image</tspan>
+<tspan x="66" dy="26">cible</tspan>
+</text>
+</g>
+<g data-node="inference">
+<rect x="44" y="813" width="325.33" height="254" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="844" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Sortie d’inférence</tspan>
+</text>
+<text x="66" y="887" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Reconstruction par</tspan>
+<tspan x="66" dy="26">défaut</tspan>
+<tspan x="66" dy="26">Encodage μ possible</tspan>
+<tspan x="66" dy="26">séparément</tspan>
+</text>
+</g>
+<g data-node="training">
+<rect x="437.33" y="813" width="325.33" height="254" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="459.33" y="844" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Sortie</tspan>
+<tspan x="459.33" dy="29">d’entraînement</tspan>
+</text>
+<text x="459.33" y="916" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">recon || μ || logvar</tspan>
+<tspan x="459.33" dy="26">Projections en plus si</tspan>
+<tspan x="459.33" dy="26">text_cond</tspan>
+<tspan x="459.33" dy="26">Loss de reconstruction</tspan>
+<tspan x="459.33" dy="26">et KL</tspan>
+</text>
+</g>
+<rect x="1078" y="429.5" width="90.9" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="1087" y="448.5" font-size="15" fill="#475569">
+<tspan x="1087" dy="0">μ, logvar</tspan>
+</text>
+<rect x="44" y="1115" width="1112" height="162" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1143" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• conv_mode = 2d, 3d ou 4d : les modes ND ajoutent des axes de taille 1 ; ils n’inventent ni volume ni temps.</tspan>
+<tspan x="66" dy="26">• En 3d/4d, conv_transpose est remplacé par nearest_conv ; bilinear_conv et pixel_shuffle gardent leur</tspan>
+<tspan x="66" dy="26">upsampling 2D. Échantillonnage si stochastique et entraînement.</tspan>
+<tspan x="66" dy="26">• logvar = 0 donne σ = 1. Le prior optionnel est un biais latent appris. Les scripts d’inférence</tspan>
+<tspan x="66" dy="26">sélectionnent recon ou μ ; la reprise conserve la topologie.</tspan>
+</text>
+<text x="44" y="1312" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : VAEConvModel.hpp · VAEConvModel.cpp · RuntimeLayerDispatch.hpp · VAETraining.cpp</tspan>
+</text>
+</g>
 </svg>

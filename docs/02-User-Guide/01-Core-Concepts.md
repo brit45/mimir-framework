@@ -20,6 +20,11 @@ Un modèle est une suite (ou un petit graphe) d’opérations (“layers”) qui
 
 Ça explique pourquoi `forward()` accepte une table “map” : vous passez des entrées nommées et le graphe connecte le reste.
 
+La définition du graphe est écrite en C/C++ dans une classe dérivée de `Model`.
+Lua et JSON la configurent et l’exécutent. L’autre voie est MPK, encore
+expérimentale et pas entièrement exploitable en production ; voir le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
+
 ### Conventions de noms (pragmatiques)
 
 | Nom | Type | Signification |
@@ -45,8 +50,8 @@ Les appels ont un ordre logique (voir `docs/02-User-Guide/02-Model-Lifecycle.md`
 
 | Étape | Rôle | Erreur typique si oubli |
 | --- | --- | --- |
-| `create` | choisit type + config | type inconnu, config vide |
-| `build` | construit la structure | forward échoue (graph absent) |
+| `create` | choisit type + config et construit la structure native | type inconnu, config vide |
+| `build` | appel de compatibilité ; la construction moderne a déjà eu lieu dans `create` | ne remplace pas une création valide |
 | `allocate_params` | alloue les poids | init/load échoue (pas de params) |
 | `init_weights` | init aléatoire | sorties NaN/0 “bizarres” |
 | `Serialization.load` | restaure checkpoint | mismatch shapes si cfg incompatible |
@@ -64,7 +69,7 @@ Conseil : pour rester stable entre architectures, préfère le format map.
 
 Mímir peut allouer de gros buffers. Les scripts “sérieux” devraient configurer :
 
-- `Mimir.MemoryGuard.setLimit(gb)` : limite dure (sécurité)
+- `Mimir.MemoryGuard.setLimit(gio)` : limite dure (sécurité)
 - `Mimir.Allocator.configure(...)` : pression mémoire (compression/éviction)
 
 Voir `docs/02-User-Guide/09-Memory.md`.

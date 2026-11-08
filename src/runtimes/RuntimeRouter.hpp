@@ -12,6 +12,8 @@ struct Layer;
 class RuntimeRouter {
 public:
     static RuntimeRouter& instance();
+    bool dispatchTensorWeights(const std::vector<tensor>&,std::vector<uint16_t>&,
+                               AbstractRuntime** selected_runtime=nullptr) const;
     const std::unordered_map<std::string,size_t>& optimizerDispatchCounts() const;
     bool dispatchOptimizer(const RuntimeOptimizerRequest&, AbstractRuntime** selected_runtime=nullptr) const;
 

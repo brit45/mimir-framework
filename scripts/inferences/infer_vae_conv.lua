@@ -21,11 +21,14 @@ Help.auto_exit_help({
     "--input, --in PATH : image PPM P6/P3 en encodage ; RAW en décodage",
     "--output, --out PATH : RAW en encodage ; PPM en décodage",
     "--format FORMAT : raw_folder ou safetensors (détecté par extension)",
+    "--config PATH : configuration correspondante pour un ancien SafeTensors sans architecture",
     "--no-resize : refuse une image dont les dimensions diffèrent du checkpoint",
     "--mem-gb N : budget allocateur (8 Go)",
     "--dtype TYPE : float32, float16 ou bfloat16",
-    "RAW : float32 little-endian sans en-tête, ordre latent CHW du modèle.",
-    "SafeTensors : fournir la configuration modèle correspondante via --config.",
+    "--conv-mode 2d|3d|4d : doit correspondre au checkpoint ; absent = mode sauvegardé (ancien checkpoint : 2d)",
+    "RAW : moyenne mu, float32 little-endian sans en-tête, ordre latent CHW du modèle.",
+    "Le biais prior appris est réappliqué au décodage ; les skips encodeur sont remplacés par des zéros.",
+    "SafeTensors natif : configuration extraite de model/architecture_json ; export sans métadonnées : --config correspondant requis.",
   },
   examples = {
     "./bin/mimir --lua scripts/inferences/infer_vae_conv.lua -- --encode --checkpoint checkpoint/vae --input image.ppm --output outputs/image.raw",
@@ -34,7 +37,7 @@ Help.auto_exit_help({
 })
 local Args = dofile(ROOTWORK.."/scripts/modules/args.lua")
 local FS = dofile(ROOTWORK.."/scripts/modules/fs.lua")
-local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
+local Inference = dofile(ROOTWORK.."/scripts/modules/vae_conv_inference.lua")
 local opts = Args.parse(arg) or {}
 
 local function logx(message)
@@ -47,7 +50,6 @@ local function opt_str(name, default)
   return tostring(value)
 end
 local function opt_num(name, default) return tonumber(opts[name]) or default end
-local function opt_int(name, default) return math.floor(opt_num(name, default)) end
 local function clamp(value, low, high)
   if value < low then return low end
   if value > high then return high end
@@ -62,9 +64,6 @@ if opts.decode == true then
 end
 if mode == nil then die("mode requis: --encode ou --decode") end
 
-local conf_model = type(CONF) == "table" and type(CONF.model) == "table" and CONF.model or {}
-local conf_training = type(CONF) == "table" and type(CONF.training) == "table" and CONF.training or {}
-local conf_inference = type(CONF) == "table" and type(CONF.inference) == "table" and CONF.inference or {}
 local input_path = opt_str("input", opt_str("in", nil))
 local output_path = opt_str("output", opt_str("out", nil))
 if input_path == nil or input_path == "" then die("--input est requis") end
@@ -76,99 +75,20 @@ if mode == "decode" and not input_path:lower():match("%.raw$") then
   die("l'entrée de décodage doit porter l'extension .raw")
 end
 
-local checkpoint = opt_str("checkpoint", opt_str("ckpt",
-  conf_inference.checkpoint or conf_training.out_dir or "checkpoint/vae_conv-generique.v8"))
-local format = opt_str("format", "")
-if format == "" then format = checkpoint:lower():match("%.safetensors$") and "safetensors" or "raw_folder" end
-if format == "raw_folder" then
-  checkpoint = Ckpt.resolve_dir(checkpoint)
-  if checkpoint == nil then die("aucun checkpoint raw_folder chargeable") end
-elseif format ~= "safetensors" then
-  die("format non supporté: " .. tostring(format))
-end
-
+local context = Inference.resolve(opts)
+local cfg, checkpoint = context.cfg, context.checkpoint
 local architecture_name = mode == "encode" and "vae_conv" or "vae_conv_decode"
-local cfg, cfg_err = Mimir.Architectures.default_config(architecture_name)
-if type(cfg) ~= "table" then die("default_config(" .. architecture_name .. "): " .. tostring(cfg_err)) end
-
-for key, value in pairs(conf_model) do if key ~= "architecture" then cfg[key] = value end end
-local checkpoint_cfg = nil
--- Le checkpoint est la source de vérité de la topologie.
-if format == "raw_folder" then
-  local architecture_path = FS.join(checkpoint, "model", "architecture.json")
-  local architecture = nil
-  if type(read_json) == "function" then
-    local ok_json, value = pcall(read_json, architecture_path)
-    if ok_json and type(value) == "table" then architecture = value end
-  end
-  checkpoint_cfg = type(architecture) == "table"
-      and (architecture.model_config or architecture.modelConfig) or nil
-  if type(checkpoint_cfg) ~= "table" then die("model_config absent ou illisible dans " .. architecture_path) end
-  if checkpoint_cfg.type ~= "vae_conv" then die("checkpoint attendu: vae_conv") end
-  for key, value in pairs(checkpoint_cfg) do cfg[key] = value end
-  -- A new launch config must not enable latent branches absent from a legacy checkpoint.
-  cfg.latent_spatial_context = checkpoint_cfg.latent_spatial_context == true
-  cfg.latent_detail_path = checkpoint_cfg.latent_detail_path == true
-  cfg.latent_context_channels = checkpoint_cfg.latent_context_channels or 32
-  if type(architecture.layers) == "table" then
-    cfg.dec_norm = "none"
-    for _, layer in ipairs(architecture.layers) do
-      if tostring(layer.name):match("^vae_conv/dec/") then
-        local kind = tostring(layer.type):lower()
-        if kind == "groupnorm" then cfg.dec_norm = "groupnorm"; break end
-        if kind == "layernorm" then cfg.dec_norm = "layernorm" end
-      end
-    end
-  end
-end
-
-local integer_overrides = {
-  { "image-w", "image_w" }, { "image-h", "image_h" }, { "image-c", "image_c" },
-  { "latent-w", "latent_w" }, { "latent-h", "latent_h" }, { "latent-c", "latent_c" },
-  { "base-channels", "base_channels" },
-}
-for _, names in ipairs(integer_overrides) do
-  if opts[names[1]] ~= nil then
-    local value = opt_int(names[1], cfg[names[2]])
-    if checkpoint_cfg and value ~= cfg[names[2]] then
-      die("configuration incompatible avec le checkpoint: --" .. names[1])
-    end
-    cfg[names[2]] = value
-  end
-end
-for _, key in ipairs({"image_w", "image_h", "image_c", "latent_w", "latent_h", "latent_c"}) do
-  local value = tonumber(cfg[key])
-  if not value or value <= 0 or value ~= math.floor(value) then die("dimension invalide: " .. key) end
-end
-cfg.latent_dim = cfg.latent_w * cfg.latent_h * cfg.latent_c
-cfg.stochastic_latent = false -- encodage déterministe : z = mu en inférence
-if tonumber(cfg.image_c) ~= 3 then die("le format PPM exige image_c=3") end
-
-local dtype = opt_str("dtype", cfg.dtype or os.getenv("MIMIR_DTYPE"))
-local dtype_aliases = { F32 = "float32", F16 = "float16", BF16 = "bfloat16", FP32 = "float32", FP16 = "float16" }
-if dtype ~= nil then dtype = dtype_aliases[tostring(dtype):upper()] or dtype end
-cfg.dtype = dtype
-
 local mem_gb = opt_num("mem-gb", opt_num("alloc-gb", 8))
+if mem_gb <= 0 or mem_gb ~= mem_gb or mem_gb == math.huge then die("--mem-gb doit être fini et positif") end
 if Mimir.Allocator and Mimir.Allocator.configure then
   local ok_mem, mem_err = Mimir.Allocator.configure({ max_ram_gb = mem_gb, enable_compression = true })
   if ok_mem == false then die("Allocator.configure: " .. tostring(mem_err)) end
 end
 
-local function create_and_load()
-  local ok_create, create_err = Mimir.Model.create(architecture_name, cfg)
-  if ok_create == false then die("Model.create: " .. tostring(create_err)) end
-  if dtype and Mimir.Model and type(Mimir.Model.dtype) == "function" then
-    local ok_dtype, dtype_err = Mimir.Model.dtype(dtype)
-    if ok_dtype == false then die("Model.dtype: " .. tostring(dtype_err)) end
+local function finite(values, label)
+  for _, value in ipairs(values) do
+    if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then die(label .. " non fini") end
   end
-  local ok_alloc, alloc_err = Mimir.Model.allocate_params()
-  if ok_alloc == false then die("Model.allocate_params: " .. tostring(alloc_err)) end
-  local ok_load, load_err = Mimir.Serialization.load(checkpoint, format, {
-    load_encoder = mode == "encode", load_tokenizer = false, load_optimizer = false,
-    strict_mode = false, validate_checksums = true,
-  })
-  if ok_load == false then die("Serialization.load: " .. tostring(load_err)) end
 end
 
 local function read_ppm(path)
@@ -281,12 +201,12 @@ end
 
 local output_dir = FS.dirname(output_path)
 if output_dir and output_dir ~= "" then FS.mkdir_p(output_dir) end
-create_and_load()
+Inference.create_and_load(context, architecture_name, mode == "encode" and "vae_conv/mu" or "x")
 
 local image_dim = cfg.image_w * cfg.image_h * cfg.image_c
 local latent_dim = cfg.latent_dim
-logx(string.format("[infer_vae_conv] mode=%s checkpoint=%s image=%dx%dx%d latent=%dx%dx%d",
-  mode, checkpoint, cfg.image_w, cfg.image_h, cfg.image_c, cfg.latent_w, cfg.latent_h, cfg.latent_c))
+logx(string.format("[infer_vae_conv] mode=%s conv_mode=%s checkpoint=%s image=%dx%dx%d latent=%dx%dx%d",
+  mode, cfg.conv_mode, checkpoint, cfg.image_w, cfg.image_h, cfg.image_c, cfg.latent_w, cfg.latent_h, cfg.latent_c))
 
 if mode == "encode" then
   local ppm, ppm_err = read_ppm(input_path)
@@ -301,19 +221,20 @@ if mode == "encode" then
   end
   local input = {}; input[image_dim] = 0.0
   for index = 1, image_dim do input[index] = (pixels[index] / 255.0) * 2.0 - 1.0 end
-  local packed, forward_err = Mimir.Model.forward(input, false)
-  if type(packed) ~= "table" then die("Model.forward(encode): " .. tostring(forward_err)) end
-  if #packed < image_dim + 2 * latent_dim then die("taille de sortie encoder inattendue: " .. tostring(#packed)) end
-  local latent = {}; latent[latent_dim] = 0.0
-  for index = 1, latent_dim do latent[index] = packed[image_dim + index] end
+  local latent, forward_err = Mimir.Model.forward(input, false)
+  if type(latent) ~= "table" then die("Model.forward(encode): " .. tostring(forward_err)) end
+  if #latent ~= latent_dim then die("taille de moyenne latente inattendue: " .. tostring(#latent)) end
+  finite(latent, "latent")
   local ok_raw, raw_err = write_raw(output_path, latent)
   if not ok_raw then die("écriture RAW: " .. tostring(raw_err)) end
   logx(string.format("[infer_vae_conv] RAW écrit: %s (%d float32, %d octets)", output_path, latent_dim, latent_dim * 4))
 else
   local latent, raw_err = read_raw(input_path, latent_dim)
   if not latent then die("lecture RAW: " .. tostring(raw_err)) end
-  local pixels, forward_err = Mimir.Model.forward(latent, false)
+  finite(latent, "latent RAW")
+  local pixels, forward_err = Mimir.Model.forward(Inference.decoder_input(context, latent), false)
   if type(pixels) ~= "table" then die("Model.forward(decode): " .. tostring(forward_err)) end
+  finite(pixels, "sortie du décodeur")
   local ok_ppm, ppm_err = write_ppm(output_path, pixels)
   if not ok_ppm then die("écriture PPM: " .. tostring(ppm_err)) end
   logx("[infer_vae_conv] PPM écrit: " .. output_path)

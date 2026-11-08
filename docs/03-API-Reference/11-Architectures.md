@@ -28,7 +28,14 @@ Trouver rapidement le contrat API réel et les paramètres utilisables.
 
 ![Architecture VGG19](../graphs/22_vgg19_architecture.svg)
 
-![Comparaison de modèles](../graphs/23_model_comparison.svg)
+![Comparaison qualitative des rôles et paramètres des modèles](../graphs/23_model_comparison.svg)
+
+Ces schémas décrivent les classes natives et leurs rôles, avec les branches
+conditionnées par la configuration. Les variantes VGG16 et VGG19 du dépôt ont
+des structures distinctes. La comparaison n’utilise pas les anciens nombres
+de couches et de paramètres d’un dump particulier ; mesurez votre configuration
+avec les outils d’inspection. La [provenance des schémas](../graphs/README.md)
+précise leurs sources et leur génération.
 
 
 Le registre d’architectures est la manière recommandée de créer des modèles.
@@ -138,14 +145,15 @@ Canonicalisation observée dans le registre C++ :
 
 ## Architectures disponibles
 
-Le registre C++ contient actuellement 27 entrées natives canoniques :
+Les entrées natives du registre courant se répartissent ainsi :
 
 | Famille | Architectures |
 | --- | --- |
 | Général | `basic_mlp` |
 | Texte | `causal_lm`, `transformer`, `t5`, `vae_text`, `vae_text_decode`, `hf_clip_text_encoder_1`, `hf_clip_text_encoder_2` |
-| Vision | `vit`, `vae`, `vae_conv`, `vae_conv_decode`, `resnet`, `unet`, `mobilenet`, `vgg16`, `vgg19`, `vgg16_feat`, `hf_vae_decoder` |
-| Diffusion/latent | `diffusion`, `cond_diffusion`, `lumen_diffusion`, `sd3_5`, `hf_sdxl_transformer_block`, `gan_latent` |
+| Vision | `vit`, `vae`, `vae_conv`, `vae_conv_decode`, `resnet`, `unet`, `mobilenet`, `vgg16`, `vgg19`, `vgg16_feat`, `hf_vae_decoder`, `medical_detector` |
+| Diffusion/latent | `diffusion`, `cond_diffusion`, `lumen_diffusion`, `sd3_5`, `hf_sdxl_transformer_block` |
+| GAN | `gan_latent`, `Gan_Style` |
 | Discrimination/import | `patch_discriminator`, `external_safetensors_base` |
 
 Cette liste décrit les clés effectivement enregistrées. Les alias acceptés peuvent
@@ -153,7 +161,7 @@ Cette liste décrit les clés effectivement enregistrées. Les alias acceptés p
 documentaire potentiellement ancienne :
 
 ```bash
-./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
+./run_mimir.sh --lua scripts/tools/inspect_architectures.lua -- -a
 ```
 
 Le nombre affiché au démarrage peut être supérieur : les sources `.mpk` et
@@ -197,7 +205,7 @@ Config par défaut :
 
 ### Modèles NLP (Transformers)
 
-**`transformer`** — Transformer encodeur/décodeur
+**`transformer`** — encodeur Transformer avec embedding d'IDs et tête dense
 
 ```json
 {
@@ -206,6 +214,36 @@ Config par défaut :
   "output_dim": 256, "causal": false
 }
 ```
+
+Son builder lit `seq_len` IDs sous `__input__`, des vecteurs `mag` et `mod` de
+taille `d_model`, puis produit `output_dim` valeurs. Fournissez ces deux vecteurs
+explicitement avec les entrées nommées, même lorsqu'ils sont nuls.
+Le flag `causal` contrôle son attention ; il ne transforme pas cette tête dense
+en générateur de logits par token. Les commentaires historiques « float-only »
+du header et la description du registre ne décrivent pas l'Embedding actuel de
+`TransformerModel.cpp`.
+
+**`causal_lm`** — modèle de langage decoder-only natif
+
+```json
+{
+  "vocab_size": 4096, "seq_len": 128, "d_model": 256,
+  "num_layers": 6, "num_heads": 8, "num_kv_heads": 2,
+  "mlp_hidden": 704, "causal_arch_version": 2,
+  "local_conv_kernel": 3, "local_conv_dilation": 1,
+  "fused_swiglu": true, "padding_idx": 0,
+  "norm_eps": 0.00001, "rope_theta": 10000.0
+}
+```
+
+Le graphe comprend embedding, RMSNorm, attention causale GQA/RoPE, mélange local
+causal par canal, FFN SwiGLU et tête de vocabulaire. Le bottleneck contextuel
+appris est actif par défaut ; `latent_dim=0` le désactive. `seq_len` est la
+fenêtre d'entraînement ; la génération native adapte le contexte au prompt et
+au budget de sortie, dans les limites de mémoire. Les anciens checkpoints
+conservent leurs options de topologie lors de la reprise. Voir le
+[guide causal](../02-User-Guide/12-Transformer-GPT.md) et son
+[API native](10-Model.md#api-native-du-modèle-causal).
 
 **`vae_text`** — VAE texte latent
 
@@ -216,7 +254,12 @@ Config par défaut :
   "latent_tokens": 32, "stochastic_latent": true
 }
 ```
-Sortie : `[logits(seq*vocab) || mu(latent_dim) || logvar(latent_dim) || img_proj || text_proj]`
+Le pack de sortie commence par
+`[logits(seq*vocab) || mu(latent_dim) || logvar(latent_dim) || img_proj || text_proj]`.
+Il comprend aussi les têtes contextuelles activées et les logits de contenu du
+vocabulaire. Les dimensions et options exactes figurent dans `get_config()` et
+le [guide VAEText](../02-User-Guide/11-VAEText.md) ; ne déduisez pas la taille du
+pack des cinq premiers segments seulement.
 
 **`t5`** — encodeur T5 natif avec tête de débruitage par tokens.
 
@@ -245,7 +288,10 @@ de poids Hugging Face.
 {
   "image_w": 64, "image_h": 64, "image_c": 3,
   "latent_h": 16, "latent_w": 16, "latent_c": 256,
-  "base_channels": 64, "stochastic_latent": false,
+  "base_channels": 64, "conv_mode": "2d", "stochastic_latent": false,
+  "latent_spatial_context": false, "latent_detail_path": false,
+  "latent_context_channels": 32,
+  "logvar_head_bias": false,
   "resnet": true, "resnet_max_tokens": 0,
   "attention": false, "attn_heads": 4, "attn_max_tokens": 0,
   "enc_norm": "groupnorm", "enc_gn_groups": 32,
@@ -258,23 +304,46 @@ de poids Hugging Face.
 }
 ```
 
-Contrat de sortie :
+Contrat de sortie en entraînement (`training=true`) :
 
 ```text
 recon[image_dim] || mu[latent_dim] || logvar[latent_dim]
 ```
 
 Si `text_cond=true`, la sortie ajoute `img_proj[proj_dim] || txt_proj[proj_dim]`.
+En inférence (`training=false`), la sortie par défaut contient seulement la
+reconstruction ; `inference_output_tensor="vae_conv/mu"` sélectionne l'encodage
+latent sans exécuter le décodeur.
 
 Points importants :
 
 - `resnet` active les **ResBlocks** ;
+- `conv_mode` accepte `2d`, `3d` et `4d` ; les rangs supérieurs ajoutent des axes
+  de taille 1 avant H/W et gardent la même entrée/sortie image HWC. Le mode
+  `conv_transpose` y est résolu en `nearest_conv` ; il ne crée pas une donnée
+  volumique ou temporelle ;
 - `attention` active la SelfAttention spatiale ;
 - `attn_max_tokens=0` signifie aucune limite et peut être très coûteux ;
 - `use_encoder_prior=true` ajoute un biais latent global apprenable à `z`, sans modifier la zone `mu` de la sortie ;
 - `stochastic_latent=false` donne `z=mu`, alors que `true` active la réparamétrisation pendant l’entraînement ;
+- `logvar_head_bias=true` ajoute un biais appris par canal à la projection `1×1` de `logvar`, ce qui permet d’ajuster l’incertitude indépendamment des features ; la tête `mu` reste identique ;
 - `decoder_upsample` accepte `nearest_conv`, `bilinear_conv`, `pixel_shuffle` et l'ancien mode `conv_transpose` ;
 - les ratios `image_h/latent_h` et `image_w/latent_w` doivent être identiques et être une puissance de deux.
+
+Le défaut natif de `logvar_head_bias` est `false` pour préserver les anciens
+checkpoints. Le script d’entraînement et la configuration officielle utilisent
+`true` pour les nouveaux runs ; `--logvar-head-bias true|false` permet de le
+choisir. La reprise conserve la valeur `use_bias` de la couche sauvegardée
+`vae_conv/enc/logvar`, ou le champ de configuration à défaut ; l’absence des
+deux signifie `false`. Une option CLI contradictoire est refusée, car l’ajout
+du biais change la taille des poids.
+
+`logvar=0` signifie une variance de 1. La reconstruction d’inférence utilise
+normalement `z=mu` ; les métriques `logvar_mean`, `logvar_stddev`,
+`posterior_std_mean`, `latent_sampling_rms`, `logvar_head_grad_norm` et
+`logvar_prehead_grad_norm` permettent d’observer le posterior et ses gradients
+pendant l’entraînement dans la Viz et HTOP. Ces diagnostics et le biais affine
+doivent être évalués sur les données visées pour conclure à un gain de qualité.
 
 Guide détaillé : [VAEConv : architecture, configuration et entraînement](../02-User-Guide/14-VAEConv.md).
 
@@ -309,9 +378,12 @@ nombre de canaux inférieur ou égal à `enc_gn_groups`.
 
 **`mobilenet`** — MobileNet v1 like
 
-### Discriminateurs
+### GAN et discriminateurs
 
-**`gan_latent`** — Discriminateur MLP latent  
+**`gan_latent`** — générateur MLP latent (`prompt || noise` vers latent)
+
+**`Gan_Style`** — GAN natif avec entraînement propre au modèle
+
 **`patch_discriminator`** — PatchGAN discriminator
 
 ### Modèles Diffusion

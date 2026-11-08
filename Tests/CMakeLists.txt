@@ -40,6 +40,19 @@ set_tests_properties(LuaTest.CausalLMTokenizer PROPERTIES
     TIMEOUT 15
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
+add_test(NAME LuaTest.ConvND
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_conv_nd.lua)
+set_tests_properties(LuaTest.ConvND PROPERTIES
+    TIMEOUT 15 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    ENVIRONMENT "MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_ROCM=1")
+add_test(
+    NAME LuaTest.CausalLMTrainingSmoke
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_causal_lm_smoke.lua
+)
+set_tests_properties(LuaTest.CausalLMTrainingSmoke PROPERTIES
+    TIMEOUT 15
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
 
 mimir_add_test(SerializationTest.SafeTensorsModel test_serialization_safetensors_model.cpp)
 mimir_add_test(SerializationTest.SafeTensorsCompliance test_safetensors_compliance.cpp)
@@ -115,6 +128,9 @@ mimir_add_test(AutogradTest.RuntimeDispatch test_runtime_autograd_dispatch.cpp)
 mimir_add_test(ModelTest.ReconLosses      test_recon_losses.cpp)
 mimir_add_test(ModelTest.VAEConvContract  test_vae_conv_contract.cpp)
 mimir_add_test(ModelTest.VAEKLControls test_vae_kl_controls.cpp)
+mimir_add_test(ModelTest.VAEConvLogvar test_vae_conv_logvar.cpp)
+set_tests_properties(ModelTest.VAEConvLogvar PROPERTIES TIMEOUT 90 ENVIRONMENT
+    "OMP_NUM_THREADS=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_RUNTIME_AUTOTUNE=0")
 mimir_add_test(ModelTest.VAETextContext test_vae_text_context.cpp)
 mimir_add_test(ModelTest.VAEConvLatentContext test_vae_conv_latent.cpp)
 mimir_add_test(ModelTest.LumenDiffusionStructure test_lumen_diffusion_structure.cpp)
@@ -274,6 +290,8 @@ if(ENABLE_CUDA AND CUDAToolkit_FOUND)
 endif()
 
 mimir_add_test(RuntimeTest.PortableWorkBudget test_portable_work_budget.cpp)
+mimir_add_test(RuntimeTest.TensorWeights test_tensor_weights_runtime.cpp)
+mimir_add_test(RuntimeTest.GradientCommit test_gradient_commit.cpp)
 if(ENABLE_OPENCL OR ENABLE_VULKAN)
     add_executable(PortableNativeOps test_portable_native_ops.cpp test_log_stub.cpp)
     target_compile_features(PortableNativeOps PRIVATE cxx_std_17)
@@ -383,13 +401,13 @@ target_compile_definitions(RuntimeTest.EmbeddedShaderSource PRIVATE ENABLE_OPENC
 add_test(NAME RuntimeTest.EmbeddedShaderSource COMMAND RuntimeTest.EmbeddedShaderSource)
 set_tests_properties(RuntimeTest.EmbeddedShaderSource PROPERTIES TIMEOUT 15 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
-add_executable(RuntimeTest.SoftwareFP16 test_fp16_software.cpp)
+add_executable(RuntimeTest.SoftwareFP16 test_fp16_software.cpp ../src/runtimes/cpu/SimdDispatch.cpp)
 target_include_directories(RuntimeTest.SoftwareFP16 PRIVATE ../src)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(RuntimeTest.SoftwareFP16 PRIVATE OpenMP::OpenMP_CXX)
 endif()
 add_test(NAME RuntimeTest.SoftwareFP16 COMMAND RuntimeTest.SoftwareFP16)
-set_tests_properties(RuntimeTest.SoftwareFP16 PROPERTIES TIMEOUT 15)
+set_tests_properties(RuntimeTest.SoftwareFP16 PROPERTIES TIMEOUT 15 ENVIRONMENT "MIMIR_CPU_ISA=scalar")
 
 add_test(NAME LuaTest.CheckpointResumeResolver
     COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_checkpoint_resume.lua)
@@ -397,6 +415,12 @@ add_test(NAME LuaTest.TrainingResume
     COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_training_resume.lua)
 set_tests_properties(LuaTest.CheckpointResumeResolver LuaTest.TrainingResume PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1")
+
+add_test(NAME LuaTest.VAEConvInferenceCompat
+    COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_vae_conv_inference_compat.lua)
+set_tests_properties(LuaTest.VAEConvInferenceCompat PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 180 ENVIRONMENT
+    "OMP_NUM_THREADS=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_RUNTIME_AUTOTUNE=0;MIMIR_VAE_INFERENCE_TEST_BIN=$<TARGET_FILE:mimir>")
 
 mimir_add_test(RuntimeTest.Fusion test_runtime_fusion.cpp)
 set_tests_properties(RuntimeTest.Fusion PROPERTIES TIMEOUT 120 ENVIRONMENT
@@ -437,3 +461,90 @@ mimir_add_test(ModelTest.T5 test_t5.cpp)
 set_tests_properties(ModelTest.T5 PROPERTIES TIMEOUT 60)
 add_test(NAME LuaTest.T5 COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_t5.lua)
 set_tests_properties(LuaTest.T5 PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)
+
+mimir_add_test(RuntimeTest.LayerBoundary test_runtime_layer_boundary.cpp)
+
+# Baseline executable: optional ISA kernels are isolated in the dispatcher TU.
+add_executable(RuntimeTest.SimdDispatch test_runtime_simd.cpp ../src/runtimes/cpu/SimdDispatch.cpp)
+target_include_directories(RuntimeTest.SimdDispatch PRIVATE ../src)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(RuntimeTest.SimdDispatch PRIVATE OpenMP::OpenMP_CXX)
+endif()
+add_test(NAME RuntimeTest.SimdDispatch COMMAND RuntimeTest.SimdDispatch)
+add_test(NAME RuntimeTest.SimdInvalidISA COMMAND RuntimeTest.SimdDispatch --expect-env-rejection)
+set_tests_properties(RuntimeTest.SimdDispatch PROPERTIES TIMEOUT 30)
+set_tests_properties(RuntimeTest.SimdInvalidISA PROPERTIES TIMEOUT 15 ENVIRONMENT "MIMIR_CPU_ISA=unknown-isa")
+
+mimir_add_test(RuntimeTest.ConvND test_runtime_conv_nd.cpp)
+set_tests_properties(RuntimeTest.ConvND PROPERTIES TIMEOUT 60)
+find_program(MIMIR_RUNTIME_AUDIT_PYTHON NAMES python3)
+if(MIMIR_RUNTIME_AUDIT_PYTHON)
+    add_test(NAME RuntimeTest.DispatchBoundary
+        COMMAND ${MIMIR_RUNTIME_AUDIT_PYTHON}
+            ${CMAKE_SOURCE_DIR}/scripts/dev/audit_runtime_dispatch.py
+            --output ${CMAKE_BINARY_DIR}/runtime_dispatch_audit.json)
+    set_tests_properties(RuntimeTest.DispatchBoundary PROPERTIES TIMEOUT 15)
+endif()
+
+mimir_add_test(VizTest.GenericLatentSpace test_latent_space_generic.cpp)
+mimir_add_test(VizTest.GenericLatentControl test_latent_space_control.cpp)
+set_tests_properties(VizTest.GenericLatentSpace VizTest.GenericLatentControl PROPERTIES
+    TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=2;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0;MIMIR_PLANNER_FUSION=0;MIMIR_PLANNER_BUFFER_REUSE=0")
+add_test(NAME VizTest.GenericProjection COMMAND VizTest.ButtonEvents --projection-only)
+set_tests_properties(VizTest.GenericProjection PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+add_test(NAME VizTest.ScrollPadding COMMAND VizTest.ButtonEvents --scroll-padding-only)
+set_tests_properties(VizTest.ScrollPadding PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+add_test(NAME VizTest.PanelManager COMMAND VizTest.ButtonEvents --panel-manager-only)
+set_tests_properties(VizTest.PanelManager PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+add_test(NAME VizTest.Export3D COMMAND VizTest.ButtonEvents --export-3d-only)
+set_tests_properties(VizTest.Export3D PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+mimir_add_test(ModelTest.VAEConvModes test_vae_conv_modes.cpp)
+set_tests_properties(ModelTest.VAEConvModes PROPERTIES TIMEOUT 90
+    ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0;MIMIR_PLANNER_FUSION=0;MIMIR_PLANNER_BUFFER_REUSE=0")
+
+mimir_add_test(RuntimeTest.CausalSequence test_runtime_causal_sequence.cpp)
+add_test(NAME RuntimeTest.VulkanCausalSequence COMMAND RuntimeTest.CausalSequence --vulkan)
+set_tests_properties(RuntimeTest.CausalSequence PROPERTIES TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_RUNTIME_AUTOTUNE=0")
+set_tests_properties(RuntimeTest.VulkanCausalSequence PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120
+    LABELS "GPU;VULKAN" ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_RUNTIME_AUTOTUNE=0")
+mimir_add_test(ModelTest.CausalSequenceLayers test_model_causal_sequence.cpp)
+set_tests_properties(ModelTest.CausalSequenceLayers PROPERTIES TIMEOUT 90
+    ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0;MIMIR_PLANNER_FUSION=0;MIMIR_PLANNER_BUFFER_REUSE=0")
+
+mimir_add_test(RuntimeTest.PrimerOps test_runtime_primer.cpp)
+add_test(NAME RuntimeTest.VulkanPrimerOps COMMAND RuntimeTest.PrimerOps --vulkan)
+add_test(NAME ModelTest.PrimerOps COMMAND RuntimeTest.PrimerOps --model)
+set_tests_properties(RuntimeTest.PrimerOps PROPERTIES TIMEOUT 90 ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_RUNTIME_AUTOTUNE=0")
+set_tests_properties(RuntimeTest.VulkanPrimerOps PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
+    LABELS "GPU;VULKAN" ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_RUNTIME_AUTOTUNE=0")
+set_tests_properties(ModelTest.PrimerOps PROPERTIES TIMEOUT 60
+    ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0")
+add_test(NAME LuaTest.PrimerOps COMMAND $<TARGET_FILE:mimir> --lua scripts/tests/test_primer_ops.lua)
+set_tests_properties(LuaTest.PrimerOps PROPERTIES TIMEOUT 45 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0")
+
+add_executable(VizTest.LatentCorrelationMath test_latent_correlations.cpp)
+target_compile_features(VizTest.LatentCorrelationMath PRIVATE cxx_std_17)
+target_include_directories(VizTest.LatentCorrelationMath PRIVATE ../src)
+add_test(NAME VizTest.LatentCorrelationMath COMMAND VizTest.LatentCorrelationMath)
+set_tests_properties(VizTest.LatentCorrelationMath PROPERTIES TIMEOUT 30)
+add_executable(VizTest.LatentSpaceExport test_latent_space_export.cpp)
+target_compile_features(VizTest.LatentSpaceExport PRIVATE cxx_std_17)
+target_include_directories(VizTest.LatentSpaceExport PRIVATE ../src)
+add_test(NAME VizTest.LatentSpaceExport COMMAND VizTest.LatentSpaceExport)
+set_tests_properties(VizTest.LatentSpaceExport PROPERTIES TIMEOUT 30)
+mimir_add_test(VizTest.LatentCorrelationControl test_latent_correlation_control.cpp)
+mimir_add_test(ModelTest.LatentCorrelations test_model_latent_correlations.cpp)
+set_tests_properties(VizTest.LatentCorrelationControl ModelTest.LatentCorrelations PROPERTIES
+    TIMEOUT 90 ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0")
+
+mimir_add_test(ModelTest.NeuronNetwork test_neuron_network.cpp)
+mimir_add_test(VizTest.NeuronNetworkControl test_neuron_network_control.cpp)
+set_tests_properties(ModelTest.NeuronNetwork VizTest.NeuronNetworkControl PROPERTIES
+    TIMEOUT 90 ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0;MIMIR_PLANNER_FUSION=0;MIMIR_PLANNER_BUFFER_REUSE=0")
+
+mimir_add_test(ModelTest.LiveWeightNetwork test_live_weight_network.cpp)
+mimir_add_test(VizTest.LiveWeightControl test_live_weight_control.cpp)
+set_tests_properties(ModelTest.LiveWeightNetwork VizTest.LiveWeightControl PROPERTIES
+    TIMEOUT 90 ENVIRONMENT "OMP_NUM_THREADS=1;MIMIR_DISABLE_VULKAN=1;MIMIR_DISABLE_OPENCL=1;MIMIR_DISABLE_CUDA=1;MIMIR_DISABLE_ROCM=1;MIMIR_RUNTIME_AUTOTUNE=0;MIMIR_PLANNER_FUSION=0;MIMIR_PLANNER_BUFFER_REUSE=0")

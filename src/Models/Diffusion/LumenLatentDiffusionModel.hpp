@@ -19,10 +19,12 @@ public:
         int latent_h = 64;
         int latent_c = 4;
         int vae_base_channels = 8;
+        std::string vae_conv_mode = "2d";
         bool vae_latent_spatial_context = false;
         bool vae_latent_detail_path = false;
         int vae_latent_context_channels = 32;
         bool vae_stochastic_latent = true;
+        bool vae_logvar_head_bias = false;
         bool vae_resnet = true;
         bool vae_attention = false;
         bool vae_use_skip_connections = false;

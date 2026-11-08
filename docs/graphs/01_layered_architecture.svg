@@ -1,40 +1,129 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1050" viewBox="0 0 1600 1050" role="img" aria-labelledby="title desc">
-<title id="title">Architecture en couches</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1281" viewBox="0 0 1200 1281" role="img" aria-labelledby="title desc">
+<title id="title">Architecture en couches</title>
+<desc id="desc">Le pilotage utilise les fabriques du registre pour obtenir une instance de classe dérivée de Model. Le modèle orchestre le graphe ; les runtimes portent les calculs. Mémoire, sérialisation et observation accompagnent le cycle de vie. Sources : src/Model.hpp, src/runtimes/AbstractRuntime.hpp, src/runtimes/RuntimeRouter.hpp, src/Planning/Planner.hpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Model.hpp&quot;, &quot;src/runtimes/AbstractRuntime.hpp&quot;, &quot;src/runtimes/RuntimeRouter.hpp&quot;, &quot;src/Planning/Planner.hpp&quot;], &quot;related_docs&quot;: [&quot;docs/00-Framework-Philosophy.md&quot;, &quot;docs/07-Devs/01-How-The-Framework-Works.md&quot;, &quot;docs/07-Devs/08-Architecture-Contract.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Architecture en couches</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Séparation stricte entre orchestration, registre, modèles, runtime, mémoire et backend matériel.</text>
-<line x1="60" y1="112" x2="1540" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="240" y="150" width="1120" height="78" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="175" class="label" text-anchor="middle">Couche Utilisateur</text>
-<text x="800.0" y="200" class="small" text-anchor="middle">CLI, scripts Lua, configurations JSON, API C++</text>
-<rect x="240" y="270" width="1120" height="78" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="295" class="label" text-anchor="middle">Orchestration</text>
-<text x="800.0" y="320" class="small" text-anchor="middle">parse arguments, load config, templates, pipelines</text>
-<path d="M800,230 L800,270" class="edgeB"/>
-<rect x="240" y="390" width="1120" height="78" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="415" class="label" text-anchor="middle">Registre central</text>
-<text x="800.0" y="440" class="small" text-anchor="middle">architectures nommées, overrides, model factory</text>
-<path d="M800,350 L800,390" class="edgeB"/>
-<rect x="240" y="510" width="1120" height="78" rx="14" fill="#cffafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="535" class="label" text-anchor="middle">Modèles</text>
-<text x="800.0" y="560" class="small" text-anchor="middle">MLP, CNN, VAE, UNet, Diffusion, Transformers, GAN</text>
-<path d="M800,470 L800,510" class="edgeB"/>
-<rect x="240" y="630" width="1120" height="78" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="655" class="label" text-anchor="middle">Runtime de graphe</text>
-<text x="800.0" y="680" class="small" text-anchor="middle">forward, backward, planner, scheduler</text>
-<path d="M800,590 L800,630" class="edgeB"/>
-<rect x="240" y="750" width="1120" height="78" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="775" class="label" text-anchor="middle">Mémoire &amp; Sérialisation</text>
-<text x="800.0" y="800" class="small" text-anchor="middle">tensor allocator, memory guard, checkpoints, safetensors</text>
-<path d="M800,710 L800,750" class="edgeB"/>
-<rect x="240" y="870" width="1120" height="78" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="895" class="label" text-anchor="middle">Backend CPU-first</text>
-<text x="800.0" y="920" class="small" text-anchor="middle">AVX2, FMA, fallback robuste; GPU détecté si disponible</text>
-<path d="M800,830 L800,870" class="edgeB"/>
-<text x="1540" y="1026" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1281" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Architecture en couches</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Des responsabilités distinctes pour la définition, le pilotage et le calcul.</tspan>
+</text>
+<path d="M 305,313 L 305,413" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 780.16,313 L 780.16,363 L 419.84,363 L 419.84,413" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 566,488 L 634,488" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 780.16,563 L 780.16,613 L 419.84,613 L 419.84,663" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 566,738 L 634,738" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 780.16,813 L 780.16,863 L 419.84,863 L 419.84,913" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 1009.84,563 L 1009.84,593 L 1182,593 L 1182,883 L 1009.84,883 L 1009.84,913" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<g data-node="pilot">
+<rect x="44" y="163" width="522" height="150" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Pilotage</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">CLI, scripts et configuration</tspan>
+<tspan x="66" dy="26">Choix du modèle et du run</tspan>
+</text>
+</g>
+<g data-node="definition">
+<rect x="634" y="163" width="522" height="150" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="656" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="656" dy="0">Définition native</tspan>
+</text>
+<text x="656" y="237" font-size="19" fill="#334155">
+<tspan x="656" dy="0">Classe C++ : public Model</tspan>
+<tspan x="656" dy="26">Config et topologie autorisée</tspan>
+</text>
+</g>
+<g data-node="registry">
+<rect x="44" y="413" width="522" height="150" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="444" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Registre</tspan>
+</text>
+<text x="66" y="487" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Noms et fabriques</tspan>
+<tspan x="66" dy="26">Conversion de configuration</tspan>
+</text>
+</g>
+<g data-node="model">
+<rect x="634" y="413" width="522" height="150" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="656" y="444" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="656" dy="0">Modèle construit</tspan>
+</text>
+<text x="656" y="487" font-size="19" fill="#334155">
+<tspan x="656" dy="0">Couches et tenseurs nommés</tspan>
+<tspan x="656" dy="26">État, entrées et sorties</tspan>
+</text>
+</g>
+<g data-node="routing">
+<rect x="44" y="663" width="522" height="150" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="66" y="694" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Planification et routage</tspan>
+</text>
+<text x="66" y="737" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Planner / RuntimeRouter</tspan>
+<tspan x="66" dy="26">Capacités et sélection réelle</tspan>
+</text>
+</g>
+<g data-node="kernels">
+<rect x="634" y="663" width="522" height="150" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="656" y="694" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="656" dy="0">Calcul des opérations</tspan>
+</text>
+<text x="656" y="737" font-size="19" fill="#334155">
+<tspan x="656" dy="0">Kernels CPU / GPU disponibles</tspan>
+<tspan x="656" dy="26">Dérivées et mises à jour</tspan>
+</text>
+</g>
+<g data-node="storage">
+<rect x="44" y="913" width="522" height="150" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="66" y="944" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Mémoire et persistance</tspan>
+</text>
+<text x="66" y="987" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Guards, allocateurs, scratch</tspan>
+<tspan x="66" dy="26">RawFolder / SafeTensors</tspan>
+</text>
+</g>
+<g data-node="observation">
+<rect x="634" y="913" width="522" height="150" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="656" y="944" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="656" dy="0">Observation</tspan>
+</text>
+<text x="656" y="987" font-size="19" fill="#334155">
+<tspan x="656" dy="0">Snapshots et métriques</tspan>
+<tspan x="656" dy="26">Viz / Htop / rapports</tspan>
+</text>
+</g>
+<rect x="735.01" y="323.5" width="90.3" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="744.01" y="342.5" font-size="15" fill="#475569">
+<tspan x="744.01" dy="0">fabrique</tspan>
+</text>
+<rect x="737.56" y="823.5" width="85.2" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="746.56" y="842.5" font-size="15" fill="#475569">
+<tspan x="746.56" dy="0">buffers</tspan>
+</text>
+<rect x="1067.72" y="578.5" width="56.4" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="1076.72" y="597.5" font-size="15" fill="#475569">
+<tspan x="1076.72" dy="0">état</tspan>
+</text>
+<rect x="44" y="1111" width="1112" height="84" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1139" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Les calculs des couches restent dans les runtimes ; Model orchestre leur exécution.</tspan>
+<tspan x="66" dy="26">• MPK est une voie de description alternative, expérimentale et partielle pour la production.</tspan>
+</text>
+<text x="44" y="1230" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : Model.hpp · AbstractRuntime.hpp · RuntimeRouter.hpp · Planner.hpp</tspan>
+</text>
+</g>
 </svg>

@@ -350,10 +350,14 @@ static void adaptLumenConfigToVaeCheckpoint(
     adapt_int("latent_h", cfg.latent_h);
     adapt_int("latent_c", cfg.latent_c);
     adapt_int("base_channels", cfg.vae_base_channels);
+    // The frozen checkpoint defines its codec topology. Legacy checkpoints
+    // predate ConvND and must remain 2D even if a launch config requests ND.
+    cfg.vae_conv_mode = vae_config.value("conv_mode", std::string("2d"));
     adapt_bool("latent_spatial_context", cfg.vae_latent_spatial_context);
     adapt_bool("latent_detail_path", cfg.vae_latent_detail_path);
     adapt_int("latent_context_channels", cfg.vae_latent_context_channels);
     adapt_bool("stochastic_latent", cfg.vae_stochastic_latent);
+    cfg.vae_logvar_head_bias = vae_config.value("logvar_head_bias", false);
     adapt_bool("resnet", cfg.vae_resnet);
     adapt_bool("attention", cfg.vae_attention);
     adapt_bool("use_skip_connections", cfg.vae_use_skip_connections);
@@ -521,10 +525,12 @@ void LumenLatentDiffusionModel::buildFromConfig(const Config& cfg) {
         vae_cfg.latent_h = cfg_.latent_h;
         vae_cfg.latent_c = cfg_.latent_c;
         vae_cfg.base_channels = cfg_.vae_base_channels;
+        vae_cfg.conv_mode = cfg_.vae_conv_mode;
         vae_cfg.latent_spatial_context = cfg_.vae_latent_spatial_context;
         vae_cfg.latent_detail_path = cfg_.vae_latent_detail_path;
         vae_cfg.latent_context_channels = cfg_.vae_latent_context_channels;
         vae_cfg.stochastic_latent = cfg_.vae_stochastic_latent;
+        vae_cfg.logvar_head_bias = cfg_.vae_logvar_head_bias;
         vae_cfg.resnet = cfg_.vae_resnet;
         vae_cfg.attention = cfg_.vae_attention;
         vae_cfg.use_skip_connections = cfg_.vae_use_skip_connections;
@@ -542,6 +548,8 @@ void LumenLatentDiffusionModel::buildFromConfig(const Config& cfg) {
 
         vae_encoder_ = std::make_unique<VAEConvModel>();
         static_cast<VAEConvModel&>(*vae_encoder_).buildFromConfig(vae_cfg);
+        cfg_.vae_conv_mode = static_cast<VAEConvModel&>(*vae_encoder_).getConfig().conv_mode;
+        vae_cfg.conv_mode = cfg_.vae_conv_mode;
         vae_encoder_->allocateParams();
 
         vae_decoder_ = std::make_unique<Model>();
@@ -558,6 +566,7 @@ void LumenLatentDiffusionModel::buildFromConfig(const Config& cfg) {
         load_options.validate_checksums = true;
         load_options.apply_model_name = false;
         load_options.apply_model_config = false;
+        load_options.load_layer_metadata = false;
 
         std::string load_error;
         // A full VAE checkpoint also contains decoder and optimizer tensors that
@@ -936,9 +945,11 @@ void LumenLatentDiffusionModel::buildInto(Model& model, const Config& cfg) {
     model.modelConfig["vae_scale"] = cfg.vae_scale;
     model.modelConfig["vae_shift"] = cfg.vae_shift;
     model.modelConfig["vae_decoder_upsample"] = cfg.vae_decoder_upsample;
+    model.modelConfig["vae_conv_mode"] = cfg.vae_conv_mode;
     model.modelConfig["vae_latent_spatial_context"] = cfg.vae_latent_spatial_context;
     model.modelConfig["vae_latent_detail_path"] = cfg.vae_latent_detail_path;
     model.modelConfig["vae_latent_context_channels"] = cfg.vae_latent_context_channels;
+    model.modelConfig["vae_logvar_head_bias"] = cfg.vae_logvar_head_bias;
     model.modelConfig["vae_calibrated"] =
         std::isfinite(cfg.vae_scale) && cfg.vae_scale > 0.0f;
     model.modelConfig["input_dim"] = latent_w * latent_h * latent_c;

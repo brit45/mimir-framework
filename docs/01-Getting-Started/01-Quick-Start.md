@@ -23,8 +23,8 @@ Temps moyen : 10 à 15 minutes.
 
 ## Pré-requis
 
-- Linux
-- CMake + compilateur C++17
+- CMake, compilateur C++17 et Lua 5.3+ avec ses en-têtes.
+- Un shell POSIX pour les commandes ci-dessous ; voir l'[installation](02-Installation.md) pour Windows.
 
 ## Démarrage rapide avec Docker (Alpine)
 
@@ -66,8 +66,9 @@ combiner `SCRIPT` avec un autre `--lua`.
 ## 1) Build
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
+cmake -S . -B build -DMIMIR_VIZ_BACKEND=NONE \
+  -DENABLE_VULKAN=OFF -DENABLE_OPENCL=OFF -DMIMIR_ENABLE_TESTS=ON
+cmake --build build --parallel 2
 ```
 
 Si le build passe mais que vous voulez un contrôle rapide avant de lire le reste de la doc :
@@ -81,8 +82,8 @@ Vous devez obtenir l’aide CLI et la détection matérielle au démarrage, sans
 Si la commande échoue :
 
 1. Vérifier que vous êtes bien à la racine du dépôt.
-2. Supprimer `build/` puis relancer `cmake -S . -B build`.
-3. Relire les erreurs CMake avant de relancer le build.
+2. Lire la première erreur et le résumé CMake pour identifier la dépendance manquante.
+3. Si un autre générateur ou toolchain est nécessaire, utiliser un nouveau dossier de build.
 
 ## 2) Exécuter un script Lua
 
@@ -93,11 +94,12 @@ Si la commande échoue :
 Cet exemple vérifie le câblage CLI → Lua, le registre et l’allocation d’un modèle sans charger de dataset. Pour une validation plus large :
 
 ```bash
-./bin/mimir --lua scripts/templates/template_new_model.lua
 ./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
 ```
 
-Le template vérifie le chemin “création de modèle”, le smoke test vérifie le chemin “save/load”. Ensemble, ils donnent un meilleur signal qu’un simple `--help`.
+L'inspection vérifie la création d'un petit VAE natif ; le smoke test vérifie
+la sauvegarde et le rechargement. Ces contrôles dépassent le simple démarrage
+du binaire, sans valider tous les modèles ni tous les backends.
 
 Attendu :
 
@@ -107,30 +109,38 @@ Attendu :
 
 ## 3) Créer un modèle (via le registre)
 
-Exemple : Transformer simple.
+Enregistrez cet exemple dans `/tmp/mimir_quickstart.lua`, puis lancez-le avec
+`./run_mimir.sh --lua /tmp/mimir_quickstart.lua`. Il configure un Transformer
+natif du registre, sans définir de graphe dans Lua.
 
 ```lua
 local cfg, err = Mimir.Architectures.default_config("transformer")
 if not cfg then error(err) end
 
-cfg.vocab_size = 8000
-cfg.seq_len = 128
-cfg.d_model = 256
-cfg.num_layers = 4
-cfg.num_heads = 8
-cfg.mlp_hidden = 1024
-cfg.output_dim = 256
+cfg.vocab_size = 128
+cfg.seq_len = 8
+cfg.d_model = 16
+cfg.num_layers = 1
+cfg.num_heads = 2
+cfg.mlp_hidden = 32
+cfg.output_dim = 4
 
 assert(Mimir.Model.create("transformer", cfg))
+assert(Mimir.Model.set_hardware(false)) -- exemple CPU
 -- Model.build() n'est plus nécessaire (v3.0+: network construit automatiquement)
 assert(Mimir.Model.allocate_params())
 assert(Mimir.Model.init_weights("xavier", 42))
 
--- forward avec ids int (Embedding) si l’archi le supporte,
--- sinon forward float: utilise __input__.
+-- TransformerModel attend des IDs entiers sur le port __input__.
 local ids = {}
 for i = 1, cfg.seq_len do ids[i] = 1 end
-local out = Mimir.Model.forward({ __input__ = ids }, false)
+-- Les ports de conditionnement mag/mod attendent chacun d_model valeurs.
+local conditioning = {}
+for i = 1, cfg.d_model do conditioning[i] = 0 end
+local out = assert(Mimir.Model.forward({
+  __input__ = ids, mag = conditioning, mod = conditioning,
+}, false))
+assert(#out == cfg.output_dim)
 print("out_len=", #out)
 ```
 
@@ -141,9 +151,14 @@ Pourquoi cet exemple est structuré comme ça :
 - `allocate_params()` réserve les poids.
 - `init_weights()` met le modèle dans un état exploitable avant le premier `forward()`.
 
+Ce Transformer encode la séquence puis applique une tête dense de `output_dim`
+valeurs. Ce n'est pas une prédiction du vocabulaire à chaque position ; pour ce
+cas, utilisez le modèle `causal_lm` et son workflow dédié.
+
 Si vous remplacez l’entrée par une table map nommée, vous gardez un script compatible avec les architectures multi-input. C’est la convention recommandée même pour un seul tenseur d’entrée.
 
-Astuce : si vous voulez un premier essai encore plus court, ne change que `seq_len` et garde le reste par défaut.
+Gardez ces petites dimensions pour le premier essai. Les configurations par
+défaut d'autres architectures peuvent allouer beaucoup plus de mémoire.
 
 ### Variante courte avec sauvegarde
 
@@ -163,9 +178,9 @@ Cette étape est utile si vous voulez valider tout de suite que la config, l’a
 
 ## 4) Où regarder ensuite
 
-- `docs/02-User-Guide/02-Model-Lifecycle.md` pour comprendre le pipeline.
-- `docs/03-API-Reference/02-Serialization.md` pour save/load.
-- `docs/02-User-Guide/09-Memory.md` si votre premier vrai modèle dépasse vite la RAM disponible.
+- [Cycle de vie du modèle](../02-User-Guide/02-Model-Lifecycle.md).
+- [Sérialisation](../03-API-Reference/16-Serialization.md) pour save/load.
+- [Gestion mémoire](../02-User-Guide/09-Memory.md) si votre modèle dépasse la RAM disponible.
 
 ## Étapes suivantes
 

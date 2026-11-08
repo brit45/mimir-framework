@@ -202,12 +202,13 @@ Pour VAEConv, `ModelTest.VAEConvContract` vérifie aussi qu’un gradient de rec
 ## Couverture OpenCL et Vulkan
 
 Les backends Vulkan et OpenCL conservent leurs chemins spécialisés et utilisent
-`PortableRuntime` pour les autres opérations et les passes arrière. Leur
-couverture par type correspond au dispatcher CPU exécutable : **72 types en
-forward et 73 en backward**, dont NMS avec stop-gradient. `Lambda` est refusé
-en forward par le dispatcher CPU lui-même ; son backward identité est supporté
-sur CPU, Vulkan et OpenCL. CUDA possède les mêmes familles de kernels mais
-n'implémente pas le backward `Lambda`.
+`PortableRuntime` pour les autres opérations et les passes arrière. Les capacités
+par type sont déclarées par le backend ; les capacités d'une opération réelle
+vérifient aussi ses formes, ses entrées et ses limites de travail. `Lambda` est
+refusé en forward par le dispatcher CPU lui-même ; son backward identité est
+supporté sur CPU, Vulkan et OpenCL. Les 18 primitives Primer,
+`CausalDepthwiseConv1d` et `SwiGLU` possèdent des calculs natifs CPU et portables ;
+CUDA/ROCm les déclarent encore `HostFallback`.
 
 Les familles couvertes comprennent convolutions, normalisations, attention,
 projections/embeddings, pooling, transformations de tenseurs, récurrence,
@@ -215,12 +216,31 @@ upsampling, dropout et reparamétrisation. Les configurations, formes de tenseur
 et limites du device restent vérifiées ; cette couverture par type ne garantit
 pas que toute forme soit acceptée.
 
-Les nouveaux kernels de référence OpenCL/Vulkan exécutent leur calcul sur le
-device avec une invocation qui traite le travail logique séquentiellement.
-Ils privilégient la conformité numérique ; leur couverture ne garantit pas des
-performances supérieures au CPU. Le staging des tenseurs et l'accumulation des
-gradients de paramètres retournés restent sur l'hôte. Les calculs forward et
-backward ne sont pas remplacés par un appel arithmétique CPU caché.
+Les kernels portables indépendants par destination, dont ceux de Primer, sont
+parallèles ; certains chemins de référence restent séquentiels. Le staging des
+tenseurs et l'accumulation des gradients de paramètres retournés restent sur
+l'hôte. Un calcul natif n'est pas remplacé par un calcul de référence CPU caché.
+Les formes et les budgets de travail peuvent provoquer un refus avant lancement.
+
+Les [contrats des primitives Primer](14-Layers-And-Ops.md#primitives-issues-de-létude-primer)
+précisent les dérivées et domaines :
+
+- `Maximum` / `Minimum` partagent le gradient en deux aux égalités ;
+  `ReduceMin` / `ReduceMax` le partagent entre tous les extrema égaux.
+- Le backward de `ReduceProd` multiplie les autres facteurs sans diviser par le
+  produit total, ce qui conserve le traitement des facteurs nuls. Son coût est
+  quadratique dans la longueur de l'axe réduit ; le runtime portable borne ce
+  travail avant lancement.
+- `LogAbs` refuse zéro en forward et backward ; `SqrtAbs` accepte zéro en forward
+  mais refuse sa dérivée singulière. Aucun epsilon implicite n'est ajouté.
+- Les entrées, gradients et résultats non finis sont refusés avant publication.
+  Le chemin portable refuse les entrées ou gradients FP32 subnormaux et signale
+  les zéros calculés ambigus pouvant masquer un sous-flux. Le routeur peut alors
+  réessayer sur CPU ; ce repli conservateur peut aussi concerner une annulation
+  exacte.
+
+Ces nouvelles opérations publient leurs sorties et gradients d'entrée après
+validation complète ; un refus ne doit pas modifier les résultats précédents.
 
 Pour NMS, le backward restitue des gradients nuls de la forme de chaque entrée.
 Il vérifie la longueur du gradient amont contre le nombre d'indices retenus.
@@ -235,6 +255,12 @@ runtime sélectionné. `RuntimeTest.NMS` vérifie le CPU ; les tests existants
 `RuntimeTest.OPENCLBackwardParity` et `RuntimeTest.VULKANBackwardParity`
 conservent la couverture des familles historiques. Les tests GPU ignorent
 l'exécution avec le code 77 si le device est indisponible.
+
+Pour les nouvelles primitives, `RuntimeTest.PrimerOps` vérifie les oracles et
+gradients CPU, `RuntimeTest.VulkanPrimerOps` vérifie le GPU et les replis avec
+contrôle du runtime sélectionné, et `ModelTest.PrimerOps` vérifie le graphe et
+les checkpoints. Les kernels OpenCL sont générés depuis la même source ; leur
+exécution matérielle doit être validée séparément.
 
 ## Étapes suivantes
 

@@ -44,7 +44,10 @@ Elements principaux :
 - `Registry::defaultConfig(name)`
 - `Registry::create(name, config)`
 
-Le `create` est une lambda/fonction qui instancie le bon modele et applique sa config.
+Ces types appartiennent au namespace `ModelArchitectures` ; l'instance est
+obtenue avec `ModelArchitectures::Registry::instance()`. Le `create` est une
+fabrique qui instancie une classe C++ dérivée de `Model` et construit son
+graphe natif depuis la configuration.
 
 ## 3. Composer une config modele
 
@@ -60,7 +63,8 @@ Regle de qualite : la config finale doit rester serialisable et explicite.
 
 Procedure conseillee :
 
-1. Creer `MyNewModel.hpp/.cpp` dans `src/Models/...`.
+1. Créer une classe dérivée de `Model` dans `src/Models/...` et intégrer ses
+   sources à `MIMIR_SOURCES`.
 2. Definir une `Config` interne et des defaults robustes.
 3. Ajouter les helpers JSON -> Config et default JSON dans le registre.
 4. Ajouter une `Entry` avec `name/description/default_config/create`.
@@ -69,11 +73,12 @@ Procedure conseillee :
 ## 5. Exemple conceptuel d'entree registre
 
 ```cpp
+auto& registry = ModelArchitectures::Registry::instance();
 registry.registerArchitecture({
     "my_new_model",
     "Description courte",
     myNewDefaultConfigJson(),
-    [](const json& cfg) {
+    [](const ModelArchitectures::json& cfg) {
         auto c = myNewCfgFromJson(cfg);
         auto m = std::make_shared<MyNewModel>();
         m->buildFromConfig(c);
@@ -135,7 +140,7 @@ Exemple :
 
 ```json
 {
-    "arch": "my_new_model",
+    "architecture": "my_new_model",
     "model": {
         "width": 256,
         "depth": 12,
@@ -147,7 +152,7 @@ Exemple :
 Puis override ponctuel :
 
 ```bash
-./bin/mimir --conf config.json --override model.depth=16
+./bin/mimir --config config.json --override model.depth=16
 ```
 
 Attendu metier :
@@ -155,6 +160,10 @@ Attendu metier :
 1. Le run reste compatible avec les anciennes configs.
 2. La provenance de la valeur finale est explicable (default + override).
 3. Le schema final reste serialisable pour audit.
+
+`--config` crée et initialise ici le modèle. Pour exécuter un workflow avec
+`--conf`, ajouter une section `lua.scripts` désignant les scripts livrés ou
+leurs adaptations ; une clé top-level `script` seule n'est pas ce contrat.
 
 ## 10. Checklist metier de release d'une architecture
 

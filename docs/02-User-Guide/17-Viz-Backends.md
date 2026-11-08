@@ -85,6 +85,23 @@ avec ceux de la Viz. Le bouton **Fermer** transmet la fermeture à Mímir ;
 fermer simplement l’onglet laisse la Viz disponible pour une reconnexion. Plusieurs
 onglets partagent le même état et les mêmes contrôles.
 
+## Projection 3D commune aux modèles
+
+Le bouton 3D du panneau **Pilotage** utilise le même calcul de projection et le
+même gestionnaire d'interaction pour les architectures natives et les graphes
+personnalisés. Le modèle fournit une copie bornée de ses poids et activations ;
+`Visualizer` dessine les axes, marqueurs, légende et infobulles avec les
+primitives du backend sélectionné.
+
+Le choix SFML/Qt/GTK/Web ne sélectionne pas un autre algorithme d'ACP. Les
+commandes restent glisser, molette, `R` et `Échap`. `NONE` conserve le mode sans
+interface graphique. Voir le [guide de la projection 3D](18-Projection-3D.md)
+pour l'exemple sans dataset, les points de capture et les limites.
+
+La réussite des tests de capture communs ne valide pas à elle seule le rendu
+d'un hôte graphique : exécuter aussi `VizTest.GenericProjection` dans la
+compilation du backend à vérifier.
+
 ## Graphe du modèle et exports PNG
 
 La touche `N` ouvre une vue arborescente du graphe nodal/planner du modèle actif.
@@ -109,6 +126,13 @@ groupés par catégorie, avec leurs labels complets renvoyés à la ligne. Le fi
 est écrit dans `snapshots/viz_snapshot_<horodatage>.png`.
 
 ## Rendu et limites
+
+Un clic droit dans l'espace principal ouvre **Gérer les sections** pour
+masquer ou rouvrir les panneaux, même si tous ont été fermés. Les changements
+sont enregistrés dans la disposition `last` de `viz_ui_settings.json` sans
+interrompre l'entraînement. Dans un tenseur agrandi, le clic droit conserve
+sa fonction de sélection ; quittez ce zoom avant d'ouvrir le gestionnaire.
+Voir [la gestion des sections](../03-API-Reference/15-Viz-Htop.md#masquer-et-rouvrir-les-sections).
 
 Les panneaux partagent un thème d'éditeur sombre inspiré de Blender : surfaces
 gris neutre, en-têtes compacts, séparateurs fins et accents de sélection. Les

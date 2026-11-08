@@ -133,6 +133,7 @@
     "decoder_upsample": "nearest_conv",
     "d_model": 512,
     "stochastic_latent": true,
+    "logvar_head_bias": true,
     "use_encoder_prior": true,
     "use_skip_connections": false,
     "resnet": true,

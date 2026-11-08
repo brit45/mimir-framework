@@ -11,11 +11,11 @@ Vérifier en 5 minutes que l'environnement est sain.
 Ce smoketest vérifie que le build, la CLI et les chemins essentiels — Lua,
 passe avant et sérialisation — fonctionnent sur votre machine.
 
-## 1) Build propre
+## 1) Préparer les tests
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
+cmake -S . -B build -DMIMIR_ENABLE_TESTS=ON
+cmake --build build --parallel 2
 ```
 
 ## 2) Vérifier la CLI
@@ -27,12 +27,12 @@ cmake --build build -j
 ## 3) Exécuter un exemple minimal (Lua)
 
 ```bash
-./bin/mimir --lua scripts/templates/template_new_model.lua
+./run_mimir.sh --lua scripts/examples/inspect_vae_conv.lua
 ```
 
 ## 4) Tester une surface API un peu plus large
 
-### Ops / layers
+### Registre
 
 ```bash
 ./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
@@ -44,29 +44,33 @@ cmake --build build -j
 ./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
 ```
 
-## 5) Lancer un petit test suite Lua (recommandé)
+## 5) Vérifier les contrats natifs sans dataset
 
-Tests rapides :
+Ces tests utilisent des entrées synthétiques :
 
 ```bash
-./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
-./bin/mimir --lua scripts/tests/test_vae_conv_generate.lua
-./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
+ctest --test-dir build --output-on-failure \
+  -R '^ModelTest\.(VAEConvContract|VAEConvLogvar)$'
 ```
 
-## 6) (Optionnel) Exécuter les tests CMake/CTest si présents
+Le script `test_vae_conv_generate.lua` demande un checkpoint et une image :
+il convient à une validation d'inférence préparée, pas à ce parcours sans données.
+
+## 6) (Optionnel) Exécuter toute la suite CTest
 
 Si votre build a généré des targets de test :
 
 ```bash
-cd build
-ctest --output-on-failure
+ctest --test-dir build --output-on-failure
 ```
 
 ## Notes
 
 - Si vous voyez des refus MemoryGuard/OOM, lis `docs/02-User-Guide/09-Memory.md`.
-- Si vous voulez faire un run plus lourd : `./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- --safe --iters 1`.
+- Les tests GPU peuvent être ignorés si leur backend ou matériel est absent.
+  Un smoketest CPU ne valide pas les autres runtimes.
+- Pour mesurer les performances, choisissez un workload dans le
+  [guide des benchmarks](../05-Advanced/01-Performance.md) ; un benchmark n'est pas un test de démarrage.
 
 ## Étapes suivantes
 

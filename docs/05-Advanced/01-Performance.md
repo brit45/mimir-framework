@@ -24,10 +24,13 @@ La complexité du calcul reste quadratique. Les projections, le contexte final
 et le backward nécessitent encore leurs propres buffers.
 
 Les kernels comportent des seuils OpenMP : augmenter le nombre de threads
-n’accélère pas automatiquement les petites matrices. AVX2/FMA dépendent des
-options de compilation et de la machine. Les tailles non multiples de huit
-sont couvertes par les restes scalaires ; une réduction SIMD peut modifier
-légèrement l’arrondi flottant.
+n’accélère pas automatiquement les petites matrices. `RuntimeSimd` sélectionne
+scalaire, SSE2, AVX/256, AVX2 ou AVX512F selon le build et le support CPU/OS.
+Les primitives MatMul de ce dispatcher vectorisent des sorties indépendantes
+en conservant l'ordre de réduction et les restes scalaires ; elles désactivent
+la contraction FMA implicite. Le mode explicite `fused=true` utilise FMA
+également dans les restes et le chemin scalaire. Ces garanties ne doivent pas
+être étendues à toute autre réduction du framework sans test numérique.
 
 ## Orchestration et allocations
 

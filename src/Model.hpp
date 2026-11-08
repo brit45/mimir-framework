@@ -14,13 +14,15 @@
 #include "Tokenizer.hpp"
 #include "Encoder.hpp"
 #include "Autograd.hpp"   // Pour la structure Gradients
-#include "HardwareOpt.hpp" // Optimisations hardware avancées
 #include "SkipConnectionControl.hpp"
 #include "LiveModelConfig.hpp"
 #include "Layers.hpp"      // Pour la structure Layer
 #include "MemoryGuard.hpp" // Pour le strict mode
 #include "DType.hpp"
 #include "Planning/Planner.hpp"
+#include "viz/LatentSpaceProjection.hpp"
+#include "viz/NeuronNetwork.hpp"
+#include "viz/LiveWeightNetwork.hpp"
 #include <chrono>
 
 using json = nlohmann::json;
@@ -191,6 +193,8 @@ public:
     // in FP32; FP64 accumulates in FP64. Integer/bool models are forward-only.
     void setDefaultDType(const std::string& dtype);
     const std::string& getDefaultDType() const { return default_dtype_; }
+    void setAutocastDType(const std::string& dtype);
+    const std::string& getAutocastDType() const { return autocast_dtype_; }
 
     void build();
     void autoBuildFromDataset(const std::string &dataset_dir);
@@ -289,6 +293,25 @@ public:
     // Retourne le snapshot complet sans vider le cache. Les frames sont mises à
     // jour en place par label; clearVizTaps() réalise l'effacement explicite.
     std::vector<VizFrame> consumeVizTaps();
+
+    // Copies graph routing and known unit/channel metadata without reading
+    // weights or executing a forward; the Viz worker arranges its topology.
+    virtual mimir::viz::NeuronNetworkSnapshot captureNeuronNetworkSnapshot() const;
+    // Copies bounded exact scalar parameters already resident on the host.
+    // Synapse identities are exposed only when storage and graph axes agree.
+    virtual mimir::viz::LiveWeightNetworkSnapshot captureLiveWeightNetworkSnapshot() const;
+    // Copies actual parameter/activation vectors at a model-thread boundary.
+    // The returned snapshot owns its samples; the Viz worker performs the PCA.
+    virtual mimir::viz::LatentSpaceRawSnapshot captureLatentSpaceSnapshot(
+        size_t optimizer_step, size_t max_token_vectors = 48,
+        size_t max_sequence_positions = 64, size_t max_vectors_per_matrix = 3) const;
+    // One bounded observation of actual internal activations. Feature identities
+    // are stable across sequence/spatial lengths; no parameter is sampled here.
+    virtual mimir::viz::LatentCorrelationObservation captureLatentCorrelationObservation(
+        size_t optimizer_step, uint64_t forward_serial, bool training) const;
+    void bindLatentSpaceControl(std::shared_ptr<mimir::viz::LatentSpaceControl> control);
+    void captureRequestedLatentSpace(size_t optimizer_step, bool force = false);
+    size_t latentSpaceOptimizerStep() const { return latent_space_optimizer_step_; }
 
     // Hooks de personnalisation des tips Viz (par modèle enfant).
     // Par défaut: désactivés (retournent false / ne modifient rien).
@@ -454,6 +477,8 @@ public:
 
     // Preferred dtype for future storage/allocations (string for config interop).
     std::string default_dtype_ = "float32";
+    std::string autocast_dtype_ = "float32";
+    bool distributed_parameters_synced_ = false;
 
     // Dernier gradient d'entrée (debug/usage avancé)
     std::vector<float> last_input_gradient_;
@@ -506,6 +531,9 @@ public:
     ForwardState forward_state;
     std::shared_ptr<SkipConnectionControl> skip_control_ = std::make_shared<SkipConnectionControl>();
     bool skip_control_initialized_ = false;
+    std::shared_ptr<mimir::viz::LatentSpaceControl> latent_space_control_;
+    uint64_t latent_space_bound_generation_ = 0;
+    size_t latent_space_optimizer_step_ = 0;
     std::shared_ptr<LiveModelConfig> runtime_config_ = std::make_shared<LiveModelConfig>();
     json runtime_config_published_model_;
     std::vector<double> runtime_config_published_controls_;
@@ -579,6 +607,9 @@ public:
     std::unordered_map<std::string, std::string> viz_tips_by_layer_name_;
 
 protected:
+    uint64_t latent_correlation_forward_serial_ = 0;
+    bool latent_correlation_last_forward_training_ = false;
+    void observeCompletedForwardCorrelations(bool training);
     std::vector<Layer> layers;
     int tw = 64, th = 64;
     Tokenizer tokenizer;

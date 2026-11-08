@@ -16,6 +16,7 @@ Optimiser, diagnostiquer et stabiliser des runs complexes.
 - [Activation pas à pas](#activation-pas-à-pas)
 - [Comprendre les seuils d'opérations](#comprendre-les-seuils-dopérations)
 - [Matrice de couverture runtime (etat actuel)](#matrice-de-couverture-runtime-etat-actuel)
+- [Primitives Primer et séquences causales](#primitives-primer-et-séquences-causales)
 - [Recettes par modèle](#recettes-par-modèle)
 - [Diagnostic guidé](#diagnostic-guidé)
 - [Sélection du device GPU](#sélection-du-device-gpu)
@@ -34,9 +35,15 @@ Choix recommandé :
 
 Ce guide est volontairement pratique: chaque section te donne une action concrète et un résultat attendu.
 
-Par défaut, Mímir exécute tous les calculs sur le **CPU**. C'est intentionnel : le CPU garantit la portabilité maximale et sert de référence pour la correction numérique. Mais pour les grands modèles, comme VAEConv 512 px ou les Transformers profonds, le CPU devient rapidement le goulot d'étranglement.
+Le **CPU** reste la référence numérique et le repli des opérations refusées par
+les autres runtimes. Les backends GPU compilés et initialisés peuvent être
+utilisés automatiquement selon la configuration, les formes et le plan
+d'exécution. La présence d'un GPU ne signifie donc pas que chaque layer y passe.
 
-Ce guide explique comment activer les **fast-paths GPU** : des chemins d'exécution spécialisés qui délèguent les opérations lourdes (multiplications matricielles, convolutions, attention) à cuBLAS (NVIDIA) ou rocBLAS (AMD). Le reste des layers continue de s'exécuter sur CPU, sans aucun changement dans vos scripts Lua.
+Ce guide explique le routage vers les kernels natifs CUDA, ROCm, Vulkan et
+OpenCL, ainsi que vers cuBLAS/rocBLAS pour les opérations prises en charge.
+Chaque backend publie des capacités forward et backward propres ; les autres
+layers peuvent être exécutés par un autre runtime disponible.
 
 > **Conseil :** si vous voulez juste démarrer rapidement, allez directement à la section [Recettes par modèle](#recettes-par-modèle).
 
@@ -51,15 +58,21 @@ Mímir maintient une **pile de runtimes** ordonnée par priorité :
 2. CUDA Runtime
 3. Vulkan Runtime
 4. OpenCL Runtime
-5. CPU Runtime (toujours actif, fallback universel)
+5. TPU Runtime (lorsqu'il est fourni au routeur)
+6. CPU Runtime (repli lorsqu'il est activé)
 ```
 
-Pour chaque layer à exécuter, le runtime le plus prioritaire *tente* de le prendre en charge. Il vérifie deux conditions :
+Pour chaque layer, le routeur examine les candidats et leurs capacités :
 
-1. **A-t-il un fast-path pour ce type de layer ?** (Linear, Conv2d, etc.)
-2. **La taille du tenseur dépasse-t-elle le seuil minimal ?** (en dessous du seuil, le transfert mémoire host↔device coûterait plus que le calcul lui-même)
+1. Le backend est-il compilé, initialisé et activé ?
+2. Le forward ou backward demandé possède-t-il une implémentation native ?
+3. La forme, le domaine numérique, les flags et les limites de travail sont-ils acceptés ?
 
-Si l'une des deux conditions échoue, le runtime passe la main au suivant. Ce **fallback est silencieux et automatique** — vous n'avez pas à le gérer.
+Le planner et la calibration peuvent classer les candidats selon leurs coûts.
+Un seuil configuré peut exclure une opération, mais sa valeur par défaut est
+zéro : il ne remplace pas une mesure de vitesse. Si un candidat refuse le
+calcul, le routeur propose l'opération à un autre backend, puis au CPU.
+Les traces et les tests contrôlant `selected_runtime` permettent d'observer ce repli.
 
 Point clé : l'objectif n'est pas de forcer "100% GPU", mais d'obtenir le meilleur compromis perf/stabilité par type de layer.
 
@@ -95,8 +108,9 @@ cmake --build . -j$(nproc)
 
 Vous avez besoin de :
 
-- Un GPU AMD compatible ROCm (RX 5000 ou supérieur, gamme Instinct)
-- ROCm 5.x ou supérieur installé (`hipcc`, `libhip`, `librocblas`)
+- Un périphérique et une pile ROCm compatibles entre eux ; la génération
+  commerciale du GPU seule ne garantit pas cette compatibilité
+- Un toolkit HIP et rocBLAS détectables par CMake (`hipcc`, `libhip`, `librocblas`)
 - Mímir compilé avec `-DENABLE_ROCM=ON`
 
 ```bash
@@ -128,7 +142,8 @@ pour les autres types et le backward :
 - `Multiply`
 - `ReLU`
 
-Pour les autres layers, le fallback routeur vers CPU/CUDA/ROCm reste automatique.
+Les autres layers peuvent passer par les kernels portables Vulkan, y compris
+en backward. Un refus permet au routeur de sélectionner un autre candidat.
 
 - Vulkan SDK installé, `glslangValidator` disponible
 - Compilé avec `-DENABLE_VULKAN=ON`
@@ -144,7 +159,7 @@ Les fast-paths matériels sont **activés par défaut** quand le backend est com
 ```bash
 export MIMIR_CUDA_LINEAR=1     # Linear → cuBLAS SGEMM
 export MIMIR_CUDA_CONV=1       # Conv2d → im2col + SGEMM
-export MIMIR_CUDA_NORM=1       # LayerNorm/RMSNorm → hybride GPU
+export MIMIR_CUDA_NORM=1       # LayerNorm/RMSNorm → kernels CUDA
 export MIMIR_CUDA_ATTENTION=1  # Attention → multi-SGEMM
 
 ./bin/mimir --lua scripts/training/train_vae_conv.lua
@@ -176,7 +191,10 @@ Parcours de mise en route conseillé :
 
 ## Comprendre les seuils d'opérations
 
-Chaque fast-path possède un **seuil minimal de MACs** (Multiply-Accumulate operations). En dessous de ce seuil, Mímir préfère le CPU, car transférer de petits tenseurs entre la RAM et la VRAM prendrait plus de temps que le calcul lui-même.
+Les familles de fast-paths possèdent des minima de travail configurables,
+exprimés en opérations ou en éléments selon le champ. Leur valeur par défaut
+est zéro. Augmenter un minimum exclut les petits calculs de cette famille ;
+la calibration et les mesures du run déterminent si cela améliore la vitesse.
 
 | Fast-path | Variable de seuil | Valeur par défaut |
 | --- | --- | --- |
@@ -187,19 +205,21 @@ Chaque fast-path possède un **seuil minimal de MACs** (Multiply-Accumulate oper
 
 Pour les variables ROCm, remplacez `CUDA` par `ROCM`.
 
-**Quand réduire les seuils ?** Si le mode verbeux indique qu'un fast-path est systématiquement ignoré parce que les tenseurs sont petits, abaissez le seuil :
+Exemple de réglage manuel, à comparer aux valeurs par défaut :
 
 ```bash
-export MIMIR_CUDA_LINEAR_MIN_OPS=65536   # 64 K au lieu de 1 M
-export MIMIR_CUDA_CONV_MIN_OPS=16384     # 16 K au lieu de 256 K
+export MIMIR_CUDA_LINEAR_MIN_OPS=65536
+export MIMIR_CUDA_CONV_MIN_OPS=16384
 ```
 
-> **Note :** des seuils trop bas sur des micro-layers peuvent dégrader les performances à cause de l'overhead de synchronisation (`cudaDeviceSynchronize`). En cas de doute, comparez les temps d'exécution avec et sans les réductions de seuil.
+Les transferts et les soumissions GPU peuvent coûter plus que le calcul sur
+un petit tenseur. Comparez le temps global, forward, backward et optimiseur,
+avec les mêmes données et la même configuration.
 
 Méthode simple de tuning :
 
 1. Commencer avec les seuils par défaut.
-2. Baisser un seul seuil à la fois.
+2. Modifier un seul seuil à la fois.
 3. Rejouer le même script (mêmes entrées, même seed).
 4. Garder la valeur seulement si le temps global baisse de manière stable.
 
@@ -215,29 +235,31 @@ vérifie ensuite configuration, formes et disponibilité du device.
 
 | Backend | Forward | Backward | Particularités |
 | --- | --- | --- | --- |
-| CPU | 72 types exécutables | 73 types | `Lambda` forward refusé par le dispatcher ; NMS stop-gradient. |
-| CUDA | 72 types natifs | 72 types natifs | `Lambda` backward indisponible ; NMS forward/backward implémenté. |
-| OpenCL | 72 types natifs | 73 types natifs | Kernels de référence pour les nouvelles opérations. |
-| Vulkan | 72 types natifs | 73 types natifs | Kernels de référence pour les nouvelles opérations. |
-| ROCm | Couverture partielle | Couverture partielle | Consulter l'inventaire du binaire et les traces ; repli possible. |
+| CPU | 94 types exécutables | 95 types | Registre de 95 types ; `Lambda` forward refusé, backward identité ; NMS stop-gradient. |
+| CUDA | Familles historiques natives si compilées | Capacités propres à chaque type | Les 18 primitives Primer, `CausalDepthwiseConv1d` et `SwiGLU` restent en `HostFallback` ; `Lambda` indisponible. |
+| OpenCL | 94 types déclarés natifs | 95 types déclarés natifs | Chemins spécialisés et kernels portables ; formes, domaines et budgets contrôlés. |
+| Vulkan | 94 types déclarés natifs | 95 types déclarés natifs | Même contrat portable ; la capacité par type n'est pas une preuve d'exécution. |
+| ROCm | Couverture partielle | Couverture partielle | BLAS et convolutions ND selon compilation ; autres familles en repli selon la capacité publiée. |
 
 Les backends Vulkan et OpenCL conservent leurs chemins spécialisés et utilisent
 `PortableRuntime` pour les autres opérations et les passes arrière. Leur
-couverture par type correspond au dispatcher CPU exécutable : **72 types en
-forward et 73 en backward**, dont NMS avec stop-gradient. `Lambda` est refusé
+couverture déclarée par type correspond au dispatcher CPU exécutable : **94 types en
+forward et 95 en backward**, dont NMS avec stop-gradient. `Lambda` est refusé
 en forward par le dispatcher CPU lui-même ; son backward identité est supporté
-sur CPU, Vulkan et OpenCL. CUDA possède les mêmes familles de kernels mais
-n'implémente pas le backward `Lambda`.
+sur CPU, Vulkan et OpenCL. Ces nombres décrivent le registre courant avec le
+backend activé ; ils ne garantissent ni l'acceptation de toute forme, ni
+l'exécution sur le matériel installé. CUDA et ROCm ont une couverture native distincte.
 
 Les familles couvertes comprennent convolutions, normalisations, attention,
 projections/embeddings, pooling, transformations de tenseurs, récurrence,
-upsampling, dropout et reparamétrisation. Les configurations, formes de tenseurs
+upsampling, dropout, reparamétrisation, convolutions ND, séquences causales
+et primitives Primer. Les configurations, formes de tenseurs
 et limites du device restent vérifiées ; cette couverture par type ne garantit
 pas que toute forme soit acceptée.
 
-Les nouveaux kernels de référence OpenCL/Vulkan exécutent leur calcul sur le
-device avec une invocation qui traite le travail logique séquentiellement.
-Ils privilégient la conformité numérique ; leur couverture ne garantit pas des
+Les kernels OpenCL/Vulkan à sorties indépendantes utilisent une grille
+parallèle ; certaines réductions utilisent des groupes coopératifs. Les chemins
+séquentiels restants sont bornés. Cette couverture ne garantit pas des
 performances supérieures au CPU. Le staging des tenseurs et l'accumulation des
 gradients de paramètres retournés restent sur l'hôte. Les calculs forward et
 backward ne sont pas remplacés par un appel arithmétique CPU caché.
@@ -258,6 +280,40 @@ optimisé. `HostFallback` et `Unsupported` restent distincts. Les tests
 résultats au CPU et contrôlent le backend effectivement exécuté.
 
 Voir [les kernels et validations](../04-Architecture-Internals/21-GPU-Runtimes.md#opencl-et-vulkan-kernels-de-référence-partagés).
+
+## Primitives Primer et séquences causales
+
+Les opérations ajoutées au vocabulaire du framework comprennent :
+
+- `SquaredReLU`, `Square`, `SqrtAbs`, `Exp`, `LogAbs`, `Abs`, `ReciprocalNoNan`, `Sign`, `Sin`, `Cos` ;
+- `Maximum`, `Minimum` avec deux entrées de même taille ou une entrée scalaire ;
+- `ReduceSum`, `ReduceMean`, `ReduceMin`, `ReduceMax`, `ReduceProd` sur un axe ;
+- `LowerTriangular`, masque multiplicatif des deux derniers axes.
+
+Ces 18 types possèdent un forward et un backward CPU et Vulkan/OpenCL. Les
+[contrats et l'exemple de graphe C++](../04-Architecture-Internals/14-Layers-And-Ops.md#primitives-issues-de-létude-primer)
+précisent les domaines, les gradients aux égalités et la configuration `shape`/`axis`.
+Le masque triangulaire met les éléments supérieurs à zéro ; il ne remplace pas
+le masque des logits d'une attention causale avant softmax.
+
+Les primitives Primer utilisent le routeur habituel. Les formes trop coûteuses,
+les entrées ou gradients subnormaux FP32 et les zéros device ambigus peuvent
+déclencher un repli CPU explicite. Les résultats sont validés avant publication,
+sans remplacer le calcul natif déclaré par une référence CPU cachée. Les autres
+erreurs de domaine ou résultats non finis ne sont pas corrigés par un epsilon
+implicite.
+
+`CausalDepthwiseConv1d` et `SwiGLU` sont aussi disponibles sur CPU et via le
+runtime portable. CUDA/ROCm déclarent `HostFallback` pour ces deux types et les
+18 primitives ci-dessus ; le routeur peut choisir Vulkan/OpenCL s'ils sont
+disponibles, puis le CPU. Les types ajoutés ne font pas partie du programme
+historique de fusion pointwise.
+
+La validation du 8 novembre 2026 comprend des tests de sorties et de gradients
+sur CPU et Vulkan/RADV RENOIR sur GPU AMD, avec contrôle du backend sélectionné.
+La syntaxe des kernels OpenCL a été validée ; leur exécution matérielle pour
+ces nouvelles primitives reste à vérifier. Voir les
+[recettes CTest ciblées et les limites](../04-Architecture-Internals/21-GPU-Runtimes.md#vérification-ciblée-des-primitives-primer).
 
 ---
 
@@ -321,23 +377,15 @@ export MIMIR_ACCEL_VERBOSE=1
 export MIMIR_RUNTIME_TRACE=1
 ```
 
-Exemple de sortie :
-
-```text
-[CUDA] Linear 4096x4096: SGEMM (ops=16777216 >= 0) ✓
-[CUDA] Conv2d 64x3x3: SGEMM fast-path ✓
-[CUDA] LayerNorm 512: hybride (512 >= 4096 ? non) → fallback CPU
-```
-
-Chaque ligne indique le type de layer, sa taille, la décision prise et la raison.
+Les journaux de configuration et de calibration exposent les candidats et
+leurs décisions. Ils ne suffisent pas à attribuer chaque opération au GPU.
 
 Avec `MIMIR_RUNTIME_TRACE=1`, vous obtenez en plus la trace d'execution reelle layer-par-layer:
 
-```text
-[runtime-trace] layer#12 name='unet/down1/conv' type='Conv2d' backend=CUDA call=runtime_router.dispatchForwardLayer output_size=262144
-[runtime-trace] layer#13 name='unet/down1/relu' type='ReLU' backend=CPU call=cpu_switch_kernel output_size=262144
-[runtime-trace] layer#14 name='unet/down1/proj' type='Linear' backend=CUDA call=linear_accel_chain output_size=65536
-```
+Lire notamment les champs `backend`, `call`, `type` et `output_size` de
+`[runtime-trace]`. La valeur de `call` dépend du chemin direct, planifié ou
+fusionné réellement exécuté ; une ancienne trace illustrant un autre build
+ne démontre pas la couverture du run courant.
 
 Cette vue permet de distinguer facilement les layers effectivement offloades de ceux qui restent en fallback CPU.
 
@@ -370,7 +418,11 @@ Les layers trop petits génèrent de nombreux aller-retours host↔device. Essay
 
 ### "J'obtiens des résultats numériquement différents avec GPU"
 
-Les opérations en virgule flottante ne sont pas strictement associatives — l'ordre des additions change légèrement les résultats. C'est normal et attendu. Si les différences sont supérieures à ~1e-4 en float32, activez le mode verbeux et vérifiez qu'aucun layer ne produit des NaN.
+L'ordre des réductions et la précision des fonctions élémentaires peuvent
+différer selon le backend. Comparez les sorties et gradients avec les tolérances
+propres à l'opération, à leur échelle et aux très petites valeurs ; un seuil
+absolu unique ne convient pas à tous les cas. Activez les traces pour vérifier
+le backend exécuté, puis utilisez les tests ciblés de parité et de domaine.
 
 ### "Le build ne détecte pas CUDA alors que le Toolkit est installé"
 

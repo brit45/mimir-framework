@@ -1,88 +1,149 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1180" viewBox="0 0 1800 1180" role="img" aria-labelledby="title desc">
-<title id="title">Taxonomie du registre d’architectures</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1331" viewBox="0 0 1200 1331" role="img" aria-labelledby="title desc">
+<title id="title">Familles du registre</title>
+<desc id="desc">Exemples des familles natives présentes dans ModelArchitectures : MLP, NLP, vision, autoencodeurs, diffusion et GAN. Les composants HF, les métadonnées externes, SD3.5 placeholder et les imports MPK ne constituent pas tous des pipelines complets. Sources : src/Models/Registry/ModelArchitectures.cpp, src/Models/NLP/T5Model.hpp, src/Models/Diffusion/SD35Model.hpp, scripts/modules/mpk.lua</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Models/Registry/ModelArchitectures.cpp&quot;, &quot;src/Models/NLP/T5Model.hpp&quot;, &quot;src/Models/Diffusion/SD35Model.hpp&quot;, &quot;scripts/modules/mpk.lua&quot;], &quot;related_docs&quot;: [&quot;docs/03-API-Reference/11-Architectures.md&quot;, &quot;docs/00-PROJECT-STATUS.md&quot;, &quot;docs/08-Tuto/13-Tuto-Familles-De-Modeles.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Taxonomie du registre d’architectures</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Les architectures sont des entrées indépendantes créées via create(name, config).</text>
-<line x1="60" y1="112" x2="1740" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="740" y="140" width="320" height="80" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="900.0" y="165" class="label" text-anchor="middle">Architecture Registry</text>
-<text x="900.0" y="192" class="small" text-anchor="middle">registre central</text>
-<rect x="80" y="300" width="240" height="70" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="200.0" y="325" class="label" text-anchor="middle">Baselines</text>
-<text x="200.0" y="342" class="small" text-anchor="middle">4 entrées</text>
-<path d="M900,220 L200,300" class="edgeB"/>
-<rect x="80" y="405" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="200.0" y="430" class="label" text-anchor="middle">basic_mlp</text>
-<rect x="80" y="461" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="200.0" y="486" class="label" text-anchor="middle">diffusion</text>
-<rect x="80" y="517" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="200.0" y="542" class="label" text-anchor="middle">cond_diffusion</text>
-<rect x="80" y="573" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="200.0" y="598" class="label" text-anchor="middle">gan_latent</text>
-<rect x="365" y="300" width="240" height="70" rx="14" fill="#cffafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="485.0" y="325" class="label" text-anchor="middle">CNN</text>
-<text x="485.0" y="342" class="small" text-anchor="middle">6 entrées</text>
-<path d="M900,220 L485,300" class="edgeB"/>
-<rect x="365" y="405" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="485.0" y="430" class="label" text-anchor="middle">vgg16</text>
-<rect x="365" y="461" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="485.0" y="486" class="label" text-anchor="middle">vgg16_feat</text>
-<rect x="365" y="517" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="485.0" y="542" class="label" text-anchor="middle">vgg19</text>
-<rect x="365" y="573" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="485.0" y="598" class="label" text-anchor="middle">resnet</text>
-<rect x="365" y="629" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="485.0" y="654" class="label" text-anchor="middle">mobilenet</text>
-<rect x="365" y="685" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="485.0" y="710" class="label" text-anchor="middle">patch_discriminator</text>
-<rect x="650" y="300" width="240" height="70" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="770.0" y="325" class="label" text-anchor="middle">Autoencodeurs</text>
-<text x="770.0" y="342" class="small" text-anchor="middle">6 entrées</text>
-<path d="M900,220 L770,300" class="edgeB"/>
-<rect x="650" y="405" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="770.0" y="430" class="label" text-anchor="middle">vae</text>
-<rect x="650" y="461" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="770.0" y="486" class="label" text-anchor="middle">vae_conv</text>
-<rect x="650" y="517" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="770.0" y="542" class="label" text-anchor="middle">vae_conv_decode</text>
-<rect x="650" y="573" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="770.0" y="598" class="label" text-anchor="middle">vae_text</text>
-<rect x="650" y="629" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="770.0" y="654" class="label" text-anchor="middle">vae_text_decode</text>
-<rect x="650" y="685" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="770.0" y="710" class="label" text-anchor="middle">hf_vae_decoder</text>
-<rect x="935" y="300" width="240" height="70" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1055.0" y="325" class="label" text-anchor="middle">Diffusion / LDM</text>
-<text x="1055.0" y="342" class="small" text-anchor="middle">4 entrées</text>
-<path d="M900,220 L1055,300" class="edgeB"/>
-<rect x="935" y="405" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<rect x="935" y="461" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<rect x="935" y="517" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1055.0" y="542" class="label" text-anchor="middle">sd3_5</text>
-<rect x="935" y="573" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1055.0" y="598" class="label" text-anchor="middle">hf_sdxl_transformer_block</text>
-<rect x="1220" y="300" width="240" height="70" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1340.0" y="325" class="label" text-anchor="middle">Transformers / Text</text>
-<text x="1340.0" y="342" class="small" text-anchor="middle">4 entrées</text>
-<path d="M900,220 L1340,300" class="edgeB"/>
-<rect x="1220" y="405" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1340.0" y="430" class="label" text-anchor="middle">transformer</text>
-<rect x="1220" y="461" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1340.0" y="486" class="label" text-anchor="middle">vit</text>
-<rect x="1220" y="517" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1340.0" y="542" class="label" text-anchor="middle">hf_clip_text_encoder_1</text>
-<rect x="1220" y="573" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1340.0" y="598" class="label" text-anchor="middle">hf_clip_text_encoder_2</text>
-<rect x="1505" y="300" width="240" height="70" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1625.0" y="325" class="label" text-anchor="middle">External</text>
-<text x="1625.0" y="342" class="small" text-anchor="middle">1 entrées</text>
-<path d="M900,220 L1625,300" class="edgeB"/>
-<rect x="1505" y="405" width="240" height="40" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1625.0" y="430" class="label" text-anchor="middle">external_safetensors_base</text>
-<text x="1740" y="1156" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1331" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Familles du registre</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Les noms sont des entrées indépendantes ; leurs niveaux de complétude diffèrent.</tspan>
+</text>
+<g data-node="mlp">
+<rect x="44" y="163" width="325.33" height="225" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Régression</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">basic_mlp</tspan>
+</text>
+</g>
+<g data-node="nlp">
+<rect x="437.33" y="163" width="325.33" height="225" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">NLP</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">transformer • causal_lm •</tspan>
+<tspan x="459.33" dy="26">t5</tspan>
+<tspan x="459.33" dy="26">T5 : encodeur +</tspan>
+<tspan x="459.33" dy="26">débruitage</tspan>
+</text>
+</g>
+<g data-node="vision">
+<rect x="830.67" y="163" width="325.33" height="225" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Vision</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">vit • resnet • mobilenet</tspan>
+<tspan x="852.67" dy="26">vgg16 • vgg19 •</tspan>
+<tspan x="852.67" dy="26">vgg16_feat</tspan>
+<tspan x="852.67" dy="26">unet • medical_detector</tspan>
+<tspan x="852.67" dy="26">patch_discriminator</tspan>
+</text>
+</g>
+<g data-node="vae">
+<rect x="44" y="488" width="325.33" height="225" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="519" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Autoencodeurs</tspan>
+</text>
+<text x="66" y="562" font-size="19" fill="#334155">
+<tspan x="66" dy="0">vae • vae_conv •</tspan>
+<tspan x="66" dy="26">vae_conv_decode</tspan>
+<tspan x="66" dy="26">vae_text •</tspan>
+<tspan x="66" dy="26">vae_text_decode</tspan>
+</text>
+</g>
+<g data-node="diffusion">
+<rect x="437.33" y="488" width="325.33" height="225" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="519" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Diffusion</tspan>
+</text>
+<text x="459.33" y="562" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">diffusion •</tspan>
+<tspan x="459.33" dy="26">cond_diffusion</tspan>
+<tspan x="459.33" dy="26">lumen_diffusion</tspan>
+<tspan x="459.33" dy="26">Baselines et pipeline</tspan>
+<tspan x="459.33" dy="26">latent</tspan>
+</text>
+</g>
+<g data-node="gan">
+<rect x="830.67" y="488" width="325.33" height="225" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="852.67" y="519" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">GAN</tspan>
+</text>
+<text x="852.67" y="562" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">gan_latent • Gan_Style</tspan>
+<tspan x="852.67" dy="26">Latent ou image vers</tspan>
+<tspan x="852.67" dy="26">image</tspan>
+</text>
+</g>
+<g data-node="hf">
+<rect x="44" y="813" width="325.33" height="274" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="844" font-size="14" fill="#7c3aed" font-weight="700">
+<tspan x="66" dy="0">COMPOSANTS</tspan>
+</text>
+<text x="66" y="871" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Composants HF</tspan>
+</text>
+<text x="66" y="914" font-size="19" fill="#334155">
+<tspan x="66" dy="0">hf_clip_text_encoder_1</tspan>
+<tspan x="66" dy="26">hf_clip_text_encoder_2</tspan>
+<tspan x="66" dy="26">hf_vae_decoder</tspan>
+<tspan x="66" dy="26">hf_sdxl_transformer_bloc</tspan>
+<tspan x="66" dy="26">k</tspan>
+</text>
+</g>
+<g data-node="partial">
+<rect x="437.33" y="813" width="325.33" height="274" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="459.33" y="844" font-size="14" fill="#b45309" font-weight="700">
+<tspan x="459.33" dy="0">PARTIEL</tspan>
+</text>
+<text x="459.33" y="871" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Entrées</tspan>
+<tspan x="459.33" dy="29">particulières</tspan>
+</text>
+<text x="459.33" y="943" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">sd3_5 : placeholder</tspan>
+<tspan x="459.33" dy="26">external_safetensors_ba</tspan>
+<tspan x="459.33" dy="26">se :</tspan>
+<tspan x="459.33" dy="26">métadonnées de poids</tspan>
+<tspan x="459.33" dy="26">externes</tspan>
+</text>
+</g>
+<g data-node="mpk">
+<rect x="830.67" y="813" width="325.33" height="274" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="852.67" y="844" font-size="14" fill="#b45309" font-weight="700">
+<tspan x="852.67" dy="0">EXPÉRIMENTAL</tspan>
+</text>
+<text x="852.67" y="871" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Packages MPK</tspan>
+</text>
+<text x="852.67" y="914" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Découverte sous _archi/</tspan>
+<tspan x="852.67" dy="26">Ex. deeplab, r_cnn, ssd,</tspan>
+<tspan x="852.67" dy="26">yolo</tspan>
+<tspan x="852.67" dy="26">Compatibilité à vérifier</tspan>
+</text>
+</g>
+<rect x="44" y="1135" width="1112" height="110" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1163" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• La présence dans le registre ne garantit ni qualité entraînée ni pipeline métier complet.</tspan>
+<tspan x="66" dy="26">• Les graphes natifs sont définis dans des classes C++ dérivées de Model. MPK n’est pas entièrement</tspan>
+<tspan x="66" dy="26">exploitable en production.</tspan>
+</text>
+<text x="44" y="1280" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : ModelArchitectures.cpp · T5Model.hpp · SD35Model.hpp · mpk.lua</tspan>
+</text>
+</g>
 </svg>

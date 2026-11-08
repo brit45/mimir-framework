@@ -24,7 +24,7 @@ from jax import lax
 
 jax.config.update("jax_default_matmul_precision", "highest")
 
-OPS = frozenset("""Conv2d ConvTranspose2d Conv1d DepthwiseConv2d Linear Bilinear
+OPS = frozenset("""Conv3d Conv4d Conv2d ConvTranspose2d Conv1d DepthwiseConv2d Linear Bilinear
 Embedding EmbeddingBag BatchNorm2d BatchNorm1d LayerNorm GroupNorm InstanceNorm2d
 RMSNorm ReLU LeakyReLU GELU GEGLU SiLU Tanh Sigmoid Softmax LogSoftmax Softplus Mish
 HardSigmoid HardSwish MaxPool2d AvgPool2d AdaptiveAvgPool2d GlobalAvgPool2d MaxPool1d
@@ -165,7 +165,15 @@ def normalize(x, w, l, training):
 
 def convolution(x,w,l):
     t=l["type"]
-    if t=="Conv1d":
+    if t in ("Conv3d","Conv4d"):
+        g=l["conv_nd"];rank=len(g["input"]);ci=l["in_channels"];co=l["out_channels"];groups=l["groups"]
+        count=co*(ci//groups)*math.prod(g["kernel"])
+        dims=lax.ConvDimensionNumbers(tuple(range(rank+2)),tuple(range(rank+2)),tuple(range(rank+2)))
+        y=lax.conv_general_dilated(x.reshape((g["batch"],ci,*g["input"])),
+            w[:count].reshape((co,ci//groups,*g["kernel"])),tuple(g["stride"]),
+            tuple((p,p) for p in g["padding"]),rhs_dilation=tuple(g["dilation"]),
+            dimension_numbers=dims,feature_group_count=groups,precision=lax.Precision.HIGHEST)
+    elif t=="Conv1d":
         ci=l["in_channels"] or 1;co=l["out_channels"] or 1;k=l["kernel_h"] or 3
         s=l["stride_h"] if l["stride_h"]>0 else 1;p=max(0,l["pad_h"])
         count=co*ci*k
@@ -335,7 +343,7 @@ def forward(xs,w,l,training,noise,fused=False):
         i=l["in_features"];j=l["out_features"];o=l["embed_dim"] or l["target_shape"][0];n=i*j*o
         y=jnp.einsum("bi,oij,bj->bo",x.reshape((-1,i)),w[:n].reshape((o,i,j)),xs[1].reshape((-1,j)),precision=lax.Precision.HIGHEST)
         if l["use_bias"]:y=y+w[n:n+o]
-    elif t in ("Conv1d","Conv2d","ConvTranspose2d","DepthwiseConv2d"):y=convolution(x,w,l)
+    elif t in ("Conv1d","Conv2d","Conv3d","Conv4d","ConvTranspose2d","DepthwiseConv2d"):y=convolution(x,w,l)
     elif t in ("BatchNorm1d","BatchNorm2d","LayerNorm","GroupNorm","InstanceNorm2d","RMSNorm"):y=normalize(x,w,l,training)
     elif t=="ReLU":y=jnp.where(x>0,x,0.)
     elif t=="LeakyReLU":y=jnp.where(x>0,x,(l["leaky_relu_alpha"] if l["leaky_relu_alpha"]>0 else .01)*x)
@@ -427,7 +435,7 @@ def forward(xs,w,l,training,noise,fused=False):
         y=jnp.concatenate((x[:prefix],(patch@w[:pd*d].reshape((pd,d))+w[pd*d:pd*d+d]).ravel()))
     else:raise ValueError("unsupported layer "+t)
     y=y.ravel()
-    if fused and t in ("Conv2d","ConvTranspose2d"):y=activation(y,l["activation"],l["activation_param"])
+    if fused and t in ("Conv2d","Conv3d","Conv4d","ConvTranspose2d"):y=activation(y,l["activation"],l["activation_param"])
     return (y,)
 
 
@@ -437,7 +445,7 @@ def bias_gradient(gw,l):
     if not l["use_bias"]:return jnp.empty((0,),jnp.float32)
     if t=="Linear":d=l["out_features"]
     elif t=="Bilinear":d=l["embed_dim"] or l["target_shape"][0]
-    elif t in ("Conv1d","Conv2d","ConvTranspose2d"):d=l["out_channels"] or 1
+    elif t in ("Conv1d","Conv2d","Conv3d","Conv4d","ConvTranspose2d"):d=l["out_channels"] or 1
     elif t=="DepthwiseConv2d":d=l["in_channels"] or 3
     elif t in ("LayerNorm","RMSNorm"):d=l["in_features"]
     elif t in ("GroupNorm","InstanceNorm2d"):d=l["in_channels"]
@@ -546,7 +554,7 @@ def backward(xs,w,gos,saved,mask,l,training):
     else:fn=lambda args,weights:forward(args,weights,l,back_training,jnp.zeros_like(x),False)
     _,pullback=jax.vjp(fn,tuple(xs),w)
     gx,gw=pullback(tuple(gos))
-    if t in ("Conv2d","ConvTranspose2d") and l["activation"]:
+    if t in ("Conv2d","Conv3d","Conv4d","ConvTranspose2d") and l["activation"]:
         raw=forward(tuple(xs),w,l,training,jnp.zeros_like(x),False)[0]
         _,gate=jax.vjp(lambda z:activation(z,l["activation"],l["activation_param"]),raw)
         gated=gate(go)[0];gx,gw=pullback((gated,))

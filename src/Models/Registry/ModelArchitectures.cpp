@@ -275,6 +275,11 @@ static CausalLMModel::Config causalLMCfgFromJson(const json& cfg) {
     out.num_heads = jget<int>(cfg, "num_heads", out.num_heads);
     out.num_kv_heads = jget<int>(cfg, "num_kv_heads", out.num_kv_heads);
     out.mlp_hidden = jget<int>(cfg, "mlp_hidden", out.mlp_hidden);
+    out.causal_arch_version = jget<int>(cfg, "causal_arch_version", out.causal_arch_version);
+    out.local_conv_kernel = jget<int>(cfg, "local_conv_kernel", out.local_conv_kernel);
+    out.local_conv_dilation = jget<int>(cfg, "local_conv_dilation", out.local_conv_dilation);
+    out.fused_swiglu = jget<bool>(cfg, "fused_swiglu", out.fused_swiglu);
+    out.latent_dim = jget<int>(cfg, "latent_dim", out.latent_dim);
     out.padding_idx = jget<int>(cfg, "padding_idx", out.padding_idx);
     out.norm_eps = jget<float>(cfg, "norm_eps", out.norm_eps);
     out.rope_theta = jget<float>(cfg, "rope_theta", out.rope_theta);
@@ -290,6 +295,13 @@ static json causalLMDefaultConfigJson() {
                 {"num_heads", d.num_heads},
                 {"num_kv_heads", d.num_kv_heads},
                 {"mlp_hidden", d.mlp_hidden},
+                {"causal_arch_version", d.causal_arch_version},
+                {"local_conv_kernel", d.local_conv_kernel},
+                {"local_conv_dilation", d.local_conv_dilation},
+                {"fused_swiglu", d.fused_swiglu},
+                {"viz_registered_tips_only", true},
+                {"viz_taps_max_frames", 64},
+                {"viz_taps_max_side", 64},
                 {"padding_idx", d.padding_idx},
                 {"norm_eps", d.norm_eps},
                 {"rope_theta", d.rope_theta}};
@@ -441,6 +453,8 @@ static VAEConvModel::Config vaeConvCfgFromJson(const json& cfg) {
     out.latent_w = jget<int>(cfg, "latent_w", out.latent_w);
     out.latent_c = jget<int>(cfg, "latent_c", out.latent_c);
     out.base_channels = jget<int>(cfg, "base_channels", out.base_channels);
+    out.conv_mode = jget<std::string>(cfg, "conv_mode", out.conv_mode);
+    out.inference_output_tensor = jget<std::string>(cfg, "inference_output_tensor", out.inference_output_tensor);
     out.latent_spatial_context = jget<bool>(cfg, "latent_spatial_context", out.latent_spatial_context);
     out.latent_detail_path = jget<bool>(cfg, "latent_detail_path", out.latent_detail_path);
     out.latent_context_channels = jget<int>(cfg, "latent_context_channels", out.latent_context_channels);
@@ -449,6 +463,7 @@ static VAEConvModel::Config vaeConvCfgFromJson(const json& cfg) {
     out.stochastic_latent = jget<bool>(cfg, "stochastic_latent", out.stochastic_latent);
 
     // Blocs optionnels
+    out.logvar_head_bias = jget<bool>(cfg, "logvar_head_bias", false);
     out.resnet = jget<bool>(cfg, "use_resnet",
                      jget<bool>(cfg, "use_attention",
                          jget<bool>(cfg, "resnet", out.resnet)));
@@ -484,10 +499,12 @@ static json vaeConvDefaultConfigJson() {
                 {"latent_w", d.latent_w},
                 {"latent_c", d.latent_c},
                 {"base_channels", d.base_channels},
+                {"conv_mode", d.conv_mode},
                 {"latent_spatial_context", d.latent_spatial_context},
                 {"latent_detail_path", d.latent_detail_path},
                 {"latent_context_channels", d.latent_context_channels},
                 {"stochastic_latent", d.stochastic_latent},
+                {"logvar_head_bias", d.logvar_head_bias},
                 {"resnet", d.resnet},
                 {"attention", d.attention},
                 {"enc_norm", d.enc_norm},
@@ -751,10 +768,12 @@ static LumenLatentDiffusionModel::Config lumenCfgFromJson(const json& cfg) {
     out.latent_h = jget<int>(cfg, "latent_h", out.latent_h);
     out.latent_c = jget<int>(cfg, "latent_c", out.latent_c);
     out.vae_base_channels = jget<int>(cfg, "vae_base_channels", out.vae_base_channels);
+    out.vae_conv_mode = jget<std::string>(cfg, "vae_conv_mode", out.vae_conv_mode);
     out.vae_latent_spatial_context = jget<bool>(cfg, "vae_latent_spatial_context", out.vae_latent_spatial_context);
     out.vae_latent_detail_path = jget<bool>(cfg, "vae_latent_detail_path", out.vae_latent_detail_path);
     out.vae_latent_context_channels = jget<int>(cfg, "vae_latent_context_channels", out.vae_latent_context_channels);
     out.vae_stochastic_latent = jget<bool>(cfg, "vae_stochastic_latent", out.vae_stochastic_latent);
+    out.vae_logvar_head_bias = jget<bool>(cfg, "vae_logvar_head_bias", out.vae_logvar_head_bias);
     out.vae_resnet = jget<bool>(cfg, "vae_use_resnet",
                          jget<bool>(cfg, "vae_resnet", out.vae_resnet));
     out.vae_attention = jget<bool>(cfg, "vae_use_attn",
@@ -798,10 +817,12 @@ static json lumenDefaultConfigJson() {
         {"seed", d.seed}, {"image_w", d.image_w}, {"image_h", d.image_h},
         {"image_c", d.image_c}, {"latent_w", d.latent_w}, {"latent_h", d.latent_h},
         {"latent_c", d.latent_c}, {"vae_base_channels", d.vae_base_channels},
+        {"vae_conv_mode", d.vae_conv_mode},
         {"vae_latent_spatial_context", d.vae_latent_spatial_context},
         {"vae_latent_detail_path", d.vae_latent_detail_path},
         {"vae_latent_context_channels", d.vae_latent_context_channels},
         {"vae_stochastic_latent", d.vae_stochastic_latent},
+        {"vae_logvar_head_bias", d.vae_logvar_head_bias},
         {"vae_resnet", d.vae_resnet}, {"vae_attention", d.vae_attention},
         {"vae_use_skip_connections", d.vae_use_skip_connections},
         {"vae_use_encoder_prior", d.vae_use_encoder_prior},
@@ -987,6 +1008,15 @@ std::shared_ptr<Model> Registry::create(const std::string& name, const json& con
         mergeInto(cfg, config);
     }
 
+    // A serialized legacy CausalLM must keep its original graph and optimizer layout.
+    if (key == "causal_lm" && config.is_object() &&
+        config.value("type", std::string()) == "causal_lm" && !config.contains("causal_arch_version")) {
+        cfg["causal_arch_version"] = 1;
+        if (!config.contains("local_conv_kernel")) cfg["local_conv_kernel"] = 0;
+        if (!config.contains("local_conv_dilation")) cfg["local_conv_dilation"] = 1;
+        if (!config.contains("fused_swiglu")) cfg["fused_swiglu"] = false;
+    }
+
     // A serialized legacy VAEText must keep its original topology.
     if (key == "vae_text" && config.is_object() && config.value("type", std::string()) == "vae_text" &&
         !config.contains("text_context_version")) {
@@ -1064,7 +1094,7 @@ void Registry::ensureBuiltinsRegistered() const {
             "causal_lm",
             Entry{
                 "causal_lm",
-                "Decoder-only causal language model (native Mimir layers)",
+                "Decoder-only causal language model with a learned contextual latent bottleneck enabled by default (native Mimir layers)",
                 causalLMDefaultConfigJson(),
                 [](const json& cfg) -> std::shared_ptr<Model> {
                     auto m = std::make_shared<CausalLMModel>();

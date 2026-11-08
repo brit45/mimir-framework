@@ -10,7 +10,7 @@ pas modifiés. Le bridge JS réutilise leurs callbacks C++ dans un état Lua pri
 il dépend donc de Lua, déjà obligatoire dans le framework.
 
 ```sh
-./bin/mimir --js scripts/examples/bridge_smoke.js
+./run_mimir.sh --js scripts/examples/bridge_smoke.js
 ```
 
 Chaque appel est synchrone et exécuté immédiatement dans le processus Mímir.

@@ -7,11 +7,12 @@
 #include <cstring>
 #include <random>
 #include <stdexcept>
-#include <omp.h>
-#include <immintrin.h>
 #include "Layers.hpp"
 #include "HardwareOpt.hpp"
+#include "../LayerOps.hpp"
 #include "RngContext.hpp"
+#include "NormalizationKernels.hpp"
+#include "PoolingKernels.hpp"
 
 // ============================================================================
 // LAYER OPERATIONS - Forward pass pour tous les types de layers
@@ -131,7 +132,7 @@ inline std::vector<float> batchnorm_forward(
     }
 
     std::vector<float> output = input;
-    Normalization::batch_norm(
+    CpuNormalization::batchNormInPlace(
         output,
         gamma,
         beta,
@@ -151,108 +152,41 @@ inline std::vector<float> batchnorm_forward(
 // ============================================================================
 
 inline std::vector<float> linear_forward(
-    const std::vector<float>& input,
-    const Layer& layer,
-    bool training = true
+    const std::vector<float>& input,const Layer& layer,bool training=true
 ) {
     (void)training;
-    const int in_f = layer.in_features > 0 ? layer.in_features : static_cast<int>(input.size());
-    const int out_f = layer.out_features;
-    
-    if (out_f <= 0) {
-        throw std::runtime_error("Linear: out_features not set");
-    }
-    
-    if (in_f <= 0) {
-        throw std::runtime_error("Linear: in_features not set");
-    }
-
-    const float* weights = layer.getWeights();
-    if (!weights) {
-        throw std::runtime_error("Linear: weights not initialized");
-    }
-    const float* bias = layer.use_bias ? (weights + in_f * out_f) : nullptr;
-
-    if (static_cast<int>(input.size()) < in_f) {
-        throw std::runtime_error("Linear: input size smaller than in_features");
-    }
-
-    const bool infer_batch = (layer.seq_len <= 0) &&
-                             (in_f > 0) &&
-                             (static_cast<int>(input.size()) > in_f) &&
-                             ((static_cast<int>(input.size()) % in_f) == 0);
-
-    // Mode séquence: input = [seq_len, in_f] aplati, output = [seq_len, out_f] aplati
-    if ((layer.seq_len > 0 && static_cast<int>(input.size()) == layer.seq_len * in_f) || infer_batch) {
-        const int seq_len = infer_batch ? (static_cast<int>(input.size()) / in_f) : layer.seq_len;
-        std::vector<float> output(static_cast<size_t>(seq_len) * static_cast<size_t>(out_f), 0.0f);
-
-        RuntimeParallel::forEach(seq_len, RuntimeParallel::workers(static_cast<long long>(seq_len) * out_f * in_f), [&](int t) {
-            const float* x = &input[static_cast<size_t>(t) * static_cast<size_t>(in_f)];
-            float* y = &output[static_cast<size_t>(t) * static_cast<size_t>(out_f)];
-
-            for (int o = 0; o < out_f; ++o) {
-                float sum = 0.0f;
-                const float* w_row = weights + o * in_f;
-
-                int i = 0;
-                #ifdef __AVX2__
-                __m256 acc = _mm256_setzero_ps();
-                for (; i + 8 <= in_f; i += 8) {
-                    __m256 w = _mm256_loadu_ps(w_row + i);
-                    __m256 xv = _mm256_loadu_ps(x + i);
-                    acc = _mm256_fmadd_ps(w, xv, acc);
-                }
-                __m128 hi = _mm256_extractf128_ps(acc, 1);
-                __m128 lo = _mm256_castps256_ps128(acc);
-                __m128 sum128 = _mm_add_ps(hi, lo);
-                sum128 = _mm_hadd_ps(sum128, sum128);
-                sum128 = _mm_hadd_ps(sum128, sum128);
-                sum = _mm_cvtss_f32(sum128);
-                #endif
-
-                for (; i < in_f; ++i) {
-                    sum += w_row[i] * x[i];
-                }
-                if (bias) sum += bias[o];
-                y[o] = sum;
+    const int in_f=layer.in_features>0?layer.in_features:static_cast<int>(input.size());
+    const int out_f=layer.out_features;
+    if(in_f<=0 || out_f<=0)throw std::runtime_error("Linear: invalid feature dimensions");
+    const size_t in=static_cast<size_t>(in_f),out=static_cast<size_t>(out_f);
+    const float* weights=layer.getWeights();
+    if(!weights || layer.getWeightsSize()/in<out ||
+       (layer.use_bias && layer.getWeightsSize()-in*out<out))
+        throw std::runtime_error("Linear: weights not initialized or too small");
+    if(input.size()<in)throw std::runtime_error("Linear: input size smaller than in_features");
+    const bool infer_batch=layer.seq_len<=0 && input.size()>in && input.size()%in==0;
+    size_t rows=1;
+    if((layer.seq_len>0 && input.size()==static_cast<size_t>(layer.seq_len)*in) || infer_batch)
+        rows=input.size()/in;
+    else if(input.size()!=in)throw std::runtime_error("Linear: input size mismatch");
+    const float* bias=layer.use_bias?weights+in*out:nullptr;
+    std::vector<float> output(rows*out);
+    const int workers=HardwareOpt::matmul_workers(rows*((out+23)/24),24,in);
+    if(RuntimeLayerOps::hardwareAccelerationEnabled()) {
+        // Parameters are [out,in], not [in,out]. Output lanes are independent,
+        // so every ISA retains the exact scalar k-order and FMA rounding.
+        RuntimeSimd::matmulTranspose(output.data(),input.data(),weights,rows,out,in,true,workers);
+    } else {
+        RuntimeParallel::forEach(rows,workers,[&](size_t row) {
+            for(size_t o=0;o<out;++o) {
+                float sum=0;
+                for(size_t i=0;i<in;++i)sum=std::fma(input[row*in+i],weights[o*in+i],sum);
+                output[row*out+o]=sum;
             }
         });
-
-        return output;
     }
-
-    if (static_cast<int>(input.size()) != in_f) {
-        throw std::runtime_error("Linear: input size mismatch");
-    }
-
-    // Fallback historique: vector -> vector
-    std::vector<float> output(static_cast<size_t>(out_f), 0.0f);
-    RuntimeParallel::forEach(out_f, RuntimeParallel::workers(static_cast<long long>(out_f) * in_f), [&](int o) {
-        float sum = 0.0f;
-        const float* w_row = weights + o * in_f;
-
-        int i = 0;
-        #ifdef __AVX2__
-        __m256 acc = _mm256_setzero_ps();
-        for (; i + 8 <= in_f; i += 8) {
-            __m256 w = _mm256_loadu_ps(w_row + i);
-            __m256 x = _mm256_loadu_ps(&input[i]);
-            acc = _mm256_fmadd_ps(w, x, acc);
-        }
-        __m128 hi = _mm256_extractf128_ps(acc, 1);
-        __m128 lo = _mm256_castps256_ps128(acc);
-        __m128 sum128 = _mm_add_ps(hi, lo);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        sum = _mm_cvtss_f32(sum128);
-        #endif
-
-        for (; i < in_f; ++i) {
-            sum += w_row[i] * input[i];
-        }
-        if (bias) sum += bias[o];
-        output[static_cast<size_t>(o)] = sum;
+    if(bias)RuntimeParallel::forEach(rows,workers,[&](size_t row) {
+        for(size_t o=0;o<out;++o)output[row*out+o]+=bias[o];
     });
     return output;
 }
@@ -300,9 +234,19 @@ inline std::vector<float> add_forward(
 
     if (input1.size() == input2.size()) {
         std::vector<float> output(input1.size());
-        RuntimeParallel::forEach(input1.size(), RuntimeParallel::workers(input1.size()), [&](size_t i) {
-            output[i] = input1[i] + input2[i];
-        });
+        if(RuntimeLayerOps::hardwareAccelerationEnabled()) {
+            const size_t count=input1.size();
+            const int workers=RuntimeParallel::workers(count);
+            RuntimeParallel::forEach(size_t(workers),workers,[&](size_t task) {
+                const size_t begin=(count/size_t(workers))*task+std::min(task,count%size_t(workers));
+                const size_t length=count/size_t(workers)+(task<count%size_t(workers)?1:0);
+                RuntimeSimd::add(output.data()+begin,input1.data()+begin,input2.data()+begin,length);
+            });
+        } else {
+            RuntimeParallel::forEach(input1.size(),RuntimeParallel::workers(input1.size()),[&](size_t i) {
+                output[i]=input1[i]+input2[i];
+            });
+        }
         return output;
     }
 
@@ -350,9 +294,21 @@ inline std::vector<float> multiply_forward(
     
     std::vector<float> output(input1.size());
     
-    RuntimeParallel::forEach(input1.size(), RuntimeParallel::workers(input1.size()), [&](size_t i) {
-        output[i] = input1[i] * input2[i];
-    });
+    if(RuntimeLayerOps::hardwareAccelerationEnabled()) {
+        const size_t count=input1.size();
+        if(count) {
+            const int workers=RuntimeParallel::workers(count);
+            RuntimeParallel::forEach(size_t(workers),workers,[&](size_t task) {
+                const size_t begin=(count/size_t(workers))*task+std::min(task,count%size_t(workers));
+                const size_t length=count/size_t(workers)+(task<count%size_t(workers)?1:0);
+                RuntimeSimd::mul(output.data()+begin,input1.data()+begin,input2.data()+begin,length);
+            });
+        }
+    } else {
+        RuntimeParallel::forEach(input1.size(),RuntimeParallel::workers(input1.size()),[&](size_t i) {
+            output[i]=input1[i]*input2[i];
+        });
+    }
     
     return output;
 }
@@ -405,8 +361,6 @@ inline std::vector<float> layernorm_forward(
     if (normalized <= 0 || (N % normalized) != 0) {
         throw std::runtime_error("LayerNorm: invalid normalized_size");
     }
-    const int groups = N / normalized;
-
     std::vector<float> output(static_cast<size_t>(N));
 
     const size_t required_weights = static_cast<size_t>(normalized) *
@@ -417,36 +371,8 @@ inline std::vector<float> layernorm_forward(
     }
     const float* bias = (layer.affine && layer.use_bias) ? (weights + normalized) : nullptr;
 
-    RuntimeParallel::forEach(groups, (groups > 1) ? RuntimeParallel::workers(input.size()) : 1, [&](int g) {
-        const int base = g * normalized;
-
-        float mean = 0.0f;
-        #pragma omp simd reduction(+:mean)
-        for (int i = 0; i < normalized; ++i) {
-            mean += input[base + i];
-        }
-        mean /= static_cast<float>(normalized);
-
-        float var = 0.0f;
-        #pragma omp simd reduction(+:var)
-        for (int i = 0; i < normalized; ++i) {
-            const float diff = input[base + i] - mean;
-            var += diff * diff;
-        }
-        var /= static_cast<float>(normalized);
-
-        const float inv_std = 1.0f / std::sqrt(var + eps);
-
-        #pragma omp simd
-        for (int i = 0; i < normalized; ++i) {
-            float v = (input[base + i] - mean) * inv_std;
-            if (weights) {
-                v *= weights[i];
-                if (bias) v += bias[i];
-            }
-            output[static_cast<size_t>(base + i)] = v;
-        }
-    });
+    CpuNormalization::layerNormForward(input.data(), output.data(), input.size(),
+                                      normalized, weights, bias, eps);
 
     return output;
 }
@@ -568,41 +494,10 @@ inline std::vector<float> avgpool2d_forward(
     const int height = layer.input_height > 0 ? layer.input_height : 32;
     const int width = layer.input_width > 0 ? layer.input_width : 32;
     
-    const int out_height = (height + 2 * pad_h - kernel_h) / stride_h + 1;
-    const int out_width = (width + 2 * pad_w - kernel_w) / stride_w + 1;
-    
-    const size_t output_size = in_channels * out_height * out_width;
-    std::vector<float> output(output_size, 0.0f);
-    
-    const float kernel_area = static_cast<float>(kernel_h * kernel_w);
-    (void)kernel_area;
-    
-    #pragma omp parallel for collapse(3) if(RuntimeParallel::workers(output_size)>1) num_threads(RuntimeParallel::workers(output_size)) schedule(static)
-    for (int c = 0; c < in_channels; ++c) {
-        for (int oh = 0; oh < out_height; ++oh) {
-            for (int ow = 0; ow < out_width; ++ow) {
-                float sum = 0.0f;
-                int count = 0;
-                
-                for (int kh = 0; kh < kernel_h; ++kh) {
-                    for (int kw = 0; kw < kernel_w; ++kw) {
-                        int ih = oh * stride_h + kh - pad_h;
-                        int iw = ow * stride_w + kw - pad_w;
-                        
-                        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                            int in_idx = c * (height * width) + ih * width + iw;
-                            sum += input[in_idx];
-                            ++count;
-                        }
-                    }
-                }
-                
-                int out_idx = c * (out_height * out_width) + oh * out_width + ow;
-                output[out_idx] = count > 0 ? (sum / count) : 0.0f;
-            }
-        }
-    }
-    
+    std::vector<float> output;
+    CpuPooling::forward2d(input, output, height, width, in_channels,
+                         kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                         CpuPooling::Reduction::Average);
     return output;
 }
 
@@ -934,38 +829,28 @@ inline std::vector<float> transpose_forward(
 // MATMUL (Matrix Multiplication)
 // ============================================================================
 
-inline std::vector<float> matmul_forward(
-    const std::vector<float>& A,
-    const std::vector<float>& B,
-    int M, int K, int N  // A: M×K, B: K×N, Output: M×N
-) {
-    if (A.size() != static_cast<size_t>(M * K) || 
-        B.size() != static_cast<size_t>(K * N)) {
+inline void matmul_into(const std::vector<float>& a,const std::vector<float>& b,
+                        std::vector<float>& c,int m,int k,int n) {
+    if(m<0 || k<0 || n<0 || a.size()!=size_t(m)*size_t(k) || b.size()!=size_t(k)*size_t(n))
         throw std::runtime_error("MatMul: dimension mismatch");
-    }
-    
-    std::vector<float> C(M * N, 0.0f);
-
-    #ifdef __AVX2__
-    // Kernel AVX2/FMA optimisé (gère correctement les tails)
-    HardwareOpt::matmul_fma_saturated(C.data(), A.data(), B.data(),
-                                      static_cast<size_t>(M),
-                                      static_cast<size_t>(N),
-                                      static_cast<size_t>(K));
-    #else
-    #pragma omp parallel for schedule(static) if (RuntimeParallel::workers(static_cast<size_t>(M)*N*K)>1) num_threads(RuntimeParallel::workers(static_cast<size_t>(M)*N*K))
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; ++k) {
-                sum += A[i * K + k] * B[k * N + j];
+    c.resize(size_t(m)*size_t(n));
+    if(RuntimeLayerOps::hardwareAccelerationEnabled()) {
+        HardwareOpt::matmul_fma_saturated(c.data(),a.data(),b.data(),size_t(m),size_t(n),size_t(k));
+    } else {
+        RuntimeParallel::forEach(size_t(m),HardwareOpt::matmul_workers(size_t(m),size_t(n),size_t(k)),[&](size_t row) {
+            for(size_t column=0;column<size_t(n);++column) {
+                float sum=0;
+                for(size_t i=0;i<size_t(k);++i)sum=std::fma(a[row*size_t(k)+i],b[i*size_t(n)+column],sum);
+                c[row*size_t(n)+column]=sum;
             }
-            C[i * N + j] = sum;
-        }
+        });
     }
-    #endif
-    
-    return C;
+}
+inline std::vector<float> matmul_forward(const std::vector<float>& a,const std::vector<float>& b,
+                                          int m,int k,int n) {
+    std::vector<float> c;
+    matmul_into(a,b,c,m,k,n);
+    return c;
 }
 
 // ============================================================================
@@ -1226,29 +1111,9 @@ inline void softmax_inplace(std::vector<float>& x, int seq_len, int dim) {
 }
 
 // Matmul helper (M x K) @ (K x N) = (M x N)
-inline void matmul(
-    const std::vector<float>& A, const std::vector<float>& B,
-    std::vector<float>& C,
-    int M, int K, int N
-) {
-    C.resize(M * N, 0.0f);
-
-    #ifdef __AVX2__
-    HardwareOpt::matmul_fma_saturated(C.data(), A.data(), B.data(),
-                                      static_cast<size_t>(M),
-                                      static_cast<size_t>(N),
-                                      static_cast<size_t>(K));
-    #else
-    RuntimeParallel::forEach(M, RuntimeParallel::workers(static_cast<long long>(M) * N * K), [&](int m) {
-        for (int n = 0; n < N; ++n) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; ++k) {
-                sum += A[m * K + k] * B[k * N + n];
-            }
-            C[m * N + n] = sum;
-        }
-    });
-    #endif
+inline void matmul(const std::vector<float>& a,const std::vector<float>& b,
+                   std::vector<float>& c,int m,int k,int n) {
+    matmul_into(a,b,c,m,k,n);
 }
 
 // Self-Attention (simplifié - single head)

@@ -204,7 +204,7 @@ end
 ---@param argv? string[]
 ---@return MimirScriptArgs opts
 ---@return string[] positional
-function M.parse(argv)
+function M.parse(argv, parse_options)
   local opts = {}
   local pos = {}
   local raw_args = argv or {}
@@ -274,11 +274,20 @@ function M.parse(argv)
   --   --htop (ou --tux)
   --   --viz (active uniquement la viz; combiner avec --htop pour les deux)
   --   --csv / --no-csv, --csv-path=..., --csv-enabled
-  local ok, err = pcall(maybe_start_htop, opts)
-  if not ok then
-    error(err)
+  if not (type(parse_options) == "table" and parse_options.defer_monitor == true) then
+    local ok, err = pcall(maybe_start_htop, opts)
+    if not ok then
+      error(err)
+    end
   end
   return opts, pos
+end
+
+-- Start requested UI after script-specific setup (for example, after MPI init).
+function M.start_monitor(opts)
+  local ok, err = pcall(maybe_start_htop, opts)
+  if not ok then error(err, 2) end
+  return rawget(_G, "__MIMIR_MONITOR_STARTED") == true
 end
 
 ---Applique des overrides (si présents) sur une config table.

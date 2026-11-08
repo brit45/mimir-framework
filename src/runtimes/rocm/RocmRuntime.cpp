@@ -3,6 +3,9 @@
 #include "runtimes/rocm/RocmRuntime.hpp"
 
 #include "runtimes/LayerOps.hpp"
+#include "runtimes/GradientCommit.hpp"
+#include "runtimes/cuda/CudaOperationGeometry.hpp"
+#include "runtimes/rocm/RocmConvNDOps.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
 
 #ifdef ENABLE_ROCM
@@ -498,53 +501,27 @@ bool RocmRuntime::supportsBackwardLayerType(const LayerType type) const {
 
 RuntimeCapabilityLevel RocmRuntime::queryForwardCapability(const LayerType type) const {
     if (!supportsForwardLayerType(type)) return RuntimeCapabilityLevel::Unsupported;
-#ifndef ENABLE_ROCM
-    return RuntimeCapabilityLevel::HostFallback;
-#else
-    switch (type) {
-        case LayerType::Linear:
-        case LayerType::MatMul:
-        case LayerType::BatchMatMul:
-        case LayerType::Conv2d:
-        case LayerType::LayerNorm:
-        case LayerType::RMSNorm:
-        case LayerType::SelfAttention:
-        case LayerType::MultiHeadAttention:
-            return RuntimeCapabilityLevel::NativeOptimized;
-        default:
-            return RuntimeCapabilityLevel::HostFallback;
-    }
+#if defined(ENABLE_ROCM) && defined(__HIPCC__)
+    if(CudaOperationGeometry::convolutionNDType(type))return RuntimeCapabilityLevel::Native;
 #endif
+#ifdef ENABLE_ROCM
+    if(type==LayerType::Linear || type==LayerType::MatMul || type==LayerType::BatchMatMul)
+        return RuntimeCapabilityLevel::NativeOptimized;
+#endif
+    // Legacy Conv2d, normalization and attention paths perform host tensor
+    // arithmetic. Let the router select CPU rather than report GPU execution.
+    return RuntimeCapabilityLevel::HostFallback;
 }
 
 RuntimeCapabilityLevel RocmRuntime::queryBackwardCapability(const LayerType type) const {
     if (!supportsBackwardLayerType(type)) return RuntimeCapabilityLevel::Unsupported;
-#ifndef ENABLE_ROCM
-    return RuntimeCapabilityLevel::HostFallback;
-#else
-    switch (type) {
-        case LayerType::Linear:
-        case LayerType::MatMul:
-        case LayerType::BatchMatMul:
-        case LayerType::Add:
-        case LayerType::Subtract:
-        case LayerType::Multiply:
-        case LayerType::Divide:
-        case LayerType::ReLU:
-        case LayerType::LeakyReLU:
-        case LayerType::Sigmoid:
-        case LayerType::Tanh:
-        case LayerType::SiLU:
-        case LayerType::GELU:
-        case LayerType::Softplus:
-        case LayerType::Mish:
-        case LayerType::HardSigmoid:
-        case LayerType::HardSwish:
-            return RuntimeCapabilityLevel::Native;
-        default:
-            return RuntimeCapabilityLevel::HostFallback;
-    }
+#if defined(ENABLE_ROCM) && defined(__HIPCC__)
+    if(CudaOperationGeometry::convolutionNDType(type))return RuntimeCapabilityLevel::Native;
 #endif
+#ifdef ENABLE_ROCM
+    if(type==LayerType::MatMul || type==LayerType::BatchMatMul)return RuntimeCapabilityLevel::Native;
+#endif
+    return RuntimeCapabilityLevel::HostFallback;
 }
 
 RuntimeCapabilityLevel RocmRuntime::queryForwardOperationCapability(
@@ -552,8 +529,28 @@ RuntimeCapabilityLevel RocmRuntime::queryForwardOperationCapability(
     const std::vector<const std::vector<float>*>& inputs,
     bool training
 ) const {
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        CudaOperationGeometry::ConvND g;
+        return !config_.disabled && inputs.size()==1 && inputs[0] && config_.conv_enabled &&
+            runtimeCapabilityIsNative(queryForwardCapability(layer.type_enum)) && g.valid(layer,inputs[0]->size()) &&
+            Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(g.outputSize())*g.ig*g.kernel_spatial,config_.conv_min_ops)
+            ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    }
     (void)training;
     return queryConfiguredForwardOperationCapability(layer, inputs, true);
+}
+
+RuntimeCapabilityLevel RocmRuntime::queryBackwardOperationCapability(
+    const Layer& layer,const std::vector<const std::vector<float>*>& inputs,
+    const std::vector<const std::vector<float>*>& grad_outputs,bool training) const {
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        CudaOperationGeometry::ConvND g;
+        return grad_outputs.size()==1 && grad_outputs[0] &&
+            runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training)) &&
+            g.valid(layer,inputs[0]->size()) && grad_outputs[0]->size()==g.outputSize()
+            ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    }
+    return AbstractRuntime::queryBackwardOperationCapability(layer,inputs,grad_outputs,training);
 }
 
 bool RocmRuntime::linearForward(
@@ -666,6 +663,15 @@ bool RocmRuntime::forwardLayer(
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
     if (!supportsForwardLayerType(layer.type_enum)) return false;
+
+    if(!runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training)))return false;
+#if defined(ENABLE_ROCM) && defined(__HIPCC__)
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        CudaOperationGeometry::ConvND g;if(!g.valid(layer,inputs[0]->size()))return false;
+        std::vector<float> result;if(!RocmConvNDOps::execute(*inputs[0],layer,g,result))return false;
+        outputs={std::move(result)};return true;
+    }
+#endif
 
     switch (layer.type_enum) {
         case LayerType::Linear:
@@ -1311,7 +1317,7 @@ bool RocmRuntime::forwardLayer(
     }
 #endif // ENABLE_ROCM
 
-    return RuntimeLayerDispatch::cpu_forward_layer(inputs, outputs, layer, training);
+    return false; // A declined native path is retried by the router.
 }
 
 bool RocmRuntime::backwardLayer(
@@ -1324,6 +1330,18 @@ bool RocmRuntime::backwardLayer(
     if (!isInitialized()) return false;
     if (config_.disabled) return false;
     if (!supportsBackwardLayerType(layer.type_enum)) return false;
+
+    if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
+#if defined(ENABLE_ROCM) && defined(__HIPCC__)
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        CudaOperationGeometry::ConvND g;if(!g.valid(layer,inputs[0]->size()))return false;
+        std::vector<float> gi,dw;
+        if(!RocmConvNDOps::execute(*inputs[0],layer,g,gi,grad_outputs[0],&dw))return false;
+        std::vector<float> db;if(g.bias){db.assign(dw.begin()+g.parameters,dw.end());dw.resize(g.parameters);}
+        if(!RuntimeGradientCommit::finite(gi) || !RuntimeGradientCommit::parameters(layer,dw,db))return false;
+        grad_inputs={std::move(gi)};return true;
+    }
+#endif
 
 #ifdef ENABLE_ROCM
     if (layer.type_enum == LayerType::MatMul || layer.type_enum == LayerType::BatchMatMul) {
@@ -1357,52 +1375,8 @@ bool RocmRuntime::backwardLayer(
     }
 #endif
 
-    switch (layer.type_enum) {
-        case LayerType::Linear:
-            if (!config_.linear_enabled) return false;
-            break;
-        case LayerType::MatMul:
-        case LayerType::BatchMatMul:
-        case LayerType::Add:
-        case LayerType::Subtract:
-        case LayerType::Multiply:
-        case LayerType::Divide:
-        case LayerType::ReLU:
-        case LayerType::LeakyReLU:
-        case LayerType::Sigmoid:
-        case LayerType::Tanh:
-        case LayerType::SiLU:
-        case LayerType::GELU:
-        case LayerType::Softplus:
-        case LayerType::Mish:
-        case LayerType::HardSigmoid:
-        case LayerType::HardSwish:
-            if (!config_.linear_enabled) return false;
-            break;
-        case LayerType::Conv2d:
-            if (!config_.conv_enabled) return false;
-            break;
-        case LayerType::LayerNorm:
-        case LayerType::RMSNorm:
-            if (!config_.norm_enabled) return false;
-            break;
-        case LayerType::SelfAttention:
-        case LayerType::MultiHeadAttention:
-        case LayerType::CrossAttention:
-            if (!config_.attention_enabled) return false;
-            break;
-        case LayerType::MaxPool2d:
-        case LayerType::MaxPool1d:
-        case LayerType::AvgPool2d:
-        case LayerType::AvgPool1d:
-        case LayerType::GlobalAvgPool2d:
-        case LayerType::AdaptiveAvgPool2d:
-            break;
-        default:
-            return false;
-    }
-
-    return RuntimeLayerDispatch::cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);
+    // No CPU computation is hidden behind a native runtime result.
+    return false;
 }
 
 bool RocmRuntime::supportsOptimizer() const {

@@ -20,12 +20,16 @@
     --recon-loss NAME        Fonction de reconstruction (mse, l1, charbonnier, ...)
     --checkpoint PATH        Dossier checkpoint ou fichier DEBUGJSON
     --checkpoint-dir PATH    Alias rétrocompatible de --checkpoint
+    --strict-context         N'utilise pas un checkpoint global ni les préférences UI
     -n, --no-interactive     Pas de prompts stdin
     --out PATH               HTML de sortie (défaut: ./graph_report.html)
     --out-text PATH          Rapport .md/.txt; accepte rapport.{md,txt}
     --watch                  Mode surveillance : régénère le rapport dès que le CSV change
                              et ouvre le navigateur automatiquement.
     --watch-interval N       Intervalle de polling en secondes (défaut: 2)
+    --validate-holdout BOOL Active ou désactive le holdout de validation
+    --validate-holdout-frac N Fraction du dataset réservée au holdout
+    --validate-holdout-items N Nombre d'items dans le holdout
     -h, --help               Aide
 ]]
 
@@ -1044,9 +1048,10 @@ local function load_meta(checkpoint_path)
   end
 
   local run_dir = checkpoint_path
-  local m = { source = run_dir }
+  local m = {}
   local raw_arch = run_dir .. "/model/architecture.json"
   if file_exists(run_dir .. "/manifest.json") and file_exists(raw_arch) then
+    m.source = run_dir
     set_training_meta(m, analyze_model_metadata(read_file(raw_arch)))
     m.checkpoint_dir = m.checkpoint_dir or run_dir
     return m
@@ -2297,6 +2302,7 @@ local function parse_args()
     algo                  = nil,
     recon_loss            = nil,
     checkpoint_dir        = nil,
+    strict_context        = false,
     no_interactive        = false,
     out                   = "./graph_report.html",
     out_text              = nil,
@@ -2305,6 +2311,9 @@ local function parse_args()
     watch_interval        = 2,
     validate_every_steps  = nil,
     validate_items        = nil,
+    validate_holdout      = nil,
+    validate_holdout_frac = nil,
+    validate_holdout_items = nil,
     n_dataset             = nil,
   }
   local pos = {}
@@ -2329,6 +2338,7 @@ local function parse_args()
     elseif a == "--checkpoint-dir" then opts.checkpoint_dir = raw[i+1]; i = i+1
     elseif a:match("^--checkpoint%-dir=") then
       opts.checkpoint_dir = a:match("^--checkpoint%-dir=(.+)")
+    elseif a == "--strict-context" then opts.strict_context = true
     elseif a == "--out"            then opts.out            = raw[i+1]; i = i+1
     elseif a:match("^--out=")     then opts.out            = a:sub(7)
     elseif a == "--out-text"       then opts.out_text       = raw[i+1]; i = i+1
@@ -2348,6 +2358,30 @@ local function parse_args()
       opts.validate_items = tonumber(raw[i+1]); i = i+1
     elseif a:match("^--validate%-items=") then
       opts.validate_items = tonumber(a:match("^--validate%-items=(.+)"))
+    elseif a == "--validate-holdout" then
+      local next_arg = raw[i+1]
+      local value = next_arg and not next_arg:match("^%-") and next_arg:lower() or "true"
+      if value == "true" or value == "1" or value == "yes" or value == "on" then
+        opts.validate_holdout = true
+      elseif value == "false" or value == "0" or value == "no" or value == "off" then
+        opts.validate_holdout = false
+      end
+      if next_arg and not next_arg:match("^%-") then i = i+1 end
+    elseif a:match("^--validate%-holdout=") then
+      local value = a:match("^--validate%-holdout=(.+)"):lower()
+      if value == "true" or value == "1" or value == "yes" or value == "on" then
+        opts.validate_holdout = true
+      elseif value == "false" or value == "0" or value == "no" or value == "off" then
+        opts.validate_holdout = false
+      end
+    elseif a == "--validate-holdout-frac" then
+      opts.validate_holdout_frac = tonumber(raw[i+1]); i = i+1
+    elseif a:match("^--validate%-holdout%-frac=") then
+      opts.validate_holdout_frac = tonumber(a:match("^--validate%-holdout%-frac=(.+)"))
+    elseif a == "--validate-holdout-items" then
+      opts.validate_holdout_items = tonumber(raw[i+1]); i = i+1
+    elseif a:match("^--validate%-holdout%-items=") then
+      opts.validate_holdout_items = tonumber(a:match("^--validate%-holdout%-items=(.+)"))
     elseif a == "--n-dataset" then
       opts.n_dataset = tonumber(raw[i+1]); i = i+1
     elseif a:match("^--n%-dataset=") then
@@ -2572,8 +2606,14 @@ local function main()
   -- ── Auto-détection checkpoint ──────────────────────────────────────────
   local meta = {}
   local ckpt_dir = opts.checkpoint_dir
-  if not ckpt_dir then
-    ckpt_dir = csv_paths[1]:match("^(.*checkpoint/[^/]+)") or find_latest_run()
+  if not ckpt_dir and not opts.strict_context then
+    if opts.csv or opts.csv_dir then
+      -- Un CSV explicite appartient à son dossier de run. Ne jamais le
+      -- compléter avec le dernier checkpoint global, qui peut être un autre modèle.
+      ckpt_dir = csv_paths[1]:match("^(.*)[/\\][^/\\]+$")
+    else
+      ckpt_dir = csv_paths[1]:match("^(.*checkpoint/[^/]+)") or find_latest_run()
+    end
   end
   if ckpt_dir then
     meta = load_meta(ckpt_dir)
@@ -2593,21 +2633,24 @@ local function main()
     validate_every_steps = opts.validate_every_steps,
     validate_items       = opts.validate_items,
     n_dataset            = opts.n_dataset,
-    validate_holdout      = nil,
-    validate_holdout_frac = nil,
-    validate_holdout_items = nil,
+    validate_holdout      = opts.validate_holdout,
+    validate_holdout_frac = opts.validate_holdout_frac,
+    validate_holdout_items = opts.validate_holdout_items,
   }
   do
-    -- Le checkpoint est la source autoritative lorsqu'il sérialise ces champs.
+    -- La config transmise par le modèle actif est prioritaire; le checkpoint
+    -- associé complète uniquement les champs absents.
     local cfg = meta.model_info and meta.model_info.config or {}
     if cal.validate_every_steps == nil and cfg.validate_every_steps ~= nil then
       cal.validate_every_steps = tonumber(cfg.validate_every_steps)
     end
-    if cfg.validate_holdout ~= nil then cal.validate_holdout = cfg.validate_holdout == true end
-    if cfg.validate_holdout_frac ~= nil then
+    if cal.validate_holdout == nil and cfg.validate_holdout ~= nil then
+      cal.validate_holdout = cfg.validate_holdout == true or cfg.validate_holdout == "true"
+    end
+    if cal.validate_holdout_frac == nil and cfg.validate_holdout_frac ~= nil then
       cal.validate_holdout_frac = tonumber(cfg.validate_holdout_frac)
     end
-    if cfg.validate_holdout_items ~= nil then
+    if cal.validate_holdout_items == nil and cfg.validate_holdout_items ~= nil then
       cal.validate_holdout_items = tonumber(cfg.validate_holdout_items)
       if cal.validate_items == nil then cal.validate_items = cal.validate_holdout_items end
     end
@@ -2667,11 +2710,13 @@ local function main()
     end
 
     -- Compatibilité avec les préférences historiques, seulement après checkpoint/CSV.
-    local settings = load_ui_settings()
-    local sg = type(settings.showgraph) == "table" and settings.showgraph or {}
-    if cal.validate_every_steps == nil then cal.validate_every_steps = tonumber(sg.validate_every_steps) end
-    if cal.validate_items == nil then cal.validate_items = tonumber(sg.validate_items) end
-    if cal.n_dataset == nil then cal.n_dataset = tonumber(sg.n_dataset) end
+    if not opts.strict_context then
+      local settings = load_ui_settings()
+      local sg = type(settings.showgraph) == "table" and settings.showgraph or {}
+      if cal.validate_every_steps == nil then cal.validate_every_steps = tonumber(sg.validate_every_steps) end
+      if cal.validate_items == nil then cal.validate_items = tonumber(sg.validate_items) end
+      if cal.n_dataset == nil then cal.n_dataset = tonumber(sg.n_dataset) end
+    end
   end
 
   -- ── Prompts interactifs ────────────────────────────────────────────────

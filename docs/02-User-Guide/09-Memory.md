@@ -19,16 +19,15 @@ Mímir est “CPU-first” et peut allouer de gros buffers. La pratique recomman
 Exemple (Lua) :
 
 ```lua
--- Limite stricte (GB)
+-- Limite stricte (Gio pour les valeurs ≤ 1000 ; octets au-delà)
 if Mimir.MemoryGuard and Mimir.MemoryGuard.setLimit then
   pcall(Mimir.MemoryGuard.setLimit, 10)
 end
 
--- Allocateur dynamique (GB)
+-- Allocateur dynamique (Gio)
 local ok, err = Mimir.Allocator.configure({
   max_ram_gb = 10.0,
   enable_compression = true,
-  swap_strategy = "lru",
 })
 assert(ok ~= false, err)
 ```
@@ -42,9 +41,8 @@ assert(ok ~= false, err)
 
 | Clé | Type | Effet | Conseil |
 | --- | --- | --- | --- |
-| `max_ram_gb` | number | budget RAM pour tenseurs dynamiques | commence bas (8–12GB) et monte |
+| `max_ram_gb` | number | budget RAM en Gio pour tenseurs dynamiques | commence bas (8–12 Gio) et monte |
 | `enable_compression` | bool | compresse des buffers évincés | `true` si vous visez stabilité |
-| `swap_strategy` | string | stratégie d’éviction | `"lru"` est un bon défaut |
 
 ## Patterns recommandés
 
@@ -64,7 +62,6 @@ Bench/training = pression mémoire variable.
 assert(Mimir.Allocator.configure({
   max_ram_gb = 10.0,
   enable_compression = true,
-  swap_strategy = "lru",
 }))
 ```
 

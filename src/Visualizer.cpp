@@ -1,6 +1,8 @@
 #include "viz/WorkbenchTheme.hpp"
 #include "viz/UiPrimitives.hpp"
 #include "viz/WorkbenchLayout.hpp"
+#include "viz/CommandCardLayout.hpp"
+#include "viz/LatentSpaceExport.hpp"
 #include "Visualizer.hpp"
 #include "viz/DatasetBBoxBadge.hpp"
 #include "viz/FeatureProbe.hpp"
@@ -20,6 +22,7 @@
 #include <cctype>
 #include <filesystem>
 #include <limits>
+#include <functional>
 
 static const char* kVizUISettingsFile = "viz_ui_settings.json";
 
@@ -169,6 +172,8 @@ static bool is_upsample_type_name(const std::string& t) {
 
 static std::string short_layer_type_name(const std::string& t) {
     if (t == "Conv2d") return "conv";
+    if (t == "Conv3d") return "conv3d";
+    if (t == "Conv4d") return "conv4d";
     if (t == "ConvTranspose2d") return "deconv";
     if (t == "DepthwiseConv2d") return "dwconv";
     if (t == "GroupNorm") return "gn";
@@ -981,6 +986,7 @@ Visualizer::~Visualizer() {
 }
 
 void Visualizer::shutdown() {
+    setLatentSpaceVisible(false);
     std::atomic_load(&runtime_config_)->requestModelGraph(false);
     if (loss_log_enabled_ && pending_loss_log_flush_ && !loss_log_file.empty()) {
         saveLossHistory(loss_log_file);
@@ -1389,6 +1395,151 @@ bool Visualizer::isPanelVisible(PanelId id) const {
     return panels_[static_cast<size_t>(id)].visible;
 }
 
+void Visualizer::setPanelVisible(PanelId id, bool visible) {
+    initDefaultPanelsIfNeeded();
+    auto& panel = panels_[static_cast<size_t>(id)];
+    panel.visible = visible;
+    if (id == PanelId::Generated) show_generated_images = visible;
+    else if (id == PanelId::Training) show_training_progress = visible;
+    else if (id == PanelId::Graph) show_loss_graph = visible;
+    if (visible) {
+        // A closed panel may have been saved outside a subsequently smaller
+        // window. Restore this panel without rearranging the other sections.
+        const float width = std::max(1.f, float(window_width) - 8.f);
+        const float height = std::max(1.f, float(window_height) - 8.f);
+        panel.size.x = std::min(panel.size.x > 0 ? panel.size.x : kPanelMinW, width);
+        panel.size.y = std::min(panel.size.y > 0 ? panel.size.y : kPanelMinH, height);
+        panel.pos.x = std::clamp(panel.pos.x, 4.f, std::max(4.f, float(window_width) - panel.size.x - 4.f));
+        panel.pos.y = std::clamp(panel.pos.y, 4.f, std::max(4.f, float(window_height) - panel.size.y - 4.f));
+    } else {
+        const bool focused = id == PanelId::Context
+            ? focus_target_ == FocusTarget::Dataset || focus_target_ == FocusTarget::Projection || focus_target_ == FocusTarget::Understanding
+            : id == PanelId::Blocks ? focus_target_ == FocusTarget::LayerBlock
+            : id == PanelId::Generated ? focus_target_ == FocusTarget::Generated
+            : id == PanelId::Output ? focus_target_ == FocusTarget::Output
+            : id == PanelId::Training ? focus_target_ == FocusTarget::Training
+            : id == PanelId::Metrics ? focus_target_ == FocusTarget::Metrics
+            : focus_target_ == FocusTarget::Graph;
+        if (focused) {
+            zoom_active_ = false;
+            picker_selecting_ = picker_selection_active_ = false;
+        }
+    }
+    saveUILayoutToLast();
+}
+
+void Visualizer::openPanelManager() {
+    initDefaultPanelsIfNeeded();
+    panel_manager_visible_ = true;
+    panel_manager_selected_ = 0;
+    panel_manager_scroll_y_ = 0.f;
+    dragging_panel_ = resizing_panel_ = dragging_blocks_scrollbar_ = dragging_panel_scrollbar_ = false;
+    dragging_detection_threshold_ = dragging_latent_space_ = picker_selecting_ = false;
+    live_dragging_ = LiveDragTarget::None;
+    live_input_target_ = LiveInputTarget::None;
+    live_input_buffer_.clear();
+    blocks_tips_limit_editing_ = false;
+    save_chord_armed_ = save_chord_consumed_ = false;
+    layoutPanelManager(true);
+    setCursor(CursorKind::Arrow);
+}
+
+void Visualizer::layoutPanelManager(bool reveal_selection) {
+    const float ww = float(std::max(1, window_width)), hh = float(std::max(1, window_height));
+    const float margin = std::min(12.f, std::min(ww, hh) * .05f);
+    const float width = std::min(520.f, std::max(1.f, ww - 2.f * margin));
+    const float height = std::min(420.f, std::max(1.f, hh - 2.f * margin));
+    const float x = (ww - width) * .5f, y = (hh - height) * .5f;
+    const float header = std::min(76.f, height * .28f), footer = std::min(60.f, height * .24f);
+    panel_manager_body_rect_ = make_rect(x, y, width, height);
+    panel_manager_close_rect_ = make_rect(x + width - 42.f, y + 12.f, 28.f, 28.f);
+    panel_manager_list_rect_ = make_rect(x + 16.f, y + header, std::max(1.f, width - 32.f),
+        std::max(1.f, height - header - footer));
+    const auto& list = *panel_manager_list_rect_;
+    const size_t count = static_cast<size_t>(PanelId::Count);
+    panel_manager_scroll_max_ = std::max(0.f, float(count) * kPanelManagerRowHeight - list.size.y);
+    if (reveal_selection && panel_manager_selected_ < count) {
+        const float row_top = float(panel_manager_selected_) * kPanelManagerRowHeight;
+        if (row_top < panel_manager_scroll_y_) panel_manager_scroll_y_ = row_top;
+        if (row_top + kPanelManagerRowHeight > panel_manager_scroll_y_ + list.size.y)
+            panel_manager_scroll_y_ = row_top + kPanelManagerRowHeight - list.size.y;
+    }
+    panel_manager_scroll_y_ = std::clamp(panel_manager_scroll_y_, 0.f, panel_manager_scroll_max_);
+    for (size_t index = 0; index < count; ++index) {
+        const auto row = make_rect(list.position.x, list.position.y + float(index) * kPanelManagerRowHeight - panel_manager_scroll_y_,
+            std::max(1.f, list.size.x - 18.f), kPanelManagerRowHeight - 3.f);
+        panel_manager_row_rects_[index] = row.findIntersection(list);
+    }
+    const float button_width = std::min(156.f, (width - 44.f) * .55f);
+    const float close_width = std::min(112.f, width - 44.f - button_width);
+    const float button_y = y + height - footer + 4.f;
+    panel_manager_show_all_rect_ = make_rect(x + 16.f, button_y, button_width, 28.f);
+    panel_manager_dismiss_rect_ = make_rect(x + width - 16.f - close_width, button_y, close_width, 28.f);
+}
+
+void Visualizer::renderPanelManagerOverlay() {
+    if (!window || !panel_manager_visible_) return;
+    layoutPanelManager();
+    const auto old_view = window->getView();
+    const float ww = float(std::max(1, window_width)), hh = float(std::max(1, window_height));
+    vizgfx::View screen(make_rect(0.f, 0.f, ww, hh));
+    screen.setViewport(make_rect(0.f, 0.f, 1.f, 1.f));
+    window->setView(screen);
+    auto text = [&](float x, float y, unsigned size, const std::string& value, vizgfx::Color color, bool bold = false) {
+        if (!font_loaded) return;
+        vizgfx::Text label(font); label.setCharacterSize(size); label.setFillColor(color);
+        if (bold) label.setStyle(vizgfx::Text::Bold);
+        label.setPosition({x,y}); label.setString(vizgfx::String::fromUtf8(value.begin(), value.end())); window->draw(label);
+    };
+    const vizgfx::Color white(235,242,250), muted(175,190,208);
+    vizgfx::RectangleShape shade({ww,hh}); shade.setFillColor(vizgfx::Color(0,0,0,185)); window->draw(shade);
+    const auto body = *panel_manager_body_rect_;
+    vizgfx::RectangleShape card(body.size); card.setPosition(body.position);
+    card.setFillColor(vizgfx::Color(22,30,43,250)); card.setOutlineColor(vizgfx::Color(102,137,174)); card.setOutlineThickness(1.f);
+    window->draw(card);
+    text(body.position.x + 16.f, body.position.y + 12.f, 20, "Gérer les sections", white, true);
+    text(body.position.x + 16.f, body.position.y + 46.f, 12, "Cocher une section pour l’afficher.", muted);
+    auto button = [&](const vizgfx::FloatRect& rect, const std::string& value, bool selected) {
+        vizgfx::RectangleShape shape(rect.size); shape.setPosition(rect.position);
+        shape.setFillColor(selected ? vizgfx::Color(54,83,111) : vizgfx::Color(39,54,73));
+        shape.setOutlineColor(selected ? vizgfx::Color(164,199,232) : vizgfx::Color(78,105,134)); shape.setOutlineThickness(1.f);
+        window->draw(shape); text(rect.position.x + 9.f, rect.position.y + 5.f, 12, value, white, true);
+    };
+    button(*panel_manager_close_rect_, "X", false);
+    const auto list = *panel_manager_list_rect_;
+    const auto rows_clip = make_rect(list.position.x, list.position.y, std::max(1.f, list.size.x - 18.f), list.size.y);
+    vizgfx::View clipped(rows_clip);
+    clipped.setViewport(make_rect(rows_clip.position.x/ww, rows_clip.position.y/hh, rows_clip.size.x/ww, rows_clip.size.y/hh));
+    window->setView(clipped);
+    const std::array<const char*, static_cast<size_t>(PanelId::Count)> fallback{{
+        "Contexte", "Tenseurs / Layers", "Images / Validation", "Entraînement", "Propriétés / Métriques", "Courbes / Loss", "Sortie"}};
+    for (size_t index = 0; index < panels_.size(); ++index) {
+        if (!panel_manager_row_rects_[index]) continue;
+        const float y = list.position.y + float(index) * kPanelManagerRowHeight - panel_manager_scroll_y_;
+        vizgfx::RectangleShape row({rows_clip.size.x, kPanelManagerRowHeight - 3.f}); row.setPosition({list.position.x,y});
+        row.setFillColor(index == panel_manager_selected_ ? vizgfx::Color(43,65,88) : vizgfx::Color(29,41,57)); window->draw(row);
+        vizgfx::RectangleShape checkbox({16.f,16.f}); checkbox.setPosition({list.position.x + 9.f,y + 8.f});
+        checkbox.setFillColor(panels_[index].visible ? vizgfx::Color(65,119,151) : vizgfx::Color(19,28,40));
+        checkbox.setOutlineColor(vizgfx::Color(144,177,207)); checkbox.setOutlineThickness(1.f); window->draw(checkbox);
+        if (panels_[index].visible) text(list.position.x + 11.f,y + 5.f,16,"×",white,true);
+        text(list.position.x + 36.f, y + 7.f, 13, panels_[index].title.empty() ? fallback[index] : panels_[index].title, white);
+    }
+    window->setView(screen);
+    if (panel_manager_scroll_max_ > 0) {
+        const float track_x = list.position.x + list.size.x - 10.f;
+        vizgfx::RectangleShape track({8.f,list.size.y}); track.setPosition({track_x,list.position.y});
+        track.setFillColor(vizgfx::Color(32,45,62)); window->draw(track);
+        const float thumb_h = std::min(list.size.y, std::max(18.f, list.size.y * list.size.y / (float(panels_.size()) * kPanelManagerRowHeight)));
+        const float thumb_y = list.position.y + (list.size.y - thumb_h) * panel_manager_scroll_y_ / panel_manager_scroll_max_;
+        vizgfx::RectangleShape thumb({8.f,thumb_h}); thumb.setPosition({track_x,thumb_y});
+        thumb.setFillColor(vizgfx::Color(116,145,177)); window->draw(thumb);
+    }
+    button(*panel_manager_show_all_rect_, "Tout afficher", panel_manager_selected_ == panels_.size());
+    button(*panel_manager_dismiss_rect_, "Fermer", panel_manager_selected_ == panels_.size() + 1);
+    text(body.position.x + 16.f, body.position.y + body.size.y - 18.f, 10, "↑/↓ / Tab : choisir · Espace/Entrée · Échap", muted);
+    window->setView(old_view);
+}
+
 namespace {
 vizgfx::Color with_alpha(vizgfx::Color c, uint8_t a) {
     c.a = a;
@@ -1424,12 +1575,21 @@ vizgfx::FloatRect Visualizer::panelTitleRect(PanelId id) const {
     return make_rect(p.pos.x, p.pos.y, p.size.x, panelHeaderHeight(id));
 }
 
-vizgfx::FloatRect Visualizer::panelContentRect(PanelId id) const {
+vizgfx::FloatRect Visualizer::panelViewportRect(PanelId id) const {
     const auto& p = panels_[static_cast<size_t>(id)];
     const float top = p.pos.y + panelHeaderHeight(id);
     const float inner_w = std::max(0.f, p.size.x - 2.f * kPanelPad);
     const float inner_h = std::max(0.f, p.size.y - panelHeaderHeight(id) - 2.f * kPanelPad);
     return make_rect(p.pos.x + kPanelPad, top + kPanelPad, inner_w, inner_h);
+}
+
+vizgfx::FloatRect Visualizer::panelContentRect(PanelId id) const {
+    auto area = panelViewportRect(id);
+    // Keep the layout stable when overflow appears/disappears. The gutter is
+    // outside both drawing and element hitboxes, including nested sections.
+    if (id != PanelId::Graph)
+        area.size.x = std::max(0.f, area.size.x - kPanelScrollbarWidth - kPanelScrollbarGap);
+    return area;
 }
 
 void Visualizer::setPanelContentHeight(PanelId id, float content_height) {
@@ -1449,16 +1609,17 @@ void Visualizer::drawPanelScrollbar(PanelId id) {
     const float scroll_max = panel_scroll_max_[index];
     if (scroll_max <= 0.0f) return;
 
-    const auto area = panelContentRect(id);
-    const float track_w = 10.0f;
-    const float tx = area.position.x + std::max(0.0f, area.size.x - track_w - 2.0f);
+    const auto area = panelViewportRect(id);
+    const float track_w = std::min(kPanelScrollbarWidth, area.size.x);
+    if (track_w <= 0.f || area.size.y <= 0.f) return;
+    const float tx = area.position.x + area.size.x - track_w;
     const float ty = area.position.y;
     const float th = std::max(0.0f, area.size.y);
     const float content_height = th + scroll_max;
     const float visible_ratio = content_height > 1.0f
         ? std::clamp(th / content_height, 0.05f, 1.0f) : 1.0f;
-    const float thumb_h = std::max(24.0f, th * visible_ratio);
-    const float travel = std::max(1.0f, th - thumb_h);
+    const float thumb_h = std::min(th, std::max(24.0f, th * visible_ratio));
+    const float travel = std::max(0.0f, th - thumb_h);
     const float ratio = std::clamp(panel_scroll_y_[index] / scroll_max, 0.0f, 1.0f);
     const float thumb_y = ty + ratio * travel;
 
@@ -2368,6 +2529,7 @@ void Visualizer::processEvents() {
 
         if (event.is<vizgfx::Event::Closed>()) {
             emitScriptEvent({{"type", "close"}});
+            setLatentSpaceVisible(false);
             window->close();
             continue;
         }
@@ -2377,6 +2539,172 @@ void Visualizer::processEvents() {
             window_width = static_cast<int>(resized->size.x);
             window_height = static_cast<int>(resized->size.y);
             syncUIView();
+            if (panel_manager_visible_) layoutPanelManager();
+            continue;
+        }
+
+        if (panel_manager_swallow_release_) {
+            // A backend may deliver TextEntered after the key that dismissed
+            // the modal. Consume the whole closing gesture before returning
+            // input ownership to a script or an underlying control.
+            if (event.is<vizgfx::Event::TextEntered>()) continue;
+            if (event.is<vizgfx::Event::MouseButtonReleased>() || event.is<vizgfx::Event::KeyReleased>()) {
+                panel_manager_swallow_release_ = false;
+                continue;
+            }
+        }
+        if (event.is<vizgfx::Event::MouseButtonPressed>() || event.is<vizgfx::Event::KeyPressed>())
+            panel_manager_swallow_release_ = false;
+        if (panel_manager_visible_) {
+            const size_t count = static_cast<size_t>(PanelId::Count);
+            auto activate = [&] {
+                if (panel_manager_selected_ < count) {
+                    const auto id = static_cast<PanelId>(panel_manager_selected_);
+                    setPanelVisible(id, !isPanelVisible(id));
+                } else if (panel_manager_selected_ == count) {
+                    for (size_t index = 0; index < count; ++index) setPanelVisible(static_cast<PanelId>(index), true);
+                } else {
+                    panel_manager_visible_ = false;
+                    panel_manager_swallow_release_ = true;
+                }
+            };
+            if (const auto* key = event.getIf<vizgfx::Event::KeyPressed>()) {
+                if (key->code == vizgfx::Keyboard::Key::Escape) {
+                    panel_manager_visible_ = false;
+                    panel_manager_swallow_release_ = true;
+                }
+                else if (key->code == vizgfx::Keyboard::Key::Up ||
+                    (key->code == vizgfx::Keyboard::Key::Tab && key->shift)) {
+                    panel_manager_selected_ = (panel_manager_selected_ + count + 1) % (count + 2);
+                    layoutPanelManager(true);
+                } else if (key->code == vizgfx::Keyboard::Key::Down || key->code == vizgfx::Keyboard::Key::Tab) {
+                    panel_manager_selected_ = (panel_manager_selected_ + 1) % (count + 2);
+                    layoutPanelManager(true);
+                } else if (key->code == vizgfx::Keyboard::Key::Enter || key->code == vizgfx::Keyboard::Key::Space) activate();
+            } else if (const auto* click = event.getIf<vizgfx::Event::MouseButtonPressed>()) {
+                const auto point = window->mapPixelToCoords(click->position);
+                if (click->button == vizgfx::Mouse::Button::Left) {
+                    if ((panel_manager_close_rect_ && panel_manager_close_rect_->contains(point)) ||
+                        (panel_manager_dismiss_rect_ && panel_manager_dismiss_rect_->contains(point)) ||
+                        (panel_manager_body_rect_ && !panel_manager_body_rect_->contains(point))) {
+                        panel_manager_visible_ = false;
+                        panel_manager_swallow_release_ = true;
+                    } else if (panel_manager_show_all_rect_ && panel_manager_show_all_rect_->contains(point)) {
+                        panel_manager_selected_ = count; activate();
+                    } else for (size_t index = 0; index < count; ++index) {
+                        if (panel_manager_row_rects_[index] && panel_manager_row_rects_[index]->contains(point)) {
+                            panel_manager_selected_ = index; activate(); break;
+                        }
+                    }
+                }
+            } else if (const auto* wheel = event.getIf<vizgfx::Event::MouseWheelScrolled>()) {
+                if (panel_manager_list_rect_ && panel_manager_list_rect_->contains(window->mapPixelToCoords(wheel->position))) {
+                    panel_manager_scroll_y_ = std::clamp(panel_manager_scroll_y_ - wheel->delta * kPanelManagerRowHeight,
+                        0.f, panel_manager_scroll_max_);
+                    layoutPanelManager();
+                }
+            } else if (const auto* move = event.getIf<vizgfx::Event::MouseMoved>()) picker_mouse_ = window->mapPixelToCoords(move->position);
+            continue;
+        }
+
+        if (show_latent_space_) {
+            if (const auto* key = event.getIf<vizgfx::Event::KeyPressed>()) {
+                if (key->code == vizgfx::Keyboard::Key::Escape) {
+                    setLatentSpaceVisible(false);
+                } else if (key->code == vizgfx::Keyboard::Key::R) {
+                    latent_space_yaw_ = -0.55f;
+                    latent_space_pitch_ = 0.25f;
+                    latent_space_zoom_ = 1.0f;
+                } else if (key->code == vizgfx::Keyboard::Key::X) {
+                    dragging_latent_space_ = false;
+                    saveLatentSpaceExport();
+                }
+            } else if (const auto* click = event.getIf<vizgfx::Event::MouseButtonPressed>()) {
+                if (click->button == vizgfx::Mouse::Button::Left) {
+                    const auto point = window->mapPixelToCoords(click->position);
+                    if (last_latent_space_close_rect_ && last_latent_space_close_rect_->contains(point)) {
+                        setLatentSpaceVisible(false);
+                    } else if (last_latent_space_export_rect_ && last_latent_space_export_rect_->contains(point)) {
+                        dragging_latent_space_ = false;
+                        saveLatentSpaceExport();
+                    } else if (last_latent_space_realtime_rect_ && last_latent_space_realtime_rect_->contains(point)) {
+                        dragging_latent_space_ = false;
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            if (control->available.load(std::memory_order_acquire))
+                                control->setRealtimeEnabled(!control->realtime_enabled.load(std::memory_order_acquire));
+                        }
+                    } else if (last_latent_space_correlations_rect_ && last_latent_space_correlations_rect_->contains(point)) {
+                        dragging_latent_space_ = false;
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            if (control->available.load(std::memory_order_acquire)) {
+                                control->setCorrelationsEnabled(!control->correlations_enabled.load(std::memory_order_acquire));
+                                control->requestSnapshot();
+                            }
+                        }
+                    } else if (last_latent_space_neurons_rect_ && last_latent_space_neurons_rect_->contains(point)) {
+                        dragging_latent_space_ = false;
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            if (control->available.load(std::memory_order_acquire)) {
+                                control->setNeuronsEnabled(!control->neurons_enabled.load(std::memory_order_acquire));
+                                control->requestSnapshot();
+                            }
+                        }
+                    } else if (last_latent_space_live_weights_rect_ && last_latent_space_live_weights_rect_->contains(point)) {
+                        dragging_latent_space_ = false;
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            if (control->available.load(std::memory_order_acquire)) {
+                                control->setLiveWeightsEnabled(!control->live_weights_enabled.load(std::memory_order_acquire));
+                                control->requestSnapshot();
+                            }
+                        }
+                    } else if (last_latent_space_correlation_all_rect_ && last_latent_space_correlation_all_rect_->contains(point)) {
+                        dragging_latent_space_ = false;
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            if (control->correlations_enabled.load(std::memory_order_acquire))
+                                latent_space_correlation_show_all_candidates_ = !latent_space_correlation_show_all_candidates_;
+                        }
+                    } else if (last_latent_space_correlation_clear_rect_ && last_latent_space_correlation_clear_rect_->contains(point)) {
+                        dragging_latent_space_ = false;
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            if (control->correlations_enabled.load(std::memory_order_acquire)) {
+                                control->clearCorrelations();
+                                control->requestSnapshot();
+                            }
+                        }
+                    } else if ((last_latent_space_correlation_minus_rect_ && last_latent_space_correlation_minus_rect_->contains(point)) ||
+                               (last_latent_space_correlation_plus_rect_ && last_latent_space_correlation_plus_rect_->contains(point))) {
+                        dragging_latent_space_ = false;
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            if (control->correlations_enabled.load(std::memory_order_acquire) &&
+                                !latent_space_correlation_show_all_candidates_) {
+                                const bool increase = last_latent_space_correlation_plus_rect_ &&
+                                    last_latent_space_correlation_plus_rect_->contains(point);
+                                latent_space_correlation_threshold_ = std::clamp(
+                                    latent_space_correlation_threshold_ + (increase ? 0.05f : -0.05f), 0.30f, 0.95f);
+                            }
+                        }
+                    } else if (last_latent_space_canvas_rect_.contains(point)) {
+                        dragging_latent_space_ = true;
+                        latent_space_last_mouse_ = point;
+                    }
+                }
+            } else if (const auto* release = event.getIf<vizgfx::Event::MouseButtonReleased>()) {
+                if (release->button == vizgfx::Mouse::Button::Left)
+                    dragging_latent_space_ = false;
+            } else if (const auto* move = event.getIf<vizgfx::Event::MouseMoved>()) {
+                const auto point = window->mapPixelToCoords(move->position);
+                picker_mouse_ = point;
+                if (dragging_latent_space_) {
+                    latent_space_yaw_ += (point.x - latent_space_last_mouse_.x) * 0.009f;
+                    latent_space_pitch_ = std::clamp(
+                        latent_space_pitch_ + (point.y - latent_space_last_mouse_.y) * 0.009f,
+                        -1.35f, 1.35f);
+                    latent_space_last_mouse_ = point;
+                }
+            } else if (const auto* wheel = event.getIf<vizgfx::Event::MouseWheelScrolled>()) {
+                latent_space_zoom_ = std::clamp(
+                    latent_space_zoom_ * std::pow(1.12f, wheel->delta), 0.35f, 3.5f);
+            }
             continue;
         }
 
@@ -2519,6 +2847,13 @@ void Visualizer::processEvents() {
             continue;
         }
 
+        if (const auto* button = event.getIf<vizgfx::Event::MouseButtonPressed>()) {
+            if (button->button == vizgfx::Mouse::Button::Right && !show_help_overlay_ && !zoom_active_) {
+                openPanelManager();
+                continue;
+            }
+        }
+
         if (script_scene_.value("events", false)) {
             if (const auto* key = event.getIf<vizgfx::Event::KeyPressed>())
                 emitScriptEvent({{"type", "key"}, {"code", static_cast<int>(key->code)},
@@ -2600,6 +2935,37 @@ void Visualizer::processEvents() {
                 }
                 if (metrics_content_hit && last_skip_button_rect_ && last_skip_button_rect_->contains(mouse)) {
                     std::atomic_load(&skip_control_)->toggle();
+                    continue;
+                }
+                if (metrics_content_hit && last_graph_report_button_rect_ &&
+                    last_graph_report_button_rect_->contains(mouse)) {
+                    if (const auto report = std::atomic_load(&graph_report_control_)) {
+                        const auto state = report->state.load(std::memory_order_relaxed);
+                        if (state == GraphReportControl::State::Ready ||
+                            state == GraphReportControl::State::Complete ||
+                            state == GraphReportControl::State::Failed) {
+                            report->state.store(GraphReportControl::State::Running,
+                                                std::memory_order_release);
+                            report->setMessage("Génération du rapport en cours…");
+                            report->requested.store(true, std::memory_order_release);
+                        }
+                    }
+                    continue;
+                }
+                if (metrics_content_hit && last_latent_space_button_rect_ &&
+                    last_latent_space_button_rect_->contains(mouse)) {
+                    if (const auto control = std::atomic_load(&latent_space_control_)) {
+                        const auto state = control->state.load(std::memory_order_acquire);
+                        if (control->available.load(std::memory_order_acquire) &&
+                            (state == mimir::viz::LatentSpaceControl::State::Ready ||
+                             state == mimir::viz::LatentSpaceControl::State::Complete ||
+                             state == mimir::viz::LatentSpaceControl::State::Failed)) {
+                            control->requestSnapshot();
+                            if (std::atomic_load(&training_paused_)->load())
+                                control->setMessage("Capture demandée; disponible à la prochaine opération du modèle");
+                        }
+                    }
+                    setLatentSpaceVisible(true);
                     continue;
                 }
                 if (metrics_content_hit && last_validation_button_rect_.has_value() && last_validation_button_rect_->contains(mouse)) {
@@ -2768,7 +3134,8 @@ void Visualizer::processEvents() {
                 bool selected_image = false;
                 for (const auto& target : image_targets) {
                     const auto owner = target.second == FocusTarget::Output ? PanelId::Output : PanelId::Context;
-                    if (clicked_panel == owner && *target.first && (*target.first)->contains(mouse)) {
+                    if (clicked_panel == owner && panelContentRect(owner).contains(mouse) &&
+                        *target.first && (*target.first)->contains(mouse)) {
                         focus_target_ = target.second; selected_image = true; break;
                     }
                 }
@@ -2776,12 +3143,7 @@ void Visualizer::processEvents() {
 
 
                 if (const auto close_hit = hitTestPanelCloseButton(mouse)) {
-                    const PanelId id = *close_hit;
-                    if (id == PanelId::Generated) show_generated_images = false;
-                    else if (id == PanelId::Training) show_training_progress = false;
-                    else if (id == PanelId::Graph) show_loss_graph = false;
-                    panels_[static_cast<size_t>(id)].visible = false;
-                    saveUILayoutToLast();
+                    setPanelVisible(*close_hit, false);
                     continue;
                 }
 
@@ -2976,7 +3338,7 @@ void Visualizer::processEvents() {
             const vizgfx::Vector2f mouse = window->mapPixelToCoords(wheel->position);
             bool consumed_scroll = false;
             if (isPanelVisible(PanelId::Metrics) &&
-                panelContentRect(PanelId::Metrics).contains(mouse)) {
+                panelViewportRect(PanelId::Metrics).contains(mouse)) {
                 for (size_t i = 0; i < dataset_text_section_rects_.size(); ++i) {
                     if (!dataset_text_section_rects_[i].contains(mouse)) continue;
                     const float previous = dataset_text_scroll_y_[i];
@@ -2988,7 +3350,7 @@ void Visualizer::processEvents() {
                 }
             }
             if (isPanelVisible(PanelId::Blocks)) {
-                const auto content = panelContentRect(PanelId::Blocks);
+                const auto content = panelViewportRect(PanelId::Blocks);
                 if (content.contains(mouse)) {
                     blocks_scroll_y_ -= wheel->delta * kBlocksScrollSpeed;
                     blocks_scroll_y_ = std::clamp(blocks_scroll_y_, 0.0f, std::max(0.0f, blocks_scroll_max_));
@@ -2999,7 +3361,7 @@ void Visualizer::processEvents() {
                 const PanelId order[] = {PanelId::Metrics, PanelId::Training,
                     PanelId::Output, PanelId::Generated, PanelId::Context};
                 for (PanelId id : order) {
-                    if (!isPanelVisible(id) || !panelContentRect(id).contains(mouse)) continue;
+                    if (!isPanelVisible(id) || !panelViewportRect(id).contains(mouse)) continue;
                     const size_t index = static_cast<size_t>(id);
                     panel_scroll_y_[index] -= wheel->delta * kPanelScrollSpeed;
                     panel_scroll_y_[index] = std::clamp(
@@ -3048,13 +3410,10 @@ void Visualizer::processEvents() {
                 snapshot_dialog_error_.clear();
             }
             if (code == vizgfx::Keyboard::Key::G) {
-                show_loss_graph = !show_loss_graph;
-                panels_[static_cast<size_t>(PanelId::Graph)].visible = show_loss_graph;
+                setPanelVisible(PanelId::Graph, !show_loss_graph);
             }
             if (code == vizgfx::Keyboard::Key::O) {
-                auto& output_panel = panels_[static_cast<size_t>(PanelId::Output)];
-                output_panel.visible = !output_panel.visible;
-                saveUILayoutToLast();
+                setPanelVisible(PanelId::Output, !isPanelVisible(PanelId::Output));
             }
             if (code == vizgfx::Keyboard::Key::P) show_prompt_text_ = !show_prompt_text_;
             if (code == vizgfx::Keyboard::Key::I && zoom_active_)
@@ -3407,6 +3766,8 @@ void Visualizer::update() {
         last_debug_json_button_rect_.reset();
         last_pause_button_rect_.reset();
         last_stop_button_rect_.reset();
+        last_graph_report_button_rect_.reset();
+        last_latent_space_button_rect_.reset();
         last_live_overrides_box_.reset();
         last_live_kl_enable_box_.reset();
         last_live_lr_track_.reset();
@@ -3441,6 +3802,8 @@ void Visualizer::update() {
     if (show_model_graph_) renderModelGraphOverlay();
     if (debug_json_dialog_.visible) renderDebugJsonDialog();
     if (snapshot_dialog_visible_) renderSnapshotDialog();
+    if (show_latent_space_) renderLatentSpaceOverlay();
+    if (panel_manager_visible_) renderPanelManagerOverlay();
 
     window->display();
 
@@ -3923,7 +4286,8 @@ void Visualizer::renderHelpOverlay() {
             {"TIPS","Limiter les vignettes : Entrée valide, vide signifie ALL."},
             {"R","Resynchroniser les textures et les informations d'architecture."}}},
         {"Panneaux et export",{{"Titre / Poignée","Glisser pour déplacer ou redimensionner un panneau."},
-            {"[X]","Masquer un panneau."},
+            {"[X]","Masquer un panneau ; le rouvrir par clic droit."},
+            {"Clic droit","Gérer les sections dans la vue principale, même si tous les panneaux sont masqués."},
             {"S","Mémoriser la disposition."},
             {"S + 0-9","Sauvegarder un slot de disposition."},
             {"0-9","Charger un slot de disposition."},
@@ -4243,8 +4607,7 @@ void Visualizer::renderZoomOverlay() {
                     vizgfx::Text text(font);text.setCharacterSize(heading?15:13);
                     text.setFillColor(heading?vizgfx::Color(100,235,255):vizgfx::Color(225,230,240));
                     text.setPosition({sidebar_x+20.f,yrow});
-                    const auto shown=clamp_text_end(line,chars);
-                    text.setString(vizgfx::String::fromUtf8(shown.begin(),shown.end()));window->draw(text);
+                    text.setString(vizgfx::String::fromUtf8(line.begin(),line.end()));window->draw(text);
                 }
                 yrow+=24.f;
             };
@@ -4252,6 +4615,15 @@ void Visualizer::renderZoomOverlay() {
                 while(line.size()>chars) {
                     size_t split=line.rfind(' ',chars);
                     if(split==std::string::npos || split==0) split=chars;
+                    if(split<line.size()) {
+                        while(split>0 &&
+                            (static_cast<unsigned char>(line[split])&0xc0u)==0x80u) --split;
+                        if(split==0) {
+                            split=1;
+                            while(split<line.size() &&
+                                (static_cast<unsigned char>(line[split])&0xc0u)==0x80u) ++split;
+                        }
+                    }
                     row(line.substr(0,split));
                     line.erase(0,split);
                     const size_t first=line.find_first_not_of(' ');
@@ -4309,20 +4681,76 @@ void Visualizer::renderZoomOverlay() {
     const float text_x = sidebar_x + 20.0f;
     const float text_w = std::max(120.0f, sidebar_w - 40.0f);
     const float key_column_w = std::clamp(text_w * 0.30f, 104.0f, 132.0f);
-    const size_t max_chars = static_cast<size_t>(std::max(12.0f, text_w / 7.2f));
     float text_y = pad + 16.0f - zoom_info_scroll_;
     auto visible_row = [&](float height) { return text_y >= pad + 8.0f && text_y + height < pad + sidebar_h - 8.0f; };
 
+    auto wrap_text = [&](const std::string& value, unsigned size, float width, bool bold) {
+        std::vector<std::string> lines;
+        auto measure = [&](const std::string& candidate) {
+            vizgfx::Text probe(font);
+            probe.setCharacterSize(size);
+            if (bold) probe.setStyle(vizgfx::Text::Bold);
+            probe.setString(vizgfx::String::fromUtf8(candidate.begin(), candidate.end()));
+            return probe.getLocalBounds().size.x;
+        };
+        auto append_long_word = [&](const std::string& word, std::string& line) {
+            for (size_t offset = 0; offset < word.size();) {
+                const unsigned char lead = static_cast<unsigned char>(word[offset]);
+                size_t codepoint_bytes = lead < 0x80 ? 1 :
+                    ((lead & 0xe0) == 0xc0 ? 2 :
+                     ((lead & 0xf0) == 0xe0 ? 3 :
+                      ((lead & 0xf8) == 0xf0 ? 4 : 1)));
+                if (offset + codepoint_bytes > word.size()) codepoint_bytes = 1;
+                const std::string codepoint = word.substr(offset, codepoint_bytes);
+                if (!line.empty() && measure(line + codepoint) > width) {
+                    lines.push_back(std::move(line));
+                    line.clear();
+                }
+                if (line.empty() && measure(codepoint) > width) lines.push_back(codepoint);
+                else line += codepoint;
+                offset += codepoint_bytes;
+            }
+        };
+
+        std::istringstream paragraphs(value);
+        std::string paragraph;
+        bool had_paragraph = false;
+        while (std::getline(paragraphs, paragraph)) {
+            had_paragraph = true;
+            std::istringstream words(paragraph);
+            std::string word, line;
+            while (words >> word) {
+                const std::string candidate = line.empty() ? word : line + " " + word;
+                if (measure(candidate) <= width) {
+                    line = candidate;
+                    continue;
+                }
+                if (!line.empty()) {
+                    lines.push_back(std::move(line));
+                    line.clear();
+                }
+                if (measure(word) <= width) line = word;
+                else append_long_word(word, line);
+            }
+            if (!line.empty()) lines.push_back(std::move(line));
+            else if (paragraph.empty()) lines.emplace_back();
+        }
+        if (!had_paragraph) lines.emplace_back();
+        return lines;
+    };
+
     auto draw_text = [&](const std::string& value, unsigned size, vizgfx::Color color, bool bold = false) {
-        vizgfx::Text text(font);
-        text.setCharacterSize(size);
-        text.setFillColor(color);
-        if (bold) text.setStyle(vizgfx::Text::Bold);
-        text.setPosition(vizgfx::Vector2f(text_x, text_y));
-        const std::string shown = clamp_text_end(value, max_chars);
-        text.setString(vizgfx::String::fromUtf8(shown.begin(), shown.end()));
-        if (visible_row(static_cast<float>(size) + 5.0f)) window->draw(text);
-        text_y += static_cast<float>(size) + 5.0f;
+        const auto lines = wrap_text(value, size, text_w, bold);
+        for (const auto& line : lines) {
+            vizgfx::Text text(font);
+            text.setCharacterSize(size);
+            text.setFillColor(color);
+            if (bold) text.setStyle(vizgfx::Text::Bold);
+            text.setPosition(vizgfx::Vector2f(text_x, text_y));
+            text.setString(vizgfx::String::fromUtf8(line.begin(), line.end()));
+            if (visible_row(static_cast<float>(size) + 5.0f)) window->draw(text);
+            text_y += static_cast<float>(size) + 5.0f;
+        }
     };
 
     auto draw_section = [&](const std::string& title) {
@@ -4342,22 +4770,89 @@ void Visualizer::renderZoomOverlay() {
         key_text.setFillColor(with_alpha(accent, 210));
         key_text.setPosition(vizgfx::Vector2f(text_x, text_y));
         key_text.setString(vizgfx::String::fromUtf8(key.begin(), key.end()));
-        if (visible_row(20.0f)) window->draw(key_text);
-
-        vizgfx::Text value_text(font);
-        value_text.setCharacterSize(12);
-        value_text.setFillColor(vizgfx::Color(220, 224, 232));
         const float value_offset = std::max(key_column_w, key_text.getLocalBounds().size.x + 12.f);
-        value_text.setPosition(vizgfx::Vector2f(text_x + value_offset, text_y - 1.0f));
-        const size_t key_chars = static_cast<size_t>(value_offset / 7.2f);
-        const size_t value_chars = max_chars > key_chars ? max_chars - key_chars : max_chars;
-        const std::string shown = clamp_text_end(value, value_chars);
-        value_text.setString(vizgfx::String::fromUtf8(shown.begin(), shown.end()));
-        if (visible_row(20.0f)) window->draw(value_text);
-        text_y += 20.0f;
+        const float value_width = std::max(40.0f, text_w - value_offset);
+        const auto lines = wrap_text(value, 12, value_width, false);
+        if (visible_row(20.0f)) window->draw(key_text);
+        for (const auto& line : lines) {
+            vizgfx::Text value_text(font);
+            value_text.setCharacterSize(12);
+            value_text.setFillColor(vizgfx::Color(220, 224, 232));
+            value_text.setPosition(vizgfx::Vector2f(text_x + value_offset, text_y - 1.0f));
+            value_text.setString(vizgfx::String::fromUtf8(line.begin(), line.end()));
+            if (visible_row(20.0f)) window->draw(value_text);
+            text_y += 20.0f;
+        }
+    };
+
+    auto draw_tensor_subsection = [&](const std::string& heading,
+                                      const std::string& value) {
+        const float card_top = text_y;
+        const float content_x = text_x + 12.0f;
+        const float content_w = std::max(60.0f, text_w - 24.0f);
+        const auto heading_lines = wrap_text(heading, 11, content_w, true);
+        const auto value_lines = value.empty()
+            ? std::vector<std::string>{}
+            : wrap_text(value, 12, content_w, false);
+        constexpr float top_pad = 7.0f;
+        constexpr float heading_line_h = 15.0f;
+        constexpr float value_line_h = 17.0f;
+        constexpr float heading_value_gap = 3.0f;
+        constexpr float bottom_pad = 7.0f;
+        const float card_h = top_pad + heading_lines.size() * heading_line_h +
+            heading_value_gap + value_lines.size() * value_line_h + bottom_pad;
+
+        // The text panel scrolls by row. Clip each subsection's background to
+        // the panel viewport so a tall context/prediction never paints over
+        // the fixed window chrome while it is being scrolled.
+        const float viewport_top = pad + 8.0f;
+        const float viewport_bottom = pad + sidebar_h - 8.0f;
+        const float visible_top = std::max(card_top, viewport_top);
+        const float visible_bottom = std::min(card_top + card_h, viewport_bottom);
+        if (visible_bottom > visible_top) {
+            vizgfx::RectangleShape card(
+                vizgfx::Vector2f(text_w, visible_bottom - visible_top));
+            card.setPosition(vizgfx::Vector2f(text_x, visible_top));
+            card.setFillColor(vizgfx::Color(27, 29, 37, 255));
+            card.setOutlineColor(with_alpha(accent, 65));
+            card.setOutlineThickness(1.0f);
+            window->draw(card);
+
+            vizgfx::RectangleShape rail(
+                vizgfx::Vector2f(3.0f, visible_bottom - visible_top));
+            rail.setPosition(vizgfx::Vector2f(text_x, visible_top));
+            rail.setFillColor(with_alpha(accent, 210));
+            window->draw(rail);
+        }
+
+        float row_y = card_top + top_pad;
+        for (const auto& line : heading_lines) {
+            vizgfx::Text text(font);
+            text.setCharacterSize(11);
+            text.setStyle(vizgfx::Text::Bold);
+            text.setFillColor(with_alpha(accent, 255));
+            text.setPosition(vizgfx::Vector2f(content_x, row_y));
+            text.setString(vizgfx::String::fromUtf8(line.begin(), line.end()));
+            if (row_y >= viewport_top && row_y + heading_line_h < viewport_bottom)
+                window->draw(text);
+            row_y += heading_line_h;
+        }
+        row_y += heading_value_gap;
+        for (const auto& line : value_lines) {
+            vizgfx::Text text(font);
+            text.setCharacterSize(12);
+            text.setFillColor(vizgfx::Color(232, 235, 242));
+            text.setPosition(vizgfx::Vector2f(content_x, row_y - 1.0f));
+            text.setString(vizgfx::String::fromUtf8(line.begin(), line.end()));
+            if (row_y >= viewport_top && row_y + value_line_h < viewport_bottom)
+                window->draw(text);
+            row_y += value_line_h;
+        }
+        text_y = card_top + card_h + 5.0f;
     };
 
     draw_text("[" + display_tag + "]  TIP INSPECTOR", 18, accent, true);
+    draw_text("Molette : défiler les statistiques complètes", 11, vizgfx::Color(164, 174, 190));
     draw_text(parsed.path.empty() ? std::string("tip") : parsed.path,
               14, vizgfx::Color(245, 245, 248), true);
     if (!parsed.extra.empty()) {
@@ -4372,8 +4867,39 @@ void Visualizer::renderZoomOverlay() {
     if (selected_frame && !selected_frame->tensor_info.empty()) {
         draw_section("STATISTIQUES DU TENSEUR");
         std::istringstream info(selected_frame->tensor_info);
-        for (std::string line; std::getline(info, line);)
-            draw_text(line, 11, vizgfx::Color(220,224,232));
+        size_t detail_index = 0;
+        for (std::string line; std::getline(info, line);) {
+            size_t start = 0;
+            while (start <= line.size()) {
+                const size_t separator = line.find(" | ", start);
+                std::string item = line.substr(start,
+                    separator == std::string::npos ? std::string::npos : separator - start);
+                const size_t first = item.find_first_not_of(" \t\r");
+                if (first != std::string::npos) {
+                    item.erase(0, first);
+                    const size_t last = item.find_last_not_of(" \t\r");
+                    item.erase(last + 1);
+                    ++detail_index;
+                    const size_t key_end = item.find_first_of(":=");
+                    std::string heading;
+                    std::string value;
+                    if (key_end != std::string::npos && key_end + 1 < item.size() &&
+                        !(item[key_end] == ':' && item.compare(key_end, 3, "://") == 0)) {
+                        heading = item.substr(0, key_end);
+                        value = item.substr(key_end + 1);
+                        const size_t value_first = value.find_first_not_of(" \t");
+                        value = value_first == std::string::npos
+                            ? std::string() : value.substr(value_first);
+                    } else {
+                        heading = "Détail " + std::to_string(detail_index);
+                        value = std::move(item);
+                    }
+                    draw_tensor_subsection(heading, value);
+                }
+                if (separator == std::string::npos) break;
+                start = separator + 3;
+            }
+        }
     }
     draw_section("STATISTIQUES DES PIXELS AFFICHES");
     draw_value("shape", std::to_string(img->w) + " x " + std::to_string(img->h) +
@@ -5122,6 +5648,10 @@ void Visualizer::updateMetrics(int epoch, int batch, float loss, float lr, float
         last_loss_log_flush_ms_ = now_ms;
         pending_loss_log_flush_ = false;
     }
+}
+
+void Visualizer::setModelMetrics(const std::map<std::string, double>& metrics) {
+    current_model_metrics_ = metrics;
 }
 
 void Visualizer::setMetricsHistory(const std::vector<MetricsRecord>& records, size_t offset) {
@@ -6062,17 +6592,18 @@ void Visualizer::renderLayerBlocks() {
     last_blocks_scroll_track_rect_ = make_rect(0.f, 0.f, 0.f, 0.f);
     last_blocks_scroll_thumb_rect_ = make_rect(0.f, 0.f, 0.f, 0.f);
     if (blocks_scroll_max_ > 0.0f) {
-        const float track_w = 10.0f;
-        const float pad = 2.0f;
-        const float tx = area.position.x + std::max(0.0f, area.size.x - track_w - pad);
-        const float ty = area.position.y;
-        const float th = std::max(0.0f, area.size.y);
+        const auto viewport = panelViewportRect(PanelId::Blocks);
+        const float track_w = std::min(kPanelScrollbarWidth, viewport.size.x);
+        const float tx = viewport.position.x + viewport.size.x - track_w;
+        const float ty = viewport.position.y;
+        const float th = std::max(0.0f, viewport.size.y);
+        if (track_w <= 0.f || th <= 0.f) return;
         last_blocks_scroll_track_rect_ = make_rect(tx, ty, track_w, th);
 
         const float content_h2 = area.size.y + blocks_scroll_max_;
         const float visible_ratio = (content_h2 > 1.0f) ? std::clamp(area.size.y / content_h2, 0.05f, 1.0f) : 1.0f;
-        const float thumb_h = std::max(24.0f, th * visible_ratio);
-        const float denom = std::max(1.0f, th - thumb_h);
+        const float thumb_h = std::min(th, std::max(24.0f, th * visible_ratio));
+        const float denom = std::max(0.0f, th - thumb_h);
         const float t = (blocks_scroll_max_ > 0.0f) ? std::clamp(blocks_scroll_y_ / blocks_scroll_max_, 0.0f, 1.0f) : 0.0f;
         const float thumb_y = ty + t * denom;
         last_blocks_scroll_thumb_rect_ = make_rect(tx, thumb_y, track_w, thumb_h);
@@ -6453,6 +6984,1007 @@ void Visualizer::renderLossGraph() {
     }
 }
 
+bool Visualizer::saveLatentSpaceExport() {
+    const auto snapshot = latent_space_displayed_projection_;
+    const auto control = std::atomic_load(&latent_space_control_);
+    if (!window || !window->isOpen() || !show_latent_space_ || !snapshot || snapshot->points.empty() ||
+        !control || snapshot->generation != control->generation.load(std::memory_order_acquire) ||
+        snapshot->correlation_mode != control->correlations_enabled.load(std::memory_order_acquire) ||
+        snapshot->neuron_mode != control->neurons_enabled.load(std::memory_order_acquire) ||
+        snapshot->live_weight_mode != control->live_weights_enabled.load(std::memory_order_acquire) ||
+        (snapshot->correlation_mode && snapshot->correlation_epoch != control->correlation_epoch.load(std::memory_order_acquire)) ||
+        (snapshot->live_weight_mode && snapshot->live_weight_epoch != control->correlation_epoch.load(std::memory_order_acquire)) ||
+        (snapshot->correlation_mode && !snapshot->correlation_ready)) {
+        latent_space_export_status_ = "Export indisponible : attendre un graphe affiché pour le mode courant.";
+        return false;
+    }
+    std::filesystem::path pending;
+    try {
+        mimir::viz::LatentSpaceExportView view;
+        view.yaw = latent_space_displayed_yaw_; view.pitch = latent_space_displayed_pitch_;
+        view.zoom = latent_space_displayed_zoom_; view.correlation_threshold = latent_space_displayed_threshold_;
+        view.correlation_show_all_candidates = latent_space_displayed_correlation_all_candidates_;
+        view.width = latent_space_displayed_canvas_width_; view.height = latent_space_displayed_canvas_height_;
+        if (snapshot->correlation_mode)
+            view.correlation_collected_observations = latent_space_displayed_correlation_observations_;
+        const auto document = mimir::viz::latentSpaceExportDocument(*snapshot, view);
+        const auto html = mimir::viz::latentSpaceExportHtml(document);
+        const auto bounds = latent_space_displayed_bounds_;
+
+        // Re-render the immutable displayed frame, not the next realtime
+        // projection or a possibly swapped desktop backbuffer. The normal 3D
+        // renderer is shared with the export, including styles and legends.
+        class ExportWindow final : public VizWindow {
+            vizgfx::RenderTexture canvas_;
+        public:
+            explicit ExportWindow(vizgfx::Vector2u size) : canvas_(size) {}
+            bool isOpen() const override { return true; }
+            void close() override {}
+            bool setActive(bool = true) override { return true; }
+            void setIcon(const vizgfx::Image&) override {}
+            void setFramerateLimit(unsigned) override {}
+            void setSize(vizgfx::Vector2u size) override { (void)canvas_.resize(size); }
+            vizgfx::Vector2u getSize() const override { return canvas_.getSize(); }
+            void setView(const vizgfx::View& value) override { canvas_.setView(value); }
+            const vizgfx::View& getView() const override { return canvas_.getView(); }
+            vizgfx::Vector2f mapPixelToCoords(vizgfx::Vector2i value) const override {
+                return {static_cast<float>(value.x),static_cast<float>(value.y)};
+            }
+            void setMouseCursor(const vizgfx::Cursor&, int) override {}
+            bool isKeyPressed(vizgfx::Keyboard::Key) const override { return false; }
+            std::optional<vizgfx::Event> pollEvent() override { return {}; }
+            void clear(const vizgfx::Color& color) override { canvas_.clear(color); }
+            void display() override { canvas_.display(); }
+            vizgfx::Image captureImage() const override { return canvas_.getTexture().copyToImage(); }
+        protected:
+            vizgfx::RenderTarget& renderTarget() override { return canvas_; }
+        };
+        vizgfx::Image image;
+        {
+            auto offscreen = std::make_unique<ExportWindow>(latent_space_displayed_window_size_);
+            std::unique_ptr<VizWindow> original;
+            const int old_width = window_width, old_height = window_height;
+            const float old_yaw = latent_space_yaw_, old_pitch = latent_space_pitch_, old_zoom = latent_space_zoom_;
+            const float old_threshold = latent_space_correlation_threshold_;
+            const bool old_all_candidates = latent_space_correlation_show_all_candidates_;
+            const auto old_mouse = picker_mouse_;
+            const auto old_status = latent_space_export_status_;
+            struct Restore { std::function<void()> action; ~Restore() { action(); } } restore{[&] {
+                if (!original) return;
+                window = std::move(original);
+                window_width = old_width; window_height = old_height;
+                latent_space_yaw_ = old_yaw; latent_space_pitch_ = old_pitch; latent_space_zoom_ = old_zoom;
+                latent_space_correlation_threshold_ = old_threshold; picker_mouse_ = old_mouse;
+                latent_space_correlation_show_all_candidates_ = old_all_candidates;
+                latent_space_export_status_ = old_status; latent_space_export_rendering_ = false;
+                window->setActive(true);
+            }};
+            original = std::move(window);
+            window = std::move(offscreen);
+            window_width = static_cast<int>(latent_space_displayed_window_size_.x);
+            window_height = static_cast<int>(latent_space_displayed_window_size_.y);
+            latent_space_yaw_ = latent_space_displayed_yaw_; latent_space_pitch_ = latent_space_displayed_pitch_;
+            latent_space_zoom_ = latent_space_displayed_zoom_; latent_space_correlation_threshold_ = latent_space_displayed_threshold_;
+            latent_space_correlation_show_all_candidates_ = latent_space_displayed_correlation_all_candidates_;
+            latent_space_export_status_ = latent_space_displayed_export_status_;
+            picker_mouse_ = {-100.f,-100.f}; latent_space_export_rendering_ = true;
+            window->clear(vizgfx::Color(12,14,18));
+            renderLatentSpaceOverlay(); window->display(); image = window->captureImage();
+        }
+        const auto size = image.getSize();
+        const unsigned left = static_cast<unsigned>(std::clamp(bounds.position.x, 0.f, float(size.x)));
+        const unsigned top = static_cast<unsigned>(std::clamp(bounds.position.y, 0.f, float(size.y)));
+        const unsigned width = std::min(static_cast<unsigned>(std::max(0.f,bounds.size.x)), size.x - left);
+        const unsigned height = std::min(static_cast<unsigned>(std::max(0.f,bounds.size.y)), size.y - top);
+        if (!width || !height) throw std::runtime_error("dimensions de capture vides");
+        vizgfx::Image cropped({width,height},vizgfx::Color(12,14,18));
+        for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x)
+            cropped.setPixel({x,y},image.getPixel({left+x,top+y}));
+
+        const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const std::string prefix = "graph_3d_" + document.at("mode").get<std::string>() +
+            "_step_" + std::to_string(snapshot->optimizer_step) + "_" + std::to_string(stamp);
+        const std::filesystem::path parent = "exports";
+        std::filesystem::create_directories(parent);
+        std::filesystem::path destination;
+        for (size_t suffix = 0; suffix < 1000; ++suffix) {
+            const std::string name = prefix + (suffix ? "_" + std::to_string(suffix) : "");
+            destination = parent / name;
+            const auto candidate = parent / ("." + name + ".pending");
+            if (!std::filesystem::exists(destination) && std::filesystem::create_directory(candidate)) {
+                pending = candidate; break;
+            }
+        }
+        if (pending.empty()) throw std::runtime_error("impossible de créer un dossier d'export unique");
+        auto write = [&](const char* filename, const std::string& contents) {
+            std::ofstream stream(pending / filename, std::ios::binary | std::ios::trunc);
+            stream.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+            stream.close();
+            if (!stream) throw std::runtime_error(std::string("écriture impossible : ") + filename);
+        };
+        write("graph.json", document.dump(2));
+        write("graph.html", html);
+        if (!cropped.saveToFile(pending / "vue.png")) throw std::runtime_error("écriture impossible : vue.png");
+        std::filesystem::rename(pending, destination); pending.clear();
+        last_latent_space_export_path_ = (destination / "graph.html").string();
+        latent_space_export_status_ = "Export 3D : " + last_latent_space_export_path_;
+        std::cout << "[Viz] Export 3D : " << last_latent_space_export_path_ << std::endl;
+        return true;
+    } catch (const std::exception& error) {
+        if (!pending.empty()) { std::error_code ignored; std::filesystem::remove_all(pending, ignored); }
+        latent_space_export_status_ = "Échec de l'export 3D : " + std::string(error.what());
+        std::cerr << "[Viz] " << latent_space_export_status_ << std::endl;
+        return false;
+    }
+}
+
+void Visualizer::setLatentSpaceVisible(bool visible) {
+    show_latent_space_=visible;
+    if(!visible){
+        dragging_latent_space_=false;
+        latent_space_displayed_projection_.reset();
+        last_latent_space_export_rect_.reset();
+        last_latent_space_realtime_rect_.reset();
+        last_latent_space_correlations_rect_.reset();
+        last_latent_space_neurons_rect_.reset();
+        last_latent_space_live_weights_rect_.reset();
+        last_latent_space_correlation_clear_rect_.reset();
+        last_latent_space_correlation_minus_rect_.reset();
+        last_latent_space_correlation_plus_rect_.reset();
+        last_latent_space_correlation_all_rect_.reset();
+        last_latent_space_correlation_edge_hits_.clear();
+        last_latent_space_neuron_edge_hits_.clear();
+        last_latent_space_live_weight_edge_hits_.clear();
+    }
+    if(const auto control=std::atomic_load(&latent_space_control_))control->setViewActive(visible);
+}
+
+void Visualizer::renderLatentSpaceOverlay() {
+    if (!window) return;
+    const float screen_w = static_cast<float>(std::max(1, window_width));
+    const float screen_h = static_cast<float>(std::max(1, window_height));
+    const vizgfx::View old_view = window->getView();
+    vizgfx::View screen_view(make_rect(0.f, 0.f, screen_w, screen_h));
+    screen_view.setViewport(make_rect(0.f, 0.f, 1.f, 1.f));
+    window->setView(screen_view);
+
+    vizgfx::RectangleShape dim({screen_w, screen_h});
+    dim.setFillColor(vizgfx::Color(4, 6, 12, 205));
+    window->draw(dim);
+
+    const float panel_w = std::max(240.f, std::min(1120.f, screen_w - 32.f));
+    const float panel_h = std::max(240.f, std::min(820.f, screen_h - 32.f));
+    const float left = (screen_w - panel_w) * 0.5f;
+    const float top = (screen_h - panel_h) * 0.5f;
+    vizgfx::RectangleShape panel({panel_w, panel_h});
+    panel.setPosition({left, top});
+    panel.setFillColor(vizgfx::Color(20, 24, 33, 250));
+    panel.setOutlineColor(vizgfx::Color(173, 135, 220));
+    panel.setOutlineThickness(2.f);
+    window->draw(panel);
+
+    last_latent_space_close_rect_ = make_rect(left + panel_w - 46.f, top + 12.f, 32.f, 26.f);
+    vizgfx::RectangleShape close_button(last_latent_space_close_rect_->size);
+    close_button.setPosition(last_latent_space_close_rect_->position);
+    close_button.setFillColor(vizgfx::Color(82, 52, 62));
+    close_button.setOutlineColor(vizgfx::Color(133, 100, 138));
+    close_button.setOutlineThickness(1.f);
+    window->draw(close_button);
+
+    auto draw_text = [&](const std::string& value, float x, float y, unsigned size,
+                         vizgfx::Color color, bool bold = false) {
+        if (!font_loaded) return;
+        vizgfx::Text text(font);
+        text.setCharacterSize(size);
+        text.setStyle(bold ? vizgfx::Text::Bold : vizgfx::Text::Regular);
+        text.setFillColor(color);
+        text.setString(vizgfx::String::fromUtf8(value.begin(), value.end()));
+        text.setPosition({x, y});
+        window->draw(text);
+    };
+    auto wrap_text = [&](const std::string& value, float width, unsigned size) {
+        std::vector<std::string> lines;
+        std::string line;
+        auto measure = [&](const std::string& candidate) {
+            if (!font_loaded) return static_cast<float>(candidate.size()) * size * 0.6f;
+            vizgfx::Text probe(font);
+            probe.setCharacterSize(size);
+            probe.setString(vizgfx::String::fromUtf8(candidate.begin(), candidate.end()));
+            return probe.getLocalBounds().size.x;
+        };
+        std::istringstream paragraphs(value);
+        std::string paragraph;
+        while (std::getline(paragraphs, paragraph)) {
+            std::istringstream words(paragraph);
+            std::string word;
+            while (words >> word) {
+                const std::string candidate = line.empty() ? word : line + " " + word;
+                if (measure(candidate) <= width) { line = candidate; continue; }
+                if (!line.empty()) { lines.push_back(std::move(line)); line.clear(); }
+                if (measure(word) <= width) { line = word; continue; }
+                // Split long layer/tensor names only at UTF-8 boundaries.
+                for (size_t offset = 0; offset < word.size();) {
+                    const auto lead = static_cast<unsigned char>(word[offset]);
+                    size_t bytes = lead < 0x80 ? 1 : (lead & 0xe0) == 0xc0 ? 2 : (lead & 0xf0) == 0xe0 ? 3 : 4;
+                    bytes = std::min(bytes, word.size() - offset);
+                    const std::string character = word.substr(offset, bytes);
+                    if (!line.empty() && measure(line + character) > width) {
+                        lines.push_back(std::move(line)); line.clear();
+                    }
+                    line += character;
+                    offset += bytes;
+                }
+            }
+            if (!line.empty()) { lines.push_back(std::move(line)); line.clear(); }
+            else if (paragraph.empty()) lines.emplace_back();
+        }
+        if (!line.empty() || lines.empty()) lines.push_back(std::move(line));
+        return lines;
+    };
+    auto draw_wrapped = [&](const std::string& value, float x, float y, float width,
+                            unsigned size, vizgfx::Color color, bool bold = false) {
+        const auto lines = wrap_text(value, width, size);
+        for (const auto& line : lines) {
+            draw_text(line, x, y, size, color, bold);
+            y += static_cast<float>(size + 4);
+        }
+        return static_cast<float>(lines.size() * (size + 4));
+    };
+    const auto control = std::atomic_load(&latent_space_control_);
+    const bool correlations = latent_space_export_rendering_ ? latent_space_displayed_projection_->correlation_mode
+        : control && control->correlations_enabled.load(std::memory_order_acquire);
+    const bool neurons = latent_space_export_rendering_ ? latent_space_displayed_projection_->neuron_mode
+        : control && control->neurons_enabled.load(std::memory_order_acquire);
+    const bool live_weights = latent_space_export_rendering_ ? latent_space_displayed_projection_->live_weight_mode
+        : control && control->live_weights_enabled.load(std::memory_order_acquire);
+    const bool topology = neurons || live_weights;
+    const auto latest_projection = latent_space_export_rendering_ ? latent_space_displayed_projection_
+        : control ? control->projectionSnapshot() : nullptr;
+    // A mode switch must never relabel a preceding projection as a different diagnostic.
+    const auto projection = latest_projection && latest_projection->correlation_mode == correlations &&
+        latest_projection->neuron_mode == neurons && latest_projection->live_weight_mode == live_weights
+        ? latest_projection : nullptr;
+    const bool show_all_candidates = latent_space_correlation_show_all_candidates_;
+    const std::vector<mimir::viz::LatentCorrelationEdge> empty_correlation_edges;
+    const auto& correlation_edges = projection
+        ? mimir::viz::correlationEdgesForDisplay(*projection, show_all_candidates) : empty_correlation_edges;
+    const auto identity = control ? control->modelIdentitySnapshot() : std::pair<std::string,std::string>{};
+    const std::string model_name = projection && !projection->model_name.empty()
+        ? projection->model_name : identity.first;
+    const std::string architecture = projection && !projection->architecture.empty()
+        ? projection->architecture : identity.second;
+    std::string model_label = model_name.empty() ? architecture : model_name;
+    if (!architecture.empty() && architecture != model_label) model_label += " (" + architecture + ")";
+    draw_text("Projection 3D : " + (model_label.empty() ? std::string("modèle courant") : model_label), left + 20.f, top + 13.f,
+              18, vizgfx::Color(205, 177, 244), true);
+    draw_text("Glisser : tourner  |  Molette : zoom  |  R : réinitialiser  |  Échap : fermer",
+              left + 20.f, top + 42.f, 12, vizgfx::Color(188, 198, 213));
+
+    last_latent_space_realtime_rect_=make_rect(left+20.f,top+64.f,142.f,24.f);
+    const bool realtime=latent_space_export_rendering_ ? latent_space_displayed_realtime_
+        : control && control->realtime_enabled.load(std::memory_order_acquire);
+    const bool realtime_available=latent_space_export_rendering_ ? latent_space_displayed_available_
+        : control && control->available.load(std::memory_order_acquire);
+    const size_t collected_observations = latent_space_export_rendering_
+        ? latent_space_displayed_correlation_observations_
+        : control ? control->correlation_observations.load(std::memory_order_acquire) : 0;
+    vizgfx::RectangleShape realtime_box({16.f,16.f});
+    realtime_box.setPosition({left+21.f,top+68.f});
+    realtime_box.setFillColor(realtime?vizgfx::Color(66,114,146):vizgfx::Color(31,38,50));
+    realtime_box.setOutlineColor(realtime_available?vizgfx::Color(153,180,211):vizgfx::Color(83,91,105));
+    realtime_box.setOutlineThickness(1.f);
+    window->draw(realtime_box);
+    if(realtime)draw_text("×",left+23.f,top+64.f,17,vizgfx::Color(228,241,249),true);
+    draw_text("Temps réel",left+45.f,top+66.f,12,
+        realtime_available?vizgfx::Color(214,225,238):vizgfx::Color(123,134,151),true);
+    draw_text("Selon les étapes du modèle",left+178.f,top+68.f,11,vizgfx::Color(157,177,199));
+
+    float controls_x = left + 20.f, controls_y = top + 92.f;
+    auto control_rect = [&](float width) {
+        if (controls_x > left + 20.f && controls_x + width > left + panel_w - 20.f) {
+            controls_x = left + 20.f;
+            controls_y += 28.f;
+        }
+        const auto rect = make_rect(controls_x, controls_y, width, 24.f);
+        controls_x += width + 8.f;
+        return rect;
+    };
+    last_latent_space_correlations_rect_ = control_rect(208.f);
+    const auto correlation_box = *last_latent_space_correlations_rect_;
+    vizgfx::RectangleShape correlation_check({16.f, 16.f});
+    correlation_check.setPosition({correlation_box.position.x + 1.f, correlation_box.position.y + 4.f});
+    correlation_check.setFillColor(correlations ? vizgfx::Color(66,114,146) : vizgfx::Color(31,38,50));
+    correlation_check.setOutlineColor(realtime_available ? vizgfx::Color(153,180,211) : vizgfx::Color(83,91,105));
+    correlation_check.setOutlineThickness(1.f);
+    window->draw(correlation_check);
+    if (correlations) draw_text("×", correlation_box.position.x + 3.f, correlation_box.position.y, 17,
+                                vizgfx::Color(228,241,249), true);
+    draw_text("Corrélations du corpus", correlation_box.position.x + 25.f, correlation_box.position.y + 2.f, 12,
+        realtime_available ? vizgfx::Color(214,225,238) : vizgfx::Color(123,134,151), true);
+    last_latent_space_neurons_rect_ = control_rect(222.f);
+    const auto neuron_box = *last_latent_space_neurons_rect_;
+    vizgfx::RectangleShape neuron_check({16.f, 16.f});
+    neuron_check.setPosition({neuron_box.position.x + 1.f, neuron_box.position.y + 4.f});
+    neuron_check.setFillColor(neurons ? vizgfx::Color(66,114,146) : vizgfx::Color(31,38,50));
+    neuron_check.setOutlineColor(realtime_available ? vizgfx::Color(153,180,211) : vizgfx::Color(83,91,105));
+    neuron_check.setOutlineThickness(1.f);
+    window->draw(neuron_check);
+    if (neurons) draw_text("×", neuron_box.position.x + 3.f, neuron_box.position.y, 17,
+                          vizgfx::Color(228,241,249), true);
+    draw_text("Répartition des neurones", neuron_box.position.x + 25.f, neuron_box.position.y + 2.f, 12,
+        realtime_available ? vizgfx::Color(214,225,238) : vizgfx::Color(123,134,151), true);
+    last_latent_space_live_weights_rect_ = control_rect(184.f);
+    const auto live_weights_box = *last_latent_space_live_weights_rect_;
+    vizgfx::RectangleShape live_weights_check({16.f, 16.f});
+    live_weights_check.setPosition({live_weights_box.position.x + 1.f, live_weights_box.position.y + 4.f});
+    live_weights_check.setFillColor(live_weights ? vizgfx::Color(66,114,146) : vizgfx::Color(31,38,50));
+    live_weights_check.setOutlineColor(realtime_available ? vizgfx::Color(153,180,211) : vizgfx::Color(83,91,105));
+    live_weights_check.setOutlineThickness(1.f);
+    window->draw(live_weights_check);
+    if (live_weights) draw_text("×", live_weights_box.position.x + 3.f, live_weights_box.position.y, 17,
+                               vizgfx::Color(228,241,249), true);
+    draw_text("Poids actifs (DL)", live_weights_box.position.x + 25.f, live_weights_box.position.y + 2.f, 12,
+        realtime_available ? vizgfx::Color(214,225,238) : vizgfx::Color(123,134,151), true);
+    last_latent_space_correlation_all_rect_ = control_rect(230.f);
+    const auto all_candidates_box = *last_latent_space_correlation_all_rect_;
+    vizgfx::RectangleShape all_candidates_check({16.f, 16.f});
+    all_candidates_check.setPosition({all_candidates_box.position.x + 1.f, all_candidates_box.position.y + 4.f});
+    all_candidates_check.setFillColor(show_all_candidates && correlations
+        ? vizgfx::Color(66,114,146) : vizgfx::Color(31,38,50));
+    all_candidates_check.setOutlineColor(correlations ? vizgfx::Color(153,180,211) : vizgfx::Color(83,91,105));
+    all_candidates_check.setOutlineThickness(1.f);
+    window->draw(all_candidates_check);
+    if (show_all_candidates) draw_text("×", all_candidates_box.position.x + 3.f,
+        all_candidates_box.position.y, 17, correlations ? vizgfx::Color(228,241,249) : vizgfx::Color(83,91,105), true);
+    draw_text("Tous les candidats valides", all_candidates_box.position.x + 25.f,
+        all_candidates_box.position.y + 2.f, 12,
+        correlations ? vizgfx::Color(214,225,238) : vizgfx::Color(123,134,151), true);
+    const auto threshold_rect = control_rect(82.f);
+    std::ostringstream threshold_label;
+    threshold_label << "|r| ≥ " << std::fixed << std::setprecision(2)
+        << (show_all_candidates ? float(mimir::viz::LatentCorrelationWindow::min_edge_correlation)
+                                : latent_space_correlation_threshold_);
+    draw_text(threshold_label.str(), threshold_rect.position.x, threshold_rect.position.y + 3.f, 12,
+        correlations && !show_all_candidates ? vizgfx::Color(214,225,238) : vizgfx::Color(123,134,151));
+    auto draw_control_button = [&](const vizgfx::FloatRect& rect, const std::string& label, bool enabled = true) {
+        enabled = enabled && correlations;
+        vizgfx::RectangleShape button(rect.size);
+        button.setPosition(rect.position);
+        button.setFillColor(enabled ? vizgfx::Color(43,64,83) : vizgfx::Color(31,38,50));
+        button.setOutlineColor(enabled ? vizgfx::Color(109,141,169) : vizgfx::Color(65,75,89));
+        button.setOutlineThickness(1.f);
+        window->draw(button);
+        draw_text(label, rect.position.x + 8.f, rect.position.y + 3.f, 12,
+            enabled ? vizgfx::Color(223,233,244) : vizgfx::Color(123,134,151), true);
+    };
+    last_latent_space_correlation_minus_rect_ = control_rect(26.f);
+    last_latent_space_correlation_plus_rect_ = control_rect(26.f);
+    last_latent_space_correlation_clear_rect_ = control_rect(72.f);
+    draw_control_button(*last_latent_space_correlation_minus_rect_, "−", !show_all_candidates);
+    draw_control_button(*last_latent_space_correlation_plus_rect_, "+", !show_all_candidates);
+    draw_control_button(*last_latent_space_correlation_clear_rect_, "Effacer");
+
+    last_latent_space_export_rect_ = control_rect(132.f);
+    const bool export_available = projection && !projection->points.empty() &&
+        (!projection->correlation_mode || projection->correlation_ready);
+    if (!latent_space_export_rendering_ && export_available &&
+        latent_space_export_status_.rfind("Export indisponible", 0) == 0)
+        latent_space_export_status_.clear();
+    vizgfx::RectangleShape export_button(last_latent_space_export_rect_->size);
+    export_button.setPosition(last_latent_space_export_rect_->position);
+    export_button.setFillColor(export_available ? vizgfx::Color(42,91,115) : vizgfx::Color(31,38,50));
+    export_button.setOutlineColor(export_available ? vizgfx::Color(109,166,184) : vizgfx::Color(65,75,89));
+    export_button.setOutlineThickness(1.f);
+    window->draw(export_button);
+    draw_text("Exporter 3D [X]", last_latent_space_export_rect_->position.x + 8.f,
+        last_latent_space_export_rect_->position.y + 3.f, 12,
+        export_available ? vizgfx::Color(223,233,244) : vizgfx::Color(123,134,151), true);
+    if (!latent_space_export_status_.empty()) {
+        controls_y += 28.f;
+        const float height = draw_wrapped(latent_space_export_status_, left + 20.f, controls_y,
+            panel_w - 40.f, 11, vizgfx::Color(166,207,224));
+        controls_y += std::max(0.f, height - 24.f);
+    }
+
+    const std::array<std::pair<mimir::viz::LatentVectorGroup, std::string>, 13> legend{{
+        {mimir::viz::LatentVectorGroup::TokenEmbedding, "Tokens"},
+        {mimir::viz::LatentVectorGroup::AttentionWeight, "Attention"},
+        {mimir::viz::LatentVectorGroup::FeedForwardWeight, "MLP"},
+        {mimir::viz::LatentVectorGroup::LatentDownWeight, "Latent down"},
+        {mimir::viz::LatentVectorGroup::LatentUpWeight, "Latent up"},
+        {mimir::viz::LatentVectorGroup::NormWeight, "Normes"},
+        {mimir::viz::LatentVectorGroup::SequenceActivation, "Positions"},
+        {mimir::viz::LatentVectorGroup::ParameterWeight, "Paramètres"},
+        {mimir::viz::LatentVectorGroup::ConvolutionWeight, "Convolutions"},
+        {mimir::viz::LatentVectorGroup::RecurrentWeight, "Récurrent"},
+        {mimir::viz::LatentVectorGroup::OutputWeight, "Sortie"},
+        {mimir::viz::LatentVectorGroup::LayerActivation, "Activations"},
+        {mimir::viz::LatentVectorGroup::LatentActivation, "Latent"}}};
+    std::vector<std::pair<mimir::viz::LatentVectorGroup,std::string>> visible_legend;
+    size_t legend_rows=1;
+    float legend_width=0.f;
+    if(projection && !correlations && !topology)for(const auto& item:legend){
+        if(std::none_of(projection->points.begin(),projection->points.end(),
+            [&](const auto& point){return point.group==item.first;}))continue;
+        const float width=item.second.size()*7.f+35.f;
+        if(legend_width>0.f && legend_width+width>panel_w-44.f){++legend_rows;legend_width=0.f;}
+        visible_legend.push_back(item);legend_width+=width;
+    }
+    const float extra_legend_height=16.f*static_cast<float>(legend_rows-1);
+
+    size_t live_positive = 0, live_negative = 0, live_zero = 0, live_changed = 0, live_compared = 0, live_unmapped = 0;
+    double live_max_abs = 0., live_max_delta = 0.;
+    if (projection && live_weights) for (const auto& coefficient : projection->live_weight_coefficients) {
+        if (!std::isfinite(coefficient.value)) continue;
+        if (coefficient.value > 0.f) ++live_positive;
+        else if (coefficient.value < 0.f) ++live_negative;
+        else ++live_zero;
+        live_max_abs = std::max(live_max_abs, std::abs(static_cast<double>(coefficient.value)));
+        if (!coefficient.mapped) ++live_unmapped;
+        if (coefficient.has_delta && std::isfinite(coefficient.delta)) {
+            ++live_compared;
+            if (coefficient.delta != 0.) ++live_changed;
+            live_max_delta = std::max(live_max_delta, std::abs(coefficient.delta));
+        }
+    }
+    std::vector<std::string> neuron_footer;
+    float neuron_footer_height = 16.f;
+    if (neurons) {
+        neuron_footer.push_back("X : profondeur du graphe · Y/Z : grille des unités par couche");
+        std::ostringstream counts;
+        counts << (projection ? projection->neuron_total_layers : 0) << " couches et entrées · "
+               << (projection ? projection->neuron_total_units : 0) << " unités connues · "
+               << (projection ? projection->points.size() : 0) << " points affichés · "
+               << (projection ? projection->neuron_links.size() : 0) << " liens de flux affichés";
+        neuron_footer.push_back(counts.str());
+        std::ostringstream coverage;
+        coverage << "Pas optimiseur " << (projection ? projection->optimizer_step : 0) << " · "
+                 << (projection ? projection->neuron_unknown_layers : 0) << " couches de dimension inconnue · "
+                 << (projection && projection->neuron_sampling ? "échantillonnage actif" : "unités non sous-échantillonnées");
+        neuron_footer.push_back(coverage.str());
+        neuron_footer.push_back("Couleurs : couches · cyan clair : entrées · contour jaune : canaux · gris : opérations et flux structurels agrégés.");
+        neuron_footer.push_back("Disposition du graphe, sans coordonnées physiques ou sémantiques apprises. Les liens gris ne représentent pas les forces des synapses.");
+        for (const auto& line : neuron_footer)
+            neuron_footer_height += static_cast<float>(wrap_text(line, panel_w - 44.f, 11).size() * 15 + 4);
+    }
+    std::vector<std::string> live_weight_footer;
+    float live_weight_footer_height = 16.f;
+    if (live_weights) {
+        live_weight_footer.push_back("Poids appris sur le graphe DL · X : profondeur · Y/Z : unités et coefficients par couche");
+        std::ostringstream counts;
+        counts << (projection ? projection->neuron_total_layers : 0) << " couches et entrées · "
+               << (projection ? projection->live_weight_coefficients.size() : 0) << '/'
+               << (projection ? projection->live_weight_total_parameters : 0) << " coefficients capturés · "
+               << (projection ? projection->live_weight_links.size() : 0) << " liens pondérés · "
+               << live_unmapped << " coefficients sans liaison neuronale établie";
+        live_weight_footer.push_back(counts.str());
+        std::ostringstream steps;
+        steps << "Pas optimiseur " << (projection ? projection->optimizer_step : 0);
+        if (projection && projection->live_weight_baseline_available)
+            steps << " · variations depuis le pas " << projection->live_weight_previous_step;
+        else steps << " · première capture : référence de variation indisponible";
+        steps << " · " << live_changed << '/' << live_compared << " coefficients comparés ont changé";
+        live_weight_footer.push_back(steps.str());
+        std::ostringstream signs;
+        signs << "Positifs " << live_positive << " · négatifs " << live_negative << " · nuls " << live_zero
+              << " · non finis exclus " << (projection ? projection->live_weight_nonfinite : 0)
+              << " · couches indisponibles " << (projection ? projection->live_weight_skipped_layers : 0)
+              << " · couches partageant des poids " << (projection ? projection->live_weight_shared_layers : 0);
+        live_weight_footer.push_back(signs.str());
+        live_weight_footer.push_back("Cyan : w > 0 · orange : w < 0 · gris : w = 0 · épaisseur et lumière : |w| · halo jaune : variation mesurée Δw ≠ 0.");
+        live_weight_footer.push_back(std::string(realtime ? "Actualisation active, captures espacées d’au moins 250 ms. "
+            : "Vue figée ; activez Temps réel ou actualisez depuis Pilotage. ") +
+            (projection && projection->live_weight_sampled ? "Échantillonnage actif. " : "") +
+            "Liens gris : flux entre couches ; les poids décrivent des paramètres, pas les activations d’un forward.");
+        for (const auto& line : live_weight_footer)
+            live_weight_footer_height += static_cast<float>(wrap_text(line, panel_w - 44.f, 11).size() * 15 + 4);
+    }
+    const float canvas_top = controls_y + 32.f;
+    const float footer_height = correlations ? 182.f : live_weights ? live_weight_footer_height :
+        neurons ? neuron_footer_height : 104.f + extra_legend_height;
+    last_latent_space_canvas_rect_ = make_rect(left + 20.f, canvas_top,
+        panel_w - 40.f, std::max(40.f, top + panel_h - canvas_top - footer_height));
+    vizgfx::RectangleShape canvas(last_latent_space_canvas_rect_.size);
+    canvas.setPosition(last_latent_space_canvas_rect_.position);
+    canvas.setFillColor(vizgfx::Color(13, 17, 25));
+    canvas.setOutlineColor(vizgfx::Color(62, 72, 90));
+    canvas.setOutlineThickness(1.f);
+    window->draw(canvas);
+    last_latent_space_point_hits_.clear();
+    last_latent_space_correlation_edge_hits_.clear();
+    last_latent_space_neuron_edge_hits_.clear();
+    last_latent_space_live_weight_edge_hits_.clear();
+
+    auto live_weight_color = [&](float value) {
+        const double relative = live_max_abs > 0. ? std::sqrt(std::abs(static_cast<double>(value)) / live_max_abs) : 0.;
+        const auto alpha = static_cast<uint8_t>(65. + 175. * std::clamp(relative, 0., 1.));
+        return value > 0.f ? vizgfx::Color(75,208,235,alpha)
+             : value < 0.f ? vizgfx::Color(246,150,76,alpha) : vizgfx::Color(142,151,167,120);
+    };
+    const auto group_color = [](mimir::viz::LatentVectorGroup group) {
+        switch (group) {
+            case mimir::viz::LatentVectorGroup::TokenEmbedding: return vizgfx::Color(67, 202, 220);
+            case mimir::viz::LatentVectorGroup::AttentionWeight: return vizgfx::Color(242, 170, 78);
+            case mimir::viz::LatentVectorGroup::FeedForwardWeight: return vizgfx::Color(235, 112, 97);
+            case mimir::viz::LatentVectorGroup::LatentDownWeight: return vizgfx::Color(174, 120, 231);
+            case mimir::viz::LatentVectorGroup::LatentUpWeight: return vizgfx::Color(227, 107, 190);
+            case mimir::viz::LatentVectorGroup::NormWeight: return vizgfx::Color(136, 166, 245);
+            case mimir::viz::LatentVectorGroup::SequenceActivation: return vizgfx::Color(103, 218, 133);
+            case mimir::viz::LatentVectorGroup::ParameterWeight: return vizgfx::Color(190, 193, 214);
+            case mimir::viz::LatentVectorGroup::ConvolutionWeight: return vizgfx::Color(241, 191, 85);
+            case mimir::viz::LatentVectorGroup::RecurrentWeight: return vizgfx::Color(112, 185, 227);
+            case mimir::viz::LatentVectorGroup::OutputWeight: return vizgfx::Color(234, 136, 190);
+            case mimir::viz::LatentVectorGroup::LayerActivation: return vizgfx::Color(123, 213, 165);
+            case mimir::viz::LatentVectorGroup::LatentActivation: return vizgfx::Color(185, 149, 239);
+        }
+        return vizgfx::Color(220, 220, 220);
+    };
+
+    size_t hovered_index = std::numeric_limits<size_t>::max();
+    size_t hovered_edge_index = std::numeric_limits<size_t>::max();
+    int hovered_edge_kind = 0; // 1: Pearson, 2: routing, 3: learned coefficient.
+    float hovered_distance = 100.f;
+    if (projection && !projection->points.empty() && (!correlations || projection->correlation_ready)) {
+        const auto& canvas_rect=last_latent_space_canvas_rect_;
+        const auto clip_rect=make_rect(canvas_rect.position.x+1.f,canvas_rect.position.y+1.f,
+            std::max(1.f,canvas_rect.size.x-2.f),std::max(1.f,canvas_rect.size.y-2.f));
+        vizgfx::View canvas_view(clip_rect);
+        canvas_view.setViewport(make_rect(clip_rect.position.x/screen_w,clip_rect.position.y/screen_h,
+            clip_rect.size.x/screen_w,clip_rect.size.y/screen_h));
+        window->setView(canvas_view);
+        const float cy = std::cos(latent_space_yaw_);
+        const float sy = std::sin(latent_space_yaw_);
+        const float cp = std::cos(latent_space_pitch_);
+        const float sp = std::sin(latent_space_pitch_);
+        const float center_x = last_latent_space_canvas_rect_.position.x +
+            last_latent_space_canvas_rect_.size.x * 0.5f;
+        const float center_y = last_latent_space_canvas_rect_.position.y +
+            last_latent_space_canvas_rect_.size.y * 0.5f;
+        const float base_scale = std::min(last_latent_space_canvas_rect_.size.x,
+            last_latent_space_canvas_rect_.size.y) * 0.21f * latent_space_zoom_;
+        struct ScreenPoint { float x; float y; float depth; };
+        std::vector<ScreenPoint> screen_points;
+        screen_points.reserve(projection->points.size());
+        auto transform = [&](const std::array<float, 3>& point) {
+            const float x = point[0] * cy - point[2] * sy;
+            const float z = point[0] * sy + point[2] * cy;
+            const float y = point[1] * cp - z * sp;
+            const float depth = point[1] * sp + z * cp;
+            const float perspective = 4.5f / std::max(1.4f, 6.0f + depth);
+            return ScreenPoint{center_x + x * base_scale * perspective,
+                               center_y - y * base_scale * perspective, depth};
+        };
+        auto draw_axis = [&](std::array<float, 3> endpoint, vizgfx::Color color,
+                             const std::string& label) {
+            const auto origin = transform({{0.f, 0.f, 0.f}});
+            const auto end = transform(endpoint);
+            vizgfx::VertexArray axis(vizgfx::PrimitiveType::LineStrip, 2);
+            axis[0].position = {origin.x, origin.y}; axis[0].color = color;
+            axis[1].position = {end.x, end.y}; axis[1].color = color;
+            window->draw(axis);
+            draw_text(label, end.x + 5.f, end.y - 8.f, 11, color, true);
+        };
+        draw_axis({{2.8f, 0.f, 0.f}}, vizgfx::Color(230, 105, 105), topology ? "Profondeur" : "PC1");
+        draw_axis({{0.f, 2.8f, 0.f}}, vizgfx::Color(105, 215, 135), topology ? "Unités Y" : "PC2");
+        draw_axis({{0.f, 0.f, 2.8f}}, vizgfx::Color(105, 160, 235), topology ? "Unités Z" : "PC3");
+
+        for (const auto& point : projection->points) screen_points.push_back(transform(point.position));
+        float closest_edge_distance = 25.f;
+        std::vector<vizgfx::Vertex> network_strokes;
+        auto append_stroke_vertex = [&](vizgfx::Vector2f position, vizgfx::Color color) {
+            vizgfx::Vertex vertex;
+            vertex.position = position;
+            vertex.color = color;
+            network_strokes.push_back(vertex);
+        };
+        auto clip_link_segment = [&](vizgfx::Vector2f& start, vizgfx::Vector2f& end) {
+            if (!std::isfinite(start.x) || !std::isfinite(start.y) ||
+                !std::isfinite(end.x) || !std::isfinite(end.y)) return false;
+            const auto original_start = start;
+            const float dx = end.x - start.x, dy = end.y - start.y;
+            float enter = 0.f, leave = 1.f;
+            auto clip = [&](float p, float q) {
+                if (std::abs(p) < 1e-8f) return q >= 0.f;
+                const float ratio = q / p;
+                if (p < 0.f) { if (ratio > leave) return false; enter = std::max(enter, ratio); }
+                else { if (ratio < enter) return false; leave = std::min(leave, ratio); }
+                return true;
+            };
+            if (!clip(-dx, start.x - clip_rect.position.x) ||
+                !clip(dx, clip_rect.position.x + clip_rect.size.x - start.x) ||
+                !clip(-dy, start.y - clip_rect.position.y) ||
+                !clip(dy, clip_rect.position.y + clip_rect.size.y - start.y)) return false;
+            start = {original_start.x + enter * dx, original_start.y + enter * dy};
+            end = {original_start.x + leave * dx, original_start.y + leave * dy};
+            return true;
+        };
+        auto draw_link = [&](size_t index, size_t source, size_t target, vizgfx::Color color,
+                             std::vector<LatentSpaceEdgeHit>& hits, float thickness = 1.f, float glow = 0.f) {
+            if (source >= screen_points.size() || target >= screen_points.size()) return;
+            const auto& first = screen_points[source];
+            const auto& second = screen_points[target];
+            // Keep drawing and hover segments inside the canvas, even when
+            // both endpoints have left it after a zoom or camera rotation.
+            vizgfx::Vector2f start{first.x, first.y}, end{second.x, second.y};
+            if (!clip_link_segment(start, end)) return;
+            auto stroke = [&](vizgfx::Color stroke_color, float width) {
+                const float sx = end.x - start.x, sy = end.y - start.y;
+                const float length = std::sqrt(sx * sx + sy * sy);
+                const float nx = length > 1e-6f ? -sy / length : 0.f;
+                const float ny = length > 1e-6f ? sx / length : 0.f;
+                const int strokes = std::max(1, static_cast<int>(std::ceil(std::clamp(width, 1.f, 7.f))));
+                // Parallel line strips work with every Viz graphics adapter.
+                for (int offset = 0; offset < strokes; ++offset) {
+                    const float distance = float(offset) - float(strokes - 1) * .5f;
+                    vizgfx::Vector2f stroke_start{start.x + nx * distance, start.y + ny * distance};
+                    vizgfx::Vector2f stroke_end{end.x + nx * distance, end.y + ny * distance};
+                    if (!clip_link_segment(stroke_start, stroke_end)) continue;
+                    if (!network_strokes.empty()) {
+                        // Zero-length color changes isolate consecutive strokes.
+                        // The connector itself has zero alpha at both ends.
+                        const auto previous_end = network_strokes.back().position;
+                        append_stroke_vertex(previous_end, vizgfx::Color(0,0,0,0));
+                        append_stroke_vertex(stroke_start, vizgfx::Color(0,0,0,0));
+                    }
+                    append_stroke_vertex(stroke_start, stroke_color);
+                    append_stroke_vertex(stroke_end, stroke_color);
+                }
+            };
+            if (glow > 0.f) stroke(vizgfx::Color(255,224,111,
+                static_cast<uint8_t>(70.f + 90.f * std::clamp(glow, 0.f, 1.f))), thickness + 2.f);
+            stroke(color, thickness);
+            hits.push_back({start, end, index});
+            if (clip_rect.contains(picker_mouse_)) {
+                const float sx = end.x - start.x, sy = end.y - start.y;
+                const float length = sx * sx + sy * sy;
+                const float along = length > 1e-8f ? std::clamp(
+                    ((picker_mouse_.x - start.x) * sx + (picker_mouse_.y - start.y) * sy) / length, 0.f, 1.f) : 0.f;
+                const float hx = picker_mouse_.x - start.x - along * sx;
+                const float hy = picker_mouse_.y - start.y - along * sy;
+                const float distance = hx * hx + hy * hy;
+                if (distance <= closest_edge_distance) {
+                    closest_edge_distance = distance;
+                    hovered_edge_index = index;
+                    hovered_edge_kind = &hits == &last_latent_space_live_weight_edge_hits_ ? 3
+                        : &hits == &last_latent_space_neuron_edge_hits_ ? 2 : 1;
+                }
+            }
+        };
+        if (correlations) {
+            for (size_t index = 0; index < correlation_edges.size(); ++index) {
+                const auto& edge = correlation_edges[index];
+                if (!mimir::viz::correlationEdgeVisible(edge, show_all_candidates, latent_space_correlation_threshold_)) continue;
+                const auto alpha = static_cast<uint8_t>(90.f + 150.f * std::min(1.f, std::abs(edge.correlation)));
+                draw_link(index, edge.source, edge.target, edge.correlation >= 0.f
+                    ? vizgfx::Color(75,208,222,alpha) : vizgfx::Color(244,161,85,alpha),
+                    last_latent_space_correlation_edge_hits_);
+            }
+        } else if (topology) {
+            for (size_t index = 0; index < projection->neuron_links.size(); ++index) {
+                const auto& edge = projection->neuron_links[index];
+                if (edge.weighted && !std::isfinite(edge.weight)) continue;
+                const auto color = !edge.weighted ? vizgfx::Color(144,160,182,100)
+                    : edge.weight >= 0.f ? vizgfx::Color(75,208,222,175) : vizgfx::Color(244,161,85,175);
+                draw_link(index, edge.source, edge.target, color, last_latent_space_neuron_edge_hits_);
+            }
+            if (live_weights) for (size_t index = 0; index < projection->live_weight_links.size(); ++index) {
+                const auto& edge = projection->live_weight_links[index];
+                if (edge.coefficient_index >= projection->live_weight_coefficients.size()) continue;
+                const auto& coefficient = projection->live_weight_coefficients[edge.coefficient_index];
+                if (!std::isfinite(coefficient.value)) continue;
+                const double amplitude = live_max_abs > 0.
+                    ? std::sqrt(std::abs(static_cast<double>(coefficient.value)) / live_max_abs) : 0.;
+                const float change = coefficient.has_delta && std::isfinite(coefficient.delta) &&
+                    coefficient.delta != 0. && live_max_delta > 0.
+                    ? static_cast<float>(std::sqrt(std::abs(coefficient.delta) / live_max_delta)) : 0.f;
+                draw_link(index, edge.source, edge.target, live_weight_color(coefficient.value),
+                    last_latent_space_live_weight_edge_hits_, 1.f + 3.f * static_cast<float>(amplitude), change);
+            }
+        }
+        if (!network_strokes.empty()) {
+            vizgfx::VertexArray batch(vizgfx::PrimitiveType::LineStrip, network_strokes.size());
+            for (size_t index = 0; index < network_strokes.size(); ++index) batch[index] = network_strokes[index];
+            window->draw(batch);
+        }
+        // Each activation tensor has its own sequence. Joining positions from
+        // different layers or from an input/output pair would invent a path.
+        std::map<std::string, std::vector<size_t>> sequence_paths;
+        for (size_t index = 0; index < projection->points.size(); ++index) {
+            const auto& point = projection->points[index];
+            if (correlations || topology || point.group != mimir::viz::LatentVectorGroup::SequenceActivation ||
+                point.sequence_position < 0) continue;
+            const auto position_suffix = point.label.rfind(" position ");
+            if (position_suffix == std::string::npos) continue;
+            sequence_paths[std::to_string(point.layer) + ":" + point.label.substr(0, position_suffix)].push_back(index);
+        }
+        for (auto& entry : sequence_paths) {
+            auto& sequence_order = entry.second;
+            std::sort(sequence_order.begin(), sequence_order.end(), [&](size_t a, size_t b) {
+                return projection->points[a].sequence_position < projection->points[b].sequence_position;
+            });
+            if (sequence_order.size() < 2) continue;
+            vizgfx::VertexArray path(vizgfx::PrimitiveType::LineStrip, sequence_order.size());
+            for (size_t index = 0; index < sequence_order.size(); ++index) {
+                const auto& point = screen_points[sequence_order[index]];
+                path[index].position = {point.x, point.y};
+                path[index].color = vizgfx::Color(93, 183, 122, 175);
+            }
+            window->draw(path);
+        }
+
+        last_latent_space_point_hits_.reserve(projection->points.size());
+        for (size_t index = 0; index < projection->points.size(); ++index) {
+            const auto& point = projection->points[index];
+            const auto& screen_point = screen_points[index];
+            if(!clip_rect.contains(vizgfx::Vector2f{screen_point.x,screen_point.y}))continue;
+            const float marker_size = topology ? (point.neuron_is_operation ? 9.f : 6.f) :
+                point.group == mimir::viz::LatentVectorGroup::SequenceActivation ? 9.f : 7.f;
+            vizgfx::RectangleShape marker({marker_size, marker_size});
+            marker.setPosition({screen_point.x - marker_size * 0.5f,
+                                screen_point.y - marker_size * 0.5f});
+            if (live_weights && point.live_weight_coefficient < projection->live_weight_coefficients.size()) {
+                const auto& coefficient = projection->live_weight_coefficients[point.live_weight_coefficient];
+                if (!std::isfinite(coefficient.value)) continue;
+                marker.setFillColor(live_weight_color(coefficient.value));
+                if (coefficient.has_delta && std::isfinite(coefficient.delta) && coefficient.delta != 0.) {
+                    marker.setOutlineColor(vizgfx::Color(255,224,111));
+                    marker.setOutlineThickness(1.5f);
+                }
+            } else if (topology) {
+                static const std::array<vizgfx::Color,8> layer_colors{{vizgfx::Color(112,185,227),vizgfx::Color(193,143,232),
+                    vizgfx::Color(123,213,165),vizgfx::Color(235,159,111),vizgfx::Color(234,138,183),
+                    vizgfx::Color(153,170,240),vizgfx::Color(218,203,112),vizgfx::Color(102,211,208)}};
+                marker.setFillColor(point.neuron_is_operation ? vizgfx::Color(67,75,91) : point.layer < 0
+                    ? vizgfx::Color(175,230,239) : layer_colors[static_cast<size_t>(point.layer) % layer_colors.size()]);
+                if (point.neuron_is_operation || point.neuron_kind.find("canal") != std::string::npos ||
+                    point.neuron_kind.find("canaux") != std::string::npos) {
+                    marker.setOutlineColor(point.neuron_is_operation ? vizgfx::Color(185,191,205) : vizgfx::Color(241,191,85));
+                    marker.setOutlineThickness(1.f);
+                }
+            } else marker.setFillColor(group_color(point.group));
+            window->draw(marker);
+            const float hit_left=std::max(clip_rect.position.x,screen_point.x-7.f);
+            const float hit_top=std::max(clip_rect.position.y,screen_point.y-7.f);
+            const float hit_right=std::min(clip_rect.position.x+clip_rect.size.x,screen_point.x+7.f);
+            const float hit_bottom=std::min(clip_rect.position.y+clip_rect.size.y,screen_point.y+7.f);
+            const auto hitbox = make_rect(hit_left,hit_top,hit_right-hit_left,hit_bottom-hit_top);
+            last_latent_space_point_hits_.push_back({hitbox, index});
+            const float dx = picker_mouse_.x - screen_point.x;
+            const float dy = picker_mouse_.y - screen_point.y;
+            const float distance = dx * dx + dy * dy;
+            if (hitbox.contains(picker_mouse_) && distance <= hovered_distance) {
+                hovered_distance = distance;
+                hovered_index = index;
+            }
+        }
+
+        // Footer and hover cards belong to the overlay, outside the plot clip.
+        window->setView(screen_view);
+
+        std::ostringstream axes;
+        if (topology) axes << "X : profondeur du graphe · Y/Z : grille des unités par couche";
+        else axes << "ACP : PC1 " << std::fixed << std::setprecision(1)
+             << projection->explained_variance_percent[0] << "%  |  PC2 "
+             << projection->explained_variance_percent[1] << "%  |  PC3 "
+             << projection->explained_variance_percent[2] << "%";
+        if (!topology) draw_text(axes.str(), left + 22.f,
+                  correlations ? canvas_top + last_latent_space_canvas_rect_.size.y + 10.f
+                               : top + panel_h - 94.f - extra_legend_height,
+                  12, vizgfx::Color(208, 215, 228), true);
+
+        float legend_x = left + 22.f;
+        float legend_y = top + panel_h - 70.f - extra_legend_height;
+        for (const auto& item : visible_legend) {
+            const float width=item.second.size()*7.f+35.f;
+            if(legend_x>left+22.f && legend_x+width>left+panel_w-22.f){
+                legend_x=left+22.f;legend_y+=16.f;
+            }
+            vizgfx::RectangleShape swatch({9.f, 9.f});
+            swatch.setPosition({legend_x, legend_y + 3.f});
+            swatch.setFillColor(group_color(item.first));
+            window->draw(swatch);
+            draw_text(item.second, legend_x + 14.f, legend_y, 11, vizgfx::Color(204, 211, 223));
+            legend_x += width;
+        }
+
+        if (!correlations && !topology) {
+            std::ostringstream details;
+            details << "Pas optimiseur " << projection->optimizer_step << "  ·  "
+                    << projection->points.size() << " vecteurs  ·  largeur ACP=" << projection->feature_dimension
+                    << "  ·  rang=" << projection->effective_rank;
+            if (projection->d_model > 0) details << "  ·  d_model=" << projection->d_model;
+            if (projection->latent_dim > 0) details << "  ·  latent=" << projection->latent_dim;
+            if (projection->sequence_length > 0) details << "  ·  positions=" << projection->sequence_length;
+            draw_text(details.str(), left + 22.f, top + panel_h - 47.f, 11,
+                      vizgfx::Color(169, 185, 205));
+            draw_wrapped("ACP structurelle : vecteurs normalisés, complétés par zéro; les distances ne mesurent pas la compréhension.",
+                      left + 22.f, top + panel_h - 27.f, panel_w - 44.f, 11, vizgfx::Color(151, 164, 183));
+        }
+
+    } else {
+        const std::string message = projection && correlations && !projection->correlation_status.empty()
+            ? projection->correlation_status : control ? control->messageSnapshot()
+            : "La projection n'est pas configurée pour ce modèle.";
+        const float message_y = canvas_top + last_latent_space_canvas_rect_.size.y * .35f;
+        const float message_h = draw_wrapped(message.empty() ? correlations
+                ? "Collecte des activations sur les contextes parcourus…"
+                : live_weights ? "En attente des poids du modèle courant…"
+                : neurons ? "En attente de la capture du réseau du modèle…"
+                          : "En attente d'une opération du modèle pour capturer les poids…" : message,
+                  left + 30.f, message_y, panel_w - 60.f, 14, vizgfx::Color(216, 220, 230), true);
+        draw_wrapped(correlations ? "Au moins 8 observations et 2 composantes variables sont nécessaires. Gardez la vue ouverte pendant les étapes du modèle."
+                  : live_weights ? "Les poids seront capturés après une opération du modèle, puis après les mises à jour d’optimiseur."
+                  : neurons ? "Le réseau apparaîtra dès le prochain point sûr du modèle, sans forward supplémentaire."
+                            : "La projection apparaîtra dès que la capture des paramètres sera terminée.",
+                  left + 30.f, message_y + message_h + 10.f, panel_w - 60.f, 12, vizgfx::Color(165, 176, 194));
+    }
+
+    if (correlations) {
+        float footer_y = canvas_top + last_latent_space_canvas_rect_.size.y + 32.f;
+        const float footer_width = panel_w - 44.f;
+        draw_text("r > 0 : coactivation", left + 22.f, footer_y, 11, vizgfx::Color(75,208,222), true);
+        draw_text("r < 0 : variation opposée", left + 192.f, footer_y, 11, vizgfx::Color(244,161,85), true);
+        footer_y += 21.f;
+        std::ostringstream observations;
+        observations << "Graphe : " << (projection ? projection->correlation_observations : 0)
+                     << " observations · collecte : " << collected_observations << '/' << (projection ? projection->correlation_window : 128)
+                     << " · " << (projection ? projection->points.size() : 0) << " composantes · "
+                     << last_latent_space_correlation_edge_hits_.size() << " liens visibles";
+        if (projection) observations << '/' << projection->correlation_edge_candidates << " candidats";
+        observations << (show_all_candidates ? " · tous les candidats valides (|r| ≥ 0,30)"
+            : " · sélection des 512 plus forts, filtrée au seuil");
+        footer_y += draw_wrapped(observations.str(), left + 22.f, footer_y, footer_width, 11,
+            vizgfx::Color(195,210,228));
+        if (projection) {
+            std::ostringstream provenance;
+            provenance << "Fenêtre : " << projection->correlation_training_observations << " entraînement + "
+                       << projection->correlation_inference_observations << " inférence · pas "
+                       << projection->correlation_first_step << "–" << projection->correlation_last_step
+                       << " · " << projection->correlation_constant_features << " composantes constantes exclues";
+            footer_y += draw_wrapped(provenance.str(), left + 22.f, footer_y, footer_width, 11,
+                vizgfx::Color(169,185,205));
+        }
+        footer_y += draw_wrapped(realtime ? "Collecte et actualisation actives pendant les opérations du modèle."
+            : "Collecte active; graphe figé après sa première projection. Actualisez depuis Pilotage ou activez Temps réel.",
+            left + 22.f, footer_y + 2.f, footer_width, 11, vizgfx::Color(169,185,205));
+        draw_wrapped("Liens : Pearson avant ACP sur les contextes visités, avec des poids pouvant évoluer. Ces corrélations ne prouvent pas une compréhension sémantique.",
+            left + 22.f, footer_y + 6.f, footer_width, 11, vizgfx::Color(151,164,183));
+    } else if (topology) {
+        float footer_y = canvas_top + last_latent_space_canvas_rect_.size.y + 8.f;
+        const auto& footer = live_weights ? live_weight_footer : neuron_footer;
+        for (size_t index = 0; index < footer.size(); ++index) {
+            footer_y += draw_wrapped(footer[index], left + 22.f, footer_y,
+                panel_w - 44.f, 11, index == 0 ? vizgfx::Color(208,215,228) : vizgfx::Color(169,185,205),
+                index == 0) + 4.f;
+        }
+    }
+
+    if (projection && (hovered_index < projection->points.size() ||
+        (correlations && hovered_edge_index < correlation_edges.size()) ||
+        (topology && hovered_edge_kind == 2 && hovered_edge_index < projection->neuron_links.size()) ||
+        (live_weights && hovered_edge_kind == 3 && hovered_edge_index < projection->live_weight_links.size())) && font_loaded) {
+        std::ostringstream tip;
+        auto describe_coefficient = [&](const auto& coefficient) {
+            tip << coefficient.label << "\nCoefficient exact : offset " << coefficient.parameter_index
+                << " · " << (coefficient.is_bias ? "biais" : "poids")
+                << "\nw=" << std::showpos << std::setprecision(9) << coefficient.value << std::noshowpos;
+            if (coefficient.has_delta && std::isfinite(coefficient.delta))
+                tip << " · Δw=" << std::showpos << std::setprecision(9) << coefficient.delta << std::noshowpos
+                    << "\nVariation entre les pas " << projection->live_weight_previous_step << " et "
+                    << projection->optimizer_step;
+            else tip << "\nVariation indisponible : aucune capture de référence compatible.";
+            if (!coefficient.mapped)
+                tip << "\nCoefficient local : correspondance entre neurones non établie.";
+        };
+        if (hovered_index < projection->points.size()) {
+            const auto& point = projection->points[hovered_index];
+            if (live_weights && point.live_weight_coefficient < projection->live_weight_coefficients.size()) {
+                describe_coefficient(projection->live_weight_coefficients[point.live_weight_coefficient]);
+            } else if (topology) {
+                tip << point.label << "\n";
+                tip << "Type : " << point.neuron_kind;
+                if (point.neuron_is_operation) tip << " · nœud d’opération, sans nombre d’unités connu";
+                else tip << " · unité " << point.neuron_unit_index << " / " << point.neuron_layer_units;
+                if (point.layer >= 0) tip << "\nCouche " << point.layer;
+                else tip << "\nEntrée du réseau";
+                tip << "\nPosition : profondeur du graphe et grille locale à la couche.";
+            } else if (correlations) {
+                tip << point.label << "\n";
+                tip << mimir::viz::latentVectorGroupName(point.group);
+                tip << " · composante=" << point.feature_index << "\nMoyenne=" << std::fixed << std::setprecision(5)
+                    << point.activation_mean << " · écart-type=" << point.activation_stddev;
+                if (!point.pooling.empty()) tip << "\nAgrégation : " << point.pooling;
+                std::vector<std::pair<float, size_t>> neighbors;
+                for (const auto& edge : correlation_edges) {
+                    if (!mimir::viz::correlationEdgeVisible(edge, show_all_candidates, latent_space_correlation_threshold_)) continue;
+                    if (edge.source == hovered_index && edge.target < projection->points.size())
+                        neighbors.push_back({edge.correlation, edge.target});
+                    else if (edge.target == hovered_index && edge.source < projection->points.size())
+                        neighbors.push_back({edge.correlation, edge.source});
+                }
+                std::sort(neighbors.begin(), neighbors.end(), [](const auto& a, const auto& b) {
+                    return std::abs(a.first) > std::abs(b.first);
+                });
+                if (neighbors.empty()) tip << "\nAucun voisin au seuil affiché.";
+                for (size_t index = 0; index < std::min<size_t>(3, neighbors.size()); ++index)
+                    tip << "\nr=" << std::showpos << std::setprecision(4) << neighbors[index].first << std::noshowpos
+                        << " : " << projection->points[neighbors[index].second].label;
+                if (neighbors.size() > 3) tip << "\n" << neighbors.size() << " voisins au total; trois plus forts affichés.";
+            } else {
+                tip << point.label << "\n";
+                tip << mimir::viz::latentVectorGroupName(point.group);
+                tip << " · norme=" << std::fixed << std::setprecision(4) << point.vector_norm;
+                tip << " · dimension=" << point.original_dimension;
+                if (point.sampled_dimension < point.original_dimension)
+                    tip << " · plage=" << point.feature_offset << ':' << point.feature_offset + point.sampled_dimension;
+                if (point.layer >= 0) tip << " · bloc=" << point.layer;
+                if (point.sequence_position >= 0) tip << " · position=" << point.sequence_position;
+            }
+        } else if (live_weights && hovered_edge_kind == 3) {
+            const auto& edge = projection->live_weight_links[hovered_edge_index];
+            if (edge.coefficient_index < projection->live_weight_coefficients.size())
+                describe_coefficient(projection->live_weight_coefficients[edge.coefficient_index]);
+            if (edge.source < projection->points.size() && edge.target < projection->points.size())
+                tip << "\n" << projection->points[edge.source].label << "\n→ " << projection->points[edge.target].label;
+        } else if (topology) {
+            const auto& edge = projection->neuron_links[hovered_edge_index];
+            if (edge.source < projection->points.size() && edge.target < projection->points.size())
+                tip << projection->points[edge.source].label << "\n→ " << projection->points[edge.target].label;
+            if (edge.weighted) tip << "\nPoids exact=" << std::showpos << std::setprecision(6) << edge.weight << std::noshowpos;
+            else tip << "\nLien structurel de flux entre couches.";
+            if (edge.aggregated) tip << "\nLiaison agrégée entre unités échantillonnées, pas une synapse individuelle.";
+        } else {
+            const auto& edge = correlation_edges[hovered_edge_index];
+            tip << projection->points[edge.source].label << "\n↔ " << projection->points[edge.target].label
+                << "\nPearson r=" << std::showpos << std::fixed << std::setprecision(5) << edge.correlation
+                << std::noshowpos << " · " << projection->correlation_observations << " observations, avant ACP";
+        }
+        const float tip_w = std::min(panel_w - 48.f, 620.f);
+        unsigned tip_size = 11;
+        auto tip_lines = wrap_text(tip.str(), tip_w - 16.f, tip_size);
+        while (tip_size > 8 && tip_lines.size() * (tip_size + 4) + 12.f > panel_h - 100.f) {
+            --tip_size;
+            tip_lines = wrap_text(tip.str(), tip_w - 16.f, tip_size);
+        }
+        const float tip_h = static_cast<float>(tip_lines.size() * (tip_size + 4)) + 12.f;
+        const float tip_x = std::clamp(picker_mouse_.x + 14.f, left + 12.f,
+                                       left + panel_w - tip_w - 12.f);
+        const float tip_y = std::clamp(picker_mouse_.y + 12.f, top + 62.f,
+                                       std::max(top + 62.f, top + panel_h - tip_h - 12.f));
+        vizgfx::RectangleShape tooltip({tip_w, tip_h});
+        tooltip.setPosition({tip_x, tip_y});
+        tooltip.setFillColor(vizgfx::Color(37, 41, 54, 245));
+        tooltip.setOutlineColor(vizgfx::Color(130, 112, 166));
+        tooltip.setOutlineThickness(1.f);
+        window->draw(tooltip);
+        draw_wrapped(tip.str(), tip_x + 8.f, tip_y + 6.f, tip_w - 16.f, tip_size, vizgfx::Color(235, 235, 243));
+    }
+
+    draw_text("×", last_latent_space_close_rect_->position.x + 10.f,
+              last_latent_space_close_rect_->position.y + 3.f, 18, vizgfx::Color(240, 222, 230), true);
+    if (!latent_space_export_rendering_) {
+        latent_space_displayed_projection_ = export_available ? projection : nullptr;
+        latent_space_displayed_yaw_ = latent_space_yaw_;
+        latent_space_displayed_pitch_ = latent_space_pitch_;
+        latent_space_displayed_zoom_ = latent_space_zoom_;
+        latent_space_displayed_threshold_ = latent_space_correlation_threshold_;
+        latent_space_displayed_correlation_all_candidates_ = show_all_candidates;
+        latent_space_displayed_realtime_ = realtime;
+        latent_space_displayed_available_ = realtime_available;
+        latent_space_displayed_correlation_observations_ = collected_observations;
+        latent_space_displayed_export_status_ = latent_space_export_status_;
+        latent_space_displayed_canvas_width_ = static_cast<unsigned>(std::ceil(last_latent_space_canvas_rect_.size.x));
+        latent_space_displayed_canvas_height_ = static_cast<unsigned>(std::ceil(last_latent_space_canvas_rect_.size.y));
+        latent_space_displayed_window_size_ = {static_cast<unsigned>(screen_w), static_cast<unsigned>(screen_h)};
+        const float x = std::max(0.f, std::floor(left - 2.f)), y = std::max(0.f, std::floor(top - 2.f));
+        const float right = std::min(screen_w, std::ceil(left + panel_w + 2.f));
+        const float bottom = std::min(screen_h, std::ceil(top + panel_h + 2.f));
+        latent_space_displayed_bounds_ = make_rect(x, y, std::max(0.f, right - x), std::max(0.f, bottom - y));
+    }
+    window->setView(old_view);
+}
+
 void Visualizer::renderMetrics() {
     // Affichage des métriques textuelles (simulé avec rectangles colorés)
     const auto area = panelContentRect(PanelId::Metrics);
@@ -6486,6 +8018,8 @@ void Visualizer::renderMetrics() {
     last_stop_button_rect_.reset();
     last_validation_button_rect_.reset();
     last_skip_button_rect_.reset();
+    last_graph_report_button_rect_.reset();
+    last_latent_space_button_rect_.reset();
 
     // Live tuning controls: hitboxes recalculées à chaque frame.
     last_live_lr_track_.reset();
@@ -6506,14 +8040,120 @@ void Visualizer::renderMetrics() {
     last_live_kl_enable_box_.reset();
     last_live_overrides_box_.reset();
     for (auto& rect : dataset_text_section_rects_) rect = make_rect(0.f, 0.f, 0.f, 0.f);
+    for (auto& rect : dataset_text_content_rects_) rect = make_rect(0.f, 0.f, 0.f, 0.f);
+    for (auto& rect : dataset_text_scroll_track_rects_) rect = make_rect(0.f, 0.f, 0.f, 0.f);
 
-    // Commands occupy their own card at the top, separate from numeric rows.
+    // Synchronize once before measuring the labels, using the same live-control
+    // state as the sliders and buttons rendered below.
+    if (font_loaded) {
+        const uint64_t external_version =
+            external_live_params_version_.load(std::memory_order_relaxed);
+        if (external_version != live_ui_external_version_) {
+            live_ui_lr_ = std::clamp(live_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
+            live_ui_lr_warmup_steps_ = live_lr_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_beta_ = std::clamp(live_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            live_ui_kl_warmup_steps_ = live_kl_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_enabled_ = live_kl_enabled_.load(std::memory_order_relaxed);
+            live_ui_recon_loss_index_ = live_recon_loss_index_.load(std::memory_order_relaxed);
+            live_ui_external_version_ = external_version;
+            live_ui_inited_ = true;
+        }
+        if (!live_ui_inited_) {
+            live_ui_lr_ = std::clamp(runtime_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
+            live_ui_lr_warmup_steps_ = runtime_lr_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
+            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
+
+            // Démarre en mode NATIVE: aucun override tant que l'utilisateur n'interagit pas.
+            live_overrides_enabled_.store(false, std::memory_order_relaxed);
+            live_lr_.store(live_ui_lr_, std::memory_order_relaxed);
+            live_lr_warmup_steps_.store(live_ui_lr_warmup_steps_, std::memory_order_relaxed);
+            live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
+            live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
+            live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
+            live_recon_loss_index_.store(live_ui_recon_loss_index_, std::memory_order_relaxed);
+            // Ne pas bump la version: on ne veut pas changer le training sans interaction.
+            live_ui_inited_ = true;
+        }
+
+        // PS (user): MAJ en temps réel des scrollers (sliders) avec les valeurs runtime associées.
+        // En mode NATIVE, refléter current_lr/current_kl_beta_effective tant qu'on ne drag pas.
+        if (!live_overrides_enabled_.load(std::memory_order_relaxed) && live_dragging_ == LiveDragTarget::None &&
+            live_input_target_ == LiveInputTarget::None) {
+            live_ui_lr_ = std::clamp(runtime_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
+            live_ui_lr_warmup_steps_ = runtime_lr_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
+            live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
+            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
+        }
+
+    }
+    const bool live_on_rt = live_overrides_enabled_.load(std::memory_order_relaxed);
+    const bool paused = std::atomic_load(&training_paused_)->load();
+    const bool validation_on = validation_enabled_.load();
+    const auto skips = std::atomic_load(&skip_control_);
+    const bool skips_available = skips->available.load();
+    const bool skips_on = skips_available && skips->enabled.load();
+    const auto report_control = std::atomic_load(&graph_report_control_);
+    const auto report_state = report_control
+        ? report_control->state.load(std::memory_order_relaxed)
+        : GraphReportControl::State::Unavailable;
+    const auto latent_control = std::atomic_load(&latent_space_control_);
+    const auto latent_state = latent_control
+        ? latent_control->state.load(std::memory_order_acquire)
+        : mimir::viz::LatentSpaceControl::State::Unavailable;
+    const std::array<std::string, 10> command_labels{{
+        paused ? "Reprendre" : "Mettre en pause",
+        stop_training_requested_.load() ? "Arrêt demandé" : "Arrêter",
+        validation_on ? "Validation : oui" : "Validation : non",
+        !skips_available ? "Skip : indisponible" : (skips_on ? "Skip : oui" : "Skip : non"),
+        live_on_rt ? "Réglages : manuels" : "Réglages : auto",
+        live_ui_kl_enabled_ ? "KL : oui" : "KL : non",
+        std::string("Perte : ") + recon_loss_name(live_ui_recon_loss_index_),
+        "Exporter JSON [D]",
+        report_state == GraphReportControl::State::Unavailable ? "Rapport : indisponible" :
+        report_state == GraphReportControl::State::Running ? "Génération du rapport…" :
+        report_state == GraphReportControl::State::Complete ? "Régénérer le rapport HTML" :
+        report_state == GraphReportControl::State::Failed ? "Réessayer le rapport" :
+        "Générer le rapport HTML",
+        latent_state == mimir::viz::LatentSpaceControl::State::Unavailable ? "Projection 3D : indisponible" :
+        latent_state == mimir::viz::LatentSpaceControl::State::Requested ? "Projection 3D : demandée" :
+        latent_state == mimir::viz::LatentSpaceControl::State::Capturing ?
+            (latent_control->correlations_enabled.load(std::memory_order_acquire) ? "Capture des activations…" : "Capture des poids…") :
+        latent_state == mimir::viz::LatentSpaceControl::State::Projecting ? "Calcul de la projection…" :
+        latent_state == mimir::viz::LatentSpaceControl::State::Complete ? "Afficher / actualiser le nuage 3D" :
+        latent_state == mimir::viz::LatentSpaceControl::State::Failed ? "Réessayer la projection 3D" :
+        "Générer la projection 3D"
+    }};
+    const std::string primary_hint = paused ? "Entraînement en pause" : "Entraînement en cours";
+    std::string command_status = std::atomic_load(&runtime_config_)->debugJsonStatus();
+    if (latent_control && latent_state != mimir::viz::LatentSpaceControl::State::Unavailable) {
+        const std::string message = latent_control->messageSnapshot();
+        if (!message.empty()) command_status = message;
+    } else if (report_control && report_state != GraphReportControl::State::Unavailable) {
+        const std::string message = report_control->messageSnapshot();
+        if (!message.empty()) command_status = message;
+    }
+    auto measure_command_text = [&](const std::string& value, unsigned size, bool bold) {
+        if (!font_loaded) {
+            // Without a font, reserve a conservative full-em width per code point.
+            std::size_t characters = 0;
+            for (unsigned char character : value) if ((character & 0xc0) != 0x80) ++characters;
+            return static_cast<float>(characters) * static_cast<float>(size) * 1.1f;
+        }
+        vizgfx::Text probe(font);
+        probe.setCharacterSize(size);
+        probe.setStyle(bold ? vizgfx::Text::Bold : vizgfx::Text::Regular);
+        probe.setString(vizgfx::String::fromUtf8(value.begin(), value.end()));
+        return probe.getLocalBounds().size.x;
+    };
+    const auto command_layout = mimir::viz::makeCommandCardLayout(
+        static_cast<float>(panel_w), command_labels, primary_hint, command_status, measure_command_text);
     const float command_y = static_cast<float>(metrics_y);
-    const float command_gap = 8.f;
-    const int command_cols = panel_w >= 460 ? 3 : (panel_w >= 300 ? 2 : 1);
-    const int command_rows = (7 + command_cols - 1) / command_cols;
-    const float command_width = static_cast<float>(panel_w) - 16.f;
-    const float command_height = 110.f + command_rows * 40.f;
+    const float command_height = command_layout.height;
     last_commands_rect_ = make_rect(static_cast<float>(metrics_x), command_y,
                                    static_cast<float>(panel_w), command_height);
     vizgfx::RectangleShape command_card({static_cast<float>(panel_w), command_height});
@@ -6527,70 +8167,81 @@ void Visualizer::renderMetrics() {
         title.setPosition({static_cast<float>(metrics_x)+8.f, command_y+5.f});
         title.setFillColor(mimir::viz::theme::text); title.setString("Pilotage"); window->draw(title);
     }
-    auto drawCommand = [&](int index, const std::string& label, vizgfx::Color color,
+    auto drawCommand = [&](int index, vizgfx::Color color,
                            std::optional<vizgfx::FloatRect>& hitbox) {
         const bool primary = index == 0;
-        const float bw = primary ? command_width :
-            (command_width - (command_cols-1)*command_gap) / command_cols;
-        const float bh = primary ? 48.f : 34.f;
-        const int grid_index = std::max(0,index-1);
-        const float bx = static_cast<float>(metrics_x)+8.f +
-            (primary ? 0.f : (grid_index%command_cols)*(bw+command_gap));
-        const float by = command_y+28.f +
-            (primary ? 0.f : 56.f+(grid_index/command_cols)*40.f);
-        hitbox = make_rect(bx,by,bw,bh);
-        const bool hovered=hitbox->contains(picker_mouse_) && !show_help_overlay_ && !zoom_active_ && !config_editor_.visible;
-        const auto fill=primary?color:(index==1?vizgfx::Color(78,43,49):mimir::viz::theme::control);
-        mimir::viz::ui::buttonSurface(*window,*hitbox,fill,hovered);
-        const float text_x=bx+(primary?40.f:12.f);
-        if(!primary && index>=2 && index<=5)
-            mimir::viz::ui::roundedRect(*window,{{bx+3.f,by+8.f},{3.f,bh-16.f}},color,1.f);
-        if(primary) {
-            const bool paused=std::atomic_load(&training_paused_)->load();
-            if(paused) {
-                for(int i=0;i<10;++i) {
+        const auto& layout = command_layout.buttons[static_cast<std::size_t>(index)];
+        const float bw = layout.bounds.width, bh = layout.bounds.height;
+        const float bx = static_cast<float>(metrics_x) + layout.bounds.x;
+        const float by = command_y + layout.bounds.y;
+        hitbox = make_rect(bx, by, bw, bh);
+        const bool hovered = hitbox->contains(picker_mouse_) && !show_help_overlay_ && !zoom_active_ && !config_editor_.visible;
+        const auto fill = primary ? color : (index == 1 ? vizgfx::Color(78,43,49) :
+            ((index == 8 || index == 9) ? color : mimir::viz::theme::control));
+        mimir::viz::ui::buttonSurface(*window, *hitbox, fill, hovered);
+        if (!primary && index >= 2 && index <= 5)
+            mimir::viz::ui::roundedRect(*window, {{bx+3.f,by+8.f},{3.f,bh-16.f}}, color, 1.f);
+        if (primary) {
+            const float icon_y = by + (bh - 18.f) * .5f;
+            if (paused) {
+                for (int i = 0; i < 10; ++i) {
                     vizgfx::RectangleShape stroke({1.f,float(18-2*std::abs(i-1))});
-                    stroke.setPosition({bx+15.f+i,by+15.f+std::abs(i-1)});stroke.setFillColor(vizgfx::Color::White);window->draw(stroke);
+                    stroke.setPosition({bx+15.f+i,icon_y+std::abs(i-1)});
+                    stroke.setFillColor(vizgfx::Color::White); window->draw(stroke);
                 }
             } else {
-                for(float dx:{15.f,23.f}) {
-                    vizgfx::RectangleShape bar({4.f,16.f});bar.setPosition({bx+dx,by+16.f});bar.setFillColor(vizgfx::Color::White);window->draw(bar);
+                for (float dx : {15.f,23.f}) {
+                    vizgfx::RectangleShape bar({4.f,16.f});
+                    bar.setPosition({bx+dx,icon_y+1.f});
+                    bar.setFillColor(vizgfx::Color::White); window->draw(bar);
                 }
             }
         }
         if (font_loaded) {
-            vizgfx::Text text(font);unsigned text_size=primary?14:12;text.setCharacterSize(text_size);
-            text.setStyle(vizgfx::Text::Bold);text.setFillColor(mimir::viz::theme::text);
-            text.setString(vizgfx::String::fromUtf8(label.begin(),label.end()));
-            while(text.getLocalBounds().size.x>bw-(text_x-bx)-10.f && text_size>10)text.setCharacterSize(--text_size);
-            text.setPosition({text_x,by+(primary?7.f:9.f)});window->draw(text);
-            if(primary) {
-                text.setCharacterSize(10);text.setStyle(vizgfx::Text::Regular);text.setFillColor(vizgfx::Color(198,218,239));
-                const std::string hint=std::atomic_load(&training_paused_)->load()?"Entraînement en pause":"Entraînement en cours";text.setString(vizgfx::String::fromUtf8(hint.begin(),hint.end()));text.setPosition({text_x,by+27.f});window->draw(text);
+            vizgfx::Text text(font);
+            text.setCharacterSize(layout.text_size);
+            text.setStyle(vizgfx::Text::Bold);
+            text.setFillColor(mimir::viz::theme::text);
+            auto drawLine = [&](const std::string& line, float x, float y) {
+                text.setString(vizgfx::String::fromUtf8(line.begin(), line.end()));
+                const auto bounds = text.getLocalBounds();
+                text.setPosition({x - bounds.position.x, y - bounds.position.y});
+                window->draw(text);
+            };
+            for (std::size_t line = 0; line < layout.lines.size(); ++line)
+                drawLine(layout.lines[line], bx + layout.text_x,
+                         by + layout.text_y + line * layout.line_height);
+            if (primary) {
+                text.setCharacterSize(10); text.setStyle(vizgfx::Text::Regular);
+                text.setFillColor(vizgfx::Color(198,218,239));
+                for (std::size_t line = 0; line < command_layout.primary_hint_lines.size(); ++line)
+                    drawLine(command_layout.primary_hint_lines[line], bx + layout.text_x,
+                             command_y + command_layout.primary_hint_y + line * 12.f);
             }
         }
     };
-    const bool paused = std::atomic_load(&training_paused_)->load();
-    drawCommand(0, paused ? "Reprendre" : "Mettre en pause",
-                paused ? vizgfx::Color(35,145,95) : vizgfx::Color(40,110,170), last_pause_button_rect_);
-    drawCommand(1, stop_training_requested_.load() ? "Arrêt demandé" : "Arrêter",
-                vizgfx::Color(155,55,55), last_stop_button_rect_);
-    const bool validation_on = validation_enabled_.load();
-    drawCommand(2, validation_on ? "Validation : oui" : "Validation : non",
-                validation_on ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_validation_button_rect_);
-    const auto skips = std::atomic_load(&skip_control_);
-    const bool skips_on = skips->available.load() && skips->enabled.load();
-    drawCommand(3, !skips->available.load() ? "Skip : indisponible" : (skips_on ? "Skip : oui" : "Skip : non"),
-                skips_on ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_skip_button_rect_);
-
-    drawCommand(7, "Exporter JSON [D]", vizgfx::Color(65,95,155), last_debug_json_button_rect_);
+    drawCommand(0, paused ? vizgfx::Color(35,145,95) : vizgfx::Color(40,110,170), last_pause_button_rect_);
+    drawCommand(1, vizgfx::Color(155,55,55), last_stop_button_rect_);
+    drawCommand(2, validation_on ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_validation_button_rect_);
+    drawCommand(3, skips_on ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_skip_button_rect_);
+    drawCommand(7, vizgfx::Color(65,95,155), last_debug_json_button_rect_);
+    drawCommand(8, vizgfx::Color(55,125,105), last_graph_report_button_rect_);
+    const vizgfx::Color latent_button_color =
+        latent_state == mimir::viz::LatentSpaceControl::State::Unavailable ? vizgfx::Color(65,75,85) :
+        latent_state == mimir::viz::LatentSpaceControl::State::Failed ? vizgfx::Color(145,75,65) : vizgfx::Color(75,105,155);
+    drawCommand(9, latent_button_color, last_latent_space_button_rect_);
     if (font_loaded) {
-        const auto status = std::atomic_load(&runtime_config_)->debugJsonStatus();
         vizgfx::Text text(font); text.setCharacterSize(11);
-        text.setPosition({static_cast<float>(metrics_x)+8.f, command_y+command_height-22.f});
-        text.setFillColor(vizgfx::Color(145,215,235));
-        text.setString(vizgfx::String::fromUtf8(status.begin(),status.end()));
-        window->draw(text);
+        text.setFillColor(report_state == GraphReportControl::State::Failed
+            ? vizgfx::Color(240,145,135) : vizgfx::Color(145,215,235));
+        for (std::size_t line = 0; line < command_layout.status_lines.size(); ++line) {
+            const auto& value = command_layout.status_lines[line];
+            text.setString(vizgfx::String::fromUtf8(value.begin(), value.end()));
+            const auto bounds = text.getLocalBounds();
+            text.setPosition({static_cast<float>(metrics_x) + 8.f - bounds.position.x,
+                command_y + command_layout.status_y + line * command_layout.status_line_height - bounds.position.y});
+            window->draw(text);
+        }
     }
     metrics_y += static_cast<int>(command_height)+28;
     metrics_content_height += command_height+28.f;
@@ -6620,30 +8271,38 @@ void Visualizer::renderMetrics() {
 
     // Texte best-effort
     if (font_loaded) {
-        auto wrap_lines = [](const std::string& s, size_t max_chars, int max_lines) {
+        auto wrap_lines = [&](const std::string& value, float width) {
             std::vector<std::string> out;
-            if (max_chars == 0) return out;
-            const bool limit_lines = (max_lines > 0);
-            std::string cur;
-            cur.reserve(max_chars);
-            size_t i = 0;
-            while (i < s.size() && (!limit_lines || static_cast<int>(out.size()) < max_lines)) {
-                // skip leading spaces
-                while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-                if (i >= s.size()) break;
-                cur.clear();
-                while (i < s.size() && cur.size() < max_chars) {
-                    const char c = s[i++];
-                    if (c == '\n' || c == '\r') break;
-                    cur.push_back(c);
+            vizgfx::Text probe(font);
+            probe.setCharacterSize(12);
+            auto fits = [&](const std::string& text) {
+                probe.setString(vizgfx::String::fromUtf8(text.begin(), text.end()));
+                const auto bounds = probe.getLocalBounds();
+                return bounds.position.x + bounds.size.x <= width;
+            };
+            std::istringstream paragraphs(value);
+            for (std::string paragraph; std::getline(paragraphs, paragraph);) {
+                std::istringstream words(paragraph);
+                std::string line, word;
+                while (words >> word) {
+                    const std::string candidate = line.empty() ? word : line + " " + word;
+                    if (fits(candidate)) { line = candidate; continue; }
+                    if (!line.empty()) { out.push_back(std::move(line)); line.clear(); }
+                    if (fits(word)) { line = word; continue; }
+                    // Long token IDs/URLs must wrap without splitting UTF-8 or
+                    // leaking into the scrollbar's reserved gutter.
+                    for (size_t offset = 0; offset < word.size();) {
+                        const unsigned char lead = static_cast<unsigned char>(word[offset]);
+                        const size_t count = std::min(word.size() - offset,
+                            size_t(lead < 0x80 ? 1 : (lead & 0xe0) == 0xc0 ? 2 : (lead & 0xf0) == 0xe0 ? 3 : 4));
+                        const auto character = word.substr(offset, count);
+                        if (!line.empty() && !fits(line + character)) {
+                            out.push_back(std::move(line)); line.clear();
+                        }
+                        line += character; offset += count;
+                    }
                 }
-                if (!cur.empty()) out.push_back(cur);
-                // skip until newline if we broke early
-                while (i < s.size() && s[i] != '\n' && s[i] != '\r') {
-                    if (cur.size() >= max_chars) break;
-                    ++i;
-                }
-                while (i < s.size() && (s[i] == '\n' || s[i] == '\r')) ++i;
+                if (!line.empty() || paragraph.empty()) out.push_back(std::move(line));
             }
             return out;
         };
@@ -6723,6 +8382,18 @@ void Visualizer::renderMetrics() {
                 drawText(line_height * 2,
                          "Loss=" + format_decimal(current_loss, 8) +
                              " avg=" + format_decimal(current_avg_loss, 8));
+            } else if (current_model_metrics_.count("cross_entropy")) {
+                const auto metric = [this](const char* name) {
+                    const auto it = current_model_metrics_.find(name);
+                    return it == current_model_metrics_.end() ? std::string("n/a")
+                        : format_decimal(it->second, 5);
+                };
+                drawText(line_height * 2,
+                         "Loss=" + format_decimal(current_loss, 8) +
+                             " avg=" + format_decimal(current_avg_loss, 8) +
+                             " CE=" + metric("cross_entropy") +
+                             " PPL=" + metric("perplexity") +
+                             " top1=" + metric("next_token_accuracy_pct") + "%");
             } else {
                 const std::string recon_name = canonical_recon_loss_name(current_recon_loss_type);
                 const float recon_normalized = normalized_recon_loss(
@@ -6739,51 +8410,6 @@ void Visualizer::renderMetrics() {
         // -------------------------
         // Live tuning controls
         // -------------------------
-        const uint64_t external_version =
-            external_live_params_version_.load(std::memory_order_relaxed);
-        if (external_version != live_ui_external_version_) {
-            live_ui_lr_ = std::clamp(live_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
-            live_ui_lr_warmup_steps_ = live_lr_warmup_steps_.load(std::memory_order_relaxed);
-            live_ui_kl_beta_ = std::clamp(live_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
-            live_ui_kl_warmup_steps_ = live_kl_warmup_steps_.load(std::memory_order_relaxed);
-            live_ui_kl_enabled_ = live_kl_enabled_.load(std::memory_order_relaxed);
-            live_ui_recon_loss_index_ = live_recon_loss_index_.load(std::memory_order_relaxed);
-            live_ui_external_version_ = external_version;
-            live_ui_inited_ = true;
-        }
-        if (!live_ui_inited_) {
-            live_ui_lr_ = std::clamp(runtime_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
-            live_ui_lr_warmup_steps_ = runtime_lr_warmup_steps_.load(std::memory_order_relaxed);
-            live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
-            live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
-            live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
-            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
-
-            // Démarre en mode NATIVE: aucun override tant que l'utilisateur n'interagit pas.
-            live_overrides_enabled_.store(false, std::memory_order_relaxed);
-            live_lr_.store(live_ui_lr_, std::memory_order_relaxed);
-            live_lr_warmup_steps_.store(live_ui_lr_warmup_steps_, std::memory_order_relaxed);
-            live_kl_beta_.store(live_ui_kl_beta_, std::memory_order_relaxed);
-            live_kl_warmup_steps_.store(live_ui_kl_warmup_steps_, std::memory_order_relaxed);
-            live_kl_enabled_.store(live_ui_kl_enabled_, std::memory_order_relaxed);
-            live_recon_loss_index_.store(live_ui_recon_loss_index_, std::memory_order_relaxed);
-            // Ne pas bump la version: on ne veut pas changer le training sans interaction.
-            live_ui_inited_ = true;
-        }
-
-        // PS (user): MAJ en temps réel des scrollers (sliders) avec les valeurs runtime associées.
-        // En mode NATIVE, refléter current_lr/current_kl_beta_effective tant qu'on ne drag pas.
-        const bool live_on_rt = live_overrides_enabled_.load(std::memory_order_relaxed);
-        if (!live_on_rt && live_dragging_ == LiveDragTarget::None &&
-            live_input_target_ == LiveInputTarget::None) {
-            live_ui_lr_ = std::clamp(runtime_lr_.load(std::memory_order_relaxed), kLiveLRMin, kLiveLRMax);
-            live_ui_lr_warmup_steps_ = runtime_lr_warmup_steps_.load(std::memory_order_relaxed);
-            live_ui_kl_beta_ = std::clamp(runtime_kl_beta_.load(std::memory_order_relaxed), 0.0f, 1.0f);
-            live_ui_kl_warmup_steps_ = runtime_kl_warmup_steps_.load(std::memory_order_relaxed);
-            live_ui_kl_enabled_ = (live_ui_kl_beta_ > 0.0f);
-            live_ui_recon_loss_index_ = runtime_recon_loss_index_.load(std::memory_order_relaxed);
-        }
-
         const int live_y0 = line_height * 4 + 30;
         const int live_row_h = 42;
         const int label_w = 82;
@@ -6814,7 +8440,7 @@ void Visualizer::renderMetrics() {
             const float y = static_cast<float>(metrics_y + live_y0 + row * live_row_h);
             const float x0 = static_cast<float>(metrics_x + 6);
             const float x_track = static_cast<float>(metrics_x + label_w);
-            const float x_value = static_cast<float>(metrics_x + panel_w - value_w);
+            const float x_value = static_cast<float>(metrics_x + panel_w - value_w - 6);
             const float w_track = std::max(20.f, x_value - x_track - 10.f);
 
             // Label
@@ -6911,12 +8537,9 @@ void Visualizer::renderMetrics() {
             }
         };
 
-        drawCommand(4, live_on_rt ? "Réglages : manuels" : "Réglages : auto",
-                    live_on_rt ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_live_overrides_box_);
-        drawCommand(5, live_ui_kl_enabled_ ? "KL : oui" : "KL : non",
-                    live_ui_kl_enabled_ ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_live_kl_enable_box_);
-        drawCommand(6, std::string("Perte : ")+recon_loss_name(live_ui_recon_loss_index_),
-                    vizgfx::Color(80,70,125), last_live_recon_loss_box_);
+        drawCommand(4, live_on_rt ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_live_overrides_box_);
+        drawCommand(5, live_ui_kl_enabled_ ? vizgfx::Color(35,115,75) : vizgfx::Color(65,75,85), last_live_kl_enable_box_);
+        drawCommand(6, vizgfx::Color(80,70,125), last_live_recon_loss_box_);
         drawSection(line_height*4+6, "Reglages", vizgfx::Color(150,190,235));
 
         // LR (log scale)
@@ -7013,11 +8636,24 @@ void Visualizer::renderMetrics() {
         }
         drawSection(extra_y - 22, "RUNTIME / OPTIMIZER", vizgfx::Color(180, 145, 235));
         {
-            const std::string recon_name = canonical_recon_loss_name(current_recon_loss_type);
-            std::string s = "t=" + format_decimal(current_timestep, 8) +
-                "  " + recon_name + "=" + format_decimal(current_mse, 8) +
-                "  norm=" + format_decimal(
-                    normalized_recon_loss(current_mse, current_recon_loss_type), 8);
+            std::string s;
+            const auto cross_entropy = current_model_metrics_.find("cross_entropy");
+            if (cross_entropy != current_model_metrics_.end()) {
+                const auto metric = [this](const char* name) {
+                    const auto it = current_model_metrics_.find(name);
+                    return it == current_model_metrics_.end() ? std::string("n/a")
+                        : format_decimal(it->second, 6);
+                };
+                s = "objective=cross_entropy  value=" + format_decimal(cross_entropy->second, 8) +
+                    "  perplexity=" + metric("perplexity") +
+                    "  next_token_accuracy_pct=" + metric("next_token_accuracy_pct");
+            } else {
+                const std::string recon_name = canonical_recon_loss_name(current_recon_loss_type);
+                s = "t=" + format_decimal(current_timestep, 8) +
+                    "  " + recon_name + "=" + format_decimal(current_mse, 8) +
+                    "  norm=" + format_decimal(
+                        normalized_recon_loss(current_mse, current_recon_loss_type), 8);
+            }
             drawTableRow(extra_y, "SIGNAL", s, vizgfx::Color(105, 190, 230));
         }
 
@@ -7039,11 +8675,28 @@ void Visualizer::renderMetrics() {
         drawTableRow(extra_y + 5 * line_height, "PERF", std::to_string(current_batch_time_ms) + "ms  bps=" + format_decimal(current_bps, 8), vizgfx::Color(90, 205, 155));
         drawTableRow(extra_y + 6 * line_height, "MEM", std::to_string(current_memory_mb) + "MB RSS  alloc=" + std::to_string(current_allocator_memory_mb) + "MB  params=" + std::to_string(current_params), vizgfx::Color(105, 165, 235));
         drawTableRow(extra_y + 7 * line_height, "OPT", std::string(optimizerTypeName(static_cast<OptimizerType>(current_opt_type))) + "  step=" + std::to_string(current_opt_step) + "  wd=" + format_decimal(current_opt_weight_decay, 10), vizgfx::Color(215, 180, 80));
-        int after_validation_y = extra_y + 11 * line_height;
+
+        int validation_header_y = extra_y + 8 * line_height;
+        if (!current_model_metrics_.empty()) {
+            drawSection(validation_header_y, "MÉTRIQUES DU MODÈLE", vizgfx::Color(180, 145, 235));
+            int metric_y = validation_header_y + 22;
+            for (const auto& [name, value] : current_model_metrics_) {
+                std::string text = format_decimal(value, 8);
+                if (std::isfinite(value) && value != 0.0 && (std::abs(value) < 1e-6 || std::abs(value) >= 1e8)) {
+                    std::ostringstream precise;
+                    precise << std::setprecision(7) << std::defaultfloat << value;
+                    text = precise.str();
+                }
+                drawTableRow(metric_y, name, text,
+                             vizgfx::Color(150, 190, 235));
+                metric_y += line_height;
+            }
+            validation_header_y = metric_y + 4;
+        }
+        int after_validation_y = validation_header_y + 3 * line_height;
         metrics_content_height = command_height+28.f+static_cast<float>(after_validation_y + 20);
 
         {
-            const int validation_header_y = extra_y + 8 * line_height;
             const int validation_status_y = validation_header_y + 22;
             const int validation_result_y = validation_status_y + line_height;
             std::string s;
@@ -7104,6 +8757,16 @@ void Visualizer::renderMetrics() {
                        << "%  F1=" << format_decimal(current_detection_metrics_.f1 * 100.0f, 2)
                        << "%  IoU=" << format_decimal(current_detection_metrics_.mean_iou * 100.0f, 2)
                        << "%";
+                } else if (current_model_metrics_.count("last_validation_cross_entropy")) {
+                    const auto metric = [this](const char* name) {
+                        const auto it = current_model_metrics_.find(name);
+                        return it == current_model_metrics_.end() ? std::string("n/a")
+                            : format_decimal(it->second, 6);
+                    };
+                    ss << "val CE=" << metric("last_validation_cross_entropy")
+                       << "  PPL=" << metric("last_validation_perplexity")
+                       << "  top1=" << metric("last_validation_next_token_accuracy_pct")
+                       << "%  tokens=" << metric("last_validation_active_tokens");
                 } else {
                     ss << "val recon=" << format_decimal(current_val_recon, 8)
                        << " kl=" << format_decimal(current_val_kl, 8);
@@ -7128,7 +8791,6 @@ void Visualizer::renderMetrics() {
         // Texte dataset : cartes indépendantes avec clipping et scroll interne.
         if (show_prompt_text_ && has_dataset_text) {
             int y = after_validation_y;
-            const size_t wrap_chars = static_cast<size_t>(std::max(30, panel_w / 8));
             drawSection(y, "PROMPT / TOKENIZER / ENCODER", vizgfx::Color(100, 205, 190));
             y += 24;
 
@@ -7147,6 +8809,7 @@ void Visualizer::renderMetrics() {
             const int card_h = 104;
             const int title_h = 22;
             const int inner_pad = 7;
+            const int inner_gutter = 12;
             const int text_line_h = 18;
 
             for (const auto& card : cards) {
@@ -7175,34 +8838,41 @@ void Visualizer::renderMetrics() {
                 title.setString(card.title);
                 window->draw(title);
 
-                const auto lines = wrap_lines(*card.value, wrap_chars, 0);
-                const float content_h = static_cast<float>(lines.size() * text_line_h + 2 * inner_pad);
-                const float viewport_h = static_cast<float>(card_h - title_h);
+                const auto text_area = make_rect(card_x + inner_pad, card_y + title_h + inner_pad,
+                    std::max(0.f, card_w - 2 * inner_pad - inner_gutter),
+                    static_cast<float>(card_h - title_h - 2 * inner_pad));
+                dataset_text_content_rects_[index] = text_area;
+                const auto lines = wrap_lines(*card.value, std::max(1.f, text_area.size.x - 2.f));
+                const float content_h = static_cast<float>(lines.size() * text_line_h);
+                const float viewport_h = text_area.size.y;
                 dataset_text_scroll_max_[index] = std::max(0.f, content_h - viewport_h);
                 dataset_text_scroll_y_[index] = std::clamp(
                     dataset_text_scroll_y_[index], 0.f, dataset_text_scroll_max_[index]);
                 dataset_text_section_rects_[index] = make_rect(
-                    card_x, card_y + static_cast<float>(title_h), card_w, viewport_h);
+                    card_x, card_y + static_cast<float>(title_h), card_w,
+                    static_cast<float>(card_h - title_h));
 
                 // View dédiée : seul le corps de cette carte est clippé.
                 const vizgfx::View metrics_view = window->getView();
                 const float ww = static_cast<float>(std::max(1, window_width));
                 const float hh = static_cast<float>(std::max(1, window_height));
-                const float clip_top = std::max(area.position.y, card_y + static_cast<float>(title_h));
-                const float clip_bottom = std::min(area.position.y + area.size.y,
-                                                   card_y + static_cast<float>(card_h));
-                if (clip_bottom > clip_top) {
-                    vizgfx::View clip_view(make_rect(card_x, clip_top, card_w, clip_bottom - clip_top));
-                    clip_view.setViewport(make_rect(card_x / ww, clip_top / hh,
-                                                    card_w / ww, (clip_bottom - clip_top) / hh));
+                const float clip_left = std::max({0.f, area.position.x, text_area.position.x});
+                const float clip_right = std::min({ww, area.position.x + area.size.x,
+                    text_area.position.x + text_area.size.x});
+                const float clip_top = std::max({0.f, area.position.y, text_area.position.y});
+                const float clip_bottom = std::min({hh, area.position.y + area.size.y,
+                    text_area.position.y + text_area.size.y});
+                if (clip_right > clip_left && clip_bottom > clip_top) {
+                    vizgfx::View clip_view(make_rect(clip_left, clip_top, clip_right - clip_left, clip_bottom - clip_top));
+                    clip_view.setViewport(make_rect(clip_left / ww, clip_top / hh,
+                        (clip_right - clip_left) / ww, (clip_bottom - clip_top) / hh));
                     window->setView(clip_view);
-                    float text_y = card_y + static_cast<float>(title_h + inner_pad) -
-                                   dataset_text_scroll_y_[index];
+                    float text_y = text_area.position.y - dataset_text_scroll_y_[index];
                     for (const auto& line : lines) {
                         vizgfx::Text text(font);
                         text.setCharacterSize(12);
                         text.setFillColor(vizgfx::Color(225, 229, 237));
-                        text.setPosition(vizgfx::Vector2f(card_x + inner_pad, text_y));
+                        text.setPosition(vizgfx::Vector2f(text_area.position.x + 1.f, text_y));
                         text.setString(vizgfx::String::fromUtf8(line.begin(), line.end()));
                         window->draw(text);
                         text_y += static_cast<float>(text_line_h);
@@ -7213,14 +8883,15 @@ void Visualizer::renderMetrics() {
                 // Scrollbar interne toujours visible si le contenu déborde.
                 if (dataset_text_scroll_max_[index] > 0.f) {
                     const float track_x = card_x + card_w - 5.f;
-                    const float track_y = card_y + static_cast<float>(title_h + 2);
-                    const float track_h = static_cast<float>(card_h - title_h - 4);
+                    const float track_y = text_area.position.y;
+                    const float track_h = text_area.size.y;
+                    dataset_text_scroll_track_rects_[index] = make_rect(track_x, track_y, 3.f, track_h);
                     vizgfx::RectangleShape track(vizgfx::Vector2f(3.f, track_h));
                     track.setPosition(vizgfx::Vector2f(track_x, track_y));
                     track.setFillColor(vizgfx::Color(65, 70, 82, 210));
                     window->draw(track);
                     const float ratio = viewport_h / std::max(viewport_h, content_h);
-                    const float thumb_h = std::max(14.f, track_h * ratio);
+                    const float thumb_h = std::min(track_h, std::max(14.f, track_h * ratio));
                     const float progress = dataset_text_scroll_y_[index] /
                                            dataset_text_scroll_max_[index];
                     vizgfx::RectangleShape thumb(vizgfx::Vector2f(3.f, thumb_h));

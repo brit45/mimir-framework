@@ -1,48 +1,128 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1750" height="1050" viewBox="0 0 1750 1050" role="img" aria-labelledby="title desc">
-<title id="title">Carte des composants internes</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1126" viewBox="0 0 1200 1126" role="img" aria-labelledby="title desc">
+<title id="title">Carte des composants</title>
+<desc id="desc">Neuf repères du framework : CLI, contexte de scripting, configuration, registre, classes de modèles, runtimes, mémoire, checkpoints et observation. Les cartes représentent des responsabilités, pas un pipeline séquentiel. Sources : src/main.cpp, src/scriptings/ScriptingContext.hpp, src/Model.hpp, src/AsyncMonitor.hpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/main.cpp&quot;, &quot;src/scriptings/ScriptingContext.hpp&quot;, &quot;src/Model.hpp&quot;, &quot;src/AsyncMonitor.hpp&quot;], &quot;related_docs&quot;: [&quot;docs/00-Framework-Philosophy.md&quot;, &quot;docs/04-Architecture-Internals/01-Engine-Overview.md&quot;, &quot;docs/05-Advanced/04-Source-Code-Map.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Carte des composants internes</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Composants logiciels principaux du framework et responsabilités.</text>
-<line x1="60" y1="112" x2="1690" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="630" y="405" width="340" height="130" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="800.0" y="430" class="label" text-anchor="middle">Cœur C++</text>
-<text x="800.0" y="507" class="small" text-anchor="middle">runtime de graphe • couches • tenseurs</text>
-<rect x="200" y="170" width="250" height="88" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="325.0" y="195" class="label" text-anchor="middle">CLI</text>
-<text x="325.0" y="230" class="small" text-anchor="middle">commandes utilisateur</text>
-<path d="M325,258 L800,470" class="edge dash"/>
-<rect x="630" y="160" width="250" height="88" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="755.0" y="185" class="label" text-anchor="middle">Lua Engine</text>
-<text x="755.0" y="220" class="small" text-anchor="middle">scripts recherche/debug</text>
-<path d="M755,248 L800,470" class="edge dash"/>
-<rect x="1030" y="160" width="250" height="88" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1155.0" y="185" class="label" text-anchor="middle">JSON Config</text>
-<text x="1155.0" y="220" class="small" text-anchor="middle">runs reproductibles</text>
-<path d="M1155,248 L800,470" class="edge dash"/>
-<rect x="1330" y="360" width="250" height="88" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1455.0" y="385" class="label" text-anchor="middle">Registry</text>
-<text x="1455.0" y="420" class="small" text-anchor="middle">architectures supportées</text>
-<path d="M1455,448 L800,470" class="edge dash"/>
-<rect x="1130" y="660" width="250" height="88" rx="14" fill="#cffafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1255.0" y="685" class="label" text-anchor="middle">Model Builder</text>
-<text x="1255.0" y="720" class="small" text-anchor="middle">instanciation modèle</text>
-<path d="M1255,748 L800,470" class="edge dash"/>
-<rect x="700" y="760" width="250" height="88" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="825.0" y="785" class="label" text-anchor="middle">Graph Runtime</text>
-<text x="825.0" y="820" class="small" text-anchor="middle">exécution forward/backward</text>
-<path d="M825,848 L800,470" class="edge dash"/>
-<rect x="300" y="640" width="250" height="88" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="425.0" y="665" class="label" text-anchor="middle">Memory Manager</text>
-<text x="425.0" y="700" class="small" text-anchor="middle">allocation • guard</text>
-<path d="M425,728 L800,470" class="edge dash"/>
-<rect x="180" y="370" width="250" height="88" rx="14" fill="#fee2e2" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="305.0" y="395" class="label" text-anchor="middle">Checkpoint IO</text>
-<text x="305.0" y="430" class="small" text-anchor="middle">JSON • safetensors • folders</text>
-<path d="M305,458 L800,470" class="edge dash"/>
-<text x="1690" y="1026" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1126" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Carte des composants</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Identifier qui configure, qui décrit le graphe et qui effectue les calculs.</tspan>
+</text>
+<g data-node="cli">
+<rect x="44" y="163" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Lanceur et CLI</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">run_mimir.sh / main.cpp</tspan>
+<tspan x="66" dy="26">Arguments et</tspan>
+<tspan x="66" dy="26">environnement</tspan>
+</text>
+</g>
+<g data-node="bridges">
+<rect x="437.33" y="163" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Bridges de scripting</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Lua de référence</tspan>
+<tspan x="459.33" dy="26">Autres bridges selon</tspan>
+<tspan x="459.33" dy="26">couverture</tspan>
+</text>
+</g>
+<g data-node="config">
+<rect x="830.67" y="163" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Configuration JSON</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">CONF, env, tâches et</tspan>
+<tspan x="852.67" dy="26">options</tspan>
+<tspan x="852.67" dy="26">Reproductibilité des runs</tspan>
+</text>
+</g>
+<g data-node="registry">
+<rect x="44" y="436" width="325.33" height="199" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Registre</tspan>
+</text>
+<text x="66" y="510" font-size="19" fill="#334155">
+<tspan x="66" dy="0">defaultConfig / create</tspan>
+<tspan x="66" dy="26">Fabriques C++ nommées</tspan>
+</text>
+</g>
+<g data-node="models">
+<rect x="437.33" y="436" width="325.33" height="199" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Classes de modèles</tspan>
+</text>
+<text x="459.33" y="510" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Héritent de Model</tspan>
+<tspan x="459.33" dy="26">Définissent les graphes</tspan>
+<tspan x="459.33" dy="26">DL</tspan>
+</text>
+</g>
+<g data-node="runtime">
+<rect x="830.67" y="436" width="325.33" height="199" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Exécution et kernels</tspan>
+</text>
+<text x="852.67" y="510" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Planner, routeur,</tspan>
+<tspan x="852.67" dy="26">dispatcher</tspan>
+<tspan x="852.67" dy="26">CPU et accélérateurs</tspan>
+<tspan x="852.67" dy="26">disponibles</tspan>
+</text>
+</g>
+<g data-node="memory">
+<rect x="44" y="735" width="325.33" height="173" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="66" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Gestion mémoire</tspan>
+</text>
+<text x="66" y="809" font-size="19" fill="#334155">
+<tspan x="66" dy="0">MemoryGuard et</tspan>
+<tspan x="66" dy="26">allocateurs</tspan>
+<tspan x="66" dy="26">Stockage et temporaires</tspan>
+</text>
+</g>
+<g data-node="checkpoint">
+<rect x="437.33" y="735" width="325.33" height="173" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Checkpoints</tspan>
+</text>
+<text x="459.33" y="809" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Poids et métadonnées</tspan>
+<tspan x="459.33" dy="26">État optimiseur /</tspan>
+<tspan x="459.33" dy="26">tokenizer</tspan>
+</text>
+</g>
+<g data-node="monitor">
+<rect x="830.67" y="735" width="325.33" height="173" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="766" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Observation</tspan>
+</text>
+<text x="852.67" y="809" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">AsyncMonitor, Viz, Htop</tspan>
+<tspan x="852.67" dy="26">Métriques et captures 3D</tspan>
+</text>
+</g>
+<rect x="44" y="956" width="1112" height="84" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="984" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Lua et JSON pilotent les classes natives ; la topologie n’est pas écrite dans les scripts.</tspan>
+<tspan x="66" dy="26">• MPK : description alternative expérimentale, pas une garantie d’exécution complète.</tspan>
+</text>
+<text x="44" y="1075" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : main.cpp · ScriptingContext.hpp · Model.hpp · AsyncMonitor.hpp</tspan>
+</text>
+</g>
 </svg>

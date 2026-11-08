@@ -30,6 +30,123 @@ struct DistMoments {
     double skew = 0.0;
 };
 
+// Diagnostics describe the posterior actually emitted by the encoder. They do
+// not introduce another training objective or force log-variance away from 0:
+// logvar=0 is a unit-variance Gaussian, not a zero-variance latent.
+using PosteriorMetrics = std::unordered_map<std::string, float>;
+
+struct PosteriorMoments {
+    size_t count = 0;
+    size_t nonfinite = 0;
+    double mean = 0.0;
+    double centered_sum = 0.0;
+    double minimum = std::numeric_limits<double>::infinity();
+    double maximum = -std::numeric_limits<double>::infinity();
+
+    void add(double value) {
+        if (!std::isfinite(value)) { ++nonfinite; return; }
+        ++count;
+        const double delta = value - mean;
+        mean += delta / static_cast<double>(count);
+        centered_sum += delta * (value - mean);
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
+    }
+
+    void publish(PosteriorMetrics& metrics, const std::string& prefix) const {
+        metrics[prefix + "_nonfinite"] = static_cast<float>(nonfinite);
+        // A nonfinite posterior must not turn into a plausible finite average.
+        if (count == 0 || nonfinite != 0) return;
+        metrics[prefix + "_mean"] = static_cast<float>(mean);
+        metrics[prefix + "_stddev"] = static_cast<float>(
+            std::sqrt(std::max(0.0, centered_sum / static_cast<double>(count))));
+        metrics[prefix + "_min"] = static_cast<float>(minimum);
+        metrics[prefix + "_max"] = static_cast<float>(maximum);
+    }
+};
+
+PosteriorMetrics posterior_metrics(const Model& model, const std::vector<float>& prediction,
+                                   int mu_offset, int logvar_offset, int latent_dim) {
+    PosteriorMetrics metrics;
+    if (model.modelConfig.value("type", std::string{}) != "vae_conv" || latent_dim <= 0)
+        return metrics;
+    const size_t count = static_cast<size_t>(latent_dim);
+    if (mu_offset < 0 || logvar_offset < 0 ||
+        prediction.size() < static_cast<size_t>(mu_offset) + count ||
+        prediction.size() < static_cast<size_t>(logvar_offset) + count) return metrics;
+
+    PosteriorMoments mu, logvar, sigma;
+    for (size_t i = 0; i < count; ++i) {
+        const double raw_logvar = prediction[static_cast<size_t>(logvar_offset) + i];
+        mu.add(prediction[static_cast<size_t>(mu_offset) + i]);
+        logvar.add(raw_logvar);
+        // Match Reparameterize's numerical range, rather than the independently
+        // configurable bounds used only to evaluate the KL objective.
+        sigma.add(std::isfinite(raw_logvar)
+            ? std::exp(0.5 * std::clamp(raw_logvar, -20.0, 20.0)) : raw_logvar);
+    }
+    mu.publish(metrics, "mu");
+    logvar.publish(metrics, "logvar");
+    sigma.publish(metrics, "posterior_std");
+    metrics["stochastic_latent_active"] = model.modelConfig.value("stochastic_latent", false) ? 1.f : 0.f;
+
+    // Capture before backward: the planner is allowed to release intermediate
+    // tensors. Absence is not equivalent to an observed zero sampling effect.
+    if (model.hasTensor("vae_conv/z")) {
+        const auto& sampled = model.getTensor("vae_conv/z");
+        if (sampled.size() == count) {
+            double squared_delta = 0.0;
+            size_t nonfinite = 0;
+            for (size_t i = 0; i < count; ++i) {
+                const double delta = static_cast<double>(sampled[i]) -
+                    prediction[static_cast<size_t>(mu_offset) + i];
+                if (!std::isfinite(delta)) { ++nonfinite; continue; }
+                squared_delta += delta * delta;
+            }
+            metrics["latent_sampling_nonfinite"] = static_cast<float>(nonfinite);
+            const double rms = std::sqrt(squared_delta / static_cast<double>(count));
+            if (nonfinite == 0 && std::isfinite(rms) && rms <= std::numeric_limits<float>::max())
+                metrics["latent_sampling_rms"] = static_cast<float>(rms);
+        }
+    }
+    return metrics;
+}
+
+void posterior_gradient_metrics(const Model& model, PosteriorMetrics& metrics) {
+    if (model.modelConfig.value("type", std::string{}) != "vae_conv") return;
+    struct BranchGradient {
+        bool present = false;
+        size_t nonfinite = 0;
+        double squared_norm = 0.0;
+        void add(const std::vector<float>& values) {
+            for (float value : values) {
+                if (!std::isfinite(value)) { ++nonfinite; continue; }
+                squared_norm += static_cast<double>(value) * value;
+            }
+        }
+        void publish(PosteriorMetrics& destination, const std::string& name) const {
+            if (!present) return;
+            destination[name + "_nonfinite"] = static_cast<float>(nonfinite);
+            const double norm = std::sqrt(squared_norm);
+            if (nonfinite == 0 && std::isfinite(norm) && norm <= std::numeric_limits<float>::max())
+                destination[name + "_norm"] = static_cast<float>(norm);
+        }
+    } head, prehead;
+    for (const auto& layer : model.getLayers()) {
+        BranchGradient* branch = nullptr;
+        if (layer.name == "vae_conv/enc/logvar") branch = &head;
+        else if (layer.name.rfind("vae_conv/enc/logvar_pre_", 0) == 0) branch = &prehead;
+        if (!branch) continue;
+        branch->present = true;
+        branch->add(layer.grad_weights);
+        branch->add(layer.grad_bias);
+    }
+    // These are total parameter gradients (reconstruction + KL, and accumulated
+    // contributions when requested). They are not reconstruction-only metrics.
+    head.publish(metrics, "logvar_head_grad");
+    prehead.publish(metrics, "logvar_prehead_grad");
+}
+
 DistMoments compute_moments_prefix(const std::vector<float>& values, size_t offset, int count) {
     DistMoments moments;
     if (count <= 0 || offset >= values.size()) return moments;
@@ -574,7 +691,7 @@ Model::TrainStepResult VAETraining::trainImage(Model& model,
         const float raw_logvar = prediction[static_cast<size_t>(logvar_offset + i)];
         const float logvar = std::clamp(raw_logvar, logvar_min, logvar_max);
         const double mu_kl = 0.5 * static_cast<double>(mu) * mu;
-        const double logvar_kl = 0.5 * (std::exp(static_cast<double>(logvar)) - 1.0 - logvar);
+        const double logvar_kl = 0.5 * (std::expm1(static_cast<double>(logvar)) - logvar);
         kl += mu_kl + logvar_kl;
         weighted_kl += mu_weight * mu_kl + logvar_weight * logvar_kl;
     }
@@ -612,12 +729,15 @@ Model::TrainStepResult VAETraining::trainImage(Model& model,
         const float logvar = std::clamp(raw_logvar, logvar_min, logvar_max);
         const float in_range = raw_logvar >= logvar_min && raw_logvar <= logvar_max ? 1.0f : 0.0f;
         packed_gradient[static_cast<size_t>(mu_offset + i)] = kl_scale * mu_weight * mu;
-        packed_gradient[static_cast<size_t>(logvar_offset + i)] = kl_scale * logvar_weight * 0.5f * (std::exp(logvar) - 1.0f) * in_range;
+        packed_gradient[static_cast<size_t>(logvar_offset + i)] = kl_scale * logvar_weight * 0.5f * std::expm1(logvar) * in_range;
     }
+    auto posterior = posterior_metrics(model, prediction, mu_offset, logvar_offset, latent_dim);
     apply_accumulation_scale(packed_gradient, mode, grad_scale);
     model.backwardPass(packed_gradient);
+    posterior_gradient_metrics(model, posterior);
 
     Model::TrainStepResult result;
+    result.metrics = std::move(posterior);
     result.metrics["kl_mu_beta_effective"] = beta_effective * mu_weight;
     result.metrics["kl_logvar_beta_effective"] = beta_effective * logvar_weight;
     result.metrics["kl_weighted"] = static_cast<float>(weighted_kl);
@@ -809,7 +929,7 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
         const float mu = prediction[static_cast<size_t>(mu_offset + i)];
         const float logvar = std::clamp(prediction[static_cast<size_t>(logvar_offset + i)], logvar_min, logvar_max);
         const double mu_kl = 0.5 * static_cast<double>(mu) * mu;
-        const double logvar_kl = 0.5 * (std::exp(static_cast<double>(logvar)) - 1.0 - logvar);
+        const double logvar_kl = 0.5 * (std::expm1(static_cast<double>(logvar)) - logvar);
         kl += mu_kl + logvar_kl;
         weighted_kl += mu_weight * mu_kl + logvar_weight * logvar_kl;
     }
@@ -886,7 +1006,7 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
         const float raw_logvar = prediction[static_cast<size_t>(logvar_offset + i)];
         const float logvar = std::clamp(raw_logvar, logvar_min, logvar_max);
         packed_gradient[static_cast<size_t>(mu_offset + i)] = kl_scale * mu_weight * mu;
-        packed_gradient[static_cast<size_t>(logvar_offset + i)] = kl_scale * logvar_weight * 0.5f * (std::exp(logvar) - 1.0f) *
+        packed_gradient[static_cast<size_t>(logvar_offset + i)] = kl_scale * logvar_weight * 0.5f * std::expm1(logvar) *
             (raw_logvar >= logvar_min && raw_logvar <= logvar_max ? 1.0f : 0.0f);
     }
     if (align_weight > 0.0f) {
@@ -914,10 +1034,13 @@ Model::TrainStepResult VAETraining::trainText(Model& model,
     write_context_gradient(dialog_offset, dialog_dim, dialog_target, dialog_weight);
 
     for (size_t i=0; i<content_gradient.size(); ++i) packed_gradient[content_offset+i] = content_gradient[i];
+    auto posterior = posterior_metrics(model, prediction, mu_offset, logvar_offset, latent_dim);
     apply_accumulation_scale(packed_gradient, mode, grad_scale);
     model.backwardPass(packed_gradient);
+    posterior_gradient_metrics(model, posterior);
 
     Model::TrainStepResult result;
+    result.metrics = std::move(posterior);
     result.metrics["content_ce"] = float(content_loss);
     result.metrics["masked_tokens"] = float(masked_tokens);
     result.metrics["context_semantic_hash_mse"] = float(semantic_loss);

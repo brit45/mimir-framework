@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <omp.h>
 #include "Layers.hpp"
+#include "NormalizationKernels.hpp"
 
 // ============================================================================
 // LAYER OPERATIONS - Extensions (layers manquants prioritaires)
@@ -374,7 +375,7 @@ inline std::vector<float> rms_norm_forward(
         }
     }
 
-    Normalization::rms_norm(output, gamma, normalized_size, eps);
+    CpuNormalization::rmsNormInPlace(output, gamma, normalized_size, eps);
     return output;
 }
 

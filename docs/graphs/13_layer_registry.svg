@@ -1,92 +1,138 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1050" viewBox="0 0 1800 1050" role="img" aria-labelledby="title desc">
-<title id="title">Registre des couches</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1265" viewBox="0 0 1200 1265" role="img" aria-labelledby="title desc">
+<title id="title">Familles du registre des couches</title>
+<desc id="desc">Le registre LayerType comprend les convolutions ND et causales, SwiGLU, les primitives Primer, les couches de projection et de normalisation, l’attention et les opérations de tenseurs. Ces catégories illustrent les noms canoniques sans figer un ancien nombre de types. Sources : src/LayerTypes.hpp, src/runtimes/PrimerGeometry.hpp, src/runtimes/cpu/RuntimeLayerDispatch.hpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/LayerTypes.hpp&quot;, &quot;src/runtimes/PrimerGeometry.hpp&quot;, &quot;src/runtimes/cpu/RuntimeLayerDispatch.hpp&quot;], &quot;related_docs&quot;: [&quot;docs/03-API-Reference/01-Layers.md&quot;, &quot;docs/04-Architecture-Internals/14-Layers-And-Ops.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Registre des couches</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Le framework annonce 70 types de couches supportées dans le registry runtime.</text>
-<line x1="60" y1="112" x2="1740" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="80" y="160" width="360" height="70" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="185" class="label" text-anchor="middle">Convolution</text>
-<text x="260.0" y="202" class="small" text-anchor="middle">4 exemples</text>
-<rect x="115" y="255" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="280" class="label" text-anchor="middle">Conv2d</text>
-<rect x="115" y="303" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="328" class="label" text-anchor="middle">ConvTranspose2d</text>
-<rect x="115" y="351" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="376" class="label" text-anchor="middle">DepthwiseConv2d</text>
-<rect x="115" y="399" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="424" class="label" text-anchor="middle">Conv1d</text>
-<rect x="510" y="160" width="360" height="70" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="185" class="label" text-anchor="middle">Activations</text>
-<text x="690.0" y="202" class="small" text-anchor="middle">6 exemples</text>
-<rect x="545" y="255" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="280" class="label" text-anchor="middle">ReLU</text>
-<rect x="545" y="303" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="328" class="label" text-anchor="middle">GELU</text>
-<rect x="545" y="351" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="376" class="label" text-anchor="middle">SiLU</text>
-<rect x="545" y="399" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="424" class="label" text-anchor="middle">Tanh</text>
-<rect x="545" y="447" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="472" class="label" text-anchor="middle">Sigmoid</text>
-<rect x="545" y="495" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="520" class="label" text-anchor="middle">Mish</text>
-<rect x="940" y="160" width="360" height="70" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="185" class="label" text-anchor="middle">Norm</text>
-<text x="1120.0" y="202" class="small" text-anchor="middle">4 exemples</text>
-<rect x="975" y="255" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="280" class="label" text-anchor="middle">BatchNorm</text>
-<rect x="975" y="303" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="328" class="label" text-anchor="middle">LayerNorm</text>
-<rect x="975" y="351" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="376" class="label" text-anchor="middle">GroupNorm</text>
-<rect x="975" y="399" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="424" class="label" text-anchor="middle">RMSNorm</text>
-<rect x="1370" y="160" width="360" height="70" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1550.0" y="185" class="label" text-anchor="middle">Attention</text>
-<text x="1550.0" y="202" class="small" text-anchor="middle">3 exemples</text>
-<rect x="1405" y="255" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1550.0" y="280" class="label" text-anchor="middle">SelfAttention</text>
-<rect x="1405" y="303" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1550.0" y="328" class="label" text-anchor="middle">MultiHeadAttention</text>
-<rect x="1405" y="351" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1550.0" y="376" class="label" text-anchor="middle">CrossAttention</text>
-<rect x="80" y="540" width="360" height="70" rx="14" fill="#cffafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="565" class="label" text-anchor="middle">Tensor ops</text>
-<text x="260.0" y="582" class="small" text-anchor="middle">6 exemples</text>
-<rect x="115" y="635" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="660" class="label" text-anchor="middle">Reshape</text>
-<rect x="115" y="683" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="708" class="label" text-anchor="middle">Permute</text>
-<rect x="115" y="731" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="756" class="label" text-anchor="middle">Concat</text>
-<rect x="115" y="779" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="804" class="label" text-anchor="middle">Split</text>
-<rect x="115" y="827" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="852" class="label" text-anchor="middle">Add</text>
-<rect x="115" y="875" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="260.0" y="900" class="label" text-anchor="middle">MatMul</text>
-<rect x="510" y="540" width="360" height="70" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="565" class="label" text-anchor="middle">Pooling</text>
-<text x="690.0" y="582" class="small" text-anchor="middle">3 exemples</text>
-<rect x="545" y="635" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="660" class="label" text-anchor="middle">MaxPool</text>
-<rect x="545" y="683" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="708" class="label" text-anchor="middle">AvgPool</text>
-<rect x="545" y="731" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="756" class="label" text-anchor="middle">GlobalAvgPool</text>
-<rect x="940" y="540" width="360" height="70" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="565" class="label" text-anchor="middle">RNN</text>
-<text x="1120.0" y="582" class="small" text-anchor="middle">3 exemples</text>
-<rect x="975" y="635" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="660" class="label" text-anchor="middle">LSTM</text>
-<rect x="975" y="683" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="708" class="label" text-anchor="middle">GRU</text>
-<rect x="975" y="731" width="290" height="34" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1120.0" y="756" class="label" text-anchor="middle">RNN</text>
-<text x="1740" y="1026" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1265" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Familles du registre des couches</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Exemples canoniques ; l’inventaire complet vient du registre courant.</tspan>
+</text>
+<g data-node="conv">
+<rect x="44" y="163" width="325.33" height="202" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Convolutions</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Conv1d / Conv2d</tspan>
+<tspan x="66" dy="26">Conv3d / Conv4d</tspan>
+<tspan x="66" dy="26">CausalDepthwiseConv1d</tspan>
+</text>
+</g>
+<g data-node="dense">
+<rect x="437.33" y="163" width="325.33" height="202" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Projections et</tspan>
+<tspan x="459.33" dy="29">embeddings</tspan>
+</text>
+<text x="459.33" y="266" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Linear / Bilinear</tspan>
+<tspan x="459.33" dy="26">Embedding / EmbeddingBag</tspan>
+<tspan x="459.33" dy="26">PatchEmbed</tspan>
+</text>
+</g>
+<g data-node="norm">
+<rect x="830.67" y="163" width="325.33" height="202" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Normalisations</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">LayerNorm / GroupNorm</tspan>
+<tspan x="852.67" dy="26">RMSNorm / BatchNorm2d</tspan>
+<tspan x="852.67" dy="26">InstanceNorm2d</tspan>
+</text>
+</g>
+<g data-node="activation">
+<rect x="44" y="465" width="325.33" height="228" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Activations et gates</tspan>
+</text>
+<text x="66" y="539" font-size="19" fill="#334155">
+<tspan x="66" dy="0">ReLU / GELU / SiLU</tspan>
+<tspan x="66" dy="26">SwiGLU / SquaredReLU</tspan>
+<tspan x="66" dy="26">Softmax / LogSoftmax</tspan>
+</text>
+</g>
+<g data-node="primer">
+<rect x="437.33" y="465" width="325.33" height="228" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="459.33" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Fonctions Primer</tspan>
+</text>
+<text x="459.33" y="539" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Square / SqrtAbs /</tspan>
+<tspan x="459.33" dy="26">LogAbs</tspan>
+<tspan x="459.33" dy="26">Abs / ReciprocalNoNan</tspan>
+<tspan x="459.33" dy="26">Exp / Sin / Cos / Sign</tspan>
+</text>
+</g>
+<g data-node="reduce">
+<rect x="830.67" y="465" width="325.33" height="228" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="852.67" y="496" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Comparaisons et</tspan>
+<tspan x="852.67" dy="29">réductions</tspan>
+</text>
+<text x="852.67" y="568" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Maximum / Minimum</tspan>
+<tspan x="852.67" dy="26">ReduceSum / ReduceMean</tspan>
+<tspan x="852.67" dy="26">ReduceMin / ReduceMax /</tspan>
+<tspan x="852.67" dy="26">ReduceProd</tspan>
+</text>
+</g>
+<g data-node="tensor">
+<rect x="44" y="793" width="325.33" height="228" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="824" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Opérations de</tspan>
+<tspan x="66" dy="29">tenseurs</tspan>
+</text>
+<text x="66" y="896" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Reshape / Permute / Add</tspan>
+<tspan x="66" dy="26">MatMul / BatchMatMul</tspan>
+<tspan x="66" dy="26">LowerTriangular / Concat</tspan>
+</text>
+</g>
+<g data-node="pool">
+<rect x="437.33" y="793" width="325.33" height="228" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="824" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Pooling et</tspan>
+<tspan x="459.33" dy="29">redimensionnement</tspan>
+</text>
+<text x="459.33" y="896" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">MaxPool2d / AvgPool2d</tspan>
+<tspan x="459.33" dy="26">TokenMeanPool</tspan>
+<tspan x="459.33" dy="26">UpsampleNearest /</tspan>
+<tspan x="459.33" dy="26">PixelShuffle</tspan>
+</text>
+</g>
+<g data-node="other">
+<rect x="830.67" y="793" width="325.33" height="228" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="852.67" y="824" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Autres familles</tspan>
+</text>
+<text x="852.67" y="867" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">LSTM / GRU / RNN</tspan>
+<tspan x="852.67" dy="26">Dropout / Reparameterize</tspan>
+<tspan x="852.67" dy="26">Constant / Identity /</tspan>
+<tspan x="852.67" dy="26">NMS</tspan>
+</text>
+</g>
+<rect x="44" y="1069" width="1112" height="110" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="1097" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Exemples non exhaustifs. Mimir.Layers.available() expose l’inventaire canonique actif.</tspan>
+<tspan x="66" dy="26">• Une entrée LayerType n’assure pas toutes les formes sur tous les backends ; vérifier forward et</tspan>
+<tspan x="66" dy="26">backward.</tspan>
+</text>
+<text x="44" y="1214" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : LayerTypes.hpp · PrimerGeometry.hpp · RuntimeLayerDispatch.hpp</tspan>
+</text>
+</g>
 </svg>

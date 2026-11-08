@@ -40,9 +40,10 @@ Pour choisir un parcours adapté à votre expérience, consultez les
 [parcours d'apprentissage](01-Getting-Started/06-Learning-Paths.md).
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-./bin/mimir --lua scripts/templates/template_new_model.lua
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DMIMIR_VIZ_BACKEND=NONE -DENABLE_VULKAN=OFF -DENABLE_OPENCL=OFF
+cmake --build build --parallel 2
+./run_mimir.sh --lua scripts/examples/inspect_vae_conv.lua
 ```
 
 ## Prologue
@@ -71,6 +72,7 @@ cmake --build build -j"$(nproc)"
 - [Registre et builders](04-Architecture-Internals/19-Models-Registry-And-Builders.md)
 - [Planification de l'exécution](04-Architecture-Internals/22-Planning.md)
 - [Autograd et gradients](04-Architecture-Internals/13-Autograd-Gradients.md)
+- [Schémas : contexte, sources et régénération](graphs/README.md)
 
 ## Les bases
 
@@ -87,6 +89,7 @@ cmake --build build -j"$(nproc)"
 - [Scripts et exemples](02-User-Guide/10-Examples.md)
 - [Packages d’architecture MPK](02-User-Guide/15-MPK.md)
 - [Rapports Show-Graph et métriques](02-User-Guide/16-Show-Graph-Metrics.md)
+- [Projection 3D des poids et activations](02-User-Guide/18-Projection-3D.md)
 
 ## Modèles
 
@@ -105,6 +108,7 @@ cmake --build build -j"$(nproc)"
 - [`Mimir.Model`](03-API-Reference/10-Model.md)
 - [`Mimir.Architectures`](03-API-Reference/11-Architectures.md)
 - [`Mimir.Layers`](03-API-Reference/18-Layers-Module.md)
+- [Catalogue des types de layers](03-API-Reference/01-Layers.md)
 - [`Mimir.Tokenizer`](03-API-Reference/12-Tokenizer.md)
 - [`Mimir.Dataset`](03-API-Reference/13-Dataset.md)
 - [`Mimir.IO`](03-API-Reference/21-IO.md)
@@ -126,12 +130,19 @@ cmake --build build -j"$(nproc)"
 - [Développer un runtime](07-Devs/04-Runtime-Development.md)
 
 Le routeur essaie les backends disponibles dans cet ordre : ROCm, CUDA,
-Vulkan, OpenCL, puis CPU. Le support déclaré d'une opération ne garantit pas
+Vulkan, OpenCL, TPU si sa session est fournie, puis CPU. Le support déclaré d'une opération ne garantit pas
 qu'elle possède un kernel GPU spécialisé ; les pages runtime distinguent ces
 deux notions.
 
-CPU, Vulkan et OpenCL couvrent 72 types exécutables en forward et 73 en
-backward. [NMS](03-API-Reference/01-Layers.md#contrat-de-nms) possède un backward
+La couverture effective dépend du backend, du type de couche et de sa
+configuration. Les [convolutions 3D/4D et variantes SIMD CPU](04-Architecture-Internals/14-Layers-And-Ops.md)
+sont décrites avec leurs conventions et leurs vérifications.
+Les [primitives issues de Primer](04-Architecture-Internals/14-Layers-And-Ops.md)
+ajoutent 18 types, dont `SquaredReLU`, les réductions par axe, les comparaisons
+min/max et le masque triangulaire. Leurs contrats incluent les gradients, les
+domaines numériques et les conditions de repli CPU ; l’[API Lua des layers](03-API-Reference/18-Layers-Module.md)
+permet de les inspecter dans le modèle courant.
+[NMS](03-API-Reference/01-Layers.md#contrat-de-nms) possède un backward
 stop-gradient sur CPU, CUDA, Vulkan et OpenCL. Les kernels de référence GPU
 complètent la couverture ; ils ne garantissent pas une amélioration de vitesse.
 
@@ -160,7 +171,7 @@ complètent la couverture ; ils ne garantissent pas une amélioration de vitesse
 
 ## Tutoriels
 
-- [Tous les tutoriels](08-Tuto/00-INDEX.md)
+- [Tous les tutoriels : cinq niveaux et couverture par aspect](08-Tuto/00-INDEX.md)
 - [Le framework en trois étapes](08-Tuto/01-Cours-Framework-3-Etapes.md)
 - [Ajouter un modèle](08-Tuto/02-Tuto-Ajouter-Modele.md)
 - [Écrire un script Lua](08-Tuto/03-Tuto-Coder-Script.md)
@@ -170,8 +181,22 @@ complètent la couverture ; ils ne garantissent pas une amélioration de vitesse
 - [Valider VAEConv sans dataset](08-Tuto/07-Tuto-VAEConv-Sans-Dataset.md)
 - [Du registre au checkpoint](08-Tuto/08-Tuto-Registre-Pipeline-Checkpoint.md)
 - [Créer et inspecter un package MPK](08-Tuto/09-Tuto-Creer-MPK.md)
+- [Installation et configuration](08-Tuto/10-Tuto-Installation-Configuration.md)
+- [Données et tokenizer](08-Tuto/11-Tuto-Donnees-Tokenizer.md)
+- [Entraînement, validation, reprise et inférence](08-Tuto/12-Tuto-Entrainement-Validation-Reprise-Inference.md)
+- [Familles de modèles et workflows](08-Tuto/13-Tuto-Familles-De-Modeles.md)
+- [Viz, métriques et diagnostic](08-Tuto/14-Tuto-Viz-Metriques-Diagnostic.md)
+- [Mémoire, performances et runtimes](08-Tuto/15-Tuto-Memoire-Performances-Runtimes.md)
+- [Compilation, portabilité, AMP et DDP](08-Tuto/16-Tuto-Compilation-Portabilite-AMP-DDP.md)
+- [Scripting, exports, tests et contribution](08-Tuto/17-Tuto-Scripting-Exports-Tests-Contribution.md)
 
 ## Conventions essentielles
+
+Les architectures DL sont écrites en C/C++ dans une classe dérivée de `Model`.
+Lua et JSON pilotent le modèle ; ils ne définissent pas son graphe. MPK est
+l’alternative expérimentale, encore partielle pour la production. Le
+[contrat des architectures](07-Devs/08-Architecture-Contract.md) est commun à
+tous les niveaux des tutoriels.
 
 | Nom | Rôle |
 | --- | --- |

@@ -34,8 +34,11 @@ Compléments développeurs :
 
 ## Où modifier
 
-- Nouveau layer : `src/Layers.hpp` + exécution/backward dans `src/Model.cpp`
-- Nouvelle architecture : `src/Models/Registry/ModelArchitectures.cpp`
+- Nouveau layer : type dans `src/LayerTypes.hpp`, métadonnées dans
+  `src/Layers.hpp`, calculs forward/backward et capacités dans `src/runtimes/`,
+  reliés au dispatcher et à `RuntimeRouter`.
+- Nouvelle architecture : classe C++ dérivée de `Model` dans `src/Models/`,
+  entrée dans `src/Models/Registry/ModelArchitectures.cpp` et sources dans CMake.
 - API scripting (contrat système commun) : `src/scriptings/ScriptingContext.hpp`
 - API Lua (implémentation) : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`
 

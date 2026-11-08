@@ -20,6 +20,8 @@ Sources de vérité :
 - `src/runtimes/opencl/OpenCLRuntime.hpp` / `.cpp` — OpenCL
 - `src/runtimes/PointwiseFusionKernels.cuh` — kernels pointwise partagés
 - `src/runtimes/portable/PortablePointwiseFusion.hpp` — soumission fusionnée Vulkan/OpenCL
+- `src/runtimes/portable/PortableRuntime.cpp` — capacités et dispatch portables
+- `src/runtimes/PrimerGeometry.hpp` et `src/runtimes/portable/PortablePrimerValidation.hpp` — contrats et validation des opérations Primer
 
 Guide utilisateur associé : [docs/05-Advanced/05-GPU-Acceleration.md](../05-Advanced/05-GPU-Acceleration.md).
 
@@ -35,6 +37,8 @@ Guide utilisateur associé : [docs/05-Advanced/05-GPU-Acceleration.md](../05-Adv
 - [6) Vulkan Runtime — kernels compute réels (SPIR-V)](#6-vulkan-runtime--kernels-compute-réels-spir-v)
 - [7) Invariants et gotchas](#7-invariants-et-gotchas)
 - [8) Ajouter un nouveau fast-path GPU](#8-ajouter-un-nouveau-fast-path-gpu)
+- [OpenCL et Vulkan : kernels de référence partagés](#opencl-et-vulkan-kernels-de-référence-partagés)
+- [Opérations Primer et séquences causales](#opérations-primer-et-séquences-causales)
 - [Fusion native des chaînes pointwise](#fusion-native-des-chaînes-pointwise)
 - [Validation de la fusion au 28 octobre 2026](#validation-de-la-fusion-au-28-octobre-2026)
 - [Étapes suivantes](#étapes-suivantes)
@@ -270,15 +274,22 @@ Les layers du modèle passent par `RuntimeRouter` en forward et backward. Ajoute
 
 Les backends Vulkan et OpenCL conservent leurs chemins spécialisés et utilisent
 `PortableRuntime` pour les autres opérations et les passes arrière. Leur
-couverture par type correspond au dispatcher CPU exécutable : **72 types en
-forward et 73 en backward**, dont NMS avec stop-gradient. `Lambda` est refusé
+couverture déclarée par type correspond au dispatcher CPU exécutable : **94 types en
+forward et 95 en backward** dans le registre actuel, dont NMS avec stop-gradient.
+Ces déclarations supposent le backend compilé et activé ; elles ne prouvent pas
+l'acceptation d'une opération particulière ni son exécution sur un périphérique.
+`Lambda` est refusé
 en forward par le dispatcher CPU lui-même ; son backward identité est supporté
-sur CPU, Vulkan et OpenCL. CUDA possède les mêmes familles de kernels mais
-n'implémente pas le backward `Lambda`.
+sur CPU, Vulkan et OpenCL. CUDA ne prend pas en charge le backward `Lambda` et
+ne déclare pas de kernels natifs pour les 18 opérations Primer,
+`CausalDepthwiseConv1d` ou `SwiGLU` : ces types restent en `HostFallback` sur
+CUDA et ROCm. La présence d'une source CUDA utilisée par le générateur portable
+ne suffit pas à publier une capacité native dans ces backends.
 
 Les familles couvertes comprennent convolutions, normalisations, attention,
 projections/embeddings, pooling, transformations de tenseurs, récurrence,
-upsampling, dropout et reparamétrisation. Les configurations, formes de tenseurs
+upsampling, dropout, reparamétrisation, convolutions ND, séquences causales
+et primitives Primer. Les configurations, formes de tenseurs
 et limites du device restent vérifiées ; cette couverture par type ne garantit
 pas que toute forme soit acceptée.
 
@@ -339,8 +350,76 @@ Ces résultats prouvent la conformité et le routage, sans mesure de performance
 Voir aussi [le contrat NMS](../03-API-Reference/01-Layers.md#contrat-de-nms)
 et [les sources portables](../../src/runtimes/portable/README.md).
 
+## Opérations Primer et séquences causales
 
-### Benchmarks Colab et validation du 18 octobre 2026
+Les 18 nouveaux types proviennent du vocabulaire étudié dans Primer. Leurs
+[contrats mathématiques et exemples Lua](14-Layers-And-Ops.md#primitives-issues-de-létude-primer)
+définissent les domaines, axes, égalités et gradients ; cet ajout n'installe pas
+automatiquement une architecture Primer dans les modèles existants.
+
+| Famille | Types |
+| --- | --- |
+| Fonctions élémentaires | `SquaredReLU`, `Square`, `SqrtAbs`, `Exp`, `LogAbs`, `Abs`, `ReciprocalNoNan`, `Sign`, `Sin`, `Cos` |
+| Comparaisons | `Maximum`, `Minimum` |
+| Réductions | `ReduceSum`, `ReduceMean`, `ReduceMin`, `ReduceMax`, `ReduceProd` |
+| Masque de matrices | `LowerTriangular` |
+
+| Backend | Forward / backward de ces 18 types | Limites et preuve locale |
+| --- | --- | --- |
+| CPU | Natif | Référence FP32, domaines et formes contrôlés, tests de gradients et checkpoints. |
+| Vulkan | Natif via `PortableRuntime` | Exécuté sur AMD Radeon Graphics/RADV RENOIR le 8 novembre 2026 ; les tests contrôlent le runtime sélectionné. |
+| OpenCL | Natif via `PortableRuntime` | Kernels générés et syntaxe OpenCL 1.2 validée ; exécution matérielle de ces 18 types non vérifiée lors de cet ajout. |
+| CUDA / ROCm | `HostFallback` | Le routeur peut sélectionner un autre backend natif disponible, puis le CPU. Aucun calcul de ces types n'est attribué à un kernel CUDA/HIP natif. |
+
+Les calculs CPU sont dans `cpu/PrimerKernels.hpp`. Les algorithmes device sont
+définis dans `cuda/CudaPrimerOps.cuh`, puis traduits en OpenCL/SPIR-V par
+`scripts/dev/generate_portable_reference.py`. `portable/PortablePrimerOps.hpp`
+prépare les appels et publie les résultats seulement après validation complète.
+Les kernels attribuent chaque sortie ou gradient d'entrée à une invocation,
+sans atomique flottante. Le backward de `ReduceProd` recalcule le produit des
+autres facteurs sans division par zéro ; son travail quadratique dans la
+longueur de l'axe est borné avant lancement par les politiques portables.
+
+Le chemin portable refuse les entrées et gradients subnormaux FP32, car leur
+préservation n'est pas garantie par tous les pilotes. Un zéro device pouvant
+masquer un résultat non nul est également signalé et refusé avant publication.
+Le routeur réessaie alors sur CPU ; cette protection conservatrice peut aussi
+concerner une annulation exacte. Les résultats non finis ou les domaines
+invalides restent des échecs si aucun backend ne peut produire un résultat valide.
+
+`CausalDepthwiseConv1d` et `SwiGLU` suivent un chemin natif CPU et portable
+distinct, documenté dans [les opérations de séquence causale](14-Layers-And-Ops.md#opérations-de-séquence-causale).
+Ces deux types et les 18 primitives Primer ne sont pas ajoutés à la liste
+historique des activations admises par la fusion pointwise ci-dessous.
+
+### Vérification ciblée des primitives Primer
+
+Les cibles et tests sont déclarés dans `Tests/CMakeLists.txt`. Les recettes
+suivantes supposent un build courant avec `mimir` et `RuntimeTest.PrimerOps` ;
+elles ne reconstruisent pas le binaire :
+
+```bash
+env MIMIR_DISABLE_CUDA=1 MIMIR_DISABLE_ROCM=1 MIMIR_DISABLE_VULKAN=1 MIMIR_DISABLE_OPENCL=1 \
+  ctest --test-dir build --output-on-failure \
+  -R '^(RuntimeTest|ModelTest|LuaTest)\.PrimerOps$'
+ctest --test-dir build --output-on-failure -R '^RuntimeTest\.VulkanPrimerOps$'
+```
+
+`RuntimeTest.VulkanPrimerOps` retourne `77` lorsque Vulkan est absent ou
+indisponible ; CTest le marque alors ignoré, ce qui ne constitue pas une preuve
+GPU. Les cas ordinaires exigent l'exécution Vulkan native. Les cas numériques
+protégés vérifient le refus sans publication partielle et le repli CPU explicite.
+Les tests utilisent des oracles indépendants, des différences finies et des
+comparaisons adaptées au FP32, y compris pour les très petites valeurs.
+
+Lors de l'intégration du 8 novembre 2026, les 11 tests CPU ciblés et les trois
+tests Vulkan `VULKANNativeOps`, `VulkanCausalSequence` et `VulkanPrimerOps` passent.
+Le scénario `scripts/tests/test_primer_ops.lua` passe aussi via `run_mimir.sh`,
+avec backward, mise à jour des poids et rechargement du checkpoint. Ces résultats
+ne valident ni les performances, ni une exécution OpenCL/CUDA/ROCm de ces types.
+
+
+## Benchmarks Colab et validation du 18 octobre 2026
 
 Les 165 cas de parité native par backend ont été revérifiés sur AMD Radeon
 Graphics avec Vulkan/RADV et OpenCL/Rusticl. Le contrôle des budgets portables

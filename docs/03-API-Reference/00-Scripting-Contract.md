@@ -65,6 +65,11 @@ train()
 
 ## Contrat des architectures
 
+- Le graphe DL natif est défini en C/C++ dans une classe dérivée de `Model`.
+- Les scripts et JSON configurent et exécutent cette architecture, sans définir
+  eux-mêmes sa topologie.
+- MPK est l’alternative expérimentale et pas entièrement exploitable en production.
+  Voir le [contrat de définition](../07-Devs/08-Architecture-Contract.md).
 - Les architectures sont decouvrables via `Architectures`.
 - Les definitions d'architecture doivent etre deterministes.
 - Une architecture valide doit pouvoir etre reconstruite a partir de sa configuration.

@@ -10,13 +10,19 @@ Comprendre et exécuter les chemins diffusion disponibles.
 
 ## Diagrammes d'explication
 
-![Architecture VAE Conv](../graphs/17_vaeconv_architecture.svg)
+![VAEConv natif : encodeur, latent spatial et contrats de sortie](../graphs/17_vaeconv_architecture.svg)
 
 ![Architecture UNet](../graphs/18_unet_architecture.svg)
 
-![Architecture diffusion](../graphs/19_diffusion_architecture.svg)
+![DiffusionModel : prédicteur de bruit MLP natif](../graphs/19_diffusion_architecture.svg)
 
-![Transformer SD3.5](../graphs/20_sd35_transformer.svg)
+![SD3.5 : squelette enregistré, pas un pipeline complet](../graphs/20_sd35_transformer.svg)
+
+Les images suivent les classes du dépôt. `DiffusionModel` est une baseline MLP,
+tandis que le schéma UNet décrit sa propre classe ; ces deux images ne forment
+pas implicitement un pipeline Lumen. Les blocs VAEConv sont configurables et
+`sd3_5` reste un placeholder. Les schémas ne fixent pas un nombre de paramètres
+indépendant de la configuration. Voir leur [provenance](../graphs/README.md).
 
 Ce dépôt contient des architectures diffusion/autoencoder exposées via le registre.
 
@@ -80,12 +86,24 @@ mutuellement exclusifs.
 
 ## Statut
 
-Les scripts de diffusion sont des **démos / squelettes** tant qu’aucun checkpoint entraîné n’est fourni.
-Pour générer des images cohérentes, il faut :
+Le registre distingue le squelette `sd3_5`, la baseline MLP `diffusion` et
+le modèle natif de diffusion latente `lumen_diffusion`. L'absence de checkpoint entraîné
+ne transforme pas ces implémentations en un même type de démo.
+Lumen utilise son DiT, un VAEConv compatible et un scheduler ; un UNet séparé
+n'est pas requis par ce chemin.
+
+Le script d'entraînement Lumen choisit `vae_text` par défaut pour un nouveau
+run et exige alors un checkpoint VAEText compatible. Pour entraîner avec son
+encodeur Transformer interne, passez explicitement
+`--text-conditioning transformer`. Le choix `t5` exige son checkpoint T5.
+Une reprise conserve le mode sauvegardé.
+
+Pour juger la cohérence des images générées, il faut :
 
 - un VAE image entraîné
-- un U-Net/diffusion entraîné
+- le modèle de diffusion correspondant entraîné
 - une config de scheduler cohérente
+- une évaluation sur les prompts et images du domaine visé
 
 ## Étapes suivantes
 

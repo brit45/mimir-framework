@@ -11,6 +11,11 @@ Contribuer avec des changements cohérents et maintenables.
 
 Ce guide montre comment ajouter une entrée Python minimale en reprenant le design de l'intégration Lua.
 
+Il s'agit d'un guide d'extension : le checkout actuel ne fournit pas de bridge
+`--python`. Les classes, fichiers et commandes Python ci-dessous sont à créer
+et à intégrer avant de pouvoir les exécuter. Les graphes restent définis par
+les classes C++ dérivées de `Model` ; le bridge ne fait que les piloter.
+
 But :
 
 - exécuter `./bin/mimir --python script.py -- args...`,

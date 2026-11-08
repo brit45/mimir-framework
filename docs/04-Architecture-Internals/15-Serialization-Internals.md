@@ -50,6 +50,7 @@ Points importants :
 - `detect_format(path)` : heuristique (dossier → RawFolder si `manifest.json`, fichier `.safetensors` → SafeTensors, `.json` → DebugJson).
 - `strict_mode` : si vrai, l’absence de tenseurs attendus est une erreur.
 - `validate_checksums` : si activé, vérifie la cohérence (selon le writer).
+- `load_layer_metadata` : `true` par défaut. À `false`, RawFolder et SafeTensors préservent les paramètres de couches et les connexions d'un graphe préconstruit ; les poids correspondants restent chargés. Ce réglage sert notamment à l'import d'un VAE complet dans son décodeur seul. Il ne désactive pas la reconstruction d'un graphe vide et ne remplace pas `apply_model_config=false`.
 
 ## 3) Dispatch réel (implémentation)
 

@@ -17,8 +17,9 @@ pas activés par ces deux profils ; leur validation reste distincte.
 
 Installer CMake, Ninja, G++, Lua 5.3, LZ4, Node.js 22, .NET 10, `dotnet-script`,
 Rust et `rust-script`, comme indiqué dans le workflow. Les bridges externes
-nécessitent leurs exécutables dans `PATH`. `config.sh` utilise apt/sudo pour les
-dépendances système ; `--skip-system-deps` est réservé aux environnements où
+nécessitent leurs exécutables dans `PATH`. Dans ce profil Ubuntu, `config.sh`
+utilise apt/sudo ; il détecte aussi d'autres gestionnaires sur les plateformes
+prises en charge. `--skip-system-deps` est réservé aux environnements où
 elles sont déjà installées.
 
 ```bash
@@ -104,6 +105,11 @@ checkpoints, builds et le hub local non suivi ne font pas partie de la release.
 
 
 ## Résultats locaux du 22 octobre 2026
+
+Ce tableau conserve les preuves datées de cette validation ; ses nombres de
+tests, de pages et de fichiers ne sont pas l'inventaire du checkout actuel.
+Pour refaire l'inventaire, exécuter les commandes de vérification ci-dessus
+et `ctest --test-dir build -N` dans la configuration concernée.
 
 | Profil ou contrôle | Résultat |
 | --- | --- |

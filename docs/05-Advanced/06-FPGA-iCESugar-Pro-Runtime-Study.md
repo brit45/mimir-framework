@@ -1,5 +1,21 @@
 # Etude d'un runtime FPGA pour iCESugar-Pro v1.3
 
+## État d'intégration du checkout actuel
+
+Cette page contient une étude matérielle et des propositions d'accélération,
+à distinguer du chemin actif. `CMakeLists.txt` inclut `FpgaRuntime.cpp`,
+`FpgaSession.cpp` et `FpgaIo.cpp`. La session négocie le firmware pour le
+buffering de dataset, les conversions F32/F16/BF16 et le contrôleur de
+checkpoints (CRC32 et nombre d'octets). `MIMIR_DISABLE_FPGA=1` désactive cette
+session ; `MIMIR_FPGA_IO=0` permet de laisser les transferts I/O à l'hôte.
+
+Le FPGA n'est pas enregistré comme candidat neuronal dans `RuntimeRouter` :
+`linearForward`, `forwardLayer` et les votes de types retournent `false`.
+Les primitives INT8 du protocole sont des fonctions de diagnostic, sans route
+automatique pour les layers d'un modèle. La présence d'une carte ou des sources
+ne prouve pas un gain d'entraînement. Les sections de conception ci-dessous
+décrivent des travaux possibles, pas la couverture native du binaire.
+
 ## Resume executif
 
 La carte cible est une **MuseLab iCESugar-Pro v1.3**, equipee d'un FPGA Lattice
@@ -239,22 +255,25 @@ bloquants. Il faut un `FpgaSubgraphOp`, un handle asynchrone et une jonction de 
 pour obtenir ce chevauchement. Ajouter seulement `FpgaRuntime::forwardLayer` ne
 permettrait pas au CPU de progresser pendant le calcul FPGA.
 
-#### Probe de validation VAE intégré
+#### Prototype de probe de validation VAE
 
-Le chemin VAE dispose maintenant d'un premier chevauchement de production limité
-au noyau disponible. Après une validation CPU, `FpgaValidationRunner` soumet une
+Le code de probe expérimental utilise `FpgaValidationRunner` pour soumettre une
 projection `8x64` d'une image holdout et rend immédiatement la main. Le résultat
 est collecté au step suivant, ce qui permet au calcul FPGA et au transport UART de
-s'exécuter pendant le prochain batch CPU.
+s'exécuter pendant le prochain batch CPU. Son intégration dans la boucle VAE est
+protégée par `MIMIR_ENABLE_FPGA_RUNTIME`, que le CMake actuel ne définit pas.
+`FpgaValidationRunner.cpp` est compilé par sa cible de test dédiée, pas par
+`MIMIR_SOURCES`. Ce chevauchement n'est donc pas actif dans le build standard.
 
-L'activation exige simultanément :
+Le prototype conditionne son activation aux éléments suivants, en plus de
+l'extension expérimentale nécessaire :
 
 - `fpga_validation_enabled=true` ;
 - une fréquence `fpga_validation_every_steps` positive ;
 - un holdout image non vide ;
 - la détection USB/tty, un handshake Mímir valide et la capacité matricielle INT8.
 
-Chaque sortie est comparée bit à bit à la référence CPU et journalisée dans
+Dans ce prototype, chaque sortie est comparée bit à bit à la référence CPU et journalisée dans
 `fpga_validation.jsonl`. Ce résultat est un probe d'intégrité auxiliaire : il ne
 modifie jamais la loss, le learning rate ou les décisions d'arrêt du VAE.
 
@@ -355,9 +374,10 @@ Le backend doit :
 - retourner `false` sans modifier la sortie en cas d'erreur, pour le repli CPU ;
 - exposer temps de transfert, temps FPGA et taux de reutilisation des poids.
 
-Le routeur actuel prend explicitement `ROCm, CUDA, Vulkan, OpenCL, CPU`. Il faudra
-le rendre extensible avec une liste ordonnee de runtimes, puis placer FPGA avant
-CPU seulement quand son modele de cout predit un gain. Pour executer CPU et FPGA
+Le routeur actuel compose `ROCm, CUDA, Vulkan, OpenCL, TPU, CPU`, selon les
+runtimes fournis. Il n'y insère pas le service I/O FPGA. Une future route de
+calcul FPGA devrait être intégrée avec ses capacités et une mesure de coût
+avant de prétendre accélérer un layer. Pour executer CPU et FPGA
 en parallele, la boucle sequentielle de `Model::forward` devra devenir un
 ordonnanceur de DAG : une branche FPGA renvoie un evenement, tandis qu'une branche
 CPU independante peut progresser. Une couche de jonction attend les deux.

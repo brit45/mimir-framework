@@ -9,17 +9,29 @@
 #include <memory>
 #include <utility>
 #include <optional>
+#include <limits>
 #include <string>
+#include <map>
 #include <cstdint>
 #include <vector>
 #include <cstdlib>
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <filesystem>
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
+#include <sstream>
 #include <fcntl.h>
 #include <cmath>
 #include <csignal>
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <io.h>
 #include <conio.h>
 #ifndef O_CLOEXEC
@@ -32,8 +44,11 @@
 #define STDERR_FILENO 2
 #endif
 #else
+#include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <termios.h>
+extern char** environ;
 #endif
 
 static inline int mimir_os_open(const char* path, int flags) {
@@ -121,6 +136,8 @@ public:
         float mse = 0.0f;
         float grad_norm = 0.0f;
         float grad_max = 0.0f;
+        // Métriques propres au modèle (par ex. cross_entropy/perplexity pour CausalLM).
+        std::map<std::string, double> model_metrics;
 
         // Warmup KL: beta effectif appliqué (après warmup)
         float kl_beta_effective = 0.0f;
@@ -178,6 +195,7 @@ public:
         if (!running_) {
             running_ = true;
         }
+        startGraphReportWorker();
         if (!viz_config.empty()) {
             if (viz_config.contains("visualization") && viz_config["visualization"].is_object()) {
                 const auto& v = viz_config["visualization"];
@@ -241,6 +259,8 @@ public:
                 current_viz->setSkipConnectionControl(std::atomic_load(&skip_control_));
                 current_viz->setRuntimeConfiguration(std::atomic_load(&runtime_config_));
             }
+            current_viz->setGraphReportControl(graph_report_control_);
+            current_viz->setLatentSpaceControl(std::atomic_load(&latent_space_control_));
 
             // Best-effort: permettre de configurer la cadence Viz depuis config.
             // Exemple: {"visualization": {"update_interval_ms": 16}}
@@ -344,7 +364,8 @@ public:
     
     // Arrêter les moniteurs
     void stop() {
-        if (!running_ && !csv_thread_.joinable()) return;
+        if (!running_ && !csv_thread_.joinable() && !graph_report_thread_.joinable() &&
+            !latent_space_thread_.joinable()) return;
 
         running_ = false;
         setTrainingPaused(false);
@@ -355,6 +376,25 @@ public:
         csv_cv_.notify_all();
         if (csv_thread_.joinable()) csv_thread_.join();
         cv_.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(graph_report_worker_mutex_);
+            graph_report_worker_stop_ = true;
+        }
+        graph_report_control_->requested.store(false, std::memory_order_relaxed);
+        graph_report_worker_cv_.notify_all();
+        if (graph_report_thread_.joinable() &&
+            std::this_thread::get_id() != graph_report_thread_.get_id()) {
+            graph_report_thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(latent_space_worker_mutex_);
+            latent_space_worker_stop_ = true;
+        }
+        latent_space_worker_cv_.notify_all();
+        if (latent_space_thread_.joinable() &&
+            std::this_thread::get_id() != latent_space_thread_.get_id()) {
+            latent_space_thread_.join();
+        }
         
         if (htop_thread_.joinable() && std::this_thread::get_id() != htop_thread_.get_id()) {
             htop_thread_.join();
@@ -903,6 +943,68 @@ public:
         configureMetricsCsv(filepath, true);
     }
 
+    // Configure le rapport graphique depuis la configuration effective du modèle.
+    // Le bouton Viz reste désactivé tant qu'aucun modèle n'a été fourni.
+    void configureGraphReport(const json& model_config) {
+        if (!model_config.is_object() || model_config.empty()) return;
+        std::string csv_path;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            csv_path = metrics_csv_file_;
+        }
+        auto job = makeGraphReportJob(model_config, csv_path);
+        if (!job) {
+            graph_report_control_->state.store(GraphReportControl::State::Failed,
+                                               std::memory_order_relaxed);
+            graph_report_control_->setMessage("Configuration du rapport invalide");
+            return;
+        }
+        const std::string output_path = job->html_path.string();
+        {
+            std::lock_guard<std::mutex> lock(graph_report_config_mutex_);
+            graph_report_job_ = std::move(*job);
+        }
+        graph_report_control_->requested.store(false, std::memory_order_relaxed);
+        graph_report_control_->setMessage("Rapport prêt : " + output_path);
+        graph_report_control_->state.store(GraphReportControl::State::Ready,
+                                           std::memory_order_release);
+        startGraphReportWorker();
+        if (auto current_viz = getViz())
+            current_viz->setGraphReportControl(graph_report_control_);
+    }
+
+    void configureLatentSpace(const json& model_config) {
+        const auto control = std::atomic_load(&latent_space_control_);
+        const bool configured = model_config.is_object() && !model_config.empty();
+        const auto field = [&](const char* name) {
+            if (!model_config.is_object()) return std::string();
+            const auto it = model_config.find(name);
+            return it != model_config.end() && it->is_string() ? it->get<std::string>() : std::string();
+        };
+        std::string architecture = field("type");
+        if (architecture.empty()) architecture = field("architecture");
+        std::string name = field("model_name");
+        if (name.empty()) name = field("name");
+        if (configured && architecture.empty()) architecture = "modèle";
+        if (name.empty()) name = architecture;
+        control->resetSession(configured ? name : std::string(),
+                              configured ? architecture : std::string(), configured);
+        if (configured) {
+            startLatentSpaceWorker();
+        }
+        if (auto current_viz = getViz()) current_viz->setLatentSpaceControl(control);
+    }
+
+    std::shared_ptr<mimir::viz::LatentSpaceControl> latentSpaceControl() const {
+        return std::atomic_load(&latent_space_control_);
+    }
+
+    void submitLatentSpaceSnapshot(mimir::viz::LatentSpaceRawSnapshot snapshot) {
+        const auto control = std::atomic_load(&latent_space_control_);
+        if (!control || !control->available.load(std::memory_order_acquire)) return;
+        if (control->submitRawSnapshot(std::move(snapshot))) latent_space_worker_cv_.notify_one();
+    }
+
     // Bloquer jusqu'à fermeture de la fenêtre Viz (best-effort).
     // Utile en mode --lua pour éviter que le process se termine dès que le script finit.
     void waitForVizClose() {
@@ -931,6 +1033,547 @@ public:
     
 private:
     friend struct AsyncMonitorPreviewTestAccess;
+
+    struct GraphReportJob {
+        std::filesystem::path root_path;
+        std::filesystem::path script_path;
+        std::filesystem::path csv_path;
+        std::filesystem::path checkpoint_dir;
+        std::filesystem::path html_path;
+        std::filesystem::path markdown_path;
+        std::filesystem::path snapshot_csv_path;
+        std::filesystem::path log_path;
+        std::string model_name;
+        std::string optimizer;
+        std::string recon_loss;
+        std::optional<std::string> validate_every_steps;
+        std::optional<std::string> validate_items;
+        std::optional<std::string> validate_holdout;
+        std::optional<std::string> validate_holdout_frac;
+        std::optional<std::string> validate_holdout_items;
+        std::optional<std::string> n_dataset;
+    };
+
+    static const json* graphConfigFind(const json& config, const char* key) {
+        if (config.contains(key)) return &config.at(key);
+        for (const char* section : {"training", "model", "dataset"}) {
+            const auto it = config.find(section);
+            if (it != config.end() && it->is_object() && it->contains(key))
+                return &it->at(key);
+        }
+        return nullptr;
+    }
+
+    static std::string graphConfigString(const json& config,
+                                         std::initializer_list<const char*> keys) {
+        for (const char* key : keys) {
+            const json* value = graphConfigFind(config, key);
+            if (value && value->is_string() && !value->get<std::string>().empty())
+                return value->get<std::string>();
+        }
+        return {};
+    }
+
+    static std::optional<std::string> graphConfigNumber(
+        const json& config, std::initializer_list<const char*> keys) {
+        for (const char* key : keys) {
+            const json* value = graphConfigFind(config, key);
+            if (value && value->is_number()) {
+                std::ostringstream text;
+                if (value->is_number_integer()) text << value->get<long long>();
+                else text << std::setprecision(12) << value->get<double>();
+                return text.str();
+            }
+        }
+        return std::nullopt;
+    }
+
+    static std::optional<std::string> graphConfigBoolean(
+        const json& config, const char* key) {
+        const json* value = graphConfigFind(config, key);
+        if (!value) return std::nullopt;
+        if (value->is_boolean()) return value->get<bool>() ? "true" : "false";
+        if (value->is_string()) {
+            std::string normalized = value->get<std::string>();
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            if (normalized == "true" || normalized == "1" || normalized == "yes" || normalized == "on")
+                return "true";
+            if (normalized == "false" || normalized == "0" || normalized == "no" || normalized == "off")
+                return "false";
+        }
+        if (value->is_number_integer()) return value->get<int>() != 0 ? "true" : "false";
+        return std::nullopt;
+    }
+
+    static std::string graphSafeName(std::string name) {
+        for (char& value : name) {
+            const auto ch = static_cast<unsigned char>(value);
+            if (!(std::isalnum(ch) || value == '_' || value == '-')) value = '_';
+        }
+        while (!name.empty() && name.front() == '_') name.erase(name.begin());
+        while (!name.empty() && name.back() == '_') name.pop_back();
+        return name.empty() ? "model" : name;
+    }
+
+    static std::string graphOptimizerName(const json& config) {
+        const json* value = graphConfigFind(config, "optimizer");
+        if (!value) value = graphConfigFind(config, "algorithm");
+        if (!value) value = graphConfigFind(config, "algo");
+        if (value && value->is_string()) return value->get<std::string>();
+        if (value && value->is_number_integer()) {
+            static const char* names[] = {
+                "sgd", "adam", "adamw", "lion", "adafactor",
+                "radam", "nadam", "rmsprop", "lamb"};
+            const auto index = value->get<int>();
+            if (index >= 0 && index < static_cast<int>(sizeof(names) / sizeof(names[0])))
+                return names[index];
+        }
+        return {};
+    }
+
+    static std::optional<GraphReportJob> makeGraphReportJob(
+        const json& config, const std::string& configured_csv) {
+        GraphReportJob job;
+        if (const char* root = std::getenv("ROOTWORK"); root && *root)
+            job.root_path = std::filesystem::path(root);
+        else
+            job.root_path = std::filesystem::current_path();
+        job.root_path = std::filesystem::absolute(job.root_path).lexically_normal();
+
+        job.model_name = graphConfigString(config,
+            {"model_name", "type", "architecture", "name"});
+        if (job.model_name.empty()) job.model_name = "model";
+        const std::string safe_name = graphSafeName(job.model_name);
+        job.optimizer = graphOptimizerName(config);
+        job.recon_loss = graphConfigString(config, {"recon_loss"});
+        job.validate_every_steps = graphConfigNumber(config, {"validate_every_steps"});
+        job.validate_items = graphConfigNumber(config, {"validate_items", "validation_items"});
+        job.validate_holdout = graphConfigBoolean(config, "validate_holdout");
+        job.validate_holdout_frac = graphConfigNumber(config, {"validate_holdout_frac"});
+        job.validate_holdout_items = graphConfigNumber(config, {"validate_holdout_items"});
+        job.n_dataset = graphConfigNumber(config, {"n_dataset", "dataset_size", "training_samples"});
+
+        auto resolve_from_root = [&job](const std::filesystem::path& path) {
+            return std::filesystem::absolute(path.is_absolute() ? path : job.root_path / path)
+                .lexically_normal();
+        };
+        job.csv_path = resolve_from_root(configured_csv.empty()
+            ? std::filesystem::path("checkpoints/loss_history.csv")
+            : std::filesystem::path(configured_csv));
+
+        const std::string checkpoint = graphConfigString(config, {"checkpoint_dir", "checkpoint"});
+        job.checkpoint_dir = checkpoint.empty()
+            ? job.root_path / "checkpoints" / safe_name
+            : resolve_from_root(std::filesystem::path(checkpoint));
+        job.html_path = job.checkpoint_dir / (safe_name + "_graph_report.html");
+        job.markdown_path = job.checkpoint_dir / (safe_name + "_graph_report.md");
+        job.snapshot_csv_path = job.checkpoint_dir / (safe_name + "_graph_metrics.csv");
+        job.log_path = job.checkpoint_dir / (safe_name + "_graph_report.log");
+        job.script_path = job.root_path / "scripts" / "tools" / "show-graph.lua";
+        if (!std::filesystem::exists(job.script_path)) return std::nullopt;
+        return job;
+    }
+
+    static std::filesystem::path latestGraphCheckpoint(const std::filesystem::path& root) {
+        const auto valid = [](const std::filesystem::path& path) {
+            return std::filesystem::exists(path / "manifest.json") &&
+                   std::filesystem::exists(path / "model" / "architecture.json");
+        };
+        if (valid(root)) return root;
+        std::error_code error;
+        if (!std::filesystem::is_directory(root, error)) return {};
+        std::filesystem::path best;
+        std::filesystem::file_time_type best_time{};
+        for (std::filesystem::directory_iterator it(root, error), end;
+             !error && it != end; it.increment(error)) {
+            if (!it->is_directory(error) || !valid(it->path())) continue;
+            const auto time = it->last_write_time(error);
+            if (error) { error.clear(); continue; }
+            if (best.empty() || time > best_time) {
+                best = it->path();
+                best_time = time;
+            }
+        }
+        return best;
+    }
+
+    static std::string luaStringLiteral(const std::string& value) {
+        std::ostringstream out;
+        out << '"';
+        for (unsigned char ch : value) {
+            switch (ch) {
+                case '\\': out << "\\\\"; break;
+                case '"': out << "\\\""; break;
+                case '\n': out << "\\n"; break;
+                case '\r': out << "\\r"; break;
+                case '\t': out << "\\t"; break;
+                default:
+                    if (ch < 32 || ch == 127) out << "\\" << std::setw(3)
+                        << std::setfill('0') << static_cast<int>(ch);
+                    else out << static_cast<char>(ch);
+            }
+        }
+        out << '"';
+        return out.str();
+    }
+
+    struct GraphReportProcessResult {
+        bool started = false;
+        int exit_code = -1;
+        std::string error;
+    };
+
+#if defined(_WIN32)
+    static std::wstring graphWide(const std::string& value) {
+        if (value.empty()) return {};
+        const int needed = MultiByteToWideChar(CP_UTF8, 0, value.data(),
+            static_cast<int>(value.size()), nullptr, 0);
+        if (needed <= 0) return std::wstring(value.begin(), value.end());
+        std::wstring result(static_cast<size_t>(needed), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                            result.data(), needed);
+        return result;
+    }
+
+    static std::wstring graphQuoteWindowsArg(const std::wstring& value) {
+        std::wstring result = L"\"";
+        size_t backslashes = 0;
+        for (wchar_t ch : value) {
+            if (ch == L'\\') {
+                ++backslashes;
+            } else if (ch == L'"') {
+                result.append(backslashes * 2 + 1, L'\\');
+                result.push_back(L'"');
+                backslashes = 0;
+            } else {
+                result.append(backslashes, L'\\');
+                result.push_back(ch);
+                backslashes = 0;
+            }
+        }
+        result.append(backslashes * 2, L'\\');
+        result.push_back(L'"');
+        return result;
+    }
+#endif
+
+    static GraphReportProcessResult runGraphReportLua(
+        const GraphReportJob& job, const std::vector<std::string>& script_args) {
+        GraphReportProcessResult result;
+        const char* configured_lua = std::getenv("MIMIR_LUA");
+        if (!configured_lua || !*configured_lua) configured_lua = std::getenv("LUA");
+#if defined(_WIN32)
+        const std::string executable = configured_lua && *configured_lua
+            ? configured_lua : "lua.exe";
+        const auto log_path = graphWide(job.log_path.string());
+        HANDLE log_file = CreateFileW(log_path.c_str(), GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (log_file == INVALID_HANDLE_VALUE) {
+            result.error = "impossible de créer le journal du rapport (Windows error " +
+                std::to_string(GetLastError()) + ")";
+            return result;
+        }
+        SetHandleInformation(log_file, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        std::vector<std::string> args;
+        args.reserve(script_args.size() + 4);
+        args.push_back("-e");
+        args.push_back("ROOTWORK=os.getenv('ROOTWORK') or " + luaStringLiteral(job.root_path.string()));
+        args.push_back(job.script_path.string());
+        args.insert(args.end(), script_args.begin(), script_args.end());
+        std::wstring command = graphQuoteWindowsArg(graphWide(executable));
+        for (const auto& arg : args) command += L" " + graphQuoteWindowsArg(graphWide(arg));
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = log_file;
+        startup.hStdOutput = log_file;
+        startup.hStdError = log_file;
+        PROCESS_INFORMATION process{};
+        const std::wstring working_dir = job.root_path.wstring();
+        const BOOL created = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE,
+            CREATE_NO_WINDOW, nullptr, working_dir.c_str(), &startup, &process);
+        CloseHandle(log_file);
+        if (!created) {
+            result.error = "impossible de lancer l'interpréteur Lua (Windows error " +
+                std::to_string(GetLastError()) + ")";
+            return result;
+        }
+        result.started = true;
+        WaitForSingleObject(process.hProcess, INFINITE);
+        DWORD exit_code = 1;
+        GetExitCodeProcess(process.hProcess, &exit_code);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        result.exit_code = static_cast<int>(exit_code);
+#else
+        const std::string executable = configured_lua && *configured_lua
+            ? configured_lua : "lua";
+        std::vector<std::string> args;
+        args.reserve(script_args.size() + 4);
+        args.push_back(executable);
+        args.push_back("-e");
+        args.push_back("ROOTWORK=os.getenv('ROOTWORK') or " + luaStringLiteral(job.root_path.string()));
+        args.push_back(job.script_path.string());
+        args.insert(args.end(), script_args.begin(), script_args.end());
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 1);
+        for (auto& arg : args) argv.push_back(arg.data());
+        argv.push_back(nullptr);
+
+        posix_spawn_file_actions_t actions;
+        int error = posix_spawn_file_actions_init(&actions);
+        if (error != 0) {
+            result.error = "initialisation du lancement Lua impossible: " + std::string(std::strerror(error));
+            return result;
+        }
+        error = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+            job.log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (error == 0) error = posix_spawn_file_actions_adddup2(
+            &actions, STDOUT_FILENO, STDERR_FILENO);
+        if (error != 0) {
+            posix_spawn_file_actions_destroy(&actions);
+            result.error = "configuration du journal Lua impossible: " + std::string(std::strerror(error));
+            return result;
+        }
+        pid_t child = -1;
+        error = posix_spawnp(&child, executable.c_str(), &actions, nullptr, argv.data(), environ);
+        posix_spawn_file_actions_destroy(&actions);
+        if (error != 0) {
+            result.error = "interpréteur Lua introuvable ou non lançable (" +
+                std::string(std::strerror(error)) + "); définissez MIMIR_LUA";
+            return result;
+        }
+        result.started = true;
+        int status = 0;
+        while (waitpid(child, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            result.error = "attente du rapport interrompue: " + std::string(std::strerror(errno));
+            return result;
+        }
+        if (WIFEXITED(status)) result.exit_code = WEXITSTATUS(status);
+        else if (WIFSIGNALED(status)) result.exit_code = 128 + WTERMSIG(status);
+        else result.exit_code = 1;
+#endif
+        return result;
+    }
+
+    void startGraphReportWorker() {
+        std::lock_guard<std::mutex> lock(graph_report_worker_mutex_);
+        if (graph_report_thread_.joinable()) return;
+        graph_report_worker_stop_ = false;
+        graph_report_thread_ = std::thread([this] { graphReportWorkerLoop(); });
+    }
+
+    void startLatentSpaceWorker() {
+        std::lock_guard<std::mutex> lock(latent_space_worker_mutex_);
+        if (latent_space_thread_.joinable()) return;
+        latent_space_worker_stop_ = false;
+        latent_space_thread_ = std::thread([this] { latentSpaceWorkerLoop(); });
+    }
+
+    void latentSpaceWorkerLoop() {
+        const auto control = std::atomic_load(&latent_space_control_);
+        mimir::viz::LatentCorrelationWindow correlation_window;
+        mimir::viz::LatentCorrelationObservation latest_observation;
+        std::optional<mimir::viz::LatentCorrelationAnalysis> correlation_analysis;
+        std::shared_ptr<const mimir::viz::LatentSpaceRawSnapshot> previous_live_weights;
+        uint64_t correlation_generation = 0, correlation_epoch = 0;
+        uint64_t analyzed_revision = std::numeric_limits<uint64_t>::max();
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(latent_space_worker_mutex_);
+                // Model threads can submit directly to the shared control. Poll
+                // the atomic mailbox without a callback tied to this lifetime.
+                latent_space_worker_cv_.wait_for(lock, std::chrono::milliseconds(100), [this, &control] {
+                    return latent_space_worker_stop_ ||
+                        control->raw_ready.load(std::memory_order_acquire) ||
+                        control->correlation_ready.load(std::memory_order_acquire) ||
+                        (control->correlations_enabled.load(std::memory_order_acquire) &&
+                         control->view_active.load(std::memory_order_acquire) &&
+                         control->requested.load(std::memory_order_acquire));
+                });
+                if (latent_space_worker_stop_) return;
+            }
+
+            const auto current_generation = control->generation.load(std::memory_order_acquire);
+            const auto current_epoch = control->correlation_epoch.load(std::memory_order_acquire);
+            if (current_generation != correlation_generation || current_epoch != correlation_epoch) {
+                correlation_generation = current_generation;
+                correlation_epoch = current_epoch;
+                correlation_window.reset(current_generation, current_epoch);
+                correlation_analysis.reset();
+                // A new-mode raw snapshot can be accepted after the epoch read
+                // above. Keep that already-published baseline on the next loop.
+                if (previous_live_weights &&
+                    (previous_live_weights->generation != current_generation ||
+                     previous_live_weights->live_weight_epoch != current_epoch))
+                    previous_live_weights.reset();
+                analyzed_revision = std::numeric_limits<uint64_t>::max();
+                latest_observation = {};
+                latest_observation.generation = current_generation;
+                latest_observation.epoch = current_epoch;
+                const auto identity = control->modelIdentitySnapshot();
+                latest_observation.model_name = identity.first;
+                latest_observation.architecture = identity.second;
+            }
+            if (control->correlations_enabled.load(std::memory_order_acquire)) {
+                uint64_t revision = 0;
+                try {
+                    bool schema_changed = false;
+                    for (auto& observation : control->takeCorrelationObservations()) {
+                        if (observation.generation != current_generation || observation.epoch != current_epoch) continue;
+                        const size_t before = correlation_window.size();
+                        if (correlation_window.append(observation)) {
+                            schema_changed = schema_changed || (before && correlation_window.size() == 1);
+                            latest_observation = std::move(observation);
+                        }
+                    }
+                    if (!control->updateCorrelationCount(current_generation, current_epoch, correlation_window.size())) continue;
+                    if (schema_changed) control->requestSnapshot();
+                    if (!correlation_analysis || analyzed_revision != correlation_window.revision()) {
+                        correlation_analysis = correlation_window.analyze();
+                        analyzed_revision = correlation_window.revision();
+                    }
+                    if (!control->beginCorrelationProjection(current_generation, current_epoch,
+                            correlation_window.revision(), correlation_analysis->ready, revision)) continue;
+                    auto projection = mimir::viz::projectLatentCorrelations3D(
+                        *correlation_analysis, latest_observation, revision);
+                    control->publishProjection(std::move(projection));
+                } catch (const std::exception& error) {
+                    control->fail("Échec des corrélations : " + std::string(error.what()),
+                                  current_generation, revision, current_epoch);
+                }
+                continue;
+            }
+
+            auto snapshot = control->takeRawSnapshot();
+            if (!snapshot) continue;
+            if (!control->beginProjection(snapshot->generation, snapshot->revision,
+                    snapshot->neuron_mode, snapshot->live_weight_mode)) continue;
+            try {
+                auto projection = snapshot->live_weight_mode
+                    ? mimir::viz::projectLiveWeightNetwork3D(*snapshot, previous_live_weights.get())
+                    : snapshot->neuron_mode
+                    ? mimir::viz::projectNeuronNetwork3D(*snapshot)
+                    : mimir::viz::projectLatentSpace3D(*snapshot);
+                if (projection.points.empty())
+                    throw std::runtime_error(snapshot->live_weight_mode
+                        ? "aucune couche disponible pour les poids actifs"
+                        : snapshot->neuron_mode
+                        ? "aucune couche disponible pour la répartition des neurones"
+                        : "aucun vecteur fini à projeter");
+                if (control->publishProjection(std::move(projection)) && snapshot->live_weight_mode)
+                    previous_live_weights = snapshot;
+            } catch (const std::exception& error) {
+                control->fail("Échec de projection 3D : " + std::string(error.what()), snapshot->generation, snapshot->revision);
+            }
+        }
+    }
+
+    void graphReportWorkerLoop() {
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(graph_report_worker_mutex_);
+                graph_report_worker_cv_.wait_for(lock, std::chrono::milliseconds(100), [this] {
+                    return graph_report_worker_stop_ ||
+                        graph_report_control_->requested.load(std::memory_order_acquire);
+                });
+                if (graph_report_worker_stop_) return;
+                if (!graph_report_control_->requested.exchange(false, std::memory_order_acq_rel))
+                    continue;
+            }
+
+            std::optional<GraphReportJob> job;
+            {
+                std::lock_guard<std::mutex> lock(graph_report_config_mutex_);
+                job = graph_report_job_;
+            }
+            if (!job) {
+                graph_report_control_->state.store(GraphReportControl::State::Failed,
+                                                   std::memory_order_release);
+                graph_report_control_->setMessage("Configuration de rapport absente");
+                continue;
+            }
+
+            graph_report_control_->state.store(GraphReportControl::State::Running,
+                                               std::memory_order_release);
+            graph_report_control_->setMessage("Génération du rapport en cours…");
+            try {
+                std::error_code error;
+                std::filesystem::create_directories(job->checkpoint_dir, error);
+                if (error) throw std::runtime_error("création du dossier de rapport impossible: " + error.message());
+
+                flushMetricsCsv();
+                const auto records = metricsHistorySnapshot();
+                if (records.empty()) throw std::runtime_error("aucune métrique enregistrée pour générer le rapport");
+                if (!MetricsCsv::write(job->snapshot_csv_path.string(), records))
+                    throw std::runtime_error("écriture du CSV du rapport impossible: " + job->snapshot_csv_path.string());
+
+                std::vector<std::string> args = {
+                    "--csv", job->snapshot_csv_path.string(),
+                    "--model", job->model_name,
+                    "--out", job->html_path.string(),
+                    "--out-text", job->markdown_path.string(),
+                    "--no-interactive",
+                    "--strict-context"};
+                if (!job->optimizer.empty()) {
+                    args.push_back("--optimizer");
+                    args.push_back(job->optimizer);
+                }
+                if (!job->recon_loss.empty()) {
+                    args.push_back("--recon-loss");
+                    args.push_back(job->recon_loss);
+                }
+                const auto checkpoint = latestGraphCheckpoint(job->checkpoint_dir);
+                if (!checkpoint.empty()) {
+                    args.push_back("--checkpoint");
+                    args.push_back(checkpoint.string());
+                }
+                if (job->validate_every_steps) {
+                    args.push_back("--validate-every-steps");
+                    args.push_back(*job->validate_every_steps);
+                }
+                if (job->validate_items) {
+                    args.push_back("--validate-items");
+                    args.push_back(*job->validate_items);
+                }
+                if (job->validate_holdout) {
+                    args.push_back("--validate-holdout");
+                    args.push_back(*job->validate_holdout);
+                }
+                if (job->validate_holdout_frac) {
+                    args.push_back("--validate-holdout-frac");
+                    args.push_back(*job->validate_holdout_frac);
+                }
+                if (job->validate_holdout_items) {
+                    args.push_back("--validate-holdout-items");
+                    args.push_back(*job->validate_holdout_items);
+                }
+                if (job->n_dataset) {
+                    args.push_back("--n-dataset");
+                    args.push_back(*job->n_dataset);
+                }
+
+                const auto process = runGraphReportLua(*job, args);
+                if (!process.started || process.exit_code != 0 ||
+                    !std::filesystem::exists(job->html_path)) {
+                    const std::string reason = !process.error.empty() ? process.error
+                        : "show-graph.lua a échoué (code " + std::to_string(process.exit_code) + ")";
+                    throw std::runtime_error(reason + "; journal: " + job->log_path.string());
+                }
+                graph_report_control_->state.store(GraphReportControl::State::Complete,
+                                                   std::memory_order_release);
+                graph_report_control_->setMessage("Rapport généré : " + job->html_path.string());
+            } catch (const std::exception& error) {
+                graph_report_control_->state.store(GraphReportControl::State::Failed,
+                                                   std::memory_order_release);
+                graph_report_control_->setMessage("Échec du rapport : " + std::string(error.what()));
+            }
+        }
+    }
+
     void loadMetricsHistoryLocked() {
         if (history_loaded_) return;
         metrics_history_ = MetricsCsv::read(metrics_csv_file_);
@@ -1188,7 +1831,8 @@ private:
                     local_metrics.grad_norm, local_metrics.grad_max,
                     local_metrics.opt_type, local_metrics.opt_step,
                     local_metrics.opt_beta1, local_metrics.opt_beta2,
-                    local_metrics.opt_eps, local_metrics.opt_weight_decay
+                    local_metrics.opt_eps, local_metrics.opt_weight_decay,
+                    local_metrics.model_metrics
                 );
                 if (local_metrics.val_has && !local_metrics.val_in_progress &&
                     local_metrics.val_step >= 0 &&
@@ -1593,6 +2237,7 @@ private:
                     local_metrics.val_feedback,
                     &local_metrics.detection
                 );
+                current_viz->setModelMetrics(local_metrics.model_metrics);
                 auto records = metricsHistorySnapshot(history_offset);
                 current_viz->setMetricsHistory(records, history_offset);
                 history_offset += records.size();
@@ -1691,6 +2336,20 @@ private:
     std::vector<std::pair<std::string, MetricsRecord>> csv_queue_;
     std::thread htop_thread_;
     std::thread viz_thread_;
+    std::shared_ptr<GraphReportControl> graph_report_control_ =
+        std::make_shared<GraphReportControl>();
+    std::mutex graph_report_config_mutex_;
+    std::optional<GraphReportJob> graph_report_job_;
+    std::mutex graph_report_worker_mutex_;
+    std::condition_variable graph_report_worker_cv_;
+    bool graph_report_worker_stop_ = false;
+    std::thread graph_report_thread_;
+    std::shared_ptr<mimir::viz::LatentSpaceControl> latent_space_control_ =
+        std::make_shared<mimir::viz::LatentSpaceControl>();
+    std::mutex latent_space_worker_mutex_;
+    std::condition_variable latent_space_worker_cv_;
+    bool latent_space_worker_stop_ = false;
+    std::thread latent_space_thread_;
 
     // UI fd (tty) + capture stdout/stderr
     int ui_fd_ = -1;

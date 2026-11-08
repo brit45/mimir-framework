@@ -26,7 +26,7 @@ def funcs(s):
  return result
 
 def split(s):
- return [x.strip() for x in s.split(',')]
+ return [x.strip() for x in s.split(',')] if s.strip() else []
 
 sources={}
 for name in ['Native','Training','Attention','Recurrent','Detection']:
@@ -53,10 +53,14 @@ __global__ void portable_sequence_constant_backward(const float* source,const fl
 '''
 
 sources['Fusion']=Path('src/runtimes/PointwiseFusionKernels.cuh').read_text()
+# Append new families so existing kernel IDs remain stable for compiled caches.
+sources['ConvND']=Path('src/runtimes/cuda/CudaConvNDOps.cuh').read_text()
+sources['CausalSequence']=Path('src/runtimes/cuda/CudaCausalSequenceOps.cuh').read_text()
+sources['Primer']=Path('src/runtimes/cuda/CudaPrimerOps.cuh').read_text()
 
 # Scalar GPU geometries have no dynamic containers.
 gs=Path('src/runtimes/cuda/CudaOperationGeometry.hpp').read_text(); geometries={}
-for name in ['Resize','Pool','Projection','ExtendedConv','BatchNorm','Attention','Recurrent']:
+for name in ['Resize','Pool','Projection','ExtendedConv','BatchNorm','Attention','Recurrent','ConvND','CausalSequence','PrimerReduction','PrimerTriangle']:
  s=gs.split('struct '+name+' {')[1].split('bool valid')[0]
  fields=[]
  for t,vals in re.findall(r'\b(int|bool|size_t)\s+([^;{}]+);',s):
@@ -72,8 +76,8 @@ for family,s in sources.items():
   allfunc.append((family,f))
 
 # GPU source uses a single float arena; pointer arguments become validated offsets.
-# Kernels with disjoint outputs use a parallel grid; gradient scatters remain
-# serialized so they do not require unsupported floating-point atomics.
+# Kernels with disjoint outputs use a parallel grid; scatter gradients use
+# portable integer CAS atomics. Intrinsically sequential families stay bounded.
 seqvars=set(); seqscalar=set()
 for f in [x[1] for x in allfunc if x[0]=='Recurrent']:
  for n in re.findall(r'SequenceVector(?:\s*&)?\s+(\w+)',f[6]):seqvars.add(n)
@@ -159,9 +163,10 @@ def transform(body,args,name):
   values=dict(re.findall(r'(\w+)\s*=\s*(\d+)',sources['Runtime'].split('enum class '+en)[1].split('};')[0]))
   body=re.sub(en+r'::(\w+)',lambda m:values[m[1]],body)
  body=re.sub(r'\bsize_t\b|\bdouble\b',lambda m:'int' if m[0]=='size_t' else 'float',body)
- for math in ['exp','log','sqrt','tanh','floor','pow','fabs','fmin','fmax']:
+ for math in ['exp','log','sqrt','tanh','sin','cos','floor','pow','fabs','fmin','fmax','fma']:
   body=re.sub(r'\b'+math+r'f\b',{'fabs':'abs','fmin':'min','fmax':'max'}.get(math,math),body)
  body=body.replace('llround','round_away').replace('lroundf','round_away').replace('lround','round_away').replace('isfinite(', 'finite_value(')
+ body=body.replace('__int_as_float(', 'intBitsToFloat(')
  body=body.replace('INFINITY','uintBitsToFloat(0x7f800000u)').replace('nullptr','0')
  body=re.sub(r'(\d(?:[\deE.+-]*\d)?\.?)[fF]\b',r'\1',body)
  # C++ recurrence views are offsets too. No heap allocation occurs on device.
@@ -308,7 +313,8 @@ void tiled_gemm(int a,int b,int c,int m,int n,int k,int lda,int ldb,int ldc,bool
 '''
 
 # A single command entry dispatches one reference kernel over its logical grid.
-entry='int group_id(){return int(gl_WorkGroupID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x); }\nint invocation_id(){return int(gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x*256u); }\nvoid reference_main(){\n blockDim_x=arguments[1];gridDim_x=arguments[2];\n int selected=specializedOperation>=0?specializedOperation:arguments[0];NORM_ENTRY\n int id=selected;bool parallel=(id>=0 && id<=44 && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id():0;if(!parallel && invocation_id()!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){\n'
+entry='int group_id(){return int(gl_WorkGroupID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x); }\nint invocation_id(){return int(gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x*256u); }\nvoid reference_main(){\n blockDim_x=arguments[1];gridDim_x=arguments[2];\n int selected=specializedOperation>=0?specializedOperation:arguments[0];NORM_ENTRY\n int id=selected;bool parallel=(id>=0 && id<KERNEL_COUNT && id!=31 && id!=32);int count=blockDim_x*gridDim_x;if(id==38)count=arguments[5];if(id==39 || id==40)count=arguments[6]*arguments[7];int first=parallel?invocation_id():0;if(!parallel && invocation_id()!=0)return;for(int gid=first;gid<count;gid+=parallel?count:1){blockIdx_x=gid/blockDim_x;threadIdx_x=gid%blockDim_x;if(id>=38 && id<=40){blockIdx_x=gid;threadIdx_x=0;blockDim_x=1;}switch(selected){\n'
+entry=entry.replace('KERNEL_COUNT',str(len(kernels)))
 pack=''
 norm_entry=''
 gemm_entry=''
@@ -348,7 +354,7 @@ for family,s in sources.items():
  s=s.replace('CudaRuntime','PortableRuntime').replace('ENABLE_CUDA','ENABLE_PORTABLE_REFERENCE')
  s=s.replace('constexpr int threads = 256;','constexpr int threads = 1;')
  s=s.replace('RuntimeCapabilityLevel::NativeOptimized','RuntimeCapabilityLevel::Native')
- for sub in ['Native','Training','Attention','Recurrent','Detection']:
+ for sub in ['Native','Training','Attention','Recurrent','Detection','ConvND','CausalSequence','Primer']:
   s=s.replace(f'runtimes/cuda/Cuda{sub}Ops.cuh',f'runtimes/portable/Portable{sub}Ops.hpp').replace(f'"Cuda{sub}Ops.cuh"',f'"Portable{sub}Ops.hpp"')
  s=s.replace('runtimes/cuda/PortableNativeOps.cuh','runtimes/portable/PortableNativeOps.hpp').replace('"PortableNativeOps.cuh"','"PortableNativeOps.hpp"')
  s=s.replace('runtimes/cuda/PortableRuntime.hpp','runtimes/portable/PortableRuntime.hpp')

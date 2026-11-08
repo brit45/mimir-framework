@@ -11,6 +11,11 @@ Implémenter ou modifier des briques techniques sans casser le contrat global.
 
 Ce chapitre formalise le contrat API systeme que tous les bridges de scripting doivent respecter.
 
+Les bridges pilotent des architectures définies en C/C++ dans des classes
+dérivées de `Model`. Ils ne définissent pas le graphe DL. MPK reste l’alternative
+expérimentale, pas entièrement exploitable en production, conformément au
+[contrat des architectures](08-Architecture-Contract.md).
+
 ## Etat des bindings
 
 - Lua est le bridge de reference et reste le seul contrat complet et stable aujourd'hui.

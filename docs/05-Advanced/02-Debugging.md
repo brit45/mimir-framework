@@ -36,7 +36,8 @@ Le repo a plusieurs mécanismes, avec des rôles distincts :
 
 - `MemoryGuard` (strict) : compte/refuse certaines allocations (voir `src/MemoryGuard.hpp`).
 	- API Lua : `Mimir.MemoryGuard.*` / `Mimir.Guard.*`.
-- `DynamicTensorAllocator` : backend d’allocations pour les tenseurs “dynamiques” (voir `src/DynamicTensorAllocator.*`, utilisé depuis `src/tensors.cpp`).
+- `DynamicTensorAllocator` : backend d’allocations pour les tenseurs dynamiques
+  (voir `src/runtimes/cpu/DynamicTensorAllocator.hpp`, utilisé depuis `src/tensors.cpp`).
 	- API Lua : `Mimir.Allocator.*`.
 - `AdvancedRAMManager` : gestionnaire best-effort type cache/compression/spill (voir `src/AdvancedRAMManager.hpp`).
 	- API Lua : `Mimir.Memory.*`.

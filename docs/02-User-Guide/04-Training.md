@@ -32,7 +32,9 @@ Ce guide couvre le workflow complet pour entraîner un modèle Mímir : de la co
 
 ### Style haut-niveau : `Mimir.Model.train(epochs, lr)`
 
-Le plus simple. Mímir gère lui-même la boucle, le dataset, la validation et les checkpoints. La plupart des scripts actuels utilisent ce chemin.
+Le plus simple. Mímir gère lui-même la boucle, le dataset, la validation et les checkpoints. Ce chemin est notamment utilisé par les workflows VAE. Les scripts causal,
+T5, Lumen et détecteur possèdent leurs propres entrées de boucle ; consultez
+le script de la tâche plutôt que de les remplacer par `Model.train`.
 
 ```lua
 Mimir.Dataset.load("dataset_2/")
@@ -82,7 +84,6 @@ pcall(Mimir.MemoryGuard.setLimit, 10)
 pcall(Mimir.Allocator.configure, {
     max_ram_gb         = 10.0,
     enable_compression = true,
-    swap_strategy      = "lru",    -- éviction des tenseurs les moins récents en premier
 })
 
 -- Activer les optimisations matérielles CPU
@@ -106,8 +107,8 @@ Pour un entraînement sérieux, chargez le tokenizer de base préentraîné :
 
 ```lua
 -- Recommandé pour les modèles texte
-local tok = require("scripts/modules/base_tokenizer")
-tok.load("checkpoint/base_tokenizer/")
+local tok = dofile(ROOTWORK .. "/scripts/modules/base_tokenizer.lua")
+assert(tok.load_base({path = "checkpoint/base_tokenizer/tokenizer.json", require = true}))
 ```
 
 > **Avertissement :** si vous chargez un checkpoint existant à l'étape 5, le tokenizer sera restauré automatiquement depuis le checkpoint (si `save_tokenizer = true` était activé lors de la sauvegarde). Dans ce cas, ne chargez pas un tokenizer séparé pour éviter les conflits de vocab.
@@ -120,7 +121,9 @@ tok.load("checkpoint/base_tokenizer/")
 Mimir.Dataset.load("dataset_2/")
 ```
 
-Le loader indexe récursivement le dossier, détecte les paires image+texte par basename et les met en cache dans `dataset_cache.json`.
+Le loader indexe récursivement le dossier et associe les modalités par chemin
+relatif sans extension. Le cache disque est optionnel ; `Dataset.load(dir)`
+seul ne l’active pas.
 
 Pour les modèles texte-seul (legacy) :
 
@@ -194,7 +197,10 @@ assert(ok, err)
 
 ## Calibration par feedback de validation
 
-Lorsque la validation est activée, Mímir peut automatiquement ajuster le learning rate effectif en fonction de l'évolution de la métrique de validation. C'est un mécanisme de **récompense/punition** qui permet au modèle de s'autoréguler sans intervention manuelle.
+La boucle Lua haut niveau peut ajuster le learning rate effectif à partir de
+la validation. Ces paramètres appartiennent à son `modelConfig` ; ils ne sont
+pas une politique universelle de tous les scripts. Ce contrôle ne remplace pas
+une évaluation indépendante.
 
 ### Le principe
 
@@ -207,30 +213,40 @@ lr_effectif = lr_base × val_lr_scale
 Après chaque validation, Mímir compare la métrique courante (lower is better) au meilleur résultat historique :
 
 - **Amélioration suffisante** (`métrique < meilleur × (1 - val_improve_thresh)`) → **récompense** : `val_lr_scale × val_reward_factor`
-- **Pas d'amélioration** (ou validation échouée / NaN) → **pénalité** : `val_lr_scale × val_penalty_factor`
+- **Dégradation supérieure au seuil** par rapport au meilleur résultat →
+  **pénalité** : `val_lr_scale × val_penalty_factor`
+- **Plateau** dans la tolérance → facteur inchangé. Le premier point initialise
+  la référence ; une métrique négative ou non finie est ignorée.
 
 Le multiplicateur est ensuite clampé dans `[val_lr_scale_min, val_lr_scale_max]` pour éviter les valeurs extrêmes.
 
 **Illustration :**
 
 ```
-Epoch  1 : val_loss = 0.45  → amélioration (+inf %)  → récompense → val_lr_scale = 1.05
-Epoch  2 : val_loss = 0.42  → amélioration (6.7 %)   → récompense → val_lr_scale = 1.10
-Epoch  3 : val_loss = 0.43  → dégradation            → pénalité   → val_lr_scale = 0.77
-Epoch  4 : val_loss = 0.41  → amélioration (4.6 %)   → récompense → val_lr_scale = 0.81
+Epoch  1 : val_loss = 0.45  → premier point         → val_lr_scale = 1.000
+Epoch  2 : val_loss = 0.42  → amélioration de 6.7 %  → val_lr_scale = 1.050
+Epoch  3 : val_loss = 0.43  → dégradation de 2.4 %   → val_lr_scale = 0.735
+Epoch  4 : val_loss = 0.41  → amélioration de 2.4 %  → val_lr_scale = 0.772
 ```
 
 ### Paramètres
 
 | Paramètre | Défaut | Description |
 | --- | --- | --- |
-| `val_feedback_enabled` | `false` | Active le mécanisme — **doit être `true`** |
+| `val_feedback_enabled` | `true` | Active le contrôle dans la boucle haut niveau ; `false` le désactive |
 | `val_reward_factor` | `1.05` | Facteur de récompense (+5 % LR) |
 | `val_penalty_factor` | `0.70` | Facteur de pénalité (−30 % LR) |
 | `val_lr_scale_min` | `0.10` | Plancher du multiplicateur (LR ne descend jamais en dessous de 10 %) |
 | `val_lr_scale_max` | `1.50` | Plafond du multiplicateur |
 | `val_improve_thresh` | `0.001` | L'amélioration doit dépasser 0.1 % pour déclencher la récompense |
 | `val_feedback_min_steps` | `0` | Nombre de steps avant activation (0 = immédiat) |
+
+Pour VAEConv, le contrôleur dédié `src/training/VaeValidationFeedback.hpp`
+compare la reconstruction et reçoit aussi la KL. Avec `val_kl_feedback_enabled`
+et un bêta positif, il peut faire évoluer `kl_beta` selon la zone de KL visée
+et les décisions de validation. Un réglage LIVE actif empêche cet ajustement
+KL automatique. Le CSV ne constitue pas une garantie que chaque paramètre
+interne de ce contrôleur y est sérialisé.
 
 ### Exemple de configuration
 

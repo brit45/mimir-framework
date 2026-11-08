@@ -9,6 +9,9 @@ local KNOWN_CANONICAL = {
   ["Conv2d"] = true,
   ["ConvTranspose2d"] = true,
   ["Conv1d"] = true,
+  ["Conv3d"] = true,
+  ["Conv4d"] = true,
+  ["CausalDepthwiseConv1d"] = true,
   ["DepthwiseConv2d"] = true,
   ["Linear"] = true,
   ["Bilinear"] = true,
@@ -24,6 +27,25 @@ local KNOWN_CANONICAL = {
   ["LeakyReLU"] = true,
   ["GELU"] = true,
   ["GEGLU"] = true,
+  ["SwiGLU"] = true,
+  ["SquaredReLU"] = true,
+  ["Square"] = true,
+  ["SqrtAbs"] = true,
+  ["Exp"] = true,
+  ["LogAbs"] = true,
+  ["Abs"] = true,
+  ["ReciprocalNoNan"] = true,
+  ["Sign"] = true,
+  ["Sin"] = true,
+  ["Cos"] = true,
+  ["Maximum"] = true,
+  ["Minimum"] = true,
+  ["ReduceSum"] = true,
+  ["ReduceMean"] = true,
+  ["ReduceMin"] = true,
+  ["ReduceMax"] = true,
+  ["ReduceProd"] = true,
+  ["LowerTriangular"] = true,
   ["SiLU"] = true,
   ["Tanh"] = true,
   ["Sigmoid"] = true,
@@ -86,6 +108,15 @@ local function to_lower_map(tbl)
 end
 
 local KNOWN_BY_LOWER = to_lower_map(KNOWN_CANONICAL)
+local PRIMER_ALIASES = {
+  relusquared = "SquaredReLU", relu2 = "SquaredReLU",
+  absroot = "SqrtAbs", sqrt_abs = "SqrtAbs", log_abs = "LogAbs",
+  reciprocal_no_nan = "ReciprocalNoNan",
+  reduce_sum = "ReduceSum", reduce_mean = "ReduceMean",
+  reduce_min = "ReduceMin", reduce_max = "ReduceMax",
+  reduce_prod = "ReduceProd", reduceproduct = "ReduceProd",
+  lower_triangular = "LowerTriangular",
+}
 
 function M.available_layer_types()
   local out = {}
@@ -98,7 +129,7 @@ function M.infer_layer_type(layer_name)
   local raw = tostring(layer_name or "")
   if raw == "" then return "Linear" end
 
-  local direct = KNOWN_BY_LOWER[raw:lower()]
+  local direct = KNOWN_BY_LOWER[raw:lower()] or PRIMER_ALIASES[raw:lower()]
   if direct ~= nil then return direct end
 
   local name = raw
@@ -117,10 +148,14 @@ function M.infer_layer_type(layer_name)
   end
 
   -- Les formes spécialisées doivent précéder leur famille générique.
+  if name:find("causal_depthwise_conv1d", 1, true) or name:find("causaldepthwiseconv1d", 1, true) then return "CausalDepthwiseConv1d" end
+  if name:find("swiglu", 1, true) then return "SwiGLU" end
   if name:find("conv_transpose", 1, true) or
       contains("deconv", "upconv") then return "ConvTranspose2d" end
   if name:find("depthwise_conv", 1, true) or
       contains("depthwise") then return "DepthwiseConv2d" end
+  if name:find("conv4d", 1, true) then return "Conv4d" end
+  if name:find("conv3d", 1, true) then return "Conv3d" end
   if name:find("conv1d", 1, true) then return "Conv1d" end
   if contains("conv", "conv2d") or name:find("conv2d", 1, true) then
     return "Conv2d"
@@ -268,6 +303,25 @@ function M.predict_params_count(layer_type, params, context)
     return math.floor(out * in1 * in2 + (use_bias and out or 0)),
       "out*in1*in2 + bias"
   end
+  if canonical == "Conv3d" or canonical == "Conv4d" then
+    if not in_channels or not out_channels then return 0, "canaux insuffisants" end
+    local rank = canonical == "Conv3d" and 3 or 4
+    local groups = positive_number(params.groups) or 1
+    if in_channels % groups ~= 0 or out_channels % groups ~= 0 then return 0, "groupes incompatibles" end
+    local kernel = params.kernel_shape
+    local count = 1
+    local scalars = rank == 3 and {params.kernel_d, params.kernel_h, params.kernel_w} or
+      {params.kernel_t, params.kernel_d, params.kernel_h, params.kernel_w}
+    if type(kernel) == "table" and #kernel ~= 1 and #kernel ~= rank then return 0, "rang du kernel invalide" end
+    for axis = 1, rank do
+      local extent = type(kernel) == "table" and (#kernel == 1 and kernel[1] or kernel[axis]) or nil
+      extent = positive_number(extent, scalars[axis], params.kernel_size) or 3
+      if extent ~= math.floor(extent) then return 0, "kernel non entier" end
+      count = count * extent
+    end
+    return math.floor(out_channels * (in_channels / groups) * count + (use_bias and out_channels or 0)),
+      "out_channels*(in_channels/groups)*kernel_volume + bias"
+  end
   if canonical == "Conv2d" or canonical == "ConvTranspose2d" or
       canonical == "DepthwiseConv2d" or canonical == "Conv1d" then
     if not in_channels or not out_channels then
@@ -339,8 +393,13 @@ function M.canonical_layer_type(raw_type, params)
   end
   local low = t:lower()
   params = params or {}
+  if PRIMER_ALIASES[low] then return PRIMER_ALIASES[low] end
 
   if low == "conv2d" then return "Conv2d" end
+  if low == "causaldepthwiseconv1d" or low == "causal_depthwise_conv1d" then return "CausalDepthwiseConv1d" end
+  if low == "swiglu" then return "SwiGLU" end
+  if low == "conv3d" or low == "convolution3d" then return "Conv3d" end
+  if low == "conv4d" or low == "convolution4d" then return "Conv4d" end
   if low == "convtranspose2d" or low == "conv_transpose2d" then return "ConvTranspose2d" end
   if low == "linear" then return "Linear" end
   if low == "batchnorm" or low == "batch_norm" or low == "batchnorm2d" then return "BatchNorm2d" end

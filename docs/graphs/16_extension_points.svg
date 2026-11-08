@@ -1,36 +1,131 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="620" viewBox="0 0 1700 620" role="img" aria-labelledby="title desc">
-<title id="title">Points d’extension</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1126" viewBox="0 0 1200 1126" role="img" aria-labelledby="title desc">
+<title id="title">Points d’extension</title>
+<desc id="desc">Carte des responsabilités à étendre : classe native, type de couche, runtime, données, bridge, sérialisation, interface et validation. L’architecture hérite de Model ; les calculs restent dans les runtimes et leurs dispatchers. Sources : src/LayerTypes.hpp, src/runtimes/RuntimeRouter.hpp, src/Serialization/Serialization.hpp, Tests/CMakeLists.txt</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/LayerTypes.hpp&quot;, &quot;src/runtimes/RuntimeRouter.hpp&quot;, &quot;src/Serialization/Serialization.hpp&quot;, &quot;Tests/CMakeLists.txt&quot;], &quot;related_docs&quot;: [&quot;docs/06-Contributing/03-Extending-Models-Runtimes-And-Features.md&quot;, &quot;docs/08-Tuto/05-Tuto-Ajouter-Op.md&quot;, &quot;docs/08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Points d’extension</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Où ajouter une architecture, une couche, un backend ou un format de sérialisation.</text>
-<line x1="60" y1="112" x2="1640" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="236.66666666666666" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="188.33333333333331" y="265" class="label" text-anchor="middle">New layer</text>
-<text x="188.33333333333331" y="322" class="small" text-anchor="middle">kernel + schema</text>
-<rect x="334.66666666666663" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="452.99999999999994" y="265" class="label" text-anchor="middle">New architecture</text>
-<text x="452.99999999999994" y="322" class="small" text-anchor="middle">builder + config</text>
-<path d="M306.66666666666663,295.0 L334.66666666666663,295.0" class="edgeB"/>
-<rect x="599.3333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="717.6666666666666" y="265" class="label" text-anchor="middle">Registry entry</text>
-<text x="717.6666666666666" y="322" class="small" text-anchor="middle">name + factory</text>
-<path d="M571.3333333333333,295.0 L599.3333333333333,295.0" class="edgeB"/>
-<rect x="863.9999999999999" y="240" width="236.66666666666666" height="110" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="982.3333333333333" y="265" class="label" text-anchor="middle">Runtime support</text>
-<text x="982.3333333333333" y="322" class="small" text-anchor="middle">planner/alloc</text>
-<path d="M835.9999999999999,295.0 L863.9999999999999,295.0" class="edgeB"/>
-<rect x="1128.6666666666665" y="240" width="236.66666666666666" height="110" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1246.9999999999998" y="265" class="label" text-anchor="middle">Serialization</text>
-<text x="1246.9999999999998" y="322" class="small" text-anchor="middle">export/import</text>
-<path d="M1100.6666666666665,295.0 L1128.6666666666665,295.0" class="edgeB"/>
-<rect x="1393.333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1511.6666666666663" y="265" class="label" text-anchor="middle">Tests</text>
-<text x="1511.6666666666663" y="322" class="small" text-anchor="middle">smoke + analyze</text>
-<path d="M1365.3333333333333,295.0 L1393.333333333333,295.0" class="edgeB"/>
-<text x="1640" y="596" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1126" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Points d’extension</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Chaque contribution relie définition, calcul, observation et vérification.</tspan>
+</text>
+<g data-node="model">
+<rect x="44" y="163" width="325.33" height="173" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Architecture native</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Classe C++ : public Model</tspan>
+<tspan x="66" dy="26">Config, graphe et</tspan>
+<tspan x="66" dy="26">registre</tspan>
+</text>
+</g>
+<g data-node="layer">
+<rect x="437.33" y="163" width="325.33" height="173" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Type de couche</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">LayerType et géométrie</tspan>
+<tspan x="459.33" dy="26">Contrat valeurs /</tspan>
+<tspan x="459.33" dy="26">gradients</tspan>
+</text>
+</g>
+<g data-node="runtime">
+<rect x="830.67" y="163" width="325.33" height="173" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Runtime</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Kernels et capacités</tspan>
+<tspan x="852.67" dy="26">Dispatcher et</tspan>
+<tspan x="852.67" dy="26">RuntimeRouter</tspan>
+</text>
+</g>
+<g data-node="data">
+<rect x="44" y="436" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Données et tokenizer</tspan>
+</text>
+<text x="66" y="510" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Formats, modalités et BPE</tspan>
+<tspan x="66" dy="26">Entrées adaptées au</tspan>
+<tspan x="66" dy="26">modèle</tspan>
+</text>
+</g>
+<g data-node="bridge">
+<rect x="437.33" y="436" width="325.33" height="173" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="459.33" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Bridge de scripting</tspan>
+</text>
+<text x="459.33" y="510" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Contexte et callbacks</tspan>
+<tspan x="459.33" dy="26">Configuration et</tspan>
+<tspan x="459.33" dy="26">exécution</tspan>
+</text>
+</g>
+<g data-node="storage">
+<rect x="830.67" y="436" width="325.33" height="173" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="467" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Sérialisation</tspan>
+</text>
+<text x="852.67" y="510" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Poids, formes et</tspan>
+<tspan x="852.67" dy="26">connexions</tspan>
+<tspan x="852.67" dy="26">Reprise et compatibilité</tspan>
+</text>
+</g>
+<g data-node="viz">
+<rect x="44" y="709" width="325.33" height="173" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="66" y="740" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Interfaces</tspan>
+</text>
+<text x="66" y="783" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Snapshots et métriques</tspan>
+<tspan x="66" dy="26">Contrôles et rendu par</tspan>
+<tspan x="66" dy="26">backend</tspan>
+</text>
+</g>
+<g data-node="mpk">
+<rect x="437.33" y="709" width="325.33" height="173" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="459.33" y="740" font-size="14" fill="#b45309" font-weight="700">
+<tspan x="459.33" dy="0">EXPÉRIMENTAL</tspan>
+</text>
+<text x="459.33" y="767" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Voie MPK</tspan>
+</text>
+<text x="459.33" y="810" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Description de graphe</tspan>
+<tspan x="459.33" dy="26">Interopérabilité partielle</tspan>
+</text>
+</g>
+<g data-node="tests">
+<rect x="830.67" y="709" width="325.33" height="173" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="740" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Vérification</tspan>
+</text>
+<text x="852.67" y="783" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Tests ciblés et négatifs</tspan>
+<tspan x="852.67" dy="26">Parité, docs et exemples</tspan>
+</text>
+</g>
+<rect x="44" y="930" width="1112" height="110" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="958" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Pas de calcul tensoriel dans Layers.hpp ; les appels passent par le dispatcher et le routeur.</tspan>
+<tspan x="66" dy="26">• Vérifier sorties, gradients et poids après mise à jour ; une compilation GPU ne prouve pas son</tspan>
+<tspan x="66" dy="26">exécution.</tspan>
+</text>
+<text x="44" y="1075" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : LayerTypes.hpp · RuntimeRouter.hpp · Serialization.hpp · CMakeLists.txt</tspan>
+</text>
+</g>
 </svg>

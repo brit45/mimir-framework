@@ -4,6 +4,17 @@ Ce tutoriel utilise l'opération existante `Multiply` comme trace de référence
 Il montre tous les endroits réellement impliqués dans une opération
 entraînable, sans prétendre qu'un type fictif est déjà disponible.
 
+| Niveau | Objectif | Résultat à vérifier |
+| --- | --- | --- |
+| Intermédiaire | Suivre `Multiply` et ses deux dérivées | Retrouver les entrées, la sortie et les gradients CPU. |
+| Avancé | Ajouter une opération et ses domaines | Comparer à un oracle et tester les refus sans effet partiel. |
+| Expert | Ajouter le kernel d’un autre runtime | Vérifier les gradients, les poids après mise à jour et le backend choisi. |
+
+L’architecture qui utilise l’opération reste écrite en C/C++ dans une classe
+dérivée de `Model`, selon le [contrat des architectures](../07-Devs/08-Architecture-Contract.md).
+Les extraits `model.push(...)` de cet atelier appartiennent à sa routine de
+construction C++. Lua et JSON configurent et exécutent ensuite la classe.
+
 ## Sources de vérité
 
 - `src/LayerTypes.hpp`

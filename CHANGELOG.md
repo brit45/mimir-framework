@@ -7,6 +7,96 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+### Export des graphes 3D
+
+- Bouton **Exporter 3D** et raccourci `X` dans la vue 3D, pour les modes poids,
+  corrélations du corpus, répartition des neurones et poids actifs.
+- Dossier local avec image PNG, données JSON et HTML interactif autonome hors
+  ligne ; conservation de la caméra, du seuil, des valeurs et métadonnées de
+  la dernière projection affichée.
+- Export de l'échantillon affiché sans relire le modèle ni lancer de forward ;
+  les poids actifs sont figés à la capture exportée pendant que l'entraînement
+  continue.
+
+### Évolution des poids dans la vue 3D
+
+- Mode facultatif **Poids actifs (DL)** : valeurs réelles des coefficients,
+  signe, amplitude et variation entre captures dans une disposition
+  topologique stable du réseau courant.
+- Correspondances fiables rendues comme liens pondérés ; coefficients sans
+  correspondance synaptique certaine identifiés par couche et indice.
+- Échantillonnage stable borné à 2 048 coefficients ; rendu limité à 4 096
+  points, 2 048 liens pondérés et 1 024 flux structurels de contexte.
+- Capture aux points sûrs après les mises à jour d’optimiseur, sans forward
+  supplémentaire ni chargement de bloc froid. Activation de **Temps réel**,
+  cadence bornée et invalidation des références au changement de mode/modèle.
+
+### Répartition du réseau dans la vue 3D
+
+- Mode facultatif **Répartition des neurones**, commun aux graphes natifs :
+  unités et canaux disposés par profondeur de graphe, avec les dépendances
+  réellement déclarées et les opérations de largeur inconnue identifiées.
+- Capture bornée à 4 096 points et 8 192 liens structurels agrégés ; les totaux
+  connus et l’échantillonnage sont distingués, sans inventer d’intensité de poids.
+- Inspection des couches et unités, rotation, zoom et actualisation manuelle
+  ou **Temps réel**, sans forward supplémentaire. Ce mode est exclusif des
+  corrélations du corpus et désactivé par défaut.
+
+### Corrélations internes dans la vue 3D
+
+- Mode facultatif **Corrélations du corpus**, commun aux architectures natives :
+  capture des activations après les forwards réels, regroupement des séquences
+  avec exclusion du padding et des canaux spatiaux selon leur géométrie.
+- Fenêtre bornée, coefficients de Pearson en double précision avant l’ACP,
+  liens positifs/négatifs filtrables et inspection des composantes internes.
+  Collecte, projection et provenance entraînement/inférence sont distinguées.
+- Calcul asynchrone sur copies, activation désactivée par défaut, effacement et
+  invalidation au changement de modèle ou de schéma. Aucun forward supplémentaire.
+
+### Illustrations de la documentation
+
+- Régénération des 29 schémas SVG avec sources traçables, descriptions
+  accessibles, typographie commune et mise en page adaptée à leurs pages.
+- Correction des cycles allocation/initialisation/chargement, des branches
+  d’entraînement et de validation et de la distinction entre référence CPU,
+  capacités annoncées et backend effectivement sélectionné.
+- Schémas d’architecture conformes au contrat C++ dérivé de `Model`, avec
+  MPK expérimental et placeholders signalés. Structures VGG16/VGG19 distinctes,
+  VAEConv configurable et comparaison qualitative sans anciens chiffres de dumps.
+- Manifestes éditables et générateur reproductible ; archive SVG actualisée
+  à partir des mêmes contenus et documentation de leur contexte d’utilisation.
+
+### Tutoriels et contrat des architectures
+
+- Parcours organisés en cinq niveaux, de la découverte à l’expertise moteur,
+  avec une matrice des aspects couverts et huit ateliers supplémentaires.
+- Ateliers sur installation/configuration, données/tokenizer, apprentissage et
+  reprise, familles de modèles, Viz/diagnostic, mémoire/performances,
+  compilation/AMP/DDP, scripting/exports/tests/contribution.
+- Règle de définition clarifiée : graphe DL en C/C++ dans une classe dérivée
+  de `Model`. Lua et JSON pilotent ces classes. MPK est l’autre voie,
+  expérimentale et pas entièrement exploitable en production.
+- Exemples de topologie Lua remplacés par des classes C++ dans les guides de
+  couches ; bindings bas niveau documentés comme mécanismes internes/tests/import.
+
+### Primitives Primer et couverture des opérations
+
+- Ajout de 18 types : `SquaredReLU`, `Square`, `SqrtAbs`, `Exp`, `LogAbs`,
+  `Abs`, `ReciprocalNoNan`, `Sign`, `Sin`, `Cos`, `Maximum`, `Minimum`,
+  `ReduceSum`, `ReduceMean`, `ReduceMin`, `ReduceMax`, `ReduceProd` et
+  `LowerTriangular`. Les identifiants des types existants sont conservés.
+- Forward/backward CPU et kernels générés Vulkan/OpenCL, avec contrôles de
+  dimensions, domaines, finitude et budgets de travail. Le routeur conserve
+  un repli CPU explicite, notamment pour les subnormaux FP32 non garantis sur
+  GPU. CUDA/ROCm restent en repli hôte pour ces nouveaux types.
+- Types accessibles aux graphes C++ et Lua/MPK, filtres d’inspection
+  `Mimir.Layers`, formes de réduction dans le planner et métadonnées complètes
+  dans les checkpoints RawFolder/SafeTensors.
+- Documentation des gradients aux égalités, des singularités de `SqrtAbs` et
+  `LogAbs`, du produit réduit avec facteurs nuls et du masque multiplicatif
+  `LowerTriangular`. L’ajout de ces primitives ne modifie pas les topologies
+  des modèles existants.
+
 ## [3.6.0] - 2026-10-22
 
 ### Performances, Viz et benchmarks

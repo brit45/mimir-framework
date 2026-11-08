@@ -1,0 +1,1857 @@
+[
+  {
+    "file": "03_model_lifecycle.svg",
+    "title": "Cycle de vie du modèle natif",
+    "subtitle": "Créer la structure, allouer, puis initialiser ou charger les poids.",
+    "description": "Le registre construit une classe C++ dérivée de Model. Les paramètres sont alloués avant une initialisation neuve ou un chargement compatible. Le modèle est ensuite utilisé en entraînement ou en inférence, puis sauvegardé.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "config",
+        "title": "Architecture et config",
+        "lines": [
+          "Classe C++ dérivée de Model",
+          "Valeurs autorisées du run"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "create",
+        "title": "Créer via le registre",
+        "lines": [
+          "Model.create(name, cfg)",
+          "Construction native du graphe"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "allocate",
+        "title": "Allouer les paramètres",
+        "lines": [
+          "allocate_params()",
+          "Avant init ou chargement"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "init",
+        "title": "Nouveau départ",
+        "lines": [
+          "init_weights(méthode, seed)",
+          "Poids initialisés une fois"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "blue",
+        "badge": "NOUVEAU RUN"
+      },
+      {
+        "id": "forward",
+        "title": "Exécuter le modèle",
+        "lines": [
+          "forward(entrées, training)",
+          "Tenseurs et sorties nommés"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "load",
+        "title": "Charger un checkpoint",
+        "lines": [
+          "Serialization.load(...)",
+          "Topologie et assets compatibles"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "orange",
+        "badge": "REPRISE / INFÉRENCE"
+      },
+      {
+        "id": "train",
+        "title": "Entraîner",
+        "lines": [
+          "Loss → backward → optimizer",
+          "Validation sans mise à jour"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "save",
+        "title": "Sauvegarder le run",
+        "lines": [
+          "Poids, config et état utile",
+          "Format et options explicites"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "infer",
+        "title": "Faire une inférence",
+        "lines": [
+          "training = false",
+          "Décoder ou post-traiter"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "slate"
+      }
+    ],
+    "edges": [
+      {
+        "from": "config",
+        "to": "create"
+      },
+      {
+        "from": "create",
+        "to": "allocate"
+      },
+      {
+        "from": "allocate",
+        "to": "init",
+        "label": "OU"
+      },
+      {
+        "from": "allocate",
+        "to": "load",
+        "label": "OU"
+      },
+      {
+        "from": "init",
+        "to": "forward"
+      },
+      {
+        "from": "load",
+        "to": "forward"
+      },
+      {
+        "from": "forward",
+        "to": "train"
+      },
+      {
+        "from": "forward",
+        "to": "infer"
+      },
+      {
+        "from": "train",
+        "to": "save"
+      },
+      {
+        "from": "infer",
+        "to": "save",
+        "label": "si nécessaire",
+        "style": "dashed"
+      }
+    ],
+    "notes": [
+      "Model.build() est un appel de compatibilité : create a déjà construit le graphe.",
+      "Ne pas réinitialiser les poids après un chargement destiné à une reprise ou une inférence."
+    ],
+    "sources": [
+      "src/Model.hpp",
+      "src/Models/Registry/ModelArchitectures.cpp",
+      "src/Serialization/Serialization.hpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/02-Model-Lifecycle.md",
+      "docs/08-Tuto/12-Tuto-Entrainement-Validation-Reprise-Inference.md"
+    ]
+  },
+  {
+    "file": "07_graph_runtime.svg",
+    "title": "Exécution du graphe et routage",
+    "subtitle": "Le modèle orchestre ; le planner prépare ; les runtimes calculent.",
+    "description": "La topologie native est définie dans une classe C++ dérivée de Model. Le plan contient les opérations, durées de vie et groupes. RuntimeRouter sélectionne un backend adapté aux entrées et lui délègue les calculs, en forward et backward.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "model",
+        "title": "Graphe natif",
+        "lines": [
+          "Couches et connexions C++",
+          "Entrées réelles du modèle"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "plan",
+        "title": "Plan d’exécution",
+        "lines": [
+          "Ordre, durées de vie, buffers",
+          "Fusion et transferts possibles"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "router",
+        "title": "RuntimeRouter",
+        "lines": [
+          "Capacités par opération",
+          "Classement et repli explicite"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "output",
+        "title": "Sorties du modèle",
+        "lines": [
+          "Logits, reconstructions…",
+          "Selon contrat d’architecture"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "ops",
+        "title": "Dispatcher et kernels",
+        "lines": [
+          "Contrôles des formes / valeurs",
+          "Forward complet ou refus"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "backend",
+        "title": "Backend choisi",
+        "lines": [
+          "ROCm, CUDA, Vulkan, OpenCL",
+          "TPU si sa session est fournie",
+          "Ou CPU selon le plan"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "backward",
+        "title": "Backward si entraînement",
+        "lines": [
+          "Activations conservées",
+          "Gradients routés par opération"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "optim",
+        "title": "Optimiseur",
+        "lines": [
+          "États et mise à jour des poids",
+          "Après calcul des gradients"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "observe",
+        "title": "Observabilité",
+        "lines": [
+          "Loss, gradients, temps, mémoire",
+          "Snapshots Viz / Htop"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "slate"
+      }
+    ],
+    "edges": [
+      {
+        "from": "model",
+        "to": "plan"
+      },
+      {
+        "from": "plan",
+        "to": "router"
+      },
+      {
+        "from": "router",
+        "to": "backend"
+      },
+      {
+        "from": "backend",
+        "to": "ops"
+      },
+      {
+        "from": "ops",
+        "to": "output"
+      },
+      {
+        "from": "output",
+        "to": "backward",
+        "label": "gradient de loss"
+      },
+      {
+        "from": "backward",
+        "to": "optim"
+      },
+      {
+        "from": "optim",
+        "to": "observe"
+      }
+    ],
+    "notes": [
+      "Une capacité déclarée ne prouve pas le backend réellement exécuté : vérifier la trace ou selected_runtime.",
+      "Le backward repasse par le routeur ; les mathématiques des layers restent dans les runtimes."
+    ],
+    "sources": [
+      "src/Model.cpp",
+      "src/Planning/Planner.hpp",
+      "src/runtimes/RuntimeRouter.cpp",
+      "src/runtimes/cpu/RuntimeLayerDispatch.hpp"
+    ],
+    "related_docs": [
+      "docs/04-Architecture-Internals/01-Engine-Overview.md",
+      "docs/04-Architecture-Internals/22-Planning.md"
+    ]
+  },
+  {
+    "file": "08_memory_subsystem.svg",
+    "title": "Mémoire : responsabilités et budgets",
+    "subtitle": "Poids, activations, scratchpads et RSS sont des mesures différentes.",
+    "description": "MemoryGuard suit les réservations instrumentées. DynamicTensorAllocator gère les tenseurs qui utilisent son chemin. RuntimeAllocator propose des handles RAII et un pool de scratchpads. Les copies device et le RSS du processus ne se confondent pas avec ces compteurs.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "params",
+        "title": "Paramètres et états",
+        "lines": [
+          "Poids et gradients",
+          "États de l’optimiseur"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "dynamic",
+        "title": "Tenseurs dynamiques",
+        "lines": [
+          "DynamicTensorAllocator",
+          "Chargement, éviction, compression"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "guard",
+        "title": "MemoryGuard",
+        "lines": [
+          "Réservations courant / pic",
+          "Budget explicite des allocations"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "activations",
+        "title": "Activations",
+        "lines": [
+          "Conservées selon le graphe",
+          "Backward et mode du modèle"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "scratch",
+        "title": "RuntimeAllocator",
+        "lines": [
+          "Handles RAII et scratchpads",
+          "Réutilisation des temporaires"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "cache",
+        "title": "AdvancedRAMManager",
+        "lines": [
+          "Suivi et cache hôte",
+          "Selon la configuration"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "slate"
+      },
+      {
+        "id": "copies",
+        "title": "Copies et staging",
+        "lines": [
+          "Buffers hôte / device",
+          "Selon le runtime sélectionné"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "rss",
+        "title": "Mémoire du processus",
+        "lines": [
+          "RSS observé séparément",
+          "Ne se réduit pas aux tenseurs"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "slate"
+      },
+      {
+        "id": "release",
+        "title": "Libération / rétention",
+        "lines": [
+          "Fin de vie des handles",
+          "Le pool peut garder un budget"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "teal"
+      }
+    ],
+    "edges": [
+      {
+        "from": "params",
+        "to": "dynamic",
+        "label": "si dynamiques"
+      },
+      {
+        "from": "dynamic",
+        "to": "guard",
+        "label": "réserve"
+      },
+      {
+        "from": "dynamic",
+        "to": "cache",
+        "label": "cache / éviction"
+      },
+      {
+        "from": "activations",
+        "to": "scratch"
+      },
+      {
+        "from": "scratch",
+        "to": "guard",
+        "label": "budget"
+      },
+      {
+        "from": "scratch",
+        "to": "release",
+        "label": "fin de vie"
+      }
+    ],
+    "notes": [
+      "Les flèches relient des responsabilités ; toutes les allocations ne passent pas par le même allocateur.",
+      "MemoryGuard ne mesure que les chemins instrumentés. Un scratchpad conservé peut rester réservé."
+    ],
+    "sources": [
+      "src/MemoryGuard.hpp",
+      "src/runtimes/cpu/RuntimeAllocator.hpp",
+      "src/runtimes/cpu/DynamicTensorAllocator.hpp",
+      "src/AdvancedRAMManager.hpp"
+    ],
+    "related_docs": [
+      "docs/04-Architecture-Internals/02-Memory.md",
+      "docs/08-Tuto/15-Tuto-Memoire-Performances-Runtimes.md"
+    ]
+  },
+  {
+    "file": "09_serialization_checkpoint.svg",
+    "title": "Formats de sauvegarde et reprise",
+    "subtitle": "Le format et les options déterminent ce qui est réellement conservé.",
+    "description": "La sérialisation reçoit le modèle et les options d’export. RawFolder et SafeTensors transportent poids et métadonnées selon leurs options. DebugJSON sert à l’inspection et peut tronquer les valeurs. Une reprise exige le bon graphe et l’état d’entraînement utile.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "model",
+        "title": "État du modèle",
+        "lines": [
+          "Poids, dtype et configuration",
+          "Architecture native identifiée"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "options",
+        "title": "Options de sauvegarde",
+        "lines": [
+          "Optimiseur, tokenizer, encodeur",
+          "Métadonnées et checksums"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "raw",
+        "title": "RawFolder",
+        "lines": [
+          "Dossier de poids et manifests",
+          "Métadonnées lisibles"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "safe",
+        "title": "SafeTensors",
+        "lines": [
+          "Fichier de tenseurs typés",
+          "Métadonnées Mímir si présentes"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "debug",
+        "title": "DebugJSON",
+        "lines": [
+          "Inspection et statistiques",
+          "Valeurs éventuellement limitées"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "orange",
+        "badge": "DIAGNOSTIC"
+      },
+      {
+        "id": "resume",
+        "title": "Recharger / reprendre",
+        "lines": [
+          "Topologie et formes compatibles",
+          "Restaurer les états nécessaires"
+        ],
+        "row": 3,
+        "col": 1,
+        "tone": "purple"
+      }
+    ],
+    "edges": [
+      {
+        "from": "model",
+        "to": "options"
+      },
+      {
+        "from": "options",
+        "to": "raw"
+      },
+      {
+        "from": "options",
+        "to": "safe"
+      },
+      {
+        "from": "options",
+        "to": "debug"
+      },
+      {
+        "from": "raw",
+        "to": "resume"
+      },
+      {
+        "from": "safe",
+        "to": "resume"
+      }
+    ],
+    "notes": [
+      "Une reprise exacte demande les états d’optimiseur et la progression, pas uniquement les poids.",
+      "DebugJSON peut être incomplet ; MPK décrit une architecture expérimentale et ne remplace pas ses poids."
+    ],
+    "sources": [
+      "src/Serialization/Serialization.hpp",
+      "src/Serialization/RawCheckpointWriter.cpp",
+      "src/Serialization/SafeTensorsWriter.cpp",
+      "scripts/modules/checkpoint_resume.lua"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/08-Checkpoints.md",
+      "docs/03-API-Reference/16-Serialization.md"
+    ]
+  },
+  {
+    "file": "10_inspection_export.svg",
+    "title": "Inspecter, exporter, puis analyser",
+    "subtitle": "Un rapport décrit l’artefact choisi, pas une qualité d’apprentissage.",
+    "description": "Les outils inspectent le registre et un profil de configuration, exportent explicitement des artefacts, puis analysent les métadonnées et poids disponibles. Le nombre de paramètres dépend du profil et ne doit pas être attaché à un nom de modèle seul.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "registry",
+        "title": "Registre d’architectures",
+        "lines": [
+          "Noms et configurations natives",
+          "MPK importé : expérimental"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "inspect",
+        "title": "Inspecter le modèle",
+        "lines": [
+          "inspect_architectures.lua",
+          "Couches, paramètres, capacités"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "profile",
+        "title": "Choisir un profil",
+        "lines": [
+          "Dimensions et options effectives",
+          "Aucune comparaison implicite"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "analyze",
+        "title": "Analyser un artefact",
+        "lines": [
+          "analyze_model.lua",
+          "Métadonnées et tenseurs présents"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "checkpoint",
+        "title": "Artefact sauvegardé",
+        "lines": [
+          "RawFolder / SafeTensors",
+          "DebugJSON selon disponibilité"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "export",
+        "title": "Exporter explicitement",
+        "lines": [
+          "Format et destination choisis",
+          "Poids et assets selon options"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "report",
+        "title": "Rapport d’inspection",
+        "lines": [
+          "Formes, dtype, paramètres",
+          "Statistiques selon les données"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "slate"
+      },
+      {
+        "id": "svg",
+        "title": "Graphe de l’artefact",
+        "lines": [
+          "SVG ou Mermaid",
+          "Uniquement la structure observée"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "purple"
+      }
+    ],
+    "edges": [
+      {
+        "from": "registry",
+        "to": "inspect"
+      },
+      {
+        "from": "inspect",
+        "to": "profile"
+      },
+      {
+        "from": "profile",
+        "to": "export"
+      },
+      {
+        "from": "export",
+        "to": "checkpoint"
+      },
+      {
+        "from": "checkpoint",
+        "to": "analyze"
+      },
+      {
+        "from": "analyze",
+        "to": "report"
+      },
+      {
+        "from": "analyze",
+        "to": "svg"
+      }
+    ],
+    "notes": [
+      "Toujours conserver la configuration associée aux nombres de couches et de paramètres.",
+      "Des poids externes seuls ne reconstruisent pas automatiquement un modèle entraînable."
+    ],
+    "sources": [
+      "scripts/tools/inspect_architectures.lua",
+      "scripts/tools/analyze_model.lua",
+      "src/Serialization/Serialization.hpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/08-Checkpoints.md",
+      "docs/03-API-Reference/18-Layers-Module.md"
+    ]
+  },
+  {
+    "file": "11_training_pipeline.svg",
+    "title": "Entraînement, validation et observabilité",
+    "subtitle": "Les poids sont mis à jour sur le train ; le holdout reste séparé.",
+    "description": "Les données sont préparées avec une partition d’entraînement et de validation. Le modèle natif calcule prédictions et objectif, puis les gradients sont routés et l’optimiseur met à jour les poids. La validation évalue sans pas optimiseur. Les métriques et checkpoints restent liés au run.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "data",
+        "title": "Données et assets",
+        "lines": [
+          "Corpus ou médias compatibles",
+          "Tokenizer / encodeur si requis"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "prepare",
+        "title": "Préparer et séparer",
+        "lines": [
+          "Prétraitement et batches",
+          "Train et holdout identifiables"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "forward",
+        "title": "Forward du modèle",
+        "lines": [
+          "Classe C++ et graphe natif",
+          "Mode d’entraînement"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "purple"
+      },
+      {
+        "id": "optimizer",
+        "title": "Pas d’optimiseur",
+        "lines": [
+          "État, LR, clipping si configuré",
+          "Mise à jour des paramètres"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "backward",
+        "title": "Backward",
+        "lines": [
+          "Gradient de l’objectif",
+          "Routage des dérivées"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "loss",
+        "title": "Objectif compatible",
+        "lines": [
+          "Loss et cibles du modèle",
+          "Contrôle des valeurs finies"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "validation",
+        "title": "Validation périodique",
+        "lines": [
+          "Évaluation sur la partition",
+          "Sans pas optimiseur"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "orange"
+      },
+      {
+        "id": "metrics",
+        "title": "Métriques du run",
+        "lines": [
+          "Train / validation distincts",
+          "Journal, Viz, Htop, CSV"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "slate"
+      },
+      {
+        "id": "checkpoint",
+        "title": "Checkpoint et reprise",
+        "lines": [
+          "Poids, config et progression",
+          "Assets et optimiseur utiles"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "purple"
+      }
+    ],
+    "edges": [
+      {
+        "from": "data",
+        "to": "prepare"
+      },
+      {
+        "from": "prepare",
+        "to": "forward"
+      },
+      {
+        "from": "forward",
+        "to": "loss"
+      },
+      {
+        "from": "loss",
+        "to": "backward"
+      },
+      {
+        "from": "backward",
+        "to": "optimizer"
+      },
+      {
+        "from": "optimizer",
+        "to": "forward",
+        "label": "pas suivant",
+        "style": "dashed"
+      },
+      {
+        "from": "optimizer",
+        "to": "validation",
+        "label": "périodique"
+      },
+      {
+        "from": "validation",
+        "to": "metrics"
+      },
+      {
+        "from": "loss",
+        "to": "metrics",
+        "label": "train",
+        "style": "dashed"
+      },
+      {
+        "from": "metrics",
+        "to": "checkpoint"
+      }
+    ],
+    "notes": [
+      "La boucle et l’objectif dépendent du modèle : il n’existe pas un contrat de données universel.",
+      "Le CSV commun dépend du moniteur actif ; un holdout ne doit pas recevoir de mise à jour des poids."
+    ],
+    "sources": [
+      "src/Model.hpp",
+      "src/Models/MLP/BasicMLPModel.cpp",
+      "src/Models/NLP/CausalLMModel.cpp",
+      "src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/04-Training.md",
+      "docs/08-Tuto/12-Tuto-Entrainement-Validation-Reprise-Inference.md"
+    ]
+  },
+  {
+    "file": "12_inference_pipeline.svg",
+    "title": "Inférence depuis un checkpoint",
+    "subtitle": "Résoudre la topologie, allouer et charger avant le premier forward.",
+    "description": "La configuration et le checkpoint déterminent une architecture native compatible. Après construction et allocation, les poids et assets sont chargés sans réinitialisation. Les entrées sont préparées, le forward d’évaluation est exécuté et la sortie est décodée selon l’architecture.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "resolve",
+        "title": "Résoudre le contexte",
+        "lines": [
+          "Checkpoint et configuration",
+          "Même expérience / mêmes assets"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "orange"
+      },
+      {
+        "id": "construct",
+        "title": "Construire la classe native",
+        "lines": [
+          "Model.create(name, cfg)",
+          "Topologie compatible"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "allocate",
+        "title": "Allouer les paramètres",
+        "lines": [
+          "allocate_params()",
+          "Avant chargement des poids"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "forward",
+        "title": "Forward d’évaluation",
+        "lines": [
+          "training = false",
+          "Sans backward ni pas optimiseur"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "input",
+        "title": "Préparer les entrées",
+        "lines": [
+          "Tokens, images, latent…",
+          "Formes et tokenizer compatibles"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "load",
+        "title": "Charger poids et assets",
+        "lines": [
+          "Serialization.load(...)",
+          "Ne pas init après load"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "post",
+        "title": "Post-traiter",
+        "lines": [
+          "Décoder le texte / l’image",
+          "Selon les sorties du modèle"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "result",
+        "title": "Résultat et contrôles",
+        "lines": [
+          "Forme, finitude et cohérence",
+          "Mesure de qualité séparée"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "slate"
+      },
+      {
+        "id": "export",
+        "title": "Enregistrer si nécessaire",
+        "lines": [
+          "Sortie, contexte et journaux",
+          "Destination explicite"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "teal"
+      }
+    ],
+    "edges": [
+      {
+        "from": "resolve",
+        "to": "construct"
+      },
+      {
+        "from": "construct",
+        "to": "allocate"
+      },
+      {
+        "from": "allocate",
+        "to": "load"
+      },
+      {
+        "from": "load",
+        "to": "input"
+      },
+      {
+        "from": "input",
+        "to": "forward"
+      },
+      {
+        "from": "forward",
+        "to": "post"
+      },
+      {
+        "from": "post",
+        "to": "result"
+      },
+      {
+        "from": "result",
+        "to": "export"
+      }
+    ],
+    "notes": [
+      "Le chargement ne remplace pas une topologie correcte ; les overrides incompatibles sont à refuser.",
+      "La sortie du forward est un tenseur : son décodage dépend de l’architecture choisie."
+    ],
+    "sources": [
+      "src/Model.hpp",
+      "src/Serialization/Serialization.hpp",
+      "scripts/inferences/causal_lm_generate.lua"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/05-Inference.md",
+      "docs/08-Tuto/12-Tuto-Entrainement-Validation-Reprise-Inference.md"
+    ]
+  },
+  {
+    "file": "13_layer_registry.svg",
+    "title": "Familles du registre des couches",
+    "subtitle": "Exemples canoniques ; l’inventaire complet vient du registre courant.",
+    "description": "Le registre LayerType comprend les convolutions ND et causales, SwiGLU, les primitives Primer, les couches de projection et de normalisation, l’attention et les opérations de tenseurs. Ces catégories illustrent les noms canoniques sans figer un ancien nombre de types.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "conv",
+        "title": "Convolutions",
+        "lines": [
+          "Conv1d / Conv2d",
+          "Conv3d / Conv4d",
+          "CausalDepthwiseConv1d"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "dense",
+        "title": "Projections et embeddings",
+        "lines": [
+          "Linear / Bilinear",
+          "Embedding / EmbeddingBag",
+          "PatchEmbed"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "norm",
+        "title": "Normalisations",
+        "lines": [
+          "LayerNorm / GroupNorm",
+          "RMSNorm / BatchNorm2d",
+          "InstanceNorm2d"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "activation",
+        "title": "Activations et gates",
+        "lines": [
+          "ReLU / GELU / SiLU",
+          "SwiGLU / SquaredReLU",
+          "Softmax / LogSoftmax"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "primer",
+        "title": "Fonctions Primer",
+        "lines": [
+          "Square / SqrtAbs / LogAbs",
+          "Abs / ReciprocalNoNan",
+          "Exp / Sin / Cos / Sign"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "orange"
+      },
+      {
+        "id": "reduce",
+        "title": "Comparaisons et réductions",
+        "lines": [
+          "Maximum / Minimum",
+          "ReduceSum / ReduceMean",
+          "ReduceMin / ReduceMax / ReduceProd"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "tensor",
+        "title": "Opérations de tenseurs",
+        "lines": [
+          "Reshape / Permute / Add",
+          "MatMul / BatchMatMul",
+          "LowerTriangular / Concat"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "pool",
+        "title": "Pooling et redimensionnement",
+        "lines": [
+          "MaxPool2d / AvgPool2d",
+          "TokenMeanPool",
+          "UpsampleNearest / PixelShuffle"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "other",
+        "title": "Autres familles",
+        "lines": [
+          "LSTM / GRU / RNN",
+          "Dropout / Reparameterize",
+          "Constant / Identity / NMS"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "slate"
+      }
+    ],
+    "edges": [],
+    "notes": [
+      "Exemples non exhaustifs. Mimir.Layers.available() expose l’inventaire canonique actif.",
+      "Une entrée LayerType n’assure pas toutes les formes sur tous les backends ; vérifier forward et backward."
+    ],
+    "sources": [
+      "src/LayerTypes.hpp",
+      "src/runtimes/PrimerGeometry.hpp",
+      "src/runtimes/cpu/RuntimeLayerDispatch.hpp"
+    ],
+    "related_docs": [
+      "docs/03-API-Reference/01-Layers.md",
+      "docs/04-Architecture-Internals/14-Layers-And-Ops.md"
+    ]
+  },
+  {
+    "file": "14_backend_detection.svg",
+    "title": "Du build au backend réellement exécuté",
+    "subtitle": "Compilation, disponibilité, capacité et sélection sont quatre preuves distinctes.",
+    "description": "Le binaire fournit les backends compilés. La configuration et les périphériques disponibles conditionnent leur initialisation. Chaque opération vérifie ses formes, valeurs et budgets ; le planner et le routeur choisissent un chemin, avec refus et repli si nécessaire.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "build",
+        "title": "Binaire compilé",
+        "lines": [
+          "Options CMake et dépendances",
+          "SDK présent ≠ device utilisable"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "slate"
+      },
+      {
+        "id": "config",
+        "title": "Configuration du run",
+        "lines": [
+          "Flags, variables d’environnement",
+          "Backends activés ou désactivés"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "device",
+        "title": "Périphérique disponible",
+        "lines": [
+          "Pilote et initialisation",
+          "Initialisation selon besoin"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "dispatch",
+        "title": "Routeur et dispatch",
+        "lines": [
+          "Candidat accepté par opération",
+          "Refus conservés / repli"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "orange"
+      },
+      {
+        "id": "plan",
+        "title": "Classement des candidats",
+        "lines": [
+          "Priorité, politique, calibration",
+          "Coût et parité lorsque mesurés"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "capability",
+        "title": "Capacités réelles",
+        "lines": [
+          "Native / NativeOptimized",
+          "HostFallback / Unsupported",
+          "Formes, valeurs et budgets"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "blue"
+      },
+      {
+        "id": "kernel",
+        "title": "Kernel exécuté",
+        "lines": [
+          "Backend choisi pour cette op",
+          "Forward ou backward"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "output",
+        "title": "Résultat vérifié",
+        "lines": [
+          "Sortie complète ou refus",
+          "Trace : selected_runtime"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "fallback",
+        "title": "Refus / échec",
+        "lines": [
+          "Autre candidat admissible",
+          "CPU si activé et compatible"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "orange"
+      }
+    ],
+    "edges": [
+      {
+        "from": "build",
+        "to": "config"
+      },
+      {
+        "from": "config",
+        "to": "device"
+      },
+      {
+        "from": "device",
+        "to": "capability"
+      },
+      {
+        "from": "capability",
+        "to": "plan"
+      },
+      {
+        "from": "plan",
+        "to": "dispatch"
+      },
+      {
+        "from": "dispatch",
+        "to": "kernel"
+      },
+      {
+        "from": "kernel",
+        "to": "output"
+      },
+      {
+        "from": "kernel",
+        "to": "fallback",
+        "label": "si refus",
+        "style": "dashed"
+      },
+      {
+        "from": "fallback",
+        "to": "dispatch",
+        "label": "réessai",
+        "style": "dashed"
+      }
+    ],
+    "notes": [
+      "L’ordre de base ROCm → CUDA → Vulkan → OpenCL → TPU (si fourni) → CPU n’annule pas la sélection mesurée par opération.",
+      "Un test ignoré faute de device ne constitue pas une validation matérielle du backend."
+    ],
+    "sources": [
+      "src/runtimes/AbstractRuntime.hpp",
+      "src/runtimes/RuntimeRouter.cpp",
+      "src/Planning/ExecutionCalibration.cpp",
+      "src/runtimes/cpu/SimdDispatch.cpp"
+    ],
+    "related_docs": [
+      "docs/04-Architecture-Internals/03-Hardware-Backends.md",
+      "docs/01-Getting-Started/03-CLI.md"
+    ]
+  },
+  {
+    "file": "15_cpu_first_execution.svg",
+    "title": "CPU-first : référence et repli",
+    "subtitle": "CPU-first ne signifie pas que le CPU gagne toujours la sélection.",
+    "description": "Le CPU est la référence générale et le repli lorsqu’il est activé et compatible. Le routeur peut préférer un backend natif admissible selon la politique ou la calibration. Les variantes SIMD sont choisies selon les capacités du CPU et de l’OS.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "input",
+        "title": "Modèle et entrées",
+        "lines": [
+          "Graphe de la classe C++",
+          "Formes et dtype du run"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "policy",
+        "title": "Planner et politique",
+        "lines": [
+          "Capacités et budgets",
+          "Mesures sur cas rejouables"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "router",
+        "title": "Choisir une route",
+        "lines": [
+          "CPU ou accélérateur admissible",
+          "Selon l’opération réelle"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "cpu",
+        "title": "Runtime CPU",
+        "lines": [
+          "Scalaire, SSE2, AVX",
+          "AVX2 / AVX512F si CPU + OS",
+          "OpenMP selon le travail"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "refuse",
+        "title": "Refus contrôlé",
+        "lines": [
+          "Forme, précision ou budget",
+          "Un autre candidat est essayé"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "orange"
+      },
+      {
+        "id": "gpu",
+        "title": "Runtime accéléré",
+        "lines": [
+          "ROCm / CUDA / Vulkan / OpenCL",
+          "TPU si sa session est fournie",
+          "Disponibilité et capacités"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "blue"
+      },
+      {
+        "id": "verify",
+        "title": "Vérifier la conformité",
+        "lines": [
+          "Sorties et gradients",
+          "Poids après mise à jour"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "measure",
+        "title": "Observer le coût complet",
+        "lines": [
+          "Transferts et soumissions inclus",
+          "Temps et backend réellement choisi"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "slate"
+      },
+      {
+        "id": "result",
+        "title": "Résultat du modèle",
+        "lines": [
+          "Valeurs publiées après succès",
+          "Preuve liée à ce matériel"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "teal"
+      }
+    ],
+    "edges": [
+      {
+        "from": "input",
+        "to": "policy"
+      },
+      {
+        "from": "policy",
+        "to": "router"
+      },
+      {
+        "from": "router",
+        "to": "cpu"
+      },
+      {
+        "from": "router",
+        "to": "gpu"
+      },
+      {
+        "from": "gpu",
+        "to": "refuse",
+        "label": "si refus",
+        "style": "dashed"
+      },
+      {
+        "from": "refuse",
+        "to": "router",
+        "label": "réessai",
+        "style": "dashed"
+      },
+      {
+        "from": "cpu",
+        "to": "verify"
+      },
+      {
+        "from": "gpu",
+        "to": "verify"
+      },
+      {
+        "from": "verify",
+        "to": "measure"
+      },
+      {
+        "from": "measure",
+        "to": "result"
+      }
+    ],
+    "notes": [
+      "AVX256 désigne la largeur 256 bits d’AVX ; le dispatch vérifie le matériel et l’état de l’OS.",
+      "Le repli CPU exige un CPU activé. La présence d’un kernel GPU ne garantit pas un gain de vitesse."
+    ],
+    "sources": [
+      "src/runtimes/RuntimeRouter.cpp",
+      "src/runtimes/cpu/SimdDispatch.cpp",
+      "src/Planning/ExecutionPolicy.hpp"
+    ],
+    "related_docs": [
+      "docs/04-Architecture-Internals/03-Hardware-Backends.md",
+      "docs/08-Tuto/15-Tuto-Memoire-Performances-Runtimes.md"
+    ]
+  },
+  {
+    "file": "25_checkpoint_analysis_flow.svg",
+    "title": "Analyser un checkpoint identifié",
+    "subtitle": "Le rapport doit conserver le contexte et les limites de l’artefact.",
+    "description": "L’analyse détecte le format, lit les métadonnées et les tenseurs disponibles, puis produit statistiques et représentation du graphe observé. L’absence de topologie ou des valeurs tronquées limite les conclusions. Les CSV d’entraînement doivent appartenir au même run.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "artifact",
+        "title": "Artefact sélectionné",
+        "lines": [
+          "RawFolder / SafeTensors",
+          "Ou DebugJSON d’inspection"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "format",
+        "title": "Format et options",
+        "lines": [
+          "Détection / format explicite",
+          "Limites et contrôles du loader"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "metadata",
+        "title": "Métadonnées disponibles",
+        "lines": [
+          "Nom, configuration, couches",
+          "Connexions si sérialisées"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "graph",
+        "title": "Graphe observé",
+        "lines": [
+          "Nœuds et arêtes disponibles",
+          "Pas de topologie inventée"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "stats",
+        "title": "Statistiques calculables",
+        "lines": [
+          "Formes, dtype et paramètres",
+          "Valeurs réellement présentes"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "blue"
+      },
+      {
+        "id": "weights",
+        "title": "Poids et valeurs",
+        "lines": [
+          "Tenseurs selon le format",
+          "Données complètes ou limitées"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "report",
+        "title": "Rapport d’analyse",
+        "lines": [
+          "Tables et limites explicites",
+          "Chemin de l’artefact choisi"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "slate"
+      },
+      {
+        "id": "svg",
+        "title": "Graphe exporté",
+        "lines": [
+          "SVG / Mermaid selon options",
+          "Description de ce checkpoint"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "context",
+        "title": "Contrôler le contexte",
+        "lines": [
+          "Même run pour CSV et checkpoint",
+          "Profil et progression identifiés"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "orange"
+      }
+    ],
+    "edges": [
+      {
+        "from": "artifact",
+        "to": "format"
+      },
+      {
+        "from": "format",
+        "to": "metadata"
+      },
+      {
+        "from": "metadata",
+        "to": "weights"
+      },
+      {
+        "from": "weights",
+        "to": "stats"
+      },
+      {
+        "from": "metadata",
+        "to": "graph"
+      },
+      {
+        "from": "stats",
+        "to": "report"
+      },
+      {
+        "from": "graph",
+        "to": "report"
+      },
+      {
+        "from": "graph",
+        "to": "svg"
+      },
+      {
+        "from": "report",
+        "to": "context"
+      },
+      {
+        "from": "svg",
+        "to": "context"
+      }
+    ],
+    "notes": [
+      "Des poids externes seuls ne suffisent pas à reconstruire un graphe natif entraînable.",
+      "DebugJSON peut tronquer les valeurs ; un rapport de métriques ne recalcule pas la qualité du modèle."
+    ],
+    "sources": [
+      "scripts/tools/analyze_model.lua",
+      "scripts/tools/show-graph.lua",
+      "src/Serialization/Serialization.hpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/08-Checkpoints.md",
+      "docs/02-User-Guide/16-Show-Graph-Metrics.md"
+    ]
+  },
+  {
+    "file": "27_runtime_dataflow.svg",
+    "title": "Flux des tenseurs nommés",
+    "subtitle": "Entrées float et IDs int alimentent le même graphe à noms explicites.",
+    "description": "Model injecte les entrées dans les stores float et int. Il résout les entrées de chaque couche, délègue le calcul au routeur et publie les sorties nommées. Les activations nécessaires au backward sont conservées, et le plan peut libérer ou réutiliser les buffers selon leur durée de vie.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "float",
+        "title": "Entrées flottantes",
+        "lines": [
+          "Images, latents, features…",
+          "Selon la classe d’architecture"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "integer",
+        "title": "Entrées entières",
+        "lines": [
+          "IDs de tokens / text_ids…",
+          "Embedding lit le chemin int"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "purple"
+      },
+      {
+        "id": "stores",
+        "title": "Stores nommés",
+        "lines": [
+          "TensorStore float",
+          "IntTensorStore",
+          "Noms définis par le modèle"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "inputs",
+        "title": "Résoudre le layer",
+        "lines": [
+          "Layer.inputs",
+          "Une ou plusieurs entrées"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "router",
+        "title": "Router → dispatcher",
+        "lines": [
+          "Opération et runtime choisis",
+          "Calcul dans les kernels"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "orange"
+      },
+      {
+        "id": "publish",
+        "title": "Publier la sortie",
+        "lines": [
+          "Layer.output",
+          "Valeur complète après succès"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "snapshots",
+        "title": "Conserver si nécessaire",
+        "lines": [
+          "Activations pour le backward",
+          "Gradients accumulés par nom"
+        ],
+        "row": 3,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "memory",
+        "title": "Fin de vie / réutilisation",
+        "lines": [
+          "Dernier consommateur du tenseur",
+          "Selon plan et mode effectifs"
+        ],
+        "row": 3,
+        "col": 1,
+        "tone": "slate"
+      },
+      {
+        "id": "output",
+        "title": "Sortie de l’architecture",
+        "lines": [
+          "Logits, reconstructions, latent…",
+          "Post-traitement séparé"
+        ],
+        "row": 3,
+        "col": 2,
+        "tone": "blue"
+      }
+    ],
+    "edges": [
+      {
+        "from": "float",
+        "to": "stores"
+      },
+      {
+        "from": "integer",
+        "to": "stores"
+      },
+      {
+        "from": "stores",
+        "to": "inputs"
+      },
+      {
+        "from": "inputs",
+        "to": "router"
+      },
+      {
+        "from": "router",
+        "to": "publish"
+      },
+      {
+        "from": "publish",
+        "to": "stores",
+        "label": "layer suivant",
+        "style": "dashed"
+      },
+      {
+        "from": "publish",
+        "to": "output"
+      },
+      {
+        "from": "router",
+        "to": "snapshots",
+        "label": "training",
+        "style": "dashed"
+      },
+      {
+        "from": "publish",
+        "to": "memory",
+        "label": "fin de vie",
+        "style": "dashed"
+      }
+    ],
+    "notes": [
+      "Le backward utilise les activations conservées et repasse par le routeur pour les dérivées.",
+      "Les noms et formes viennent de la classe C++ dérivée de Model ; les scripts fournissent les entrées."
+    ],
+    "sources": [
+      "src/Model.cpp",
+      "src/Layers.hpp",
+      "src/Planning/Planner.hpp",
+      "src/runtimes/RuntimeRouter.cpp"
+    ],
+    "related_docs": [
+      "docs/04-Architecture-Internals/01-Engine-Overview.md",
+      "docs/04-Architecture-Internals/13-Autograd-Gradients.md"
+    ]
+  }
+]

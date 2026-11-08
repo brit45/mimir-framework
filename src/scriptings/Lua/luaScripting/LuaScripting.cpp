@@ -190,6 +190,18 @@ void LuaScripting::registerAPI() {
     
     lua_pushcfunction(L, lua_trainModel);
     lua_setfield(L, -2, "train");
+    lua_pushcfunction(L, lua_causalLmPrepareCorpus);
+    lua_setfield(L, -2, "causal_lm_prepare_corpus");
+    lua_pushcfunction(L, lua_causalLmTrainCorpus);
+    lua_setfield(L, -2, "causal_lm_train");
+    lua_pushcfunction(L, lua_causalLmGenerate);
+    lua_setfield(L, -2, "causal_lm_generate");
+    lua_pushcfunction(L, lua_causalLmChat);
+    lua_setfield(L, -2, "causal_lm_chat");
+    lua_pushcfunction(L, lua_causalLmResetMemory);
+    lua_setfield(L, -2, "causal_lm_reset_memory");
+    lua_pushcfunction(L, lua_causalLmMemorySize);
+    lua_setfield(L, -2, "causal_lm_memory_size");
     lua_pushcfunction(L, lua_visionTrainStep);
     lua_setfield(L, -2, "vision_train_step");
     
@@ -277,12 +289,30 @@ void LuaScripting::registerAPI() {
     // DType selection
     lua_pushcfunction(L, lua_modelDType);
     lua_setfield(L, -2, "dtype");
+    lua_pushcfunction(L, lua_modelAutocast);
+    lua_setfield(L, -2, "set_autocast");
 
     // Expose both Mimir.Model and Mimir.model (lowercase alias)
     lua_pushvalue(L, -1);
     lua_setfield(L, -3, "model");  // Mimir.model
 
     lua_setfield(L, -2, "Model");  // Mimir.Model
+
+    // ========== Sous-table "Mimir.Distributed" ==========
+    lua_newtable(L);
+    lua_pushcfunction(L, lua_distributedInitialize);
+    lua_setfield(L, -2, "initialize");
+    lua_pushcfunction(L, lua_distributedShutdown);
+    lua_setfield(L, -2, "shutdown");
+    lua_pushcfunction(L, lua_distributedRank);
+    lua_setfield(L, -2, "rank");
+    lua_pushcfunction(L, lua_distributedWorldSize);
+    lua_setfield(L, -2, "world_size");
+    lua_pushcfunction(L, lua_distributedIsMainProcess);
+    lua_setfield(L, -2, "is_main_process");
+    lua_pushcfunction(L, lua_distributedBarrier);
+    lua_setfield(L, -2, "barrier");
+    lua_setfield(L, -2, "Distributed");
 
     // ========== Sous-table "Mimir.Benchmark" ==========
     lua_newtable(L);
@@ -387,6 +417,9 @@ void LuaScripting::registerAPI() {
     
     lua_pushcfunction(L, lua_getVocabSize);
     lua_setfield(L, -2, "vocab_size");
+
+    lua_pushcfunction(L, lua_getBPEMergeCount);
+    lua_setfield(L, -2, "bpe_merge_count");
 
     lua_pushcfunction(L, lua_getMaxVocab);
     lua_setfield(L, -2, "get_max_vocab");

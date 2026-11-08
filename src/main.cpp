@@ -11,6 +11,7 @@
 #include "scriptings/JavaScript/jsScripting/JSScripting.hpp"
 #endif
 #include "AsyncMonitor.hpp"
+#include "scriptings/ModelVizProjection.hpp"
 #include "Helpers.hpp"
 #include "HtopDisplay.hpp"
 #include "Visualizer.hpp"
@@ -173,20 +174,20 @@ private:
         }
 
         static bool showOnConsole(const std::string& line) {
-            if (startsWith(line, "[startup]")) return false;
+            if (startsWith(line, "[startup]")) return true;
             if (startsWith(line, "[memory]")) return false;
             if (startsWith(line, "[planner]")) return false;
             if (startsWith(line, "[runtime-trace]")) return false;
-            if (startsWith(line, "[runtime]")) return false;
+            if (startsWith(line, "[runtime]")) return true;
             if (startsWith(line, "[allocator]")) return false;
-            if (startsWith(line, "[registry]")) return false;
+            if (startsWith(line, "[registry]")) return true;
             if (startsWith(line, "[encoder]")) return false;
             if (startsWith(line, "[serialization] raw ")) return false;
             if (startsWith(line, "[serialization] safetensors ")) return false;
-            if (startsWith(line, "  Layer ")) return false;
-            if (startsWith(line, "Test ")) return false;
-            if (startsWith(line, "  • ")) return false;
-            if (startsWith(line, "🛡️  Vérification")) return false;
+            if (startsWith(line, "  Layer ")) return true;
+            if (startsWith(line, "Test ")) return true;
+            if (startsWith(line, "  • ")) return true;
+            if (startsWith(line, "🛡️  Vérification")) return true;
             if (startsWith(line, "✅ Structure legacy")) return false;
             if (startsWith(line, "🧪 TEST D'INTÉGRITÉ")) return false;
             if (startsWith(line, "✅ TOUS LES TESTS PASSÉS")) return false;
@@ -592,6 +593,8 @@ int main(int argc, char **argv)
     auto waitForLuaVizCloseIfOpen = []() {
         auto& ctx = LuaContext::getInstance();
         if (ctx.asyncMonitor && ctx.asyncMonitor->getViz() && ctx.asyncMonitor->getViz()->isOpen()) {
+            Mimir::Scripting::bindModelProjection(ctx, false, true);
+            ctx.asyncMonitor->latentSpaceControl()->training_active.store(false, std::memory_order_release);
             std::cerr << "\n🖼️  Viz ouverte — fermeture manuelle requise pour quitter le script...\n";
             ctx.asyncMonitor->waitForVizClose();
         }

@@ -25,6 +25,7 @@ Mimir = {}
 ---@class Mimir
 ---@field Model MimirModelAPI
 ---@field model MimirModelAPI @Alias de `Mimir.Model`
+---@field Distributed MimirDistributedAPI
 ---@field Benchmark MimirBenchmarkAPI
 ---@field Architectures MimirArchitecturesAPI
 ---@field Layers MimirLayersAPI
@@ -165,6 +166,7 @@ function Mimir.Benchmark.now() end
 ---@field csv_dir? string @Dossier CSV : génère `{csv_dir}/{name}_htop_metrics.csv`
 ---@field viz_taps_max_frames? int @Limite frames "viz taps" (si viz active)
 ---@field viz_taps_max_side? int @Limite taille preview "viz taps" (si viz active)
+---@field viz_registered_tips_only? bool @N'affiche que les couches repérées par l'architecture
 ---@field validate_every_steps? int @Validation toutes les N étapes d'optimizer (0 = désactivé)
 ---@field validate_items? int @Nombre d'items évalués par validation
 ---@field validate_holdout? bool @Active un split holdout (si supporté par le script/archi)
@@ -203,6 +205,10 @@ function Mimir.Benchmark.now() end
 ---@field causal? bool
 
 ---@class CausalLMConfig: ModelConfig
+---@field causal_arch_version? int @2 pour nouveaux modèles; 1 pour checkpoints historiques
+---@field local_conv_kernel? int @Noyau causal par canal (défaut 3); 0 désactive la branche locale
+---@field local_conv_dilation? int @Espacement des tokens précédents (défaut 1)
+---@field fused_swiglu? boolean @Couche SwiGLU native à deux entrées (défaut true)
 ---@field vocab_size? int
 ---@field padding_idx? int
 ---@field seq_len? int
@@ -211,6 +217,7 @@ function Mimir.Benchmark.now() end
 ---@field num_heads? int
 ---@field num_kv_heads? int @Nombre de têtes K/V; doit diviser num_heads (GQA)
 ---@field mlp_hidden? int @Largeur intermédiaire SwiGLU
+---@field latent_dim? int @Dimension du bottleneck latent causal; 0 désactive cette branche
 ---@field norm_eps? float
 ---@field rope_theta? float
 
@@ -274,6 +281,8 @@ function Mimir.Benchmark.now() end
 ---@field hidden_dim? int
 
 ---@class VAEConvConfig: ModelConfig
+---@field conv_mode? "2d"|"3d"|"4d" @Rang des convolutions; axes ND supplémentaires singleton, images HWC/CHW inchangées (défaut: 2d)
+---@field inference_output_tensor? string @Sortie d'inférence explicite, par exemple vae_conv/mu pour encoder; défaut: recon pour VAE complet, x pour décodeur seul
 ---@field image_w? int
 ---@field image_h? int
 ---@field image_c? int
@@ -491,7 +500,27 @@ function Mimir.Benchmark.now() end
 ---@field tensor_conversion? boolean @F32 <-> F16/BF16 on FPGA
 ---@field buffer_input_bytes? integer @256-byte blocks (BRAM, not SDRAM)
 
+---@class SimdCaps
+---@field selected "scalar"|"sse2"|"avx256"|"avx2"|"avx512f"
+---@field sse2 boolean
+---@field sse3 boolean
+---@field ssse3 boolean
+---@field sse41 boolean
+---@field sse42 boolean
+---@field avx boolean
+---@field avx256 boolean @Alias AVX, vecteurs de 256 bits
+---@field avx2 boolean
+---@field avx512f boolean
+---@field avx512dq boolean
+---@field avx512bw boolean
+---@field avx512vl boolean
+---@field fma boolean
+---@field f16c boolean
+---@field bmi1 boolean
+---@field bmi2 boolean
+
 ---@class HardwareCaps
+---@field simd SimdCaps @Capacités CPU/OS et variante sélectionnée
 ---@field fpga? FpgaCaps
 ---@field avx2 bool @Support AVX2 SIMD instructions
 ---@field fma bool @Support FMA (Fused Multiply-Add)
@@ -642,6 +671,13 @@ function Mimir.Benchmark.now() end
 ---@class MimirModelAPI
 Mimir.Model = {}
 
+---Sélectionne le dtype AMP; float32 désactive l'autocast.
+---Les opérations non prises en charge restent en précision complète.
+---@param dtype "float16"|"bfloat16"|"float32"
+---@return boolean ok
+---@return string? err_or_dtype
+function Mimir.Model.set_autocast(dtype) end
+
 ---Créer un modèle via le registre d'architectures (C++).
 ---Le modèle est construit via le registre C++ immédiatement.
 ---Note: `Mimir.Model.create()` ne fait plus allocate/init automatiquement.
@@ -685,6 +721,46 @@ function Mimir.Model.create(model_type, config) end
 ---@return ModelConfig|table|nil config
 ---@return string? err
 function Mimir.Model.get_config() end
+
+---Prépare le corpus et réutilise ou compose le tokenizer BPE du modèle causal.
+---@param corpus_path string
+---@param tokenizer_path? string
+---@param bpe_merges? integer
+---@param seed? integer
+---@return boolean ok
+---@return table|string stats_or_error
+function Mimir.Model.causal_lm_prepare_corpus(corpus_path, tokenizer_path, bpe_merges, seed) end
+
+---Entraîne le modèle causal sur son corpus préparé jusqu'au nombre de steps demandé.
+---@param steps integer
+---@param learning_rate number
+---@param seed? integer
+---@return boolean ok
+---@return integer|string completed_steps_or_error
+function Mimir.Model.causal_lm_train(steps, learning_rate, seed) end
+
+---@param prompt string
+---@param options? table
+---@return string? response
+---@return string? err
+function Mimir.Model.causal_lm_generate(prompt, options) end
+
+---@param message string
+---@param memory_path? string
+---@param options? table
+---@return string? response
+---@return string? err
+function Mimir.Model.causal_lm_chat(message, memory_path, options) end
+
+---@param memory_path? string
+---@return boolean ok
+---@return string? err
+function Mimir.Model.causal_lm_reset_memory(memory_path) end
+
+---@param memory_path? string
+---@return integer? turns
+---@return string? err
+function Mimir.Model.causal_lm_memory_size(memory_path) end
 
 ---Créer un modèle vide (hors registre) pour importer une architecture nodale custom.
 ---Utilisé pour les MPK standalone quand le type n'existe pas dans le registre.
@@ -750,6 +826,32 @@ Mimir.model = Mimir.Model
 ---@overload fun(dtype: DTypeName|string): (boolean, string)
 function Mimir.model.dtype(dtype) end
 
+---@class MimirDistributedAPI
+Mimir.Distributed = {}
+
+---Initialise le groupe MPI pour DDP. Le binaire doit être compilé avec ENABLE_MPI.
+---@return boolean ok
+---@return string? err
+function Mimir.Distributed.initialize() end
+
+---Termine le groupe MPI si Mímir en est propriétaire.
+---@return boolean ok
+---@return string? err
+function Mimir.Distributed.shutdown() end
+
+---@return integer rank
+function Mimir.Distributed.rank() end
+
+---@return integer world_size
+function Mimir.Distributed.world_size() end
+
+---@return boolean is_main_process
+function Mimir.Distributed.is_main_process() end
+
+---@return boolean ok
+---@return string? err
+function Mimir.Distributed.barrier() end
+
 ---[DÉPRÉCIÉ] Sauvegarder le modèle (ancienne API).
 ---⚠️  Utilisez Mimir.Serialization.save() pour la nouvelle API v2.4
 ---@param dir string @Ex: "checkpoints/run1/epoch_10"
@@ -794,6 +896,16 @@ function Mimir.Model.clear_layers() end
 
 ---Pousser une couche (API bas niveau / description) dans le modèle.
 ---Note: cette fonction est surtout utilisée par les builders d'architectures.
+---Conv3d/Conv4d: params inclut input_spatial_shape, in_channels, out_channels,
+---kernel_shape, stride_shape, padding_shape, dilation_shape, groups et use_bias.
+---Les vecteurs kernel/stride/padding/dilation acceptent une valeur ou une par axe.
+---shape peut préciser N,C,D,H,W ou N,C,T,D,H,W; sans N le batch est inféré.
+---Avec params_count=0, allocate_params déduit la taille du bloc des convolutions ND.
+---Les opérations Primer sont sans poids (params_count=0). Maximum/Minimum acceptent
+---deux entrées de même taille ou un scalaire; Reduce* utilise shape et axis (base 0,
+---négatif accepté), conserve la dimension réduite à 1, ou réduit le vecteur entier
+---sans shape. LowerTriangular exige shape de rang >=2 et met à zéro col>row.
+---Utiliser set_layer_io après push_layer pour définir les connexions du graphe.
 ---@param name string
 ---@param layer_type string
 ---@param params_count integer
@@ -913,7 +1025,8 @@ function Mimir.Model.optimizer_step(learning_rate, opt_type) end
 function Mimir.Model.set_hardware(enable) end
 
 ---Retourne les capacités CPU et le statut de connexion/contrôle FPGA.
----@return HardwareCaps caps
+---@return HardwareCaps? caps
+---@return string? err @Configuration SIMD invalide/non disponible
 function Mimir.Model.hardware_caps() end
 
 ---Construire le contexte natif : entités, bbox, squelettes, relations, attributs et description.
@@ -1058,6 +1171,16 @@ function Mimir.Layers.by_type(layer_type) end
 ---@field vocab_size integer
 ---@field input_height integer
 ---@field input_width integer
+---@field input_depth? integer
+---@field input_time? integer
+---@field output_depth? integer
+---@field output_time? integer
+---@field input_spatial_shape? integer[] @D,H,W ou T,D,H,W
+---@field kernel_shape? integer[]
+---@field stride_shape? integer[]
+---@field padding_shape? integer[]
+---@field dilation_shape? integer[]
+---@field shape? integer[] @Shape d'entrée optionnelle, incluant N,C si explicites
 ---@field kernel_h? integer
 ---@field kernel_w? integer
 ---@field stride_h? integer
@@ -1092,6 +1215,14 @@ function Mimir.Layers.by_type(layer_type) end
 ---API en lecture seule: ne modifie jamais le modèle.
 ---@return MimirLayerInfo[] layers
 function Mimir.Layers.conv2d(...) end
+
+---Liste les convolutions 3D du modèle courant (inspection en lecture seule).
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.conv3d(...) end
+
+---Liste les convolutions 4D du modèle courant (inspection en lecture seule).
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.conv4d(...) end
 
 ---Liste les layers `Conv2d` du modèle courant.
 ---@return MimirLayerInfo[] layers
@@ -1168,6 +1299,87 @@ function Mimir.Layers.GELU() end
 ---Liste les layers `GEGLU` du modèle courant.
 ---@return MimirLayerInfo[] layers
 function Mimir.Layers.GEGLU() end
+
+---Liste les layers `SwiGLU` (deux entrées gate/value) du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.SwiGLU() end
+
+---Liste les layers `SquaredReLU` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.SquaredReLU() end
+
+---Liste les layers `Square` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Square() end
+
+---Liste les layers `SqrtAbs` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.SqrtAbs() end
+
+---Liste les layers `Exp` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Exp() end
+
+---Liste les layers `LogAbs` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.LogAbs() end
+
+---Liste les layers `Abs` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Abs() end
+
+---Liste les layers `ReciprocalNoNan` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ReciprocalNoNan() end
+
+---Liste les layers `Sign` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Sign() end
+
+---Liste les layers `Sin` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Sin() end
+
+---Liste les layers `Cos` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Cos() end
+
+---Liste les layers `Maximum` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Maximum() end
+
+---Liste les layers `Minimum` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.Minimum() end
+
+---Liste les layers `ReduceSum` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ReduceSum() end
+
+---Liste les layers `ReduceMean` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ReduceMean() end
+
+---Liste les layers `ReduceMin` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ReduceMin() end
+
+---Liste les layers `ReduceMax` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ReduceMax() end
+
+---Liste les layers `ReduceProd` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.ReduceProd() end
+
+---Liste les layers `LowerTriangular` du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.LowerTriangular() end
+
+
+---Liste les convolutions causales token-major par canal du modèle courant.
+---@return MimirLayerInfo[] layers
+function Mimir.Layers.CausalDepthwiseConv1d() end
 
 ---Liste les layers `SiLU` du modèle courant.
 ---@return MimirLayerInfo[] layers
@@ -1369,6 +1581,14 @@ function Mimir.Tokenizer.detokenize(tokens) end
 ---@return integer size
 function Mimir.Tokenizer.vocab_size() end
 
+---Retourne le nombre de merges BPE appris et chargés.
+---@return integer count
+function Mimir.Tokenizer.bpe_merge_count() end
+
+---Retourne le nombre de merges BPE appris et chargés.
+---@return integer count
+function Mimir.Tokenizer.bpe_merge_count() end
+
 ---Retourne la capacité maximale du vocab (limite d'ajout de nouveaux tokens).
 ---Note: si `vocab_size()` atteint `max_vocab`, `add_token()` peut échouer / retomber sur UNK selon impl.
 ---@return integer max_vocab
@@ -1427,12 +1647,12 @@ function Mimir.Tokenizer.mag_id() end
 ---@return string token
 function Mimir.Tokenizer.get_token_by_id(id) end
 
----Apprendre un BPE depuis un corpus (chemin ou texte selon impl).
----@param corpus_path string
----@param vocab_target? integer
+---Apprendre un BPE à partir d'une liste de corpus textuels.
+---@param corpus string[]
+---@param num_merges? integer
 ---@return boolean ok
 ---@return string? err
-function Mimir.Tokenizer.learn_bpe(corpus_path, vocab_target) end
+function Mimir.Tokenizer.learn_bpe(corpus, num_merges) end
 
 ---Tokeniser via BPE (si appris/chargé).
 ---@param text string
@@ -1855,7 +2075,7 @@ Mimir.Htop = {} --avec configuration optionnelle.
 ---- `Mimir.Htop.create({ ... })` : options avancées
 ---
 ---Notes:
----- L'export CSV est unique: Viz le porte lorsqu'elle est active, Htop sinon.
+---- L'export CSV unique appartient au worker d'écriture d'AsyncMonitor.
 ---- `csv` active/désactive cet export commun; `csv_path`/`csv_file` choisit son chemin.
 ---- `C` ouvre le panneau de configuration du modèle courant; `Entrée` édite puis valide.
 ---- Les changements sont consommés par le thread d'entraînement à une frontière de calcul sûre.
@@ -1943,7 +2163,9 @@ function Mimir.Viz.is_open() end
 ---@return boolean ok
 function Mimir.Viz.process_events() end
 
----Compatibilité: le rendu est mis à jour automatiquement par AsyncMonitor; no-op.
+---Servir une demande de capture 3D avec le modèle courant sur le thread Lua.
+---En mode Temps réel, servir aussi une capture automatique arrivée à échéance
+---lorsque la vue 3D est ouverte. AsyncMonitor assure le rendu.
 ---@return boolean ok
 function Mimir.Viz.update() end
 
@@ -2115,6 +2337,8 @@ Mimir.Serialization = {}
 ---@field load_optimizer? boolean @Charger l'état optimizer (défaut: false)
 ---@field strict_mode? boolean @Refuser les tensors inconnus ou incompatibles
 ---@field validate_checksums? boolean @Vérifier les checksums disponibles
+---@field apply_model_config? boolean @Appliquer model_config du checkpoint (défaut: true)
+---@field load_layer_metadata? boolean @Appliquer les métadonnées/routages des couches (défaut: true); false conserve un sous-graphe déjà reconstruit comme le décodeur VAEConv
 ---@field mapping_json? string @Chemin du mapping de noms de tensors
 ---@field tensor_mapping_json? string @Alias de mapping_json
 
@@ -2294,9 +2518,13 @@ function print(...) end
 ---@field path? string
 ---@field vocab_size integer
 ---@field max_vocab integer
+---@field bpe_merges integer
+---@field bpe_merges_requested? integer
+---@field unknown_tokens integer
 
 ---@class MimirCausalTokenizerModule
 ---@field ensure fun(options:MimirCausalTokenizerOptions):TokenIds, MimirCausalTokenizerInfo
+---@field load_prepared fun(options:MimirCausalTokenizerOptions):TokenIds, MimirCausalTokenizerInfo
 
 ---@class MimirHelpModule
 ---@field should_show_help fun(argv?:string[]):boolean

@@ -11,6 +11,10 @@ et relie chaque mécanisme à ses sources de vérité.
 
 ## Parcours recommandé
 
+Commencez par le [contrat des architectures](08-Architecture-Contract.md) :
+graphe DL dans une classe C++ dérivée de `Model`, scripts pour l’orchestration,
+MPK comme alternative expérimentale non entièrement exploitable en production.
+
 1. [Comprendre le fonctionnement du framework](01-How-The-Framework-Works.md)
 2. [Construire des modèles et des layers](02-Building-Models-And-Layers.md)
 3. [Comprendre la configuration et le registre](03-Config-And-Registry.md)
@@ -23,6 +27,7 @@ le refuser afin que le routeur puisse essayer le backend suivant.
 
 ## Modèles et configuration
 
+- [Contrat de définition des architectures](08-Architecture-Contract.md)
 - [Construction de modèles et de layers](02-Building-Models-And-Layers.md)
 - [Configuration et registre](03-Config-And-Registry.md)
 - [Ajouter une architecture et ses outils](../06-Contributing/02-New-Architecture-And-Tools.md)
@@ -51,6 +56,9 @@ le refuser afin que le routeur puisse essayer le backend suivant.
 | Bridge Lua | `src/scriptings/Lua/luaScripting/` |
 
 ## Étapes suivantes
+
+Les [tutoriels par niveau](../08-Tuto/00-INDEX.md) relient ces références à des
+ateliers guidés, de la première exécution au développement de kernels.
 
 Consultez l'[index des internals](../04-Architecture-Internals/00-Internals-Index.md)
 pour étudier l'implémentation composant par composant, ou le

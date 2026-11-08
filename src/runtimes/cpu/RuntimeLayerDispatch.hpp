@@ -17,17 +17,22 @@
 #include "../ops_sequence_constant.hpp"
 #include "LayerOpsExt.hpp"
 #include "ConvolutionKernels.hpp"
+#include "ConvolutionNDKernels.hpp"
+#include "PoolingKernels.hpp"
 #include "MatMulKernels.hpp"
 #include "FlatJoinKernels.hpp"
+#include "CausalAttentionKernels.hpp"
+#include "CausalSequenceKernels.hpp"
+#include "PrimerKernels.hpp"
 
 namespace RuntimeLayerDispatch {
 
 inline bool cpu_supports_forward_layer_type(LayerType type) {
-    return type != LayerType::UNKNOWN;
+    return type >= LayerType::Conv2d && type < LayerType::UNKNOWN;
 }
 
 inline bool cpu_supports_backward_layer_type(LayerType type) {
-    return type != LayerType::UNKNOWN;
+    return type >= LayerType::Conv2d && type < LayerType::UNKNOWN;
 }
 
 inline bool cpu_forward_layer(
@@ -40,6 +45,47 @@ inline bool cpu_forward_layer(
     if (layer.type_enum != LayerType::Constant && (inputs.empty() || inputs[0] == nullptr)) return false;
     static const std::vector<float> empty;
     const std::vector<float>& x = inputs.empty() ? empty : *inputs[0];
+    if (RuntimePrimer::supported(layer.type_enum)) {
+        try {
+            if (layer.getWeightsSize() != 0) return false;
+            std::vector<std::vector<float>> staged(1);
+            const int unary = RuntimePrimer::unaryCode(layer.type_enum);
+            const int binary = RuntimePrimer::binaryCode(layer.type_enum);
+            if (binary >= 0) {
+                if (inputs.size() != 2 || !inputs[1]) return false;
+                CpuPrimer::binaryForward(x, *inputs[1], staged[0], binary);
+            } else {
+                if (inputs.size() != 1) return false;
+                if (unary >= 0) CpuPrimer::unaryForward(x, staged[0], unary);
+                else if (RuntimePrimer::reductionCode(layer.type_enum) >= 0)
+                    CpuPrimer::reductionForward(x, staged[0], layer);
+                else CpuPrimer::triangleForward(x, staged[0], layer);
+            }
+            outputs.swap(staged);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    // New sequence operations publish their outer container only after every
+    // shape/finite check and allocation has succeeded. A failure must preserve
+    // the caller's previous output as well as persistent layer gradients.
+    if (layer.type_enum == LayerType::CausalDepthwiseConv1d || layer.type_enum == LayerType::SwiGLU) {
+        try {
+            std::vector<std::vector<float>> staged(1);
+            if (layer.type_enum == LayerType::CausalDepthwiseConv1d) {
+                if (inputs.size() != 1) return false;
+                CpuCausalSequence::forward(x, staged[0], layer);
+            } else {
+                if (inputs.size() != 2 || !inputs[1] || layer.getWeightsSize() != 0) return false;
+                CpuCausalSequence::swigluForward(x, *inputs[1], staged[0]);
+            }
+            outputs.swap(staged);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
     outputs.clear();
 
     try {
@@ -47,6 +93,12 @@ inline bool cpu_forward_layer(
             // ====================================================================
             // CONVOLUTION
             // ====================================================================
+            case LayerType::Conv3d:
+            case LayerType::Conv4d: {
+                outputs.resize(1);
+                CpuConvolutionND::forward(x, outputs[0], layer);
+                return true;
+            }
             case LayerType::Conv2d: {
                 const int in_c = layer.in_channels > 0 ? layer.in_channels : 1;
                 const int out_c = layer.out_channels > 0 ? layer.out_channels : 1;
@@ -140,14 +192,10 @@ inline bool cpu_forward_layer(
                 const size_t need = w_kernel + (layer.use_bias ? static_cast<size_t>(out_c) : 0ULL);
                 if (layer.getWeightsSize() < need) return false;
 
-                std::vector<float> kernel(w, w + w_kernel);
-                std::vector<float> bias;
-                if (layer.use_bias) {
-                    bias.assign(w + w_kernel, w + w_kernel + static_cast<size_t>(out_c));
-                }
-
                 outputs.resize(1);
-                Conv::conv_transpose2d(x, outputs[0], kernel, bias, H, W, in_c, out_c, k, stride, pad);
+                CpuConvolution::transposeForward(x, outputs[0], w,
+                    layer.use_bias ? w + w_kernel : nullptr,
+                    H, W, in_c, out_c, k, stride, pad);
                 return true;
             }
 
@@ -413,32 +461,9 @@ inline bool cpu_forward_layer(
                 if (out_height <= 0 || out_width <= 0) return false;
 
                 outputs.resize(1);
-                outputs[0].assign(static_cast<size_t>(in_channels) * static_cast<size_t>(out_height) * static_cast<size_t>(out_width),
-                                  -std::numeric_limits<float>::infinity());
-
-                const size_t output_size = outputs[0].size();
-                #pragma omp parallel for collapse(3) if(RuntimeParallel::workers(output_size)>1) num_threads(RuntimeParallel::workers(output_size)) schedule(static)
-                for (int c = 0; c < in_channels; ++c) {
-                    for (int oh = 0; oh < out_height; ++oh) {
-                        for (int ow = 0; ow < out_width; ++ow) {
-                            float max_val = -std::numeric_limits<float>::infinity();
-                            for (int kh = 0; kh < kernel_size; ++kh) {
-                                for (int kw = 0; kw < kernel_size; ++kw) {
-                                    const int ih = oh * stride + kh - padding;
-                                    const int iw = ow * stride + kw - padding;
-                                    if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                        const int in_idx = c * (height * width) + ih * width + iw;
-                                        if (in_idx >= 0 && static_cast<size_t>(in_idx) < x.size()) {
-                                            max_val = std::max(max_val, x[static_cast<size_t>(in_idx)]);
-                                        }
-                                    }
-                                }
-                            }
-                            const int out_idx = c * (out_height * out_width) + oh * out_width + ow;
-                            outputs[0][static_cast<size_t>(out_idx)] = max_val;
-                        }
-                    }
-                }
+                CpuPooling::forward2d(x, outputs[0], height, width, in_channels,
+                    kernel_size, kernel_size, stride, stride, padding, padding,
+                    CpuPooling::Reduction::Max);
                 return true;
             }
 
@@ -877,6 +902,24 @@ inline bool cpu_forward_layer(
                 const int num_heads = layer.num_heads > 0 ? layer.num_heads : 1;
                 const bool causal = layer.causal;
 
+                if (layer.type_enum == LayerType::MultiHeadAttention &&
+                    layer.num_kv_heads > 0 && layer.rope_theta > 0.0f) {
+                    const int kv_heads = layer.num_kv_heads;
+                    if (embed_dim <= 0 || num_heads <= 0 || kv_heads <= 0 ||
+                        embed_dim % num_heads != 0 || num_heads % kv_heads != 0 ||
+                        x.size() != static_cast<size_t>(seq_len) * embed_dim) return false;
+                    const size_t head_dim = static_cast<size_t>(embed_dim / num_heads);
+                    const size_t kv_dim = static_cast<size_t>(kv_heads) * head_dim;
+                    const size_t expected = static_cast<size_t>(embed_dim) *
+                        (2 * static_cast<size_t>(embed_dim) + 2 * kv_dim);
+                    if (layer.getWeightsSize() < expected) return false;
+                    outputs.resize(1);
+                    const std::vector<float> no_gradient;
+                    return CausalAttentionOps::run(x, no_gradient, seq_len, embed_dim,
+                        num_heads, kv_heads, causal, layer.rope_theta, weights, nullptr,
+                        outputs[0], nullptr);
+                }
+
                 const int qkv_size = embed_dim * embed_dim * 3;
                 const int out_size = embed_dim * embed_dim;
                 const int qkv_bias_size = embed_dim * 3;
@@ -1262,6 +1305,47 @@ inline bool cpu_backward_layer(
     bool training
 ) {
     (void)training;
+    if (RuntimePrimer::supported(layer.type_enum)) {
+        if (inputs.empty() || !inputs[0] || grad_outputs.size() != 1 || !grad_outputs[0]) return false;
+        try {
+            if (layer.getWeightsSize() != 0) return false;
+            const int unary = RuntimePrimer::unaryCode(layer.type_enum);
+            const int binary = RuntimePrimer::binaryCode(layer.type_enum);
+            std::vector<std::vector<float>> staged(binary >= 0 ? 2 : 1);
+            if (binary >= 0) {
+                if (inputs.size() != 2 || !inputs[1]) return false;
+                CpuPrimer::binaryBackward(*inputs[0], *inputs[1], *grad_outputs[0], staged[0], staged[1], binary);
+            } else {
+                if (inputs.size() != 1) return false;
+                if (unary >= 0) CpuPrimer::unaryBackward(*inputs[0], *grad_outputs[0], staged[0], unary);
+                else if (RuntimePrimer::reductionCode(layer.type_enum) >= 0)
+                    CpuPrimer::reductionBackward(*inputs[0], *grad_outputs[0], staged[0], layer);
+                else CpuPrimer::triangleBackward(*inputs[0], *grad_outputs[0], staged[0], layer);
+            }
+            grad_inputs.swap(staged);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    if (layer.type_enum == LayerType::CausalDepthwiseConv1d || layer.type_enum == LayerType::SwiGLU) {
+        if (inputs.empty() || !inputs[0] || grad_outputs.size() != 1 || !grad_outputs[0]) return false;
+        try {
+            // Allocate the outer container before committing parameter deltas.
+            std::vector<std::vector<float>> staged(layer.type_enum == LayerType::SwiGLU ? 2 : 1);
+            if (layer.type_enum == LayerType::CausalDepthwiseConv1d) {
+                if (inputs.size() != 1) return false;
+                CpuCausalSequence::backward(*inputs[0], *grad_outputs[0], staged[0], layer);
+            } else {
+                if (inputs.size() != 2 || !inputs[1] || layer.getWeightsSize() != 0) return false;
+                CpuCausalSequence::swigluBackward(*inputs[0], *inputs[1], *grad_outputs[0], staged[0], staged[1]);
+            }
+            grad_inputs.swap(staged);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
     grad_inputs.clear();
 
     if ((layer.type_enum != LayerType::Constant) && (inputs.empty() || inputs[0] == nullptr)) {
@@ -2319,6 +2403,13 @@ inline bool cpu_backward_layer(
                         }
                     }
                 }
+                return true;
+            }
+
+            case LayerType::Conv3d:
+            case LayerType::Conv4d: {
+                grad_inputs.resize(1);
+                CpuConvolutionND::backward(*inputs[0], *grad_outputs[0], grad_inputs[0], layer);
                 return true;
             }
 
@@ -3709,6 +3800,31 @@ inline bool cpu_backward_layer(
             }
 
             case LayerType::MultiHeadAttention: {
+                if (layer.num_kv_heads > 0 && layer.rope_theta > 0.0f) {
+                    if (inputs.empty() || !inputs[0] || grad_outputs.empty() || !grad_outputs[0]) return false;
+                    const int seq_len = layer.seq_len > 0 ? layer.seq_len : 1;
+                    const int embed_dim = layer.embed_dim > 0 ? layer.embed_dim :
+                        static_cast<int>(inputs[0]->size());
+                    const int num_heads = layer.num_heads > 0 ? layer.num_heads : 1;
+                    const int kv_heads = layer.num_kv_heads;
+                    if (embed_dim <= 0 || num_heads <= 0 || kv_heads <= 0 ||
+                        embed_dim % num_heads != 0 || num_heads % kv_heads != 0) return false;
+                    const size_t head_dim = static_cast<size_t>(embed_dim / num_heads);
+                    const size_t kv_dim = static_cast<size_t>(kv_heads) * head_dim;
+                    const size_t expected = static_cast<size_t>(embed_dim) *
+                        (2 * static_cast<size_t>(embed_dim) + 2 * kv_dim);
+                    const float* weights = layer.getWeights();
+                    if (!weights || layer.getWeightsSize() < expected) return false;
+                    if (layer.grad_weights.size() != layer.getWeightsSize())
+                        layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
+                    std::vector<float> output;
+                    std::vector<float> input_gradient;
+                    if (!CausalAttentionOps::run(*inputs[0], *grad_outputs[0], seq_len,
+                            embed_dim, num_heads, kv_heads, layer.causal, layer.rope_theta,
+                            weights, layer.grad_weights.data(), output, &input_gradient)) return false;
+                    grad_inputs = {std::move(input_gradient)};
+                    return true;
+                }
                 // Même paramétrisation que SelfAttention dans ce runtime.
                 layer.type_enum = LayerType::SelfAttention;
                 const bool ok = cpu_backward_layer(inputs, grad_outputs, grad_inputs, layer, training);

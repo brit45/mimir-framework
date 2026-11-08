@@ -1,0 +1,995 @@
+[
+  {
+    "file": "17_vaeconv_architecture.svg",
+    "title": "VAEConv natif : latent et sorties",
+    "subtitle": "Une classe C++ dérivée de Model ; géométrie et branches définies par sa configuration.",
+    "description": "Le VAE convolutionnel adapte une image HWC à son encodeur, produit mu et logvar, construit un latent spatial puis décode une reconstruction. Le mode entraînement rassemble reconstruction, mu et logvar ; l’inférence sélectionne la reconstruction. Les branches et dimensions sont configurables, sans nombres de paramètres issus d’un ancien dump.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "image",
+        "title": "Image en entrée",
+        "lines": [
+          "Vecteur image HWC",
+          "Adaptation vers CHW"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "encoder",
+        "title": "Encodeur",
+        "lines": [
+          "Convolutions et réduction spatiale",
+          "Normes selon configuration",
+          "ResNet / attention facultatifs"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "parameters",
+        "title": "Paramètres du latent",
+        "lines": [
+          "μ et logvar au format CHW",
+          "LH × LW × LC",
+          "Biais logvar apprenable optionnel"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "purple"
+      },
+      {
+        "id": "latent",
+        "title": "Latent opérationnel",
+        "lines": [
+          "Reparameterize : z",
+          "z = μ en mode déterministe",
+          "Biais appris ajouté si activé"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "purple"
+      },
+      {
+        "id": "decoder",
+        "title": "Décodeur",
+        "lines": [
+          "Upsampling puis convolutions",
+          "Mode choisi dans la classe",
+          "Skips facultatifs"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "recon",
+        "title": "Reconstruction",
+        "lines": [
+          "Retour à la disposition HWC",
+          "Même géométrie image cible"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "inference",
+        "title": "Sortie d’inférence",
+        "lines": [
+          "Reconstruction par défaut",
+          "Encodage μ possible séparément"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "slate"
+      },
+      {
+        "id": "training",
+        "title": "Sortie d’entraînement",
+        "lines": [
+          "recon || μ || logvar",
+          "Projections en plus si text_cond",
+          "Loss de reconstruction et KL"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "orange"
+      }
+    ],
+    "edges": [
+      {
+        "from": "image",
+        "to": "encoder"
+      },
+      {
+        "from": "encoder",
+        "to": "parameters"
+      },
+      {
+        "from": "parameters",
+        "to": "latent"
+      },
+      {
+        "from": "latent",
+        "to": "decoder"
+      },
+      {
+        "from": "decoder",
+        "to": "recon"
+      },
+      {
+        "from": "recon",
+        "to": "inference"
+      },
+      {
+        "from": "recon",
+        "to": "training"
+      },
+      {
+        "from": "parameters",
+        "to": "training",
+        "label": "μ, logvar"
+      }
+    ],
+    "notes": [
+      "conv_mode = 2d, 3d ou 4d : les modes ND ajoutent des axes de taille 1 ; ils n’inventent ni volume ni temps.",
+      "En 3d/4d, conv_transpose est remplacé par nearest_conv ; bilinear_conv et pixel_shuffle gardent leur upsampling 2D. Échantillonnage si stochastique et entraînement.",
+      "logvar = 0 donne σ = 1. Le prior optionnel est un biais latent appris. Les scripts d’inférence sélectionnent recon ou μ ; la reprise conserve la topologie."
+    ],
+    "sources": [
+      "src/Models/Vision/VAEConvModel.hpp",
+      "src/Models/Vision/VAEConvModel.cpp",
+      "src/runtimes/cpu/RuntimeLayerDispatch.hpp",
+      "src/Models/VAETraining.cpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/13-Diffusion.md",
+      "docs/02-User-Guide/14-VAEConv.md"
+    ]
+  },
+  {
+    "file": "18_unet_architecture.svg",
+    "title": "UNet natif : descente, sauts et remontée",
+    "subtitle": "Les connexions de saut sont des tenseurs nommés réellement câblés dans UNetModel.",
+    "description": "La classe UNetModel dérive de Model. Chaque niveau de descente applique deux convolutions ReLU et conserve un skip avant une convolution stride 2. Après le bottleneck, la remontée utilise UpsampleNearest, une concaténation avec le skip correspondant et deux convolutions. Une convolution 1×1 et Tanh produisent l’image de sortie.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "image",
+        "title": "Image en entrée",
+        "lines": [
+          "image_w, image_h, image_c",
+          "Dimensions choisies par Config"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "down",
+        "title": "Niveaux descendants",
+        "lines": [
+          "2 × Conv3×3 → ReLU",
+          "Skip avant la réduction",
+          "Puis Conv3×3 stride 2"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "skips",
+        "title": "Tenseurs de saut",
+        "lines": [
+          "Un tenseur nommé par niveau",
+          "Résolution avant downsample"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "purple"
+      },
+      {
+        "id": "middle",
+        "title": "Bottleneck",
+        "lines": [
+          "2 × Conv3×3 → ReLU",
+          "Canaux : base × 2^depth"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "up",
+        "title": "Remontée",
+        "lines": [
+          "UpsampleNearest ×2",
+          "Niveaux en ordre inverse"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "concat",
+        "title": "Concaténation",
+        "lines": [
+          "Feature remontée + skip",
+          "Concat sur les canaux"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "orange"
+      },
+      {
+        "id": "refine",
+        "title": "Convolutions du niveau",
+        "lines": [
+          "2 × Conv3×3 → ReLU",
+          "Canaux ramenés au niveau"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "output",
+        "title": "Image en sortie",
+        "lines": [
+          "Projection Conv1×1",
+          "Puis Tanh"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "blue"
+      }
+    ],
+    "edges": [
+      {
+        "from": "image",
+        "to": "down"
+      },
+      {
+        "from": "down",
+        "to": "skips"
+      },
+      {
+        "from": "down",
+        "to": "middle"
+      },
+      {
+        "from": "middle",
+        "to": "up"
+      },
+      {
+        "from": "up",
+        "to": "concat"
+      },
+      {
+        "from": "skips",
+        "to": "concat",
+        "label": "niveau associé"
+      },
+      {
+        "from": "concat",
+        "to": "refine"
+      },
+      {
+        "from": "refine",
+        "to": "output"
+      }
+    ],
+    "notes": [
+      "Descente et remontée sont répétées depth fois. La remontée répète le motif upsample → concat → convolutions à chaque niveau.",
+      "Choisir des dimensions spatiales qui alignent les tenseurs des skips. Ce schéma ne représente pas un pipeline de diffusion complet."
+    ],
+    "sources": [
+      "src/Models/Vision/UNetModel.hpp",
+      "src/Models/Vision/UNetModel.cpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/13-Diffusion.md"
+    ]
+  },
+  {
+    "file": "19_diffusion_architecture.svg",
+    "title": "Diffusion : prédicteur de bruit MLP",
+    "subtitle": "Baseline native diffusion : ce graphe n’est ni un UNet implicite ni le pipeline Lumen.",
+    "description": "DiffusionModel dérive de Model et prédit un bruit epsilon à partir d’un embedding temporel concaténé à une image bruitée. Son graphe est un MLP avec Linear, GELU, Dropout optionnel et projection Linear. La préparation du bruit et l’itération du scheduler sont des étapes du workflow de diffusion, pas des nœuds cachés dans ce MLP.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "input",
+        "title": "Entrée préparée",
+        "lines": [
+          "t_embed || x_t",
+          "Taille : time_dim + image_dim"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "linear",
+        "title": "Projection intermédiaire",
+        "lines": [
+          "Linear avec biais",
+          "Largeur : hidden_dim"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "activation",
+        "title": "Activation",
+        "lines": [
+          "GELU"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "purple"
+      },
+      {
+        "id": "dropout",
+        "title": "Dropout facultatif",
+        "lines": [
+          "Actif si dropout > 0",
+          "Désactivé à l’évaluation"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "orange",
+        "badge": "OPTION"
+      },
+      {
+        "id": "projection",
+        "title": "Projection de sortie",
+        "lines": [
+          "Linear avec biais",
+          "Largeur : image_dim"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "noise",
+        "title": "Bruit prédit",
+        "lines": [
+          "ε de même taille que x_t",
+          "Utilisé par le workflow choisi"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "blue"
+      }
+    ],
+    "edges": [
+      {
+        "from": "input",
+        "to": "linear"
+      },
+      {
+        "from": "linear",
+        "to": "activation"
+      },
+      {
+        "from": "activation",
+        "to": "dropout",
+        "label": "si activé",
+        "style": "dashed"
+      },
+      {
+        "from": "dropout",
+        "to": "projection",
+        "style": "dashed"
+      },
+      {
+        "from": "activation",
+        "to": "projection",
+        "label": "sinon"
+      },
+      {
+        "from": "projection",
+        "to": "noise"
+      }
+    ],
+    "notes": [
+      "image_dim = image_w × image_h × image_c. Les tailles et le nombre de paramètres varient avec la configuration.",
+      "Le scheduler et la préparation de x_t appartiennent au chemin de diffusion utilisé. Un checkpoint entraîné et un workflow compatible restent nécessaires."
+    ],
+    "sources": [
+      "src/Models/Diffusion/DiffusionModel.hpp",
+      "src/Models/Diffusion/DiffusionModel.cpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/13-Diffusion.md",
+      "docs/08-Tuto/13-Tuto-Familles-De-Modeles.md"
+    ]
+  },
+  {
+    "file": "20_sd35_transformer.svg",
+    "title": "sd3_5 : squelette natif, pas SD3.5 complet",
+    "subtitle": "Placeholder enregistré : la présence d’un builder ne fournit pas le pipeline original.",
+    "description": "SD35Model est un squelette C++ dérivé de Model. L’entrée contient un flux query et un flux key/value aplatis. Le mode stub_only renvoie le flux query ; sinon une petite pile LayerNorm, self-attention, cross-attention et MLP résiduel est construite. Le flux KV demeure fixe dans cette pile. Cela ne constitue pas une implémentation ni un checkpoint complet de Stable Diffusion 3.5.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "input",
+        "title": "Entrée packée",
+        "lines": [
+          "query_stream || kv_stream",
+          "Séquences de taille d_model"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "split",
+        "title": "Séparation des flux",
+        "lines": [
+          "Split en query et KV",
+          "KV réutilisé dans la pile"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "stub",
+        "title": "Mode stub_only",
+        "lines": [
+          "Identity sur query",
+          "Aucun backbone attention"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "orange",
+        "badge": "PLACEHOLDER"
+      },
+      {
+        "id": "self",
+        "title": "Bloc : self-attention",
+        "lines": [
+          "LayerNorm → MultiHeadAttention",
+          "Puis addition résiduelle"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "cross",
+        "title": "Bloc : cross-attention",
+        "lines": [
+          "LayerNorm → CrossAttention",
+          "Query courante, KV fixe",
+          "Puis addition résiduelle"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "mlp",
+        "title": "Bloc : MLP",
+        "lines": [
+          "LayerNorm → Linear → GELU",
+          "Puis Linear et résidu"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "purple"
+      },
+      {
+        "id": "repeat",
+        "title": "Pile configurable",
+        "lines": [
+          "Motif répété num_layers fois",
+          "Longueurs q_len et kv_len"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "slate"
+      },
+      {
+        "id": "output",
+        "title": "Sortie query",
+        "lines": [
+          "Identity finale",
+          "Taille : q_len × d_model"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "blue"
+      }
+    ],
+    "edges": [
+      {
+        "from": "input",
+        "to": "split"
+      },
+      {
+        "from": "split",
+        "to": "stub",
+        "label": "stub_only=true",
+        "style": "dashed"
+      },
+      {
+        "from": "split",
+        "to": "self",
+        "label": "stub_only=false"
+      },
+      {
+        "from": "self",
+        "to": "cross"
+      },
+      {
+        "from": "split",
+        "to": "cross",
+        "label": "KV fixe"
+      },
+      {
+        "from": "cross",
+        "to": "mlp"
+      },
+      {
+        "from": "mlp",
+        "to": "repeat"
+      },
+      {
+        "from": "repeat",
+        "to": "output"
+      },
+      {
+        "from": "stub",
+        "to": "output",
+        "label": "query",
+        "style": "dashed"
+      }
+    ],
+    "notes": [
+      "Statut : squelette / placeholder. Ni le nom du registre ni ce schéma ne garantissent un pipeline SD3.5 fonctionnel de bout en bout.",
+      "Le nombre de blocs, les dimensions et le mode stub_only sont définis par Config. Aucune ancienne métrique de dump n’est reprise ici."
+    ],
+    "sources": [
+      "src/Models/Diffusion/SD35Model.hpp",
+      "src/Models/Diffusion/SD35Model.cpp",
+      "src/Models/Registry/ModelArchitectures.cpp"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/13-Diffusion.md",
+      "docs/03-API-Reference/11-Architectures.md"
+    ]
+  },
+  {
+    "file": "21_vgg16_architecture.svg",
+    "title": "VGG16 : variante native configurable",
+    "subtitle": "Downsampling par convolution stride 2, agrégation globale et sortie de logits.",
+    "description": "VGG16Model dérive de Model. Les cinq blocs utilisent deux, deux, trois, trois puis trois convolutions de base avec LayerNorm sans paramètres et ReLU, suivies chacune d’une réduction par convolution stride 2. Une agrégation spatiale globale alimente deux couches denses GELU puis une projection vers les logits. La largeur de base et la tête sont configurables.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "image",
+        "title": "Image en entrée",
+        "lines": [
+          "Dimensions définies par Config",
+          "B = base_channels"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "b1",
+        "title": "Bloc 1",
+        "lines": [
+          "2 convolutions 3×3",
+          "LayerNorm → ReLU",
+          "Canaux : B",
+          "Puis conv stride 2"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "b2",
+        "title": "Bloc 2",
+        "lines": [
+          "2 convolutions 3×3",
+          "LayerNorm → ReLU",
+          "Canaux : 2B",
+          "Puis conv stride 2"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "b3",
+        "title": "Bloc 3",
+        "lines": [
+          "3 convolutions 3×3",
+          "LayerNorm → ReLU",
+          "Canaux : 4B",
+          "Puis conv stride 2"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "b4",
+        "title": "Bloc 4",
+        "lines": [
+          "3 convolutions 3×3",
+          "LayerNorm → ReLU",
+          "Canaux : 8B",
+          "Puis conv stride 2"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "b5",
+        "title": "Bloc 5",
+        "lines": [
+          "3 convolutions 3×3",
+          "LayerNorm → ReLU",
+          "Canaux : 8B",
+          "Puis conv stride 2"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "gap",
+        "title": "Agrégation spatiale",
+        "lines": [
+          "GlobalAvgPool2d",
+          "Un vecteur par image"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "fc",
+        "title": "Deux couches denses",
+        "lines": [
+          "Linear → GELU, répété deux fois",
+          "Dropout si configuré",
+          "Largeur : fc_hidden"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "head",
+        "title": "Tête de classification",
+        "lines": [
+          "Linear → logits",
+          "Largeur : num_classes"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "blue"
+      }
+    ],
+    "edges": [
+      {
+        "from": "image",
+        "to": "b1"
+      },
+      {
+        "from": "b1",
+        "to": "b2"
+      },
+      {
+        "from": "b2",
+        "to": "b3"
+      },
+      {
+        "from": "b3",
+        "to": "b4"
+      },
+      {
+        "from": "b4",
+        "to": "b5"
+      },
+      {
+        "from": "b5",
+        "to": "gap"
+      },
+      {
+        "from": "gap",
+        "to": "fc"
+      },
+      {
+        "from": "fc",
+        "to": "head"
+      }
+    ],
+    "notes": [
+      "La variante Mímir n’est pas le VGG16 canonique : elle utilise LayerNorm et une convolution de réduction supplémentaire par bloc, pas MaxPool.",
+      "B, fc_hidden, num_classes, dropout et les dimensions d’image déterminent les paramètres. La sortie native est un vecteur de logits."
+    ],
+    "sources": [
+      "src/Models/Vision/CNN/VGG16Model.hpp",
+      "src/Models/Vision/CNN/VGG16Model.cpp"
+    ],
+    "related_docs": [
+      "docs/03-API-Reference/11-Architectures.md"
+    ]
+  },
+  {
+    "file": "22_vgg19_architecture.svg",
+    "title": "VGG19 : blocs canoniques et Softmax",
+    "subtitle": "Convolutions [2,2,4,4,4], pooling explicite et tête dense dépendante de la résolution.",
+    "description": "VGG19Model dérive de Model. Les blocs convolutifs ont des canaux fixes 64, 128, 256, 512, 512 ; chaque convolution est suivie de ReLU et chaque bloc de MaxPool2d. L’aplatissement alimente deux couches denses ReLU avec Dropout facultatif. Une couche Linear et Softmax donnent la sortie. Cette structure diffère de la variante VGG16 du framework.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "image",
+        "title": "Image en entrée",
+        "lines": [
+          "Dimensions définies par Config",
+          "Canaux des blocs fixés en C++"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "blue"
+      },
+      {
+        "id": "b1",
+        "title": "Bloc 1",
+        "lines": [
+          "2 × Conv3×3 → ReLU",
+          "64 canaux",
+          "Puis MaxPool2d 2×2"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "b2",
+        "title": "Bloc 2",
+        "lines": [
+          "2 × Conv3×3 → ReLU",
+          "128 canaux",
+          "Puis MaxPool2d 2×2"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "b3",
+        "title": "Bloc 3",
+        "lines": [
+          "4 × Conv3×3 → ReLU",
+          "256 canaux",
+          "Puis MaxPool2d 2×2"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      },
+      {
+        "id": "b4",
+        "title": "Bloc 4",
+        "lines": [
+          "4 × Conv3×3 → ReLU",
+          "512 canaux",
+          "Puis MaxPool2d 2×2"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "b5",
+        "title": "Bloc 5",
+        "lines": [
+          "4 × Conv3×3 → ReLU",
+          "512 canaux",
+          "Puis MaxPool2d 2×2"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "teal"
+      },
+      {
+        "id": "flatten",
+        "title": "Aplatissement",
+        "lines": [
+          "Flatten",
+          "Taille : 512 × H′ × W′"
+        ],
+        "row": 2,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "fc",
+        "title": "Deux couches denses",
+        "lines": [
+          "Linear → ReLU, répété deux fois",
+          "Dropout si configuré",
+          "Largeur : fc_hidden"
+        ],
+        "row": 2,
+        "col": 1,
+        "tone": "purple"
+      },
+      {
+        "id": "head",
+        "title": "Tête de classification",
+        "lines": [
+          "Linear → Softmax",
+          "Sortie : num_classes valeurs"
+        ],
+        "row": 2,
+        "col": 2,
+        "tone": "blue"
+      }
+    ],
+    "edges": [
+      {
+        "from": "image",
+        "to": "b1"
+      },
+      {
+        "from": "b1",
+        "to": "b2"
+      },
+      {
+        "from": "b2",
+        "to": "b3"
+      },
+      {
+        "from": "b3",
+        "to": "b4"
+      },
+      {
+        "from": "b4",
+        "to": "b5"
+      },
+      {
+        "from": "b5",
+        "to": "flatten"
+      },
+      {
+        "from": "flatten",
+        "to": "fc"
+      },
+      {
+        "from": "fc",
+        "to": "head"
+      }
+    ],
+    "notes": [
+      "Les canaux 64/128/256/512/512 sont fixés dans le builder actuel ; changer base_channels ne les modifie pas.",
+      "H′ et W′ résultent des cinq MaxPool. Dimensions d’image, fc_hidden, num_classes et dropout déterminent la tête et le nombre de paramètres.",
+      "La sortie native comprend Softmax. Elle ne doit pas être confondue avec les logits fournis par la variante VGG16."
+    ],
+    "sources": [
+      "src/Models/Vision/CNN/VGG19Model.hpp",
+      "src/Models/Vision/CNN/VGG19Model.cpp"
+    ],
+    "related_docs": [
+      "docs/03-API-Reference/11-Architectures.md"
+    ]
+  },
+  {
+    "file": "23_model_comparison.svg",
+    "title": "Comparer les rôles avant les paramètres",
+    "subtitle": "Cartes qualitatives : les tailles ne sont comparables qu’avec une configuration explicite.",
+    "description": "Comparaison des familles illustrées dans cette section : VAEConv reconstruit via un latent spatial ; UNet transforme une image avec des connexions de saut ; DiffusionModel est un prédicteur de bruit MLP ; sd3_5 reste un squelette ; les variantes VGG16 et VGG19 sont des classifieurs aux topologies et sorties différentes. Aucune métrique issue d’un ancien dump n’est présentée comme universelle.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "vae",
+        "title": "VAEConv",
+        "lines": [
+          "Image → latent → reconstruction",
+          "Modes conv 2d / 3d / 4d",
+          "Options du latent configurables"
+        ],
+        "row": 0,
+        "col": 0,
+        "tone": "purple"
+      },
+      {
+        "id": "unet",
+        "title": "UNet",
+        "lines": [
+          "Image → image",
+          "Descente et remontée",
+          "Concaténations de saut"
+        ],
+        "row": 0,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "diff",
+        "title": "Diffusion MLP",
+        "lines": [
+          "t_embed || x_t → ε",
+          "Prédicteur de bruit dense",
+          "Scheduler dans le workflow"
+        ],
+        "row": 0,
+        "col": 2,
+        "tone": "blue"
+      },
+      {
+        "id": "sd35",
+        "title": "sd3_5",
+        "lines": [
+          "Squelette query / KV",
+          "Stub ou petite pile attention",
+          "Pas le pipeline SD3.5 complet"
+        ],
+        "row": 1,
+        "col": 0,
+        "tone": "orange",
+        "badge": "PLACEHOLDER"
+      },
+      {
+        "id": "vgg16",
+        "title": "VGG16 Mímir",
+        "lines": [
+          "Conv stride 2 et LayerNorm",
+          "GlobalAvgPool puis FC/GELU",
+          "Sortie de logits"
+        ],
+        "row": 1,
+        "col": 1,
+        "tone": "teal"
+      },
+      {
+        "id": "vgg19",
+        "title": "VGG19",
+        "lines": [
+          "MaxPool puis Flatten",
+          "Tête dense avec ReLU",
+          "Softmax en sortie"
+        ],
+        "row": 1,
+        "col": 2,
+        "tone": "teal"
+      }
+    ],
+    "edges": [],
+    "notes": [
+      "Pour comparer couches et paramètres : inspecter chaque classe avec sa configuration exacte et conserver cette configuration avec le résultat.",
+      "Les noms de modèles ne fournissent pas de poids préentraînés. Le modèle à retenir dépend des entrées, des sorties, de la loss et du workflow."
+    ],
+    "sources": [
+      "src/Models/Registry/ModelArchitectures.cpp",
+      "src/Models/Vision/VAEConvModel.hpp",
+      "src/Models/Vision/UNetModel.hpp",
+      "src/Models/Diffusion/DiffusionModel.hpp",
+      "src/Models/Diffusion/SD35Model.hpp",
+      "src/Models/Vision/CNN/VGG16Model.cpp",
+      "src/Models/Vision/CNN/VGG19Model.cpp"
+    ],
+    "related_docs": [
+      "docs/03-API-Reference/11-Architectures.md",
+      "docs/08-Tuto/13-Tuto-Familles-De-Modeles.md"
+    ]
+  }
+]

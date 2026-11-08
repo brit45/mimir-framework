@@ -1,30 +1,108 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="850" viewBox="0 0 1600 850" role="img" aria-labelledby="title desc">
-<title id="title">Quand utiliser Lua, JSON et outils d’inspection</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1009" viewBox="0 0 1200 1009" role="img" aria-labelledby="title desc">
+<title id="title">Quand utiliser Lua, JSON et l’inspection</title>
+<desc id="desc">Lua sert à orchestrer le run ; JSON conserve ses valeurs de configuration. Les outils d’inspection lisent le registre, les capacités et les métadonnées de checkpoints. La définition du graphe demeure en C++ ou dans un MPK expérimental. Sources : scripts/modules/pipeline_api.lua, src/main.cpp, scripts/tools/inspect_architectures.lua, scripts/tools/analyze_model.lua</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;scripts/modules/pipeline_api.lua&quot;, &quot;src/main.cpp&quot;, &quot;scripts/tools/inspect_architectures.lua&quot;, &quot;scripts/tools/analyze_model.lua&quot;], &quot;related_docs&quot;: [&quot;docs/02-User-Guide/08-Config-Driven-Scripting.md&quot;, &quot;docs/03-API-Reference/18-Layers-Module.md&quot;, &quot;docs/08-Tuto/17-Tuto-Scripting-Exports-Tests-Contribution.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Quand utiliser quoi</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Choix recommandé selon objectif : itération, reproductibilité ou audit.</text>
-<line x1="60" y1="112" x2="1540" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="160" y="250" width="330" height="330" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="325.0" y="275" class="label" text-anchor="middle">Lua</text>
-<text x="325" y="345" class="label" text-anchor="middle">Itérer vite</text>
-<text x="325" y="387" class="label" text-anchor="middle">Tester</text>
-<text x="325" y="429" class="label" text-anchor="middle">Déboguer</text>
-<text x="325" y="471" class="label" text-anchor="middle">Visualiser</text>
-<rect x="610" y="250" width="330" height="330" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="775.0" y="275" class="label" text-anchor="middle">JSON config</text>
-<text x="775" y="345" class="label" text-anchor="middle">Runs reproductibles</text>
-<text x="775" y="387" class="label" text-anchor="middle">CI</text>
-<text x="775" y="429" class="label" text-anchor="middle">Automatisation</text>
-<text x="775" y="471" class="label" text-anchor="middle">Expériences</text>
-<rect x="1060" y="250" width="330" height="330" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1225.0" y="275" class="label" text-anchor="middle">Inspection</text>
-<text x="1225" y="345" class="label" text-anchor="middle">Comprendre architectures</text>
-<text x="1225" y="387" class="label" text-anchor="middle">Exporter graphes</text>
-<text x="1225" y="429" class="label" text-anchor="middle">Auditer checkpoints</text>
-<text x="1540" y="826" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="1009" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Quand utiliser Lua, JSON et l’inspection</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Configurer ou observer un modèle n’est pas définir son architecture.</tspan>
+</text>
+<g data-node="lua">
+<rect x="44" y="163" width="325.33" height="251" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Lua : orchestrer</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Arguments et préparation</tspan>
+<tspan x="66" dy="26">Créer un modèle du</tspan>
+<tspan x="66" dy="26">registre</tspan>
+<tspan x="66" dy="26">Entraîner, valider,</tspan>
+<tspan x="66" dy="26">inférer</tspan>
+</text>
+</g>
+<g data-node="json">
+<rect x="437.33" y="163" width="325.33" height="251" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">JSON : reproduire</tspan>
+</text>
+<text x="459.33" y="237" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Architecture</tspan>
+<tspan x="459.33" dy="26">sélectionnée</tspan>
+<tspan x="459.33" dy="26">Paramètres, env et</tspan>
+<tspan x="459.33" dy="26">tâches</tspan>
+<tspan x="459.33" dy="26">Même configuration de</tspan>
+<tspan x="459.33" dy="26">run</tspan>
+</text>
+</g>
+<g data-node="inspection">
+<rect x="830.67" y="163" width="325.33" height="251" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Inspection : expliquer</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Entrées du registre</tspan>
+<tspan x="852.67" dy="26">Types et capacités</tspan>
+<tspan x="852.67" dy="26">déclarés</tspan>
+<tspan x="852.67" dy="26">Paramètres et couches</tspan>
+</text>
+</g>
+<g data-node="native">
+<rect x="44" y="514" width="325.33" height="251" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="545" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Graphe natif</tspan>
+</text>
+<text x="66" y="588" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Classe C++ : public Model</tspan>
+<tspan x="66" dy="26">Couches et connexions</tspan>
+<tspan x="66" dy="26">Config structurelle</tspan>
+<tspan x="66" dy="26">autorisée</tspan>
+</text>
+</g>
+<g data-node="state">
+<rect x="437.33" y="514" width="325.33" height="251" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="545" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">État du run</tspan>
+</text>
+<text x="459.33" y="588" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Poids et état optimiseur</tspan>
+<tspan x="459.33" dy="26">Tokenizer compatible</tspan>
+<tspan x="459.33" dy="26">Checkpoint à conserver</tspan>
+<tspan x="459.33" dy="26">entier</tspan>
+</text>
+</g>
+<g data-node="reports">
+<rect x="830.67" y="514" width="325.33" height="251" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="852.67" y="545" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Analyser des sorties</tspan>
+</text>
+<text x="852.67" y="588" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">analyze_model :</tspan>
+<tspan x="852.67" dy="26">checkpoint</tspan>
+<tspan x="852.67" dy="26">show-graph : métriques</tspan>
+<tspan x="852.67" dy="26">CSV</tspan>
+<tspan x="852.67" dy="26">Graphe et rapport du</tspan>
+<tspan x="852.67" dy="26">même run</tspan>
+</text>
+</g>
+<rect x="44" y="813" width="1112" height="110" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="841" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Ni Lua ni JSON ne sont des langages de définition du graphe DL.</tspan>
+<tspan x="66" dy="26">• MPK est une description alternative expérimentale, encore partielle pour la production.</tspan>
+<tspan x="66" dy="26">• Une capacité déclarée par type ne prouve pas le backend réellement choisi pour une opération.</tspan>
+</text>
+<text x="44" y="958" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : pipeline_api.lua · main.cpp · inspect_architectures.lua · analyze_model.lua</tspan>
+</text>
+</g>
 </svg>

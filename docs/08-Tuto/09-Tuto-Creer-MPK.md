@@ -1,8 +1,20 @@
-# Créer un fichier MPK à la main ou avec les outils
+# Expérimenter un package MPK avec les outils
 
 Ce tutoriel construit un package d'architecture MPK, le vérifie, le compile et
 le charge. Il présente deux méthodes : l'utilitaire `build_mpk.lua` et une
-spécification Lua écrite à la main.
+spécification de package produite par un outil Lua.
+
+> **Statut expérimental**
+> MPK est l’autre moyen de décrire une architecture après la classe C++
+> héritant de `Model`. Il est encore expérimental et pas encore entièrement
+> exploitable en production. Réussir les étapes de ce tutoriel valide un
+> package et les cas testés, pas un pipeline général d’entraînement ou
+> d’inférence.
+
+Lua/JSON servent normalement à configurer et piloter des architectures natives.
+Les tables Lua de ce tutoriel sont les données d’un générateur MPK ; elles ne
+sont pas une architecture à recopier dans un script métier. Consultez aussi le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
 **Public concerné :** utilisateurs qui veulent partager une configuration,
 prototyper un graphe ou ajouter une architecture locale dans `_archi/`.
@@ -97,11 +109,13 @@ Affichez toutes les options avec :
 ./bin/mimir --lua scripts/tools/build_mpk.lua -- --help
 ```
 
-## 3. Méthode manuelle recommandée
+## 3. Produire manuellement une spécification MPK
 
 Écrire un MPK à la main ne signifie pas calculer soi-même le Base64, la taille
 et le checksum. Écrivez plutôt la spécification dans un petit script Lua, puis
-laissez `MPK.build` et `MPK.write` produire le pseudocode valide.
+laissez `MPK.build` et `MPK.write` produire le pseudocode valide. Ce travail reste
+du prototypage MPK ; pour une intégration native, écrivez une classe dérivée de
+`Model` selon le [tutoriel C++](02-Tuto-Ajouter-Modele.md).
 
 Créez `scripts/local/create_my_stack_mpk.lua` avec le contenu suivant :
 
@@ -400,7 +414,11 @@ Pour capturer les couches réellement créées par une architecture existante :
 L'export produit un graphe statique correspondant à la configuration fournie.
 Il ne recrée pas automatiquement une boucle à partir de couches répétées.
 
-## 9. Installer le package dans le registre local
+## 9. Tester la découverte dans le registre local
+
+Cette étape modifie le contenu local de `_archi/` pour une expérience.
+Conservez le nom du fichier ajouté afin de le retirer après l’exercice.
+La découverte automatique ne vaut pas validation de production.
 
 Copiez la source ou le binaire validé dans `_archi/` :
 
@@ -412,6 +430,20 @@ cp exports/my_configurable_stack.mpk.bin _archi/
 Au démarrage, Mímir inspecte les `.mpk` et `.mpk.bin` de `_archi/`. Si le nom du
 package entre en collision avec une architecture existante, le nom du fichier
 sert d'alias lorsque cela est possible.
+
+## Exercices par niveau
+
+- **Débutant :** inspectez un MPK livré sans le modifier. Distinguez sa
+  configuration, sa structure et un checkpoint de poids.
+- **Intermédiaire :** générez le package simple du tutoriel, vérifiez son
+  checksum et comparez source et binaire. Le résultat attendu est un même
+  package logique, pas une mesure de qualité du modèle.
+- **Avancé :** changez une borne de boucle ou un type de couche dans la
+  spécification MPK ; inspectez le graphe développé et testez une entrée de
+  dimensions connues. Un champ exporté manquant peut empêcher son exécution.
+- **Expert :** comparez sortie et gradients avec une classe native dérivée de
+  `Model` qui représente le même petit graphe. Relevez les différences de
+  topologie et de métadonnées au lieu de supposer une équivalence.
 
 ## 10. Erreurs fréquentes
 

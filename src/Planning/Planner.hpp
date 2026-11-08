@@ -15,6 +15,8 @@
 #include "Layers.hpp"
 #include "Planning/ExecutionCalibration.hpp"
 #include "runtimes/AbstractRuntime.hpp"
+#include "runtimes/ConvolutionND.hpp"
+#include "runtimes/PrimerGeometry.hpp"
 
 namespace Mimir::Planning {
 
@@ -486,17 +488,41 @@ inline MemoryLocation memory_location_for_runtime(const RuntimeKind runtime) {
     }
 }
 
+inline std::vector<int> planned_output_shape(const Layer& layer) {
+    if (RuntimePrimer::binaryCode(layer.type_enum) >= 0) return {};
+    if (RuntimePrimer::reductionCode(layer.type_enum) >= 0) {
+        if (layer.shape.empty()) return {};
+        try { return RuntimePrimer::checkedReduction(layer, 0).output_shape; }
+        catch (...) { return {}; }
+    }
+    // Sequence lengths follow the actual runtime inputs, including long prompts.
+    if (layer.type_enum == LayerType::CausalDepthwiseConv1d || layer.type_enum == LayerType::SwiGLU) return {};
+    if (layer.type_enum == LayerType::Conv3d || layer.type_enum == LayerType::Conv4d) {
+        try {
+            const auto geometry = RuntimeConvolutionND::checkedGeometry(layer);
+            // The runtime may infer N from a flat input. Keep allocation
+            // dynamic until a complete batch/channel/spatial shape is known.
+            if (layer.shape.size() != static_cast<size_t>(geometry.rank + 2)) return {};
+            std::vector<int> shape{geometry.batch, geometry.out_channels};
+            for (int axis = 0; axis < geometry.rank; ++axis) shape.push_back(geometry.output[axis]);
+            return shape;
+        } catch (...) { return {}; }
+    }
+    return layer.shape;
+}
+
 inline size_t planned_tensor_bytes(const Layer& layer) {
     const size_t item_size = Mimir::dtype_size_bytes(layer.dtype);
-    if (item_size == 0 || layer.shape.empty()) return 0;
+    const auto shape = planned_output_shape(layer);
+    if (item_size == 0 || shape.empty()) return 0;
     size_t elements = 1;
-    for (const int dimension : layer.shape) {
+    for (const int dimension : shape) {
         if (dimension <= 0 || elements > std::numeric_limits<size_t>::max() / static_cast<size_t>(dimension)) {
             return 0;
         }
         elements *= static_cast<size_t>(dimension);
     }
-    return elements * item_size;
+    return elements <= std::numeric_limits<size_t>::max() / item_size ? elements * item_size : 0;
 }
 
 inline ExecutionPlan build_execution_plan_global(
@@ -566,7 +592,7 @@ inline ExecutionPlan build_execution_plan_global(
         tensor.generation = generation;
         tensor.bytes = planned_tensor_bytes(layer);
         tensor.dtype = layer.dtype;
-        tensor.shape = layer.shape;
+        tensor.shape = planned_output_shape(layer);
         tensor.first_definition = index;
         tensor.last_use = index;
         tensor.required_for_backward = training;

@@ -4,6 +4,7 @@
 #define ENABLE_PORTABLE_REFERENCE 1
 
 #include "runtimes/LayerOps.hpp"
+#include "runtimes/GradientCommit.hpp"
 #include "runtimes/cuda/CudaOperationGeometry.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
 
@@ -14,6 +15,9 @@
 #include "PortableLayerGeometry.hpp"
 #include "PortableParallelGeometry.hpp"
 #include "runtimes/portable/PortableTrainingOps.hpp"
+#include "runtimes/portable/PortableConvNDOps.hpp"
+#include "runtimes/portable/PortableCausalSequenceOps.hpp"
+#include "runtimes/portable/PortablePrimerOps.hpp"
 #include "runtimes/portable/PortableAttentionOps.hpp"
 #include "runtimes/portable/PortableRecurrentOps.hpp"
 #include "runtimes/portable/PortableDetectionOps.hpp"
@@ -383,9 +387,12 @@ bool PortableRuntime::supportsBackwardLayerType(const LayerType type) const {
 
 RuntimeCapabilityLevel PortableRuntime::queryForwardCapability(const LayerType type) const {
     if (!supportsForwardLayerType(type)) return RuntimeCapabilityLevel::Unsupported;
+    if(RuntimePrimer::supported(type))return RuntimeCapabilityLevel::Native;
     if(type==LayerType::NMS)return RuntimeCapabilityLevel::Native;
-    if(CudaOperationGeometry::poolType(type) || CudaOperationGeometry::movementType(type) || CudaOperationGeometry::projectionType(type) || CudaOperationGeometry::extendedConvType(type) || CudaOperationGeometry::stochasticType(type) || CudaOperationGeometry::batchNormType(type) || CudaOperationGeometry::attentionType(type) || CudaOperationGeometry::recurrentType(type))return RuntimeCapabilityLevel::Native;
+    if(CudaOperationGeometry::poolType(type) || CudaOperationGeometry::movementType(type) || CudaOperationGeometry::projectionType(type) || CudaOperationGeometry::extendedConvType(type) || CudaOperationGeometry::convolutionNDType(type) || CudaOperationGeometry::stochasticType(type) || CudaOperationGeometry::batchNormType(type) || CudaOperationGeometry::attentionType(type) || CudaOperationGeometry::recurrentType(type))return RuntimeCapabilityLevel::Native;
     switch (type) {
+        case LayerType::CausalDepthwiseConv1d:
+        case LayerType::SwiGLU:
         case LayerType::Linear:
         case LayerType::MatMul:
         case LayerType::BatchMatMul:
@@ -425,10 +432,13 @@ RuntimeCapabilityLevel PortableRuntime::queryForwardCapability(const LayerType t
 
 RuntimeCapabilityLevel PortableRuntime::queryBackwardCapability(const LayerType type) const {
     if (!supportsBackwardLayerType(type)) return RuntimeCapabilityLevel::Unsupported;
+    if(RuntimePrimer::supported(type))return RuntimeCapabilityLevel::Native;
     if(type==LayerType::Lambda)return RuntimeCapabilityLevel::Native;
     if(type==LayerType::NMS)return RuntimeCapabilityLevel::Native;
-    if(CudaOperationGeometry::poolType(type) || CudaOperationGeometry::movementType(type) || CudaOperationGeometry::projectionType(type) || CudaOperationGeometry::extendedConvType(type) || CudaOperationGeometry::stochasticType(type) || CudaOperationGeometry::batchNormType(type) || CudaOperationGeometry::attentionType(type) || CudaOperationGeometry::recurrentType(type))return RuntimeCapabilityLevel::Native;
+    if(CudaOperationGeometry::poolType(type) || CudaOperationGeometry::movementType(type) || CudaOperationGeometry::projectionType(type) || CudaOperationGeometry::extendedConvType(type) || CudaOperationGeometry::convolutionNDType(type) || CudaOperationGeometry::stochasticType(type) || CudaOperationGeometry::batchNormType(type) || CudaOperationGeometry::attentionType(type) || CudaOperationGeometry::recurrentType(type))return RuntimeCapabilityLevel::Native;
     switch (type) {
+        case LayerType::CausalDepthwiseConv1d:
+        case LayerType::SwiGLU:
         case LayerType::LayerNorm:
         case LayerType::RMSNorm:
         case LayerType::Conv2d:
@@ -465,15 +475,34 @@ RuntimeCapabilityLevel PortableRuntime::queryBackwardCapability(const LayerType 
 
 RuntimeCapabilityLevel PortableRuntime::queryForwardOperationCapability(
     const Layer& layer, const std::vector<const std::vector<float>*>& inputs, bool training) const {
+    if(RuntimePrimer::supported(layer.type_enum))
+        return !config_.disabled && PortableParallelGeometry::primerFits(layer,inputs,false)
+            ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    if(layer.type_enum==LayerType::CausalDepthwiseConv1d){
+        CudaOperationGeometry::CausalSequence g;
+        return !config_.disabled && config_.conv_enabled &&
+            PortableParallelGeometry::causalSequenceFits(layer,inputs,false) &&
+            g.valid(layer,inputs[0]->size()) &&
+            Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(
+                static_cast<long long>(g.values)*std::min(g.taps,1+(g.steps-1)/g.dilation),config_.conv_min_ops)
+            ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    }
+    if(layer.type_enum==LayerType::SwiGLU)
+        return !config_.disabled && PortableParallelGeometry::swigluFits(layer,inputs,false)
+            ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
     if(layer.type_enum==LayerType::Constant)
         return !config_.disabled && PortableConstantOps::fits(layer)
             ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum) && !PortableParallelGeometry::convolutionFits(layer,inputs,false))return RuntimeCapabilityLevel::Unsupported;
     if (!PortableParallelGeometry::fits(layer,inputs,false) && !referenceInputsFit(layer.getWeightsSize(),inputs))return RuntimeCapabilityLevel::Unsupported;
     return queryForwardGeometryCapability(layer, inputs, training);
 }
 
 RuntimeCapabilityLevel PortableRuntime::queryForwardGeometryCapability(
     const Layer& layer, const std::vector<const std::vector<float>*>& inputs, bool training) const {
+    if(RuntimePrimer::supported(layer.type_enum))return queryForwardOperationCapability(layer,inputs,training);
+    if(layer.type_enum==LayerType::CausalDepthwiseConv1d || layer.type_enum==LayerType::SwiGLU)
+        return queryForwardOperationCapability(layer,inputs,training);
     if(layer.type_enum==LayerType::Constant)
         return !config_.disabled && PortableConstantOps::fits(layer)
             ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
@@ -491,6 +520,12 @@ RuntimeCapabilityLevel PortableRuntime::queryForwardGeometryCapability(
     }
     if(CudaOperationGeometry::attentionType(layer.type_enum)){
         CudaOperationGeometry::Attention g;return config_.attention_enabled && g.valid(layer,inputs) && Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(2LL*g.q*g.k*g.ed,config_.attention_min_ops)?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+    }
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        CudaOperationGeometry::ConvND g;
+        return inputs.size()==1 && config_.conv_enabled && g.valid(layer,inputs[0]->size()) &&
+            Mimir::Planning::ExecutionPolicy::runtimeWorkAllowed(static_cast<long long>(g.outputSize())*g.ig*g.kernel_spatial,config_.conv_min_ops)
+            ?queryForwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::extendedConvType(layer.type_enum)){
         CudaOperationGeometry::ExtendedConv g;
@@ -559,24 +594,34 @@ bool cuda_axis_geometry(const std::vector<float>& x, const Layer& layer, int& si
     inner=stride;
     return size>0 && static_cast<long long>(size)*inner<=INT_MAX && x.size()%(static_cast<size_t>(size)*inner)==0;
 }
-void cuda_accumulate_parameters(Layer& layer, const std::vector<float>& weights, const std::vector<float>& bias) {
-    if (layer.grad_weights.size()!=layer.getWeightsSize()) layer.grad_weights.assign(layer.getWeightsSize(),0.f);
-    for (size_t i=0;i<weights.size();++i) layer.grad_weights[i]+=weights[i];
-    if (!bias.empty()) {
-        if (layer.grad_bias.size()!=bias.size()) layer.grad_bias.assign(bias.size(),0.f);
-        const size_t offset=layer.getWeightsSize()-bias.size();
-        for (size_t i=0;i<bias.size();++i) { layer.grad_bias[i]+=bias[i]; layer.grad_weights[offset+i]+=bias[i]; }
-    }
+bool cuda_accumulate_parameters(Layer& layer,const std::vector<float>& weights,const std::vector<float>& bias){
+    return RuntimeGradientCommit::parameters(layer,weights,bias);
 }
 }
 
 RuntimeCapabilityLevel PortableRuntime::queryBackwardOperationCapability(
     const Layer& layer, const std::vector<const std::vector<float>*>& inputs,
     const std::vector<const std::vector<float>*>& grad_outputs, bool training) const {
+    if(RuntimePrimer::supported(layer.type_enum))
+        return !config_.disabled && PortableParallelGeometry::primerFits(layer,inputs,true) &&
+            grad_outputs.size()==1 && grad_outputs[0] &&
+            grad_outputs[0]->size()==PortableParallelGeometry::primerOutputSize(layer,inputs) &&
+            PortablePrimerValidation::supportedValues(*grad_outputs[0])
+            ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    if(layer.type_enum==LayerType::CausalDepthwiseConv1d || layer.type_enum==LayerType::SwiGLU){
+        if(!runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training)) ||
+           grad_outputs.size()!=1 || !grad_outputs[0] || grad_outputs[0]->size()!=inputs[0]->size())
+            return RuntimeCapabilityLevel::Unsupported;
+        const bool fits=layer.type_enum==LayerType::CausalDepthwiseConv1d
+            ?PortableParallelGeometry::causalSequenceFits(layer,inputs,true)
+            :PortableParallelGeometry::swigluFits(layer,inputs,true);
+        return fits?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    }
     if(layer.type_enum==LayerType::Constant)
         return !config_.disabled && PortableConstantOps::fits(layer) && grad_outputs.size()==1 && grad_outputs[0] &&
             grad_outputs[0]->size()==SequenceConstant::outputSize(layer)
             ?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum) && !PortableParallelGeometry::convolutionFits(layer,inputs,true))return RuntimeCapabilityLevel::Unsupported;
     if (!PortableParallelGeometry::fits(layer,inputs,true) && (!referenceInputsFit(layer.getWeightsSize(),inputs) || !referenceInputsFit(0,grad_outputs)))return RuntimeCapabilityLevel::Unsupported;
     if(layer.type_enum==LayerType::Lambda) {
         return !config_.disabled && inputs.size()>=1 && inputs[0] && grad_outputs.size()==1 && grad_outputs[0] && inputs[0]->size()==grad_outputs[0]->size()?RuntimeCapabilityLevel::Native:RuntimeCapabilityLevel::Unsupported;
@@ -594,6 +639,12 @@ RuntimeCapabilityLevel PortableRuntime::queryBackwardOperationCapability(
     }
     if(CudaOperationGeometry::attentionType(layer.type_enum)){
         CudaOperationGeometry::Attention g;return grad_outputs.size()==1 && g.valid(layer,inputs,true) && grad_outputs[0]->size()==g.output && runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training))?queryBackwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
+    }
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        CudaOperationGeometry::ConvND g;
+        return grad_outputs.size()==1 && g.valid(layer,inputs[0]->size()) && grad_outputs[0]->size()==g.outputSize() &&
+            runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training))
+            ?queryBackwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
     }
     if(CudaOperationGeometry::extendedConvType(layer.type_enum)){
         CudaOperationGeometry::ExtendedConv g;return grad_outputs.size()==1 && g.valid(layer,inputs[0]->size()) && grad_outputs[0]->size()==g.outputSize() && runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training))?queryBackwardCapability(layer.type_enum):RuntimeCapabilityLevel::Unsupported;
@@ -756,6 +807,18 @@ bool PortableRuntime::forwardLayer(
     if (config_.disabled) return false;
     if (!supportsForwardLayerType(layer.type_enum)) return false;
 
+    if(RuntimePrimer::supported(layer.type_enum))
+        return PortableNativeOps::primer(inputs,outputs,layer);
+    if(layer.type_enum==LayerType::CausalDepthwiseConv1d){
+        CudaOperationGeometry::CausalSequence g;
+        if(!g.valid(layer,inputs[0]->size()))return false;
+        std::vector<float> result;
+        if(!PortableNativeOps::causal_depthwise(*inputs[0],layer,g,result))return false;
+        outputs={std::move(result)};
+        return true;
+    }
+    if(layer.type_enum==LayerType::SwiGLU)
+        return PortableNativeOps::swiglu(*inputs[0],*inputs[1],outputs);
     if(layer.type_enum==LayerType::Constant){
         if(!runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training)))return false;
         outputs.resize(1);return PortableConstantOps::execute(layer,outputs[0]);
@@ -771,6 +834,12 @@ bool PortableRuntime::forwardLayer(
     if(CudaOperationGeometry::attentionType(layer.type_enum)){
         if(!runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training)))return false;
         CudaOperationGeometry::Attention g;g.valid(layer,inputs);return PortableNativeOps::attention(inputs,outputs,layer,g,nullptr,nullptr,impl_->handle);
+    }
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        if(!runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training)))return false;
+        CudaOperationGeometry::ConvND g;if(!g.valid(layer,inputs[0]->size()))return false;
+        std::vector<float> result;if(!PortableNativeOps::convolution_nd(*inputs[0],layer,g,result))return false;
+        outputs={std::move(result)};return true;
     }
     if(CudaOperationGeometry::extendedConvType(layer.type_enum)){
         if(!runtimeCapabilityIsNative(queryForwardOperationCapability(layer,inputs,training)))return false;
@@ -1169,13 +1238,29 @@ bool PortableRuntime::backwardLayer(
     if (config_.disabled) return false;
     if (!supportsBackwardLayerType(layer.type_enum)) return false;
     if (!impl_ || !impl_->handle) return false;
+    if(RuntimePrimer::supported(layer.type_enum))
+        return PortableNativeOps::primer(inputs,grad_inputs,layer,grad_outputs[0]);
+    if(layer.type_enum==LayerType::CausalDepthwiseConv1d){
+        CudaOperationGeometry::CausalSequence g;
+        if(!g.valid(layer,inputs[0]->size()))return false;
+        std::vector<float> gi,dw,db;
+        if(!PortableNativeOps::causal_depthwise(*inputs[0],layer,g,gi,grad_outputs[0],&dw))return false;
+        if(g.bias){
+            db.assign(dw.begin()+g.weights,dw.end());
+            dw.resize(g.weights);
+        }
+        if(!RuntimeGradientCommit::finite(gi) || !cuda_accumulate_parameters(layer,dw,db))return false;
+        grad_inputs={std::move(gi)};
+        return true;
+    }
+    if(layer.type_enum==LayerType::SwiGLU)
+        return PortableNativeOps::swiglu(*inputs[0],*inputs[1],grad_inputs,grad_outputs[0]);
     if(layer.type_enum==LayerType::Constant){
         if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
         if(layer.trainable_parameter){
             std::vector<float> gradients;
             if(!PortableConstantOps::execute(layer,gradients,grad_outputs[0]))return false;
-            if(layer.grad_weights.size()!=layer.getWeightsSize())layer.grad_weights.assign(layer.getWeightsSize(),0.f);
-            for(size_t i=0;i<gradients.size();++i)layer.grad_weights[i]+=gradients[i];
+            if(!cuda_accumulate_parameters(layer,gradients,{}))return false;
         }
         grad_inputs.clear();return true;
     }
@@ -1195,26 +1280,42 @@ bool PortableRuntime::backwardLayer(
         if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
         CudaOperationGeometry::Recurrent g;g.valid(layer,inputs[0]->size());std::vector<float> gi,dw;
         if(!PortableNativeOps::recurrent(*inputs[0],gi,layer,g,grad_outputs[0],&dw))return false;
-        cuda_accumulate_parameters(layer,dw,{});grad_inputs={std::move(gi)};return true;
+        if(!RuntimeGradientCommit::finite(gi) || !cuda_accumulate_parameters(layer,dw,{}))return false;
+        grad_inputs={std::move(gi)};
+        return true;
     }
     if(CudaOperationGeometry::attentionType(layer.type_enum)){
         if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
-        CudaOperationGeometry::Attention g;g.valid(layer,inputs,true);std::vector<float> dw;
-        if(!PortableNativeOps::attention(inputs,grad_inputs,layer,g,grad_outputs[0],&dw,impl_->handle))return false;
-        cuda_accumulate_parameters(layer,dw,{});return true;
+        CudaOperationGeometry::Attention g;g.valid(layer,inputs,true);std::vector<float> dw;std::vector<std::vector<float>> gi;
+        if(!PortableNativeOps::attention(inputs,gi,layer,g,grad_outputs[0],&dw,impl_->handle))return false;
+        if(!RuntimeGradientCommit::finite(gi) || !cuda_accumulate_parameters(layer,dw,{}))return false;
+        grad_inputs=std::move(gi);
+        return true;
+    }
+    if(CudaOperationGeometry::convolutionNDType(layer.type_enum)){
+        if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
+        CudaOperationGeometry::ConvND g;if(!g.valid(layer,inputs[0]->size()))return false;
+        std::vector<float> gi,dw;
+        if(!PortableNativeOps::convolution_nd(*inputs[0],layer,g,gi,grad_outputs[0],&dw))return false;
+        std::vector<float> db;if(g.bias){db.assign(dw.begin()+g.parameters,dw.end());dw.resize(g.parameters);}
+        if(!RuntimeGradientCommit::finite(gi) || !cuda_accumulate_parameters(layer,dw,db))return false;
+        grad_inputs={std::move(gi)};
+        return true;
     }
     if(CudaOperationGeometry::extendedConvType(layer.type_enum)){
         if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
         CudaOperationGeometry::ExtendedConv g;g.valid(layer,inputs[0]->size());std::vector<float> gi,dw;
         if(!PortableNativeOps::extended_conv(*inputs[0],layer,g,gi,grad_outputs[0],&dw))return false;
         std::vector<float> db;if(g.bias){db.assign(dw.begin()+g.parameters,dw.end());dw.resize(g.parameters);}
-        cuda_accumulate_parameters(layer,dw,db);grad_inputs={std::move(gi)};return true;
+        if(!RuntimeGradientCommit::finite(gi) || !cuda_accumulate_parameters(layer,dw,db))return false;
+        grad_inputs={std::move(gi)};
+        return true;
     }
     if(CudaOperationGeometry::batchNormType(layer.type_enum)){
         if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
         CudaOperationGeometry::BatchNorm g;g.valid(layer,inputs[0]->size());std::vector<float> gi,dw;
         if(!PortableNativeOps::batch_norm(*inputs[0],gi,layer,g,training,grad_outputs[0],&dw))return false;
-        if(g.affine)cuda_accumulate_parameters(layer,dw,{}); // CPU BatchNorm stores beta only in grad_weights.
+        if(!RuntimeGradientCommit::finite(gi) || (g.affine && !cuda_accumulate_parameters(layer,dw,{})))return false; // CPU BatchNorm stores beta only in grad_weights.
         grad_inputs={std::move(gi)};return true;
     }
     if(CudaOperationGeometry::stochasticType(layer.type_enum)){
@@ -1231,16 +1332,22 @@ bool PortableRuntime::backwardLayer(
     }
     if(CudaOperationGeometry::projectionType(layer.type_enum)){
         if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
-        CudaOperationGeometry::Projection g;g.valid(layer,inputs);std::vector<float> dw;
-        if(!PortableNativeOps::projection(inputs,grad_inputs,layer,g,grad_outputs[0],&dw))return false;
-        if(g.mode==4 && g.bias){std::vector<float> db(dw.end()-g.dim,dw.end());dw.resize(dw.size()-g.dim);cuda_accumulate_parameters(layer,dw,db);}
-        else cuda_accumulate_parameters(layer,dw,{});
+        CudaOperationGeometry::Projection g;g.valid(layer,inputs);std::vector<float> dw;std::vector<std::vector<float>> gi;
+        if(!PortableNativeOps::projection(inputs,gi,layer,g,grad_outputs[0],&dw))return false;
+        if(!RuntimeGradientCommit::finite(gi))return false;
+        if(g.mode==4 && g.bias){
+            std::vector<float> db(dw.end()-g.dim,dw.end());
+            dw.resize(dw.size()-g.dim);
+            if(!cuda_accumulate_parameters(layer,dw,db))return false;
+        }
+        else if(!cuda_accumulate_parameters(layer,dw,{}))return false;
+        grad_inputs=std::move(gi);
         return true;
     }
     if(layer.type_enum==LayerType::LayerNorm || layer.type_enum==LayerType::RMSNorm){
         if(!runtimeCapabilityIsNative(queryBackwardOperationCapability(layer,inputs,grad_outputs,training)))return false;
         std::vector<float> gi,dw,db;if(!PortableNativeOps::row_norm(*inputs[0],layer,gi,grad_outputs[0],&dw,&db))return false;
-        if(!dw.empty())cuda_accumulate_parameters(layer,dw,db);
+        if(!RuntimeGradientCommit::finite(gi) || (!dw.empty() && !cuda_accumulate_parameters(layer,dw,db)))return false;
         grad_inputs={std::move(gi)};return true;
     }
     if(CudaOperationGeometry::poolType(layer.type_enum) || CudaOperationGeometry::movementType(layer.type_enum)) {
@@ -1250,8 +1357,7 @@ bool PortableRuntime::backwardLayer(
         }
         if(layer.type_enum==LayerType::Constant){
             if(layer.trainable_parameter){
-                if(layer.grad_weights.size()!=layer.getWeightsSize())layer.grad_weights.assign(layer.getWeightsSize(),0.f);
-                for(size_t i=0;i<layer.grad_weights.size();++i)layer.grad_weights[i]+=(*grad_outputs[0])[i];
+                if(!cuda_accumulate_parameters(layer,*grad_outputs[0],{}))return false;
             }
             grad_inputs.clear();return true;
         }
@@ -1318,24 +1424,14 @@ bool PortableRuntime::backwardLayer(
             if(has_bias && cublasSgemm(impl_->handle,CUBLAS_OP_N,CUBLAS_OP_N,out_f,1,batch,&alpha,reinterpret_cast<const float*>(d_go.ptr),out_f,reinterpret_cast<const float*>(d_ones.ptr),batch,&beta,reinterpret_cast<float*>(d_bias.ptr),out_f)!=CUBLAS_STATUS_SUCCESS)return false;
             if (cudaDeviceSynchronize() != cudaSuccess) return false;
 
-            grad_inputs.resize(1);
-            grad_inputs[0].resize(x_elems);
+            std::vector<float> grad_x(x_elems);
             std::vector<float> grad_w(w_elems, 0.0f);
-            if (!d_gx.copyToHost(grad_inputs[0].data(), x_elems * sizeof(float))) return false;
+            if (!d_gx.copyToHost(grad_x.data(), x_elems * sizeof(float))) return false;
             if (!d_gw.copyToHost(grad_w.data(), w_elems * sizeof(float))) return false;
             if(has_bias && !d_bias.copyToHost(bias_gradient.data(),out_f*sizeof(float)))return false;
 
-            if (layer.grad_weights.size() != layer.getWeightsSize()) {
-                layer.grad_weights.assign(layer.getWeightsSize(), 0.0f);
-            }
-            for (size_t i = 0; i < w_elems; ++i) layer.grad_weights[i] += grad_w[i];
-
-            if (layer.use_bias && layer.getWeightsSize() >= w_elems + static_cast<size_t>(out_f)) {
-                if (layer.grad_bias.size() != static_cast<size_t>(out_f)) {
-                    layer.grad_bias.assign(static_cast<size_t>(out_f), 0.0f);
-                }
-                for(int o=0;o<out_f;++o){layer.grad_bias[o]+=bias_gradient[o];layer.grad_weights[w_elems+o]+=bias_gradient[o];}
-            }
+            if(!RuntimeGradientCommit::finite(grad_x) || !cuda_accumulate_parameters(layer,grad_w,bias_gradient))return false;
+            grad_inputs={std::move(grad_x)};
             return true;
         }
 
@@ -1461,7 +1557,9 @@ bool PortableRuntime::backwardLayer(
             std::vector<float> gi,gw,gb;
             if (!PortableNativeOps::conv_backward(impl_->handle,x,go,layer.getWeights(),shape.ic,shape.oc,shape.h,shape.w,
                 shape.k,shape.stride,shape.pad,shape.dilation,shape.oh,shape.ow,layer.use_bias,gi,gw,gb)) return false;
-            cuda_accumulate_parameters(layer,gw,gb); grad_inputs={std::move(gi)}; return true;
+            if(!RuntimeGradientCommit::finite(gi) || !cuda_accumulate_parameters(layer,gw,gb))return false;
+            grad_inputs={std::move(gi)};
+            return true;
         }
         case LayerType::InstanceNorm2d:
         case LayerType::GroupNorm: {
@@ -1470,7 +1568,7 @@ bool PortableRuntime::backwardLayer(
             std::vector<float> gi,gw,gb;
             if (!PortableNativeOps::groupnorm(x,layer.affine?layer.getWeights():nullptr,layer.getWeightsSize(),shape.channels,
                 shape.spatial,shape.groups,layer.eps,layer.affine && layer.use_bias,gi,grad_outputs[0],&gw,&gb)) return false;
-            if (layer.affine) cuda_accumulate_parameters(layer,gw,gb);
+            if(!RuntimeGradientCommit::finite(gi) || (layer.affine && !cuda_accumulate_parameters(layer,gw,gb)))return false;
             grad_inputs={std::move(gi)}; return true;
         }
         case LayerType::UpsampleNearest:

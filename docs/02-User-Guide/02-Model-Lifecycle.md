@@ -28,7 +28,7 @@ Suivre le bon ordre d'appels pour éviter les erreurs courantes.
 
 Cette page explique **l’ordre des appels** et surtout **pourquoi** cet ordre existe.
 
-Si vous suivez ce lifecycle, vous évitez 90% des “ça crash / ça renvoie vide / ça explose en mémoire”.
+Cet ordre distingue les erreurs de configuration, d’allocation et de chargement.
 
 ## Vue d'ensemble (ordre recommandé - Moderne)
 
@@ -103,85 +103,16 @@ Cette table liste les types **les plus fréquents**. Pour la liste complète (av
 | `Identity` | Special | No-op (debug / placeholder). | — |
 | `PatchEmbed` | Custom | Projection learnable de patches (vision/diffusion). | `patch_dim`, `num_patches`, etc. |
 
-### Table complète (tous les `LayerType`)
+### Opérations complémentaires et couverture
 
-Notes:
+Les couches `Conv3d`, `Conv4d`, `CausalDepthwiseConv1d`, `SwiGLU`, `GEGLU`
+et `SquaredReLU` sont aussi déclarées dans `src/LayerTypes.hpp`. La
+[référence des layers](../03-API-Reference/01-Layers.md) centralise la liste,
+les alias et les contrats pour éviter de dupliquer ici un inventaire incomplet.
 
-- Cette liste reflète l’enum `LayerType` (C++). Le runtime peut normaliser des alias (colonne “Alias”).
-- Le fait qu’un type existe ne garantit pas que son backward soit complet (certaines ops sont best-effort). Pour le statut et les champs fréquents, voir `docs/03-API-Reference/01-Layers.md`.
-
-| Type (canonique) | Alias normalisés (si présents) | Catégorie | Description rapide |
-| --- | --- | --- | --- |
-| `Conv2d` | — | Conv | Convolution 2D. |
-| `ConvTranspose2d` | `ConvTranspose`, `Deconv2d` | Conv | Convolution transposée 2D (upsampling). |
-| `Conv1d` | — | Conv | Convolution 1D. |
-| `DepthwiseConv2d` | — | Conv | Convolution depthwise 2D. |
-| `Linear` | — | Dense | Projection dense (GEMM). |
-| `Bilinear` | — | Dense | Transformation bilinéaire. |
-| `Embedding` | — | Embedding | IDs int → vecteurs. |
-| `EmbeddingBag` | — | Embedding | Embedding agrégé (bag). |
-| `BatchNorm2d` | `BatchNorm`, `BN`, `BN2d` | Norm | BatchNorm 2D. |
-| `BatchNorm1d` | `BN1d` | Norm | BatchNorm 1D. |
-| `LayerNorm` | `LN` | Norm | LayerNorm. |
-| `GroupNorm` | `GN` | Norm | GroupNorm. |
-| `InstanceNorm2d` | `IN` | Norm | InstanceNorm 2D. |
-| `RMSNorm` | — | Norm | RMSNorm. |
-| `ReLU` | `ReLu`, `Relu`, `RELU` | Activation | Activation ReLU. |
-| `LeakyReLU` | — | Activation | Activation LeakyReLU. |
-| `GELU` | `Gelu` | Activation | Activation GELU. |
-| `SiLU` | `Swish`, `Silu`, `silu`, `swish` | Activation | Activation SiLU/Swish. |
-| `Tanh` | — | Activation | Activation tanh. |
-| `Sigmoid` | — | Activation | Activation sigmoid. |
-| `Softmax` | — | Activation | Softmax. |
-| `LogSoftmax` | — | Activation | Log-Softmax. |
-| `Softplus` | — | Activation | Softplus. |
-| `Mish` | — | Activation | Mish. |
-| `HardSigmoid` | — | Activation | Hard-sigmoid. |
-| `HardSwish` | — | Activation | Hard-swish. |
-| `MaxPool2d` | `MaxPool` | Pooling | MaxPool 2D. |
-| `AvgPool2d` | `AvgPool` | Pooling | AvgPool 2D. |
-| `AdaptiveAvgPool2d` | `AdaptiveAvgPool` | Pooling | Adaptive AvgPool 2D. |
-| `GlobalAvgPool2d` | `GlobalAvgPool` | Pooling | Global AvgPool 2D. |
-| `MaxPool1d` | — | Pooling | MaxPool 1D. |
-| `AvgPool1d` | — | Pooling | AvgPool 1D. |
-| `TokenMeanPool` | — | Pooling | Moyenne sur tokens (résumé séquence). |
-| `Dropout` | — | Regularization | Dropout. |
-| `Dropout2d` | — | Regularization | Dropout 2D. |
-| `AlphaDropout` | — | Regularization | AlphaDropout. |
-| `Flatten` | — | Shape | Flatten. |
-| `Reshape` | — | Shape | Reshape. |
-| `Transpose` | — | Shape | Transpose. |
-| `Permute` | — | Shape | Permute dimensions. |
-| `Squeeze` | — | Shape | Squeeze dimension(s). |
-| `Unsqueeze` | — | Shape | Ajoute une dimension. |
-| `View` | — | Shape | Alias reshape/view. |
-| `Add` | — | Elemwise | Addition élément-par-élément. |
-| `Subtract` | — | Elemwise | Soustraction élément-par-élément. |
-| `Multiply` | — | Elemwise | Multiplication élément-par-élément. |
-| `Divide` | — | Elemwise | Division élément-par-élément. |
-| `Reparameterize` | — | VAE | Réparamétrisation (VAE). |
-| `Concat` | `Concatenate`, `Cat` | Tensor op | Concaténation. |
-| `Split` | — | Tensor op | Split. |
-| `Chunk` | — | Tensor op | Chunk (split en N chunks). |
-| `Stack` | — | Tensor op | Stack. |
-| `MatMul` | — | Tensor op | MatMul. |
-| `BatchMatMul` | — | Tensor op | Batch MatMul. |
-| `SelfAttention` | — | Attention | Self-attention. |
-| `MultiHeadAttention` | — | Attention | Multi-head attention. |
-| `CrossAttention` | — | Attention | Cross-attention. |
-| `UpsampleNearest` | — | Upsample | Upsample nearest. |
-| `UpsampleBilinear` | — | Upsample | Upsample bilinear. |
-| `UpsampleBicubic` | — | Upsample | Upsample bicubic. |
-| `PixelShuffle` | — | Upsample | Pixel shuffle. |
-| `LSTM` | — | Recurrent | LSTM. |
-| `GRU` | — | Recurrent | GRU. |
-| `RNN` | — | Recurrent | RNN. |
-| `ZeroPad2d` | — | Padding | Padding zero 2D. |
-| `ReflectionPad2d` | — | Padding | Padding reflection 2D. |
-| `ReplicationPad2d` | — | Padding | Padding replication 2D. |
-| `Identity` | — | Special | Identity (no-op). |
-| `Lambda` | — | Special | Layer custom/placeholder (best-effort). |
-| `PatchEmbed` | `PatchProjection` | Custom | Patch embedding / projection learnable. |
+Un type déclaré ne garantit pas un kernel natif et un backward sur chaque
+backend. La disponibilité dépend du routeur, des capacités du runtime et du
+build ; consultez les diagnostics de dispatch et les tests du backend choisi.
 
 ## 3) Allouer les paramètres (poids)
 
@@ -222,15 +153,26 @@ assert(Mimir.Model.allocate_params())
 local ok, load_err = Mimir.Serialization.load("checkpoint/my_model.safetensors")
 assert(ok ~= false, load_err)
 
-local out = Mimir.Model.forward({ __input__ = {1, 1, 1, 1} }, false)
+local ids = {}
+for i = 1, cfg.seq_len do ids[i] = 1 end
+local neutral = {}
+for i = 1, cfg.d_model do neutral[i] = 0.0 end
+local out = Mimir.Model.forward({__input__ = ids, mag = neutral, mod = neutral}, false)
 assert(out)
 ```
+
+Dans cet exemple Transformer, `mag` et `mod` sont des vecteurs flottants de
+`d_model` composantes, diffusés sur les tokens. Les zéros rendent ces ajouts
+neutres ; un workflow qui fournit un `ConditioningEncoder` peut les composer
+automatiquement. Leur absence dans un appel direct peut produire
+`Missing input tensor: mag`.
 
 Conseil : la config doit matcher (ex: `seq_len`, `vocab_size`, dims). Sinon vous aurez un mismatch de shapes.
 
 ## 5) Forward (inputs)
 
-Recommandation : utilise une table map, même pour un seul input :
+Extrait schématique : fournissez une table map et respectez la longueur et
+le type attendus par l’architecture :
 
 ```lua
 local out = Mimir.Model.forward({ __input__ = {1,1,1,1} }, false)

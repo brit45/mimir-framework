@@ -44,7 +44,8 @@ Role fonctionnel:
 1. Rendre visibles les etats internes (tensors intermediaires, reconstructions, latent, diff).
 2. Permettre le diagnostic rapide des regressions de shape/layout/couleur.
 3. Exposer les metriques live de training sans bloquer la boucle de calcul.
-4. Servir de contrat operatoire entre modele, monitor asynchrone et interface SFML.
+4. Servir de contrat entre modèle, monitor asynchrone et scène `Visualizer`,
+   commune aux backends d'interface SFML/Qt/GTK/Web.
 
 Role architectural:
 
@@ -66,10 +67,13 @@ Cycle conseille en production :
 2. `allocateParams`.
 3. `initializeWeights` ou chargement checkpoint.
 4. `forwardPass` / `forwardPassNamed`.
-5. training step (`trainStep*`) puis `optimizerStep` si entrainement.
+5. `trainStep` avec `TrainStepMode::Optimize` réalise backward et update ;
+   une boucle manuelle appelle forward, backward puis `optimizerStep` une fois.
 6. sauvegarde (`Serialization`).
 
-Le pipeline doit rester deterministic et verifiable sur ce cycle.
+Le pipeline doit rester vérifiable. Les paramètres aléatoires, le backend et
+les graines doivent être fixés pour comparer deux exécutions ; le simple
+respect du cycle ne garantit pas l'identité numérique entre matériels.
 
 ## 3. Topologie et execution
 
@@ -129,16 +133,23 @@ Le framework est oriente recherche/production reproductible. En pratique :
 
 ## 8. Demo metier - run reproductible en mode conf
 
-Exemple de config minimale:
+Exemple de configuration du template de démonstration fourni :
 
 ```json
 {
-  "script": "scripts/templates/template_conf_load_and_train.lua",
-  "arch": "vae_conv",
-  "seed": 42,
-  "epochs": 1,
-  "batch_size": 2,
-  "dataset_path": "dataset_2"
+  "lua": {
+    "scripts": ["scripts/templates/template_conf_load_and_train.lua"]
+  },
+  "model": {
+    "architecture": "transformer",
+    "vocab_size": 128,
+    "seq_len": 8,
+    "d_model": 16,
+    "num_layers": 1,
+    "num_heads": 2,
+    "mlp_hidden": 32
+  },
+  "training": {"num_epochs": 1, "batch_size": 1, "learning_rate": 0.0001}
 }
 ```
 
@@ -147,6 +158,11 @@ Commande de demo :
 ```bash
 ./bin/mimir --conf config.json
 ```
+
+Enregistrer d'abord le JSON ci-dessus dans `config.json`. Ce template effectue
+un forward de démonstration ; un entraînement réel utilise un script dédié
+avec son dataset et ses options. `--conf` résout `lua.scripts` ou
+`run.lua.scripts`, pas une clé top-level `script`.
 
 Ce que le dev doit verifier :
 

@@ -37,6 +37,15 @@ int main() {
     require(!parallelDispatchFits(1024,{39,1,1,1,2,3,8,8,65537}));
     require(!parallelDispatchFits(1024,{10,1,1,1,2,3,4,5,1048577}));
     require(!parallelDispatchFits(1024,{42,1,1024})); // malformed scatter arguments are rejected
+    for(int id:{45,46,47}) {
+        std::vector<int> convolution(41,1);convolution[0]=id;convolution[1]=256;convolution[2]=1;
+        convolution[6]=2;convolution[9]=2;convolution[10]=3;convolution[36]=60;convolution[37]=8;
+        require(parallelInvocationCount(convolution)==256);
+        require(parallelDispatchFits(2048,convolution));
+        convolution[id==45?9:id==46?10:6]=INT_MAX;
+        require(!parallelDispatchFits(2048,convolution));
+        convolution.pop_back();require(!parallelDispatchFits(2048,convolution));
+    }
     std::vector<float> image(3 * 1024 * 1024), small(16);
     require(referenceInputsFit(16, {&small}));
     require(!referenceInputsFit(0, {&image}));

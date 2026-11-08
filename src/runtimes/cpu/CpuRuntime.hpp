@@ -13,6 +13,9 @@ public:
 
     bool isInitialized() const override { return initialized_; }
 
+    bool supportsTensorWeights() const override { return initialized_ && !config_.disabled; }
+    bool computeTensorWeights(const std::vector<tensor>&,std::vector<uint16_t>&) override;
+
     bool linearForward(
         const float* input,
         const float* weights,
@@ -29,6 +32,8 @@ public:
         const Mimir::TypedTensor* bias_or_null,
         Mimir::TypedTensor& output
     ) override;
+
+    bool supportsAutocast(const Layer& layer, Mimir::DType dtype) const override;
 
     bool mergeBranches(const std::vector<float>& left,
                        const std::vector<float>& right,

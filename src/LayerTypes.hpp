@@ -118,6 +118,30 @@ enum class LayerType {
 
     // === Custom (Mímir) ===
     PatchEmbed,
+
+    // Appended to preserve the numeric identities of existing layer types.
+    Conv3d,
+    Conv4d,
+    CausalDepthwiseConv1d,
+    SwiGLU,
+    SquaredReLU,
+    Square,
+    SqrtAbs,
+    Exp,
+    LogAbs,
+    Abs,
+    ReciprocalNoNan,
+    Sign,
+    Sin,
+    Cos,
+    Maximum,
+    Minimum,
+    ReduceSum,
+    ReduceMean,
+    ReduceMin,
+    ReduceMax,
+    ReduceProd,
+    LowerTriangular,
     
     // === Total ===
     UNKNOWN
@@ -131,6 +155,24 @@ namespace LayerRegistry {
 
 // Normalisation des alias
 inline std::string normalize_type(const std::string& type) {
+    static const std::unordered_map<std::string, std::string> primer_aliases = {
+        {"ReLUSquared", "SquaredReLU"}, {"ReLU2", "SquaredReLU"}, {"squaredrelu", "SquaredReLU"},
+        {"square", "Square"}, {"AbsRoot", "SqrtAbs"}, {"sqrtabs", "SqrtAbs"}, {"sqrt_abs", "SqrtAbs"},
+        {"exp", "Exp"}, {"logabs", "LogAbs"}, {"log_abs", "LogAbs"}, {"abs", "Abs"},
+        {"ReciprocalNoNaN", "ReciprocalNoNan"}, {"reciprocal_no_nan", "ReciprocalNoNan"},
+        {"reciprocalnonan", "ReciprocalNoNan"}, {"sign", "Sign"}, {"sin", "Sin"}, {"cos", "Cos"},
+        {"maximum", "Maximum"}, {"minimum", "Minimum"}, {"reduce_sum", "ReduceSum"},
+        {"reducesum", "ReduceSum"}, {"reduce_mean", "ReduceMean"}, {"reducemean", "ReduceMean"},
+        {"reduce_min", "ReduceMin"}, {"reducemin", "ReduceMin"}, {"reduce_max", "ReduceMax"},
+        {"reducemax", "ReduceMax"}, {"reduce_prod", "ReduceProd"}, {"reduceprod", "ReduceProd"},
+        {"ReduceProduct", "ReduceProd"}, {"lowertriangular", "LowerTriangular"},
+        {"lower_triangular", "LowerTriangular"}
+    };
+    if (const auto alias = primer_aliases.find(type); alias != primer_aliases.end()) return alias->second;
+    if (type == "CausalDepthwiseConv1D" || type == "causal_depthwise_conv1d") return "CausalDepthwiseConv1d";
+    if (type == "SwiGlu" || type == "swiglu") return "SwiGLU";
+    if (type == "Conv3D" || type == "conv3d" || type == "Convolution3D") return "Conv3d";
+    if (type == "Conv4D" || type == "conv4d" || type == "Convolution4D") return "Conv4d";
     // Alias communs
     if (type == "BatchNorm") return "BatchNorm2d";
     if (type == "BN") return "BatchNorm2d";
@@ -179,6 +221,9 @@ inline LayerType string_to_type(const std::string& str) {
         {"Conv2d", LayerType::Conv2d},
         {"ConvTranspose2d", LayerType::ConvTranspose2d},
         {"Conv1d", LayerType::Conv1d},
+        {"Conv3d", LayerType::Conv3d},
+        {"Conv4d", LayerType::Conv4d},
+        {"CausalDepthwiseConv1d", LayerType::CausalDepthwiseConv1d},
         {"DepthwiseConv2d", LayerType::DepthwiseConv2d},
         
         // Linear
@@ -202,6 +247,25 @@ inline LayerType string_to_type(const std::string& str) {
         {"LeakyReLU", LayerType::LeakyReLU},
         {"GELU", LayerType::GELU},
         {"GEGLU", LayerType::GEGLU},
+        {"SwiGLU", LayerType::SwiGLU},
+        {"SquaredReLU", LayerType::SquaredReLU},
+        {"Square", LayerType::Square},
+        {"SqrtAbs", LayerType::SqrtAbs},
+        {"Exp", LayerType::Exp},
+        {"LogAbs", LayerType::LogAbs},
+        {"Abs", LayerType::Abs},
+        {"ReciprocalNoNan", LayerType::ReciprocalNoNan},
+        {"Sign", LayerType::Sign},
+        {"Sin", LayerType::Sin},
+        {"Cos", LayerType::Cos},
+        {"Maximum", LayerType::Maximum},
+        {"Minimum", LayerType::Minimum},
+        {"ReduceSum", LayerType::ReduceSum},
+        {"ReduceMean", LayerType::ReduceMean},
+        {"ReduceMin", LayerType::ReduceMin},
+        {"ReduceMax", LayerType::ReduceMax},
+        {"ReduceProd", LayerType::ReduceProd},
+        {"LowerTriangular", LayerType::LowerTriangular},
         {"SiLU", LayerType::SiLU},
         {"Tanh", LayerType::Tanh},
         {"Sigmoid", LayerType::Sigmoid},
@@ -299,6 +363,9 @@ inline std::string type_to_string(LayerType type) {
         case LayerType::Conv2d: return "Conv2d";
         case LayerType::ConvTranspose2d: return "ConvTranspose2d";
         case LayerType::Conv1d: return "Conv1d";
+        case LayerType::Conv3d: return "Conv3d";
+        case LayerType::Conv4d: return "Conv4d";
+        case LayerType::CausalDepthwiseConv1d: return "CausalDepthwiseConv1d";
         case LayerType::DepthwiseConv2d: return "DepthwiseConv2d";
         
         // Linear
@@ -322,6 +389,25 @@ inline std::string type_to_string(LayerType type) {
         case LayerType::LeakyReLU: return "LeakyReLU";
         case LayerType::GELU: return "GELU";
         case LayerType::GEGLU: return "GEGLU";
+        case LayerType::SwiGLU: return "SwiGLU";
+        case LayerType::SquaredReLU: return "SquaredReLU";
+        case LayerType::Square: return "Square";
+        case LayerType::SqrtAbs: return "SqrtAbs";
+        case LayerType::Exp: return "Exp";
+        case LayerType::LogAbs: return "LogAbs";
+        case LayerType::Abs: return "Abs";
+        case LayerType::ReciprocalNoNan: return "ReciprocalNoNan";
+        case LayerType::Sign: return "Sign";
+        case LayerType::Sin: return "Sin";
+        case LayerType::Cos: return "Cos";
+        case LayerType::Maximum: return "Maximum";
+        case LayerType::Minimum: return "Minimum";
+        case LayerType::ReduceSum: return "ReduceSum";
+        case LayerType::ReduceMean: return "ReduceMean";
+        case LayerType::ReduceMin: return "ReduceMin";
+        case LayerType::ReduceMax: return "ReduceMax";
+        case LayerType::ReduceProd: return "ReduceProd";
+        case LayerType::LowerTriangular: return "LowerTriangular";
         case LayerType::SiLU: return "SiLU";
         case LayerType::Tanh: return "Tanh";
         case LayerType::Sigmoid: return "Sigmoid";
@@ -412,12 +498,14 @@ inline bool is_supported(const std::string& type_str) {
 // Liste de tous les types supportés (pour messages d'erreur)
 inline std::vector<std::string> get_all_supported_types() {
     return {
-        "Conv2d", "ConvTranspose2d", "Conv1d", "DepthwiseConv2d",
+        "Conv2d", "ConvTranspose2d", "Conv1d", "Conv3d", "Conv4d", "DepthwiseConv2d", "CausalDepthwiseConv1d",
         "Linear", "Bilinear",
         "Embedding", "EmbeddingBag", "PatchEmbed",
         "BatchNorm2d", "BatchNorm1d", "LayerNorm", "GroupNorm", "InstanceNorm2d", "RMSNorm",
-        "ReLU", "LeakyReLU", "GELU", "GEGLU", "SiLU", "Tanh", "Sigmoid", "Softmax", "LogSoftmax", 
+        "ReLU", "LeakyReLU", "GELU", "GEGLU", "SwiGLU", "SiLU", "Tanh", "Sigmoid", "Softmax", "LogSoftmax",
         "Softplus", "Mish", "HardSigmoid", "HardSwish",
+        "SquaredReLU", "Square", "SqrtAbs", "Exp", "LogAbs", "Abs", "ReciprocalNoNan", "Sign", "Sin", "Cos",
+        "Maximum", "Minimum", "ReduceSum", "ReduceMean", "ReduceMin", "ReduceMax", "ReduceProd", "LowerTriangular",
         "MaxPool2d", "AvgPool2d", "AdaptiveAvgPool2d", "GlobalAvgPool2d", "MaxPool1d", "AvgPool1d", "TokenMeanPool",
         "Dropout", "Dropout2d", "AlphaDropout",
         "Flatten", "Reshape", "Transpose", "Permute", "Squeeze", "Unsqueeze", "View",

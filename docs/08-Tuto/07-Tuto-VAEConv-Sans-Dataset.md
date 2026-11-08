@@ -11,8 +11,8 @@ Construire un petit VAE, vérifier son contrat latent et tester le prior appris 
 ## Étape 1 — Compiler le test ciblé
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build --target ModelTest.VAEConvContract -j2
+cmake -S . -B build -DMIMIR_ENABLE_TESTS=ON
+cmake --build build --target ModelTest.VAEConvContract ModelTest.VAEConvLogvar -j2
 ```
 
 Le test utilise une image synthétique `4×4×1` créée en mémoire. Il ne lit aucun dataset.
@@ -20,13 +20,14 @@ Le test utilise une image synthétique `4×4×1` créée en mémoire. Il ne lit 
 ## Étape 2 — Exécuter le contrat
 
 ```bash
-ctest --test-dir build --output-on-failure -R ModelTest.VAEConvContract
+ctest --test-dir build --output-on-failure -R '^ModelTest\.(VAEConvContract|VAEConvLogvar)$'
 ```
 
 Résultat attendu :
 
 ```text
 ModelTest.VAEConvContract ... Passed
+ModelTest.VAEConvLogvar ... Passed
 ```
 
 ## Étape 3 — Comprendre les quatre assertions importantes
@@ -39,6 +40,15 @@ Le fichier `Tests/test_vae_conv_contract.cpp` vérifie successivement :
 4. un gradient placé uniquement sur la reconstruction remonte à travers les convolutions du décodeur jusqu’à `vae_conv/z_prior_bias`.
 
 La quatrième assertion est essentielle : elle montre que le prior apprend à partir des features reconstruites, et pas seulement lorsqu’un gradient artificiel lui est appliqué directement.
+
+`Tests/test_vae_conv_logvar.cpp` contrôle aussi le chemin stochastique et les
+gradients de la tête `logvar`. `logvar=0` signifie un écart-type de 1, et non
+l'absence de bruit. L'option `logvar_head_bias` ajoute un biais apprenable à
+cette tête : elle est activée pour les nouveaux runs du script d'entraînement,
+mais sa valeur native par défaut reste `false` pour les anciens graphes. Une
+reprise conserve la topologie du checkpoint. Les métriques `logvar`,
+`posterior_std` et les normes de gradients permettent de vérifier son activité ;
+une valeur moyenne seule ne démontre pas que la tête est inutilisée.
 
 ## Étape 4 — Vérifier les gradients numériques voisins
 
@@ -71,7 +81,7 @@ Après une modification de `VAEConvModel.cpp`, vérifie :
 ```bash
 git diff --check
 ctest --test-dir build --output-on-failure \
-  -R 'ModelTest.VAEConvContract|AutogradTest.Numerical|RuntimeTest.Math'
+  -R 'ModelTest.VAEConvContract|ModelTest.VAEConvLogvar|AutogradTest.Numerical|RuntimeTest.Math'
 ```
 
 Si le contrat VAE change volontairement, mets à jour ensemble :
@@ -79,7 +89,7 @@ Si le contrat VAE change volontairement, mets à jour ensemble :
 - `src/Models/Vision/VAEConvModel.hpp`;
 - `src/Models/Vision/VAEConvModel.cpp`;
 - `src/Models/Registry/ModelArchitectures.cpp`;
-- les helpers VAE dans `src/Model.cpp`;
+- les helpers de loss et métriques VAE dans `src/Models/VAETraining.cpp`;
 - ce tutoriel et la page `docs/02-User-Guide/14-VAEConv.md`.
 
 ## Étapes suivantes

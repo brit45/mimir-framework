@@ -1,35 +1,111 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="650" viewBox="0 0 1500 650" role="img" aria-labelledby="title desc">
-<title id="title">DiffusionModel — architecture</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="882" viewBox="0 0 1200 882" role="img" aria-labelledby="title desc">
+<title id="title">Diffusion : prédicteur de bruit MLP</title>
+<desc id="desc">DiffusionModel dérive de Model et prédit un bruit epsilon à partir d’un embedding temporel concaténé à une image bruitée. Son graphe est un MLP avec Linear, GELU, Dropout optionnel et projection Linear. La préparation du bruit et l’itération du scheduler sont des étapes du workflow de diffusion, pas des nœuds cachés dans ce MLP. Sources : src/Models/Diffusion/DiffusionModel.hpp, src/Models/Diffusion/DiffusionModel.cpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Models/Diffusion/DiffusionModel.hpp&quot;, &quot;src/Models/Diffusion/DiffusionModel.cpp&quot;], &quot;related_docs&quot;: [&quot;docs/02-User-Guide/13-Diffusion.md&quot;, &quot;docs/08-Tuto/13-Tuto-Familles-De-Modeles.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">DiffusionModel — architecture</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Baseline MLP epsilon predictor : input=t_embed||x_t, hidden_dim=2048.</text>
-<line x1="60" y1="112" x2="1440" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="1110" y="135" width="320" height="90" rx="14" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1270.0" y="160" class="label" text-anchor="middle">Métriques du dump</text>
-<text x="1270.0" y="197" class="small" text-anchor="middle">4 couches • 50.61 M params</text>
-<rect x="70" y="330" width="220" height="105" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="180.0" y="355" class="label" text-anchor="middle">Input</text>
-<text x="180.0" y="407" class="small" text-anchor="middle">t_embed || x_t</text>
-<rect x="318" y="330" width="220" height="105" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="428.0" y="355" class="label" text-anchor="middle">Linear fc1</text>
-<text x="428.0" y="407" class="small" text-anchor="middle">12 416 → 2 048</text>
-<path d="M290,382.5 L318,382.5" class="edgeB"/>
-<rect x="566" y="330" width="220" height="105" rx="14" fill="#ffedd5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="676.0" y="355" class="label" text-anchor="middle">GELU</text>
-<text x="676.0" y="407" class="small" text-anchor="middle">activation</text>
-<path d="M538,382.5 L566,382.5" class="edgeB"/>
-<rect x="814" y="330" width="220" height="105" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="924.0" y="355" class="label" text-anchor="middle">Linear out</text>
-<text x="924.0" y="407" class="small" text-anchor="middle">2 048 → output</text>
-<path d="M786,382.5 L814,382.5" class="edgeB"/>
-<rect x="1062" y="330" width="220" height="105" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1172.0" y="355" class="label" text-anchor="middle">ε prediction</text>
-<text x="1172.0" y="407" class="small" text-anchor="middle">bruit estimé</text>
-<path d="M1034,382.5 L1062,382.5" class="edgeB"/>
-<text x="1440" y="626" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="882" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Diffusion : prédicteur de bruit MLP</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">Baseline native diffusion : ce graphe n’est ni un UNet implicite ni le pipeline Lumen.</tspan>
+</text>
+<path d="M 369.33,251 L 437.33,251" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,251 L 830.67,251" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 993.33,339 L 993.33,439" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 830.67,525.5 L 762.67,525.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)" stroke-dasharray="7 6"/>
+<path d="M 921.76,339 L 921.76,389 L 671.57,389 L 671.57,439" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 437.33,525.5 L 369.33,525.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="input">
+<rect x="44" y="163" width="325.33" height="176" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Entrée préparée</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">t_embed || x_t</tspan>
+<tspan x="66" dy="26">Taille : time_dim +</tspan>
+<tspan x="66" dy="26">image_dim</tspan>
+</text>
+</g>
+<g data-node="linear">
+<rect x="437.33" y="163" width="325.33" height="176" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Projection</tspan>
+<tspan x="459.33" dy="29">intermédiaire</tspan>
+</text>
+<text x="459.33" y="266" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Linear avec biais</tspan>
+<tspan x="459.33" dy="26">Largeur : hidden_dim</tspan>
+</text>
+</g>
+<g data-node="activation">
+<rect x="830.67" y="163" width="325.33" height="176" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Activation</tspan>
+</text>
+<text x="852.67" y="237" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">GELU</tspan>
+</text>
+</g>
+<g data-node="dropout">
+<rect x="830.67" y="439" width="325.33" height="173" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/>
+<text x="852.67" y="470" font-size="14" fill="#b45309" font-weight="700">
+<tspan x="852.67" dy="0">OPTION</tspan>
+</text>
+<text x="852.67" y="497" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Dropout facultatif</tspan>
+</text>
+<text x="852.67" y="540" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Actif si dropout &gt; 0</tspan>
+<tspan x="852.67" dy="26">Désactivé à l’évaluation</tspan>
+</text>
+</g>
+<g data-node="projection">
+<rect x="437.33" y="439" width="325.33" height="173" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="459.33" y="470" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Projection de sortie</tspan>
+</text>
+<text x="459.33" y="513" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Linear avec biais</tspan>
+<tspan x="459.33" dy="26">Largeur : image_dim</tspan>
+</text>
+</g>
+<g data-node="noise">
+<rect x="44" y="439" width="325.33" height="173" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="66" y="470" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Bruit prédit</tspan>
+</text>
+<text x="66" y="513" font-size="19" fill="#334155">
+<tspan x="66" dy="0">ε de même taille que x_t</tspan>
+<tspan x="66" dy="26">Utilisé par le workflow</tspan>
+<tspan x="66" dy="26">choisi</tspan>
+</text>
+</g>
+<rect x="947.88" y="374.5" width="90.9" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="956.88" y="393.5" font-size="15" fill="#475569">
+<tspan x="956.88" dy="0">si activé</tspan>
+</text>
+<rect x="765.92" y="374.5" width="61.5" height="29" rx="5" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="774.92" y="393.5" font-size="15" fill="#475569">
+<tspan x="774.92" dy="0">sinon</tspan>
+</text>
+<rect x="44" y="660" width="1112" height="136" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="688" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• image_dim = image_w × image_h × image_c. Les tailles et le nombre de paramètres varient avec la</tspan>
+<tspan x="66" dy="26">configuration.</tspan>
+<tspan x="66" dy="26">• Le scheduler et la préparation de x_t appartiennent au chemin de diffusion utilisé. Un checkpoint</tspan>
+<tspan x="66" dy="26">entraîné et un workflow compatible restent nécessaires.</tspan>
+</text>
+<text x="44" y="831" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : DiffusionModel.hpp · DiffusionModel.cpp</tspan>
+</text>
+</g>
 </svg>

@@ -65,16 +65,19 @@ Bon pattern :
 - écrire dans des sous-dossiers `_interrupt_*` en cas de Ctrl+C
 - reprendre via `scripts/modules/checkpoint_resume.lua`
 
-`checkpoint_resume.lua` sélectionne les checkpoints RawFolder. Il examine les
-sous-dossiers `epoch_*` et `step_*`, le sous-dossier `final` et le dossier
-racine. Si `model/training.json` expose un step (`step` ou
-`loop.global_step`), il retient le checkpoint dont la progression est la plus
-récente. Les epochs et steps sont d'abord triés numériquement ; à progression
-égale ou absente, l'ordre de parcours permet à un checkpoint `step_*`, puis
-`final` ou le dossier racine, de remplacer le précédent. Sans métadonnées de
-progression, `final` ou le dossier racine peut donc être choisi même si un
-checkpoint périodique existe. Le helper reconnaît aussi un RawFolder dans un
-sous-dossier epoch sans supposer une disposition unique des poids.
+`checkpoint_resume.lua` sélectionne un candidat RawFolder. Il prend d'abord
+le sous-dossier `epoch_*` au numéro le plus élevé, puis le compare aux dossiers
+`step_*` ou `step-*` triés numériquement, au sous-dossier `final` et à la racine.
+Quand `model/training.json` expose `step` ou `loop.global_step`, la comparaison
+retient la progression la plus élevée parmi ces candidats. À progression
+égale ou absente, un candidat parcouru plus tard remplace le précédent :
+`final`, puis la racine, peuvent donc remplacer une sauvegarde périodique.
+
+La reconnaissance porte sur la présence d'un fichier d'architecture ou de poids
+à un emplacement attendu ; elle ne vérifie pas l'intégrité de tous les fichiers.
+Le chargement effectif et les contrôles du script restent nécessaires pour
+établir qu'une reprise est valide. Le résolveur ne recherche pas une architecture
+compatible à votre place.
 
 Les scripts d'entraînement qui sauvegardent un résultat final utilisent
 généralement `<out-dir>/final`. Passer ce dossier directement à un loader ou au

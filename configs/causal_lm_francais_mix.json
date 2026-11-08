@@ -1,0 +1,67 @@
+{
+  "env": {
+    "MIMIR_ENABLE_PLANNER": 1,
+    "MIMIR_PLANNER_MODE": "cost",
+    "MIMIR_PLANNER_FUSION": 1,
+    "MIMIR_ENABLE_FUSION_TRAIN": 1,
+    "MIMIR_RUNTIME_AUTOTUNE": 1
+  },
+  "$schema": "./conf.schema.json",
+  "lua": {
+    "scripts": [
+      "scripts/training/train_causal_lm.lua"
+    ]
+  },
+  "model": {
+    "architecture": "causal_lm",
+    "vocab_size": 4096,
+    "seq_len": 128,
+    "d_model": 256,
+    "num_layers": 6,
+    "num_heads": 8,
+    "num_kv_heads": 2,
+    "mlp_hidden": 512,
+    "latent_dim": 128,
+    "viz_registered_tips_only": true,
+    "viz_taps_max_frames": 48,
+    "viz_taps_max_side": 64,
+    "padding_idx": 0,
+    "norm_eps": 1e-05,
+    "rope_theta": 10000.0,
+    "causal_arch_version": 2,
+    "local_conv_kernel": 3,
+    "local_conv_dilation": 1,
+    "fused_swiglu": true
+  },
+  "tokenizer": {
+    "path": "checkpoints/francais_mix_latent/tokenizer.json",
+    "bpe_merges": 1000
+  },
+  "dataset": {
+    "text_path": "dataset/francais_mix.txt"
+  },
+  "training": {
+    "steps": 10000,
+    "learning_rate": 0.0003,
+    "optimizer": "adamw",
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "epsilon": 1e-08,
+    "weight_decay": 0.1,
+    "grad_clip_norm": 1.0,
+    "amp": false,
+    "amp_dtype": "bfloat16",
+    "ddp": false,
+    "log_every": 1,
+    "save_every": 500,
+    "checkpoint_dir": "checkpoints/francais_mix_latent",
+    "seed": 1337
+  },
+  "visualization": {
+    "enabled": true,
+    "window_title": "French Causal LM with Latent Bottleneck",
+    "update_interval_ms": 200,
+    "fps_limit": 60,
+    "show_generated_images": false
+  }
+}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Layers.hpp"
+#include "runtimes/GradientCommit.hpp"
 #include <climits>
 #include <cmath>
 #include <vector>
@@ -116,17 +117,7 @@ bool execute(Engine& engine, const std::vector<const std::vector<float>*>& input
     if (!finite(dw) || !finite(db)) return false;
     // Commit once, after every device operation succeeds. A failed device can
     // be retried on another backend without double-accumulating parameters.
-    if (!dw.empty()) {
-        if (layer.grad_weights.size()!=layer.getWeightsSize()) layer.grad_weights.assign(layer.getWeightsSize(),0.0f);
-        for (size_t i=0;i<dw.size();++i) layer.grad_weights[i]+=dw[i];
-        if (!db.empty()) {
-            if (layer.grad_bias.size()!=db.size()) layer.grad_bias.assign(db.size(),0.0f);
-            for (size_t i=0;i<db.size();++i) {
-                layer.grad_weights[dw.size()+i]+=db[i];
-                layer.grad_bias[i]+=db[i];
-            }
-        }
-    }
+    if((!dw.empty() || !db.empty()) && !RuntimeGradientCommit::parameters(layer,dw,db))return false;
     grad_inputs=std::move(result);
     return true;
 }

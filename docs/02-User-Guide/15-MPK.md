@@ -2,8 +2,21 @@
 
 Le format MPK (`Mimir Package Template`) transporte une configuration de
 modèle, des métadonnées et, si nécessaire, la description complète d’un graphe.
-Utilisez-le pour partager une variante d’architecture, prototyper un graphe ou
-exporter une architecture sans confondre ce package avec un checkpoint de poids.
+Il sert à explorer le partage de variantes, le prototypage et l’export
+d’architectures, sans confondre ce package avec un checkpoint de poids.
+
+> **Statut expérimental**
+> MPK est l’alternative à une architecture écrite en C/C++ dans une classe
+> héritant de `Model`. Il n’est pas encore entièrement exploitable en
+> production. Les contrôles de format, l’inspection ou la compilation d’un
+> package ne garantissent ni la reconstruction complète de son graphe, ni son
+> entraînement, ni la fidélité de son inférence.
+
+Lua et JSON pilotent normalement une architecture déjà définie en C++. Lorsqu’un
+outil Lua écrit un MPK, il sérialise une spécification de package : il ne crée pas
+une troisième méthode de définition d’architecture dans un script métier. Le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md) définit
+la frontière entre description du graphe et orchestration du run.
 
 ## Sur cette page
 
@@ -12,7 +25,7 @@ exporter une architecture sans confondre ce package avec un checkpoint de poids.
 - [Le format moderne en pseudocode](#le-format-moderne-en-pseudocode)
 - [Créer un MPK depuis le registre](#créer-un-mpk-depuis-le-registre)
 - [Exporter l’architecture complète d’un modèle](#exporter-larchitecture-complète-dun-modèle)
-- [Construire un MPK en Lua](#construire-un-mpk-en-lua)
+- [Générer un package MPK avec un outil Lua](#générer-un-package-mpk-avec-un-outil-lua)
 - [Compiler le pseudocode en binaire](#compiler-le-pseudocode-en-binaire)
 - [Prototyper un graphe nodal](#prototyper-un-graphe-nodal)
 - [Vérifier et inspecter un MPK](#vérifier-et-inspecter-un-mpk)
@@ -226,7 +239,11 @@ par `Mimir.Model.get_layers()`.
 > processus ne crée aucun modèle et échoue avec `aucun layer disponible à
 > exporter`. Pour un lancement CLI autonome, préférez `--arch <nom>`.
 
-## Construire un MPK en Lua
+## Générer un package MPK avec un outil Lua
+
+Cet exemple produit un artefact MPK expérimental. Les tables Lua décrivent le
+package à sérialiser ; elles ne constituent pas une architecture de production
+à construire directement dans les scripts d’entraînement ou d’inférence.
 
 Pour générer un package dans un outil ou un script :
 
@@ -519,9 +536,10 @@ Et validés avec :
 | Besoin | Artefact recommandé |
 | --- | --- |
 | Modifier des options de lancement | JSON `--conf` ou table Lua |
-| Nommer et partager une variante d’architecture | MPK |
-| Inspecter ou échanger une structure de graphe | MPK avec `model_structure` |
-| Ajouter localement une variante au registre | MPK dans `_archi/` |
+| Définir une architecture à intégrer au framework | Classe C++ héritant de `Model`, enregistrée dans le registre |
+| Explorer le partage d’une variante d’architecture | MPK expérimental |
+| Inspecter ou échanger une structure de graphe | MPK expérimental avec `model_structure` |
+| Expérimenter une variante locale du registre | MPK dans `_archi/`, sans garantie de production |
 | Sauvegarder les poids entraînés | SafeTensors ou RawFolder |
 | Reprendre optimiseur, époque et métriques | checkpoint du workflow d’entraînement |
 
@@ -540,7 +558,9 @@ Le format moderne possède une source et une représentation compilée :
 La lecture accepte encore les anciens JSON MPK et binaires v1/v2/v3 afin de
 permettre leur migration. Aucun outil moderne ne les écrit.
 
-Limites actuelles :
+Limites actuelles, à vérifier pour chaque expérimentation :
+
+- le format et son chargement ne constituent pas un chemin complet de production ;
 
 - aucun poids n’est inclus ;
 - le checksum FNV-1a détecte une corruption accidentelle, mais ne constitue pas

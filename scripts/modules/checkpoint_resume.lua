@@ -1,4 +1,4 @@
--- Simple checkpoint resume helper (raw_folder + epoch_* layout)
+-- Checkpoint resume helper for raw_folder epoch_*, step_*, step-*, final and root layouts.
 -- Usage:
 --   local Ckpt = dofile(ROOTWORK.."/scripts/modules/checkpoint_resume.lua")
 --   local dir = Ckpt.resolve_dir("checkpoint/MyModel")
@@ -44,6 +44,12 @@ local function find_latest_epoch_dir(base)
   return nil
 end
 
+local function step_number(path_or_name)
+  local name = tostring(path_or_name or "")
+  return tonumber(name:match("step[_%-](%d+)[^/\\]*$")) or
+         tonumber(name:match("^step[_%-](%d+)$")) or -1
+end
+
 function M.file_exists(path)
   return file_exists(path)
 end
@@ -71,13 +77,12 @@ function M.resolve_dir(base)
   local best_step = best and checkpoint_step(best) or -1
   local candidates = {}
   for _, name in ipairs(FS.list_dir(base)) do
-    if tostring(name):match("^step_%d+") then
+    if tostring(name):match("^step[_%-]%d+") then
       candidates[#candidates + 1] = FS.join(base, name)
     end
   end
   table.sort(candidates, function(a, b)
-    return (tonumber(a:match("step_(%d+)[^/\\]*$")) or -1) <
-           (tonumber(b:match("step_(%d+)[^/\\]*$")) or -1)
+    return step_number(a) < step_number(b)
   end)
   candidates[#candidates + 1] = FS.join(base, "final")
   candidates[#candidates + 1] = base

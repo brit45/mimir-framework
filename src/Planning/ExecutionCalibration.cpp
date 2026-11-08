@@ -6,6 +6,8 @@
 #include "runtimes/LayerOps.hpp"
 #include "runtimes/AbstractRuntime.hpp"
 #include "runtimes/FiniteCheck.hpp"
+#include "runtimes/PrimerGeometry.hpp"
+#include "runtimes/cpu/SimdDispatch.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -38,6 +40,7 @@ size_t configuration(const AbstractRuntime& rt){
     for(auto v:{c.device_index,int(c.disabled),int(c.linear_enabled),c.linear_min_ops,int(c.conv_enabled),c.conv_min_ops,int(c.norm_enabled),c.norm_min_elements,int(c.attention_enabled),c.attention_min_ops})mix(h,size_t(v));
     if(std::string(rt.name())=="CPU") {
         mix(h,RuntimeLayerOps::hardwareAccelerationEnabled());
+        mix(h,static_cast<size_t>(RuntimeSimd::selectedIsa()));
         mix(h,ExecutionPolicy::cacheBytes());
         mix(h,MemoryGuard::instance().getLimit());
         if(const char* scratch=std::getenv("MIMIR_PLANNER_SCRATCH_BYTES"))mix(h,std::hash<std::string>{}(scratch));
@@ -45,9 +48,12 @@ size_t configuration(const AbstractRuntime& rt){
     return h;
 }
 bool replayable(LayerType type){
+    if (RuntimePrimer::supported(type)) return true;
     switch(type){
         case LayerType::Linear:case LayerType::MatMul:case LayerType::BatchMatMul:
-        case LayerType::Conv2d:case LayerType::LayerNorm:case LayerType::RMSNorm:
+        case LayerType::Conv2d:case LayerType::Conv3d:case LayerType::Conv4d:
+        case LayerType::CausalDepthwiseConv1d:case LayerType::SwiGLU:
+        case LayerType::LayerNorm:case LayerType::RMSNorm:
         case LayerType::GroupNorm:case LayerType::InstanceNorm2d:
         case LayerType::ReLU:case LayerType::LeakyReLU:case LayerType::Sigmoid:case LayerType::Tanh:
         case LayerType::SiLU:case LayerType::GELU:case LayerType::Softplus:case LayerType::Mish:
@@ -94,7 +100,11 @@ size_t signature(const Layer& l,bool backward,bool training,uint64_t generation,
         mix(h,std::hash<float>{}(l.nms_iou_threshold));mix(h,std::hash<float>{}(l.nms_score_threshold));
         mix(h,size_t(l.nms_max_detections));mix(h,size_t(l.nms_class_agnostic));
     }
-    for(const auto* dims:{&l.shape,&l.target_shape,&l.permute_dims,&l.split_sizes}){mix(h,dims->size());for(int v:*dims)mix(h,size_t(v));}
+    for(int v:{l.input_depth,l.input_time,l.output_depth,l.output_time,l.kernel_d,l.kernel_t,
+        l.stride_d,l.stride_t,l.pad_d,l.pad_t,l.dilation_d,l.dilation_t})mix(h,size_t(v));
+    for(const auto* dims:{&l.shape,&l.target_shape,&l.permute_dims,&l.split_sizes,
+        &l.input_spatial_shape,&l.kernel_shape,&l.stride_shape,&l.padding_shape,&l.dilation_shape})
+        {mix(h,dims->size());for(int v:*dims)mix(h,size_t(v));}
     for(const auto* tensors:{&inputs,&gradients}){mix(h,tensors->size());for(const auto* v:*tensors)mix(h,v?v->size():size_t(-1));}
     return h;
 }

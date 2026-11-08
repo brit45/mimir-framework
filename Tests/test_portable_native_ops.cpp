@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
+#include "runtimes/ConvolutionND.hpp"
 #include <cmath>
 #include <chrono>
 #include <climits>
@@ -76,6 +77,7 @@ int main(int argc,char** argv) {
     try {
         // Coverage must force native GPU routing; measured placement has its own test.
         setTestEnvironment("MIMIR_PLANNER_MODE","static");
+        setTestEnvironment("MIMIR_RUNTIME_AUTOTUNE","0");
         const std::string backend=argc>1?argv[1]:"VULKAN";
         std::unique_ptr<AbstractRuntime> selected;
         if(backend=="OPENCL") {
@@ -113,6 +115,48 @@ int main(int argc,char** argv) {
         std::cout<<"GPU native types: forward="<<forward<<'/'<<total<<" backward="<<backward<<'/'<<cpu_backward<<'\n';
         require(forward==total && backward==cpu_backward,"GPU/CPU type coverage must match CPU");
         if(!runtime.initialize(cfg)) { std::cout<<"SKIP: "<<backend<<" device unavailable\n";return 77; }
+        for(auto type:{LayerType::Conv3d,LayerType::Conv4d}) {
+            Layer l;l.type_enum=type;l.in_channels=4;l.out_channels=6;l.groups=2;
+            const bool four=type==LayerType::Conv4d;
+            l.input_spatial_shape=four?std::vector<int>{2,3,4,3}:std::vector<int>{3,4,5};
+            l.kernel_shape=four?std::vector<int>{2,1,2,2}:std::vector<int>{2,2,2};
+            l.stride_shape=four?std::vector<int>{1,2,1,1}:std::vector<int>{1,2,1};
+            l.padding_shape=four?std::vector<int>{0,1,1,0}:std::vector<int>{1,1,0};
+            l.dilation_shape=four?std::vector<int>{1,1,2,1}:std::vector<int>{1,2,1};
+            l.shape={2,l.in_channels};l.shape.insert(l.shape.end(),l.input_spatial_shape.begin(),l.input_spatial_shape.end());
+            for(bool bias:{false,true}) {
+                l.use_bias=bias;auto g=RuntimeConvolutionND::checkedGeometry(l);
+                l.weights.resize(g.parameter_size);std::vector<float>x(g.input_size);
+                for(size_t i=0;i<x.size();++i)x[i]=std::sin(float(i)*.21f);
+                for(size_t i=0;i<l.weights.size();++i)l.weights[i]=float(int(i%13)-6)*.017f;
+                parity(runtime,l,x);
+                if(bias){
+                    auto refuses=[&](Layer bad,std::vector<float> source,std::vector<float> dy){
+                        if(bad.grad_weights.empty())bad.grad_weights.assign(bad.getWeightsSize(),.125f);
+                        if(bad.grad_bias.empty())bad.grad_bias.assign(bad.out_channels,.25f);
+                        const auto before=bad.grad_weights,before_bias=bad.grad_bias;
+                        std::vector<std::vector<float>> result{{42.f,-7.f}};
+                        require(!runtime.backwardLayer({&source},{&dy},result,bad,true),"ConvND must reject invalid/overflowing gradients");
+                        require(result==std::vector<std::vector<float>>{{42.f,-7.f}},"ConvND failure changed input gradients");
+                        require(bad.grad_weights==before && bad.grad_bias==before_bias,"ConvND failure partially committed parameters");
+                    };
+                    std::vector<float> dy(g.output_size,.5f);
+                    auto invalid_input=x;invalid_input.back()=std::numeric_limits<float>::quiet_NaN();refuses(l,invalid_input,dy);
+                    auto invalid_dy=dy;invalid_dy.back()=std::numeric_limits<float>::infinity();refuses(l,x,invalid_dy);
+                    const float max=std::numeric_limits<float>::max();
+                    refuses(l,std::vector<float>(g.input_size,max*.5f),std::vector<float>(g.output_size,2.f));
+                    Layer huge_weights=l;std::fill(huge_weights.weights.begin(),huge_weights.weights.end(),max*.5f);
+                    refuses(huge_weights,std::vector<float>(g.input_size,1.f),std::vector<float>(g.output_size,2.f));
+                    Layer overflow=l;overflow.grad_weights.assign(overflow.getWeightsSize(),max);overflow.grad_bias.assign(overflow.out_channels,max);
+                    refuses(overflow,std::vector<float>(g.input_size,1.f),std::vector<float>(g.output_size,max/(8.f*g.batch*g.output_spatial)));
+                    std::cout<<"GPU_CONVND_TRANSACTIONAL_OK "<<type_name(type)<<'\n';
+                }
+                Layer invalid=l;invalid.groups=3;
+                require(!runtimeCapabilityIsNative(runtime.queryForwardOperationCapability(invalid,{&x},true)),"ConvND rejects non-divisible groups");
+                x.pop_back();
+                require(!runtimeCapabilityIsNative(runtime.queryForwardOperationCapability(l,{&x},true)),"ConvND rejects truncated batch");
+            }
+        }
         {
             Layer l; l.type_enum=LayerType::Linear; l.in_features=128; l.out_features=1; l.seq_len=254; l.use_bias=true;
             l.weights.assign(129,.1f); l.grad_weights.assign(129,.125f); l.grad_bias.assign(1,.25f);

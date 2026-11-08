@@ -1,36 +1,106 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="620" viewBox="0 0 1700 620" role="img" aria-labelledby="title desc">
-<title id="title">Flux Model Factory</title><desc id="desc">Diagramme vectoriel éditable généré depuis les dumps du framework.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="937" viewBox="0 0 1200 937" role="img" aria-labelledby="title desc">
+<title id="title">Ce que fait la fabrique</title>
+<desc id="desc">Le registre reçoit un nom et une configuration, trouve la fabrique de la classe dérivée et appelle sa construction C++. Il retourne une instance dont les noms, formes et tailles de paramètres sont décrits. Allocation et initialisation viennent ensuite. Sources : src/Models/Registry/ModelArchitectures.cpp, src/Models/MLP/BasicMLPModel.hpp, src/Models/MLP/BasicMLPModel.cpp</desc>
+<metadata>{&quot;generator&quot;: &quot;scripts/docs/generate_diagrams.py&quot;, &quot;sources&quot;: [&quot;src/Models/Registry/ModelArchitectures.cpp&quot;, &quot;src/Models/MLP/BasicMLPModel.hpp&quot;, &quot;src/Models/MLP/BasicMLPModel.cpp&quot;], &quot;related_docs&quot;: [&quot;docs/04-Architecture-Internals/19-Models-Registry-And-Builders.md&quot;, &quot;docs/02-User-Guide/02-Model-Lifecycle.md&quot;, &quot;docs/07-Devs/08-Architecture-Contract.md&quot;]}</metadata>
 <defs>
-<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#475569"/></marker>
-<marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L10,6 L2,10 z" fill="#2563eb"/></marker>
-<style><![CDATA[text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{font-size:34px;font-weight:800;fill:#0f172a}.subtitle{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:700;fill:#0f172a}.small{font-size:13px;fill:#475569}.tiny{font-size:11px;fill:#64748b}.box{stroke:#94a3b8;stroke-width:1.4;rx:14}.edge{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#arrow)}.edgeB{stroke:#2563eb;stroke-width:2.4;fill:none;marker-end:url(#arrowBlue)}.dash{stroke-dasharray:7 7}.note{font-size:12px;fill:#475569}]]></style>
+<marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#2563eb"/></marker>
+<marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#0f766e"/></marker>
+<marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#7c3aed"/></marker>
+<marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b45309"/></marker>
+<marker id="arrow-slate" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#475569"/></marker>
+<marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M1,1 L8,4.5 L1,8 Z" fill="#b91c1c"/></marker>
 </defs>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<text x="60" y="62" class="title" text-anchor="start">Flux Model Factory</text>
-<text x="60" y="92" class="subtitle" text-anchor="start">Le registre ne connecte pas les modèles entre eux : il instancie une architecture choisie.</text>
-<line x1="60" y1="112" x2="1640" y2="112" stroke="#e2e8f0" stroke-width="2"/>
-<rect x="70.0" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="188.33333333333331" y="265" class="label" text-anchor="middle">Nom architecture</text>
-<text x="188.33333333333331" y="322" class="small" text-anchor="middle">ex: vae_conv</text>
-<rect x="334.66666666666663" y="240" width="236.66666666666666" height="110" rx="14" fill="#fef3c7" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="452.99999999999994" y="265" class="label" text-anchor="middle">Config</text>
-<text x="452.99999999999994" y="322" class="small" text-anchor="middle">image_h, base_channels…</text>
-<path d="M306.66666666666663,295.0 L334.66666666666663,295.0" class="edgeB"/>
-<rect x="599.3333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#d1fae5" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="717.6666666666666" y="265" class="label" text-anchor="middle">Registry lookup</text>
-<text x="717.6666666666666" y="322" class="small" text-anchor="middle">trouve builder</text>
-<path d="M571.3333333333333,295.0 L599.3333333333333,295.0" class="edgeB"/>
-<rect x="863.9999999999999" y="240" width="236.66666666666666" height="110" rx="14" fill="#cffafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="982.3333333333333" y="265" class="label" text-anchor="middle">Builder</text>
-<text x="982.3333333333333" y="322" class="small" text-anchor="middle">crée couches</text>
-<path d="M835.9999999999999,295.0 L863.9999999999999,295.0" class="edgeB"/>
-<rect x="1128.6666666666665" y="240" width="236.66666666666666" height="110" rx="14" fill="#dbeafe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1246.9999999999998" y="265" class="label" text-anchor="middle">Graph</text>
-<text x="1246.9999999999998" y="322" class="small" text-anchor="middle">nodes + tensors</text>
-<path d="M1100.6666666666665,295.0 L1128.6666666666665,295.0" class="edgeB"/>
-<rect x="1393.333333333333" y="240" width="236.66666666666666" height="110" rx="14" fill="#ede9fe" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="1511.6666666666663" y="265" class="label" text-anchor="middle">Model instance</text>
-<text x="1511.6666666666663" y="322" class="small" text-anchor="middle">forward/backward</text>
-<path d="M1365.3333333333333,295.0 L1393.333333333333,295.0" class="edgeB"/>
-<text x="1640" y="596" class="tiny" text-anchor="end">Mímir Framework — SVG vectoriel éditable</text>
+<g font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+<rect width="1200" height="937" fill="#ffffff"/>
+<text x="44" y="47" font-size="31" fill="#0f172a" font-weight="700">
+<tspan x="44" dy="0">Ce que fait la fabrique</tspan>
+</text>
+<text x="44" y="86" font-size="21" fill="#475569">
+<tspan x="44" dy="0">create construit la topologie native ; il n’alloue pas encore les poids.</tspan>
+</text>
+<path d="M 369.33,277 L 437.33,277" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 762.67,277 L 830.67,277" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 993.33,391 L 993.33,491" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 830.67,592 L 762.67,592" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<path d="M 437.33,592 L 369.33,592" fill="none" stroke="#475569" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+<g data-node="request">
+<rect x="44" y="163" width="325.33" height="228" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.4"/>
+<text x="66" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Nom et configuration</tspan>
+</text>
+<text x="66" y="237" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Ex. basic_mlp / vae_conv</tspan>
+<tspan x="66" dy="26">Valeurs fournies au</tspan>
+<tspan x="66" dy="26">registre</tspan>
+</text>
+</g>
+<g data-node="lookup">
+<rect x="437.33" y="163" width="325.33" height="228" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Recherche au</tspan>
+<tspan x="459.33" dy="29">registre</tspan>
+</text>
+<text x="459.33" y="266" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Nom canonique ou alias</tspan>
+<tspan x="459.33" dy="26">Configuration autorisée</tspan>
+</text>
+</g>
+<g data-node="factory">
+<rect x="830.67" y="163" width="325.33" height="228" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="852.67" y="194" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Classe dérivée de</tspan>
+<tspan x="852.67" dy="29">Model</tspan>
+</text>
+<text x="852.67" y="266" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">La fabrique crée</tspan>
+<tspan x="852.67" dy="26">l’instance</tspan>
+<tspan x="852.67" dy="26">Appel</tspan>
+<tspan x="852.67" dy="26">buildFromConfig(Config)</tspan>
+</text>
+</g>
+<g data-node="instance">
+<rect x="44" y="491" width="325.33" height="202" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/>
+<text x="66" y="522" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="66" dy="0">Instance construite</tspan>
+</text>
+<text x="66" y="565" font-size="19" fill="#334155">
+<tspan x="66" dy="0">Graphe disponible</tspan>
+<tspan x="66" dy="26">Poids à allouer puis</tspan>
+<tspan x="66" dy="26">init/charger</tspan>
+</text>
+</g>
+<g data-node="metadata">
+<rect x="437.33" y="491" width="325.33" height="202" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+<text x="459.33" y="522" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="459.33" dy="0">Métadonnées du</tspan>
+<tspan x="459.33" dy="29">graphe</tspan>
+</text>
+<text x="459.33" y="594" font-size="19" fill="#334155">
+<tspan x="459.33" dy="0">Types et noms des</tspan>
+<tspan x="459.33" dy="26">tenseurs</tspan>
+<tspan x="459.33" dy="26">Formes et params_count</tspan>
+</text>
+</g>
+<g data-node="builder">
+<rect x="830.67" y="491" width="325.33" height="202" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="852.67" y="522" font-size="22" fill="#0f172a" font-weight="700">
+<tspan x="852.67" dy="0">Construction en C++</tspan>
+</text>
+<text x="852.67" y="565" font-size="19" fill="#334155">
+<tspan x="852.67" dy="0">Couches et connexions</tspan>
+<tspan x="852.67" dy="26">nommées</tspan>
+<tspan x="852.67" dy="26">Helper buildInto si</tspan>
+<tspan x="852.67" dy="26">nécessaire</tspan>
+</text>
+</g>
+<rect x="44" y="741" width="1112" height="110" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="66" y="769" font-size="18" fill="#334155">
+<tspan x="66" dy="0">• Le registre instancie l’architecture choisie ; il ne connecte pas les différentes architectures entre</tspan>
+<tspan x="66" dy="26">elles.</tspan>
+<tspan x="66" dy="26">• Model.build() reste un appel de compatibilité : la construction moderne a déjà lieu lors de create.</tspan>
+</text>
+<text x="44" y="886" font-size="14" fill="#64748b">
+<tspan x="44" dy="0">Sources : ModelArchitectures.cpp · BasicMLPModel.hpp · BasicMLPModel.cpp</tspan>
+</text>
+</g>
 </svg>

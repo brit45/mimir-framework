@@ -1,8 +1,83 @@
 #include "Tokenizer.hpp"
 #include <algorithm>
 #include <cctype>
+#include <map>
+#include <set>
 #include <sstream>
 #include <iostream>
+
+namespace {
+const std::string kBpeWordStart = "▁";
+const std::string kBpeContinuation = "##";
+
+std::vector<std::string> splitUtf8Codepoints(const std::string& text) {
+    std::vector<std::string> out;
+    for (size_t offset = 0; offset < text.size();) {
+        const unsigned char lead = static_cast<unsigned char>(text[offset]);
+        size_t length = lead < 0x80 ? 1 :
+            ((lead & 0xe0) == 0xc0 ? 2 :
+             ((lead & 0xf0) == 0xe0 ? 3 :
+              ((lead & 0xf8) == 0xf0 ? 4 : 1)));
+        if (offset + length > text.size()) length = 1;
+        for (size_t i = 1; i < length; ++i) {
+            if ((static_cast<unsigned char>(text[offset + i]) & 0xc0) != 0x80) {
+                length = 1;
+                break;
+            }
+        }
+        out.push_back(text.substr(offset, length));
+        offset += length;
+    }
+    return out;
+}
+
+std::string bpeSymbolContent(const std::string& symbol) {
+    if (symbol.rfind(kBpeWordStart, 0) == 0) return symbol.substr(kBpeWordStart.size());
+    if (symbol.rfind(kBpeContinuation, 0) == 0) return symbol.substr(kBpeContinuation.size());
+    return symbol;
+}
+
+std::string mergeBpeSymbols(const std::string& left, const std::string& right) {
+    const std::string prefix = left.rfind(kBpeWordStart, 0) == 0
+        ? kBpeWordStart : kBpeContinuation;
+    return prefix + bpeSymbolContent(left) + bpeSymbolContent(right);
+}
+
+bool isBpeWord(const std::string& token) {
+    for (unsigned char c : token) {
+        if (std::isalnum(c) || c >= 128) return true;
+    }
+    return false;
+}
+
+std::vector<std::string> initialBpeSymbols(const std::string& word) {
+    auto codepoints = splitUtf8Codepoints(word);
+    std::vector<std::string> symbols;
+    symbols.reserve(codepoints.size());
+    for (size_t i = 0; i < codepoints.size(); ++i) {
+        symbols.push_back((i == 0 ? kBpeWordStart : kBpeContinuation) + codepoints[i]);
+    }
+    return symbols;
+}
+
+void applyBpeMerge(std::vector<std::string>& symbols,
+                   const std::pair<std::string, std::string>& pair,
+                   const std::string& merged) {
+    if (symbols.size() < 2) return;
+    std::vector<std::string> result;
+    result.reserve(symbols.size());
+    for (size_t i = 0; i < symbols.size();) {
+        if (i + 1 < symbols.size() && symbols[i] == pair.first &&
+            symbols[i + 1] == pair.second) {
+            result.push_back(merged);
+            i += 2;
+        } else {
+            result.push_back(symbols[i++]);
+        }
+    }
+    symbols = std::move(result);
+}
+} // namespace
 
 Tokenizer::Tokenizer(size_t max_vocab_)
     : maxVocab(max_vocab_)
@@ -46,6 +121,36 @@ int Tokenizer::addToken(const std::string &tok)
     return id;
 }
 
+int Tokenizer::addSpecialToken(const std::string &tok)
+{
+    if (tok.empty())
+        return getUnkId() >= 0 ? getUnkId() : 0;
+    const int id = addToken(tok);
+    const auto found = vocab.find(tok);
+    if (found == vocab.end())
+        return id;
+    if (std::find(specialTokens_.begin(), specialTokens_.end(), tok) == specialTokens_.end())
+    {
+        specialTokens_.push_back(tok);
+        std::stable_sort(specialTokens_.begin(), specialTokens_.end(),
+                         [](const std::string &left, const std::string &right)
+                         {
+                             return left.size() > right.size();
+                         });
+    }
+    return found->second;
+}
+
+bool Tokenizer::hasToken(const std::string &tok) const
+{
+    return vocab.find(tok) != vocab.end();
+}
+
+bool Tokenizer::isSpecialToken(const std::string &tok) const
+{
+    return std::find(specialTokens_.begin(), specialTokens_.end(), tok) != specialTokens_.end();
+}
+
 void Tokenizer::ensureVocabFromText(const std::string &text)
 {
     // add all words from text to vocab
@@ -87,7 +192,7 @@ void Tokenizer::ensureSpecialTokens()
         // Apostrophes françaises courantes
         "l'", "d'", "qu'", "c'", "j'", "m'", "t'", "s'", "n'"
     };
-    for (const auto &s : specials) addToken(s);
+    for (const auto &s : specials) addSpecialToken(s);
 }
 
 std::vector<std::string> Tokenizer::splitTokens(const std::string &text) const
@@ -100,6 +205,25 @@ std::vector<std::string> Tokenizer::splitTokens(const std::string &text) const
     };
     
     for (size_t i = 0; i < text.size(); ++i) {
+        bool matched_special = false;
+        for (const auto &special : specialTokens_)
+        {
+            if (special.empty() || i + special.size() > text.size() ||
+                text.compare(i, special.size(), special) != 0)
+                continue;
+            if (!cur.empty())
+            {
+                out.push_back(std::move(cur));
+                cur.clear();
+            }
+            out.push_back(special);
+            i += special.size() - 1;
+            matched_special = true;
+            break;
+        }
+        if (matched_special)
+            continue;
+
         unsigned char c = static_cast<unsigned char>(text[i]);
         
         // Gérer les caractères UTF-8 multi-byte (accents)
@@ -158,6 +282,7 @@ std::vector<std::string> Tokenizer::splitTokens(const std::string &text) const
 std::string Tokenizer::normalizeToken(std::string s) const
 {
     if (s.empty()) return s;
+    if (isSpecialToken(s)) return s;
     
     // Détection de ponctuation pure (garder telle quelle)
     bool isPurePunct = true;
@@ -360,7 +485,11 @@ std::string Tokenizer::decode(const std::vector<int> &ids) const
     
     std::string prev;
     for (int id : ids) {
-        std::string token = getTokenById(id);
+        std::string raw_token = getTokenById(id);
+        const bool continuation = raw_token.rfind(kBpeContinuation, 0) == 0;
+        std::string token = raw_token;
+        if (token.rfind(kBpeWordStart, 0) == 0) token.erase(0, kBpeWordStart.size());
+        else if (continuation) token.erase(0, kBpeContinuation.size());
         
         // Ajouter espace intelligent
         if (!prev.empty()) {
@@ -368,7 +497,7 @@ std::string Tokenizer::decode(const std::vector<int> &ids) const
             bool prev_is_punct = isPunctuation(prev);
             
             // Pas d'espace avant ponctuation fermante ou après ouvrante
-            if (!(curr_is_punct && !needsSpaceBefore(token)) &&
+            if (!continuation && !(curr_is_punct && !needsSpaceBefore(token)) &&
                 !(prev_is_punct && !needsSpaceAfter(prev))) {
                 ss << ' ';
             }
@@ -404,11 +533,32 @@ json Tokenizer::to_json() const
         j["vocab"] = json::object();
         j["vocab_error"] = "to_json unknown exception";
     }
+
+    j["bpe_enabled"] = bpeReady;
+    j["special_tokens"] = specialTokens_;
+    j["bpe_merges"] = json::array();
+    std::vector<std::pair<std::pair<std::string, std::string>, int>> ordered_merges;
+    ordered_merges.reserve(bpeMerges.size());
+    for (const auto& merge : bpeMerges) ordered_merges.push_back(merge);
+    std::sort(ordered_merges.begin(), ordered_merges.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second < b.second;
+        return a.first < b.first;
+    });
+    for (const auto& merge : ordered_merges) {
+        j["bpe_merges"].push_back({
+            {"left", merge.first.first},
+            {"right", merge.first.second},
+            {"rank", merge.second}
+        });
+    }
     return j;
 }
 
 void Tokenizer::from_json(const json &j)
 {
+    bpeMerges.clear();
+    bpeReady = false;
+    specialTokens_.clear();
     if (j.contains("maxVocab")) maxVocab = j["maxVocab"].get<size_t>();
     
     // Support ancien format id2token (rétrocompatibilité)
@@ -444,6 +594,59 @@ void Tokenizer::from_json(const json &j)
             // ignore malformed json
         }
     }
+
+    if (j.contains("special_tokens") && j["special_tokens"].is_array())
+    {
+        try
+        {
+            for (const auto &item : j["special_tokens"])
+            {
+                if (!item.is_string())
+                    continue;
+                const std::string token = item.get<std::string>();
+                if (!token.empty() &&
+                    std::find(specialTokens_.begin(), specialTokens_.end(), token) == specialTokens_.end())
+                    specialTokens_.push_back(token);
+            }
+        }
+        catch (...)
+        {
+            specialTokens_.clear();
+        }
+    }
+    // Old tokenizer files do not record this list. Keep the original boundary
+    // tokens atomic without mutating their vocabulary or ids while loading.
+    const std::vector<std::string> boundary_tokens = {
+        "<PAD>", "<UNK>", "<SEQ>", "<MOD>", "<MAG>", "<BOS>", "<EOS>"};
+    for (const auto &token : boundary_tokens)
+    {
+        if (std::find(specialTokens_.begin(), specialTokens_.end(), token) == specialTokens_.end())
+            specialTokens_.push_back(token);
+    }
+    std::stable_sort(specialTokens_.begin(), specialTokens_.end(),
+                     [](const std::string &left, const std::string &right)
+                     {
+                         return left.size() > right.size();
+                     });
+
+    if (j.contains("bpe_merges") && j["bpe_merges"].is_array()) {
+        try {
+            for (const auto& item : j["bpe_merges"]) {
+                if (!item.is_object() || !item.contains("left") ||
+                    !item.contains("right") || !item.contains("rank")) continue;
+                const std::string left = item["left"].get<std::string>();
+                const std::string right = item["right"].get<std::string>();
+                const int rank = item["rank"].get<int>();
+                if (rank < 0) continue;
+                const std::string merged = mergeBpeSymbols(left, right);
+                if (vocab.count(left) && vocab.count(right) && vocab.count(merged))
+                    bpeMerges[{left, right}] = rank;
+            }
+        } catch (...) {
+            bpeMerges.clear();
+        }
+    }
+    bpeReady = j.value("bpe_enabled", !bpeMerges.empty()) || !bpeMerges.empty();
 }
 
 void Tokenizer::setMaxSequenceLength(int max_len) {
@@ -557,75 +760,172 @@ void Tokenizer::learnBPEFromCorpus(
     const std::vector<std::string>& corpus, 
     int num_merges
 ) {
-    std::cerr << "\n🔤 Apprentissage BPE..." << std::endl;
-    
-    // 1. Compter les paires de tokens
-    std::unordered_map<std::pair<std::string, std::string>, int, PairHash> pair_counts;
-    
+    std::cerr << "[BPE] Étude démarrée: " << corpus.size()
+              << " texte(s), jusqu'à " << std::max(0, num_merges) << " merges." << std::endl;
+
+    struct WordEntry {
+        std::vector<std::string> pieces;
+        size_t frequency = 0;
+    };
+
+    std::vector<WordEntry> words;
+    std::unordered_map<std::string, size_t> word_indices;
+    std::set<std::string> base_symbols;
     for (const auto& text : corpus) {
-        auto tokens = splitTokens(text);
-        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-            std::string t1 = normalizeToken(tokens[i]);
-            std::string t2 = normalizeToken(tokens[i + 1]);
-            if (!t1.empty() && !t2.empty()) {
-                pair_counts[{t1, t2}]++;
+        for (const auto& raw : splitTokens(text)) {
+            if (isSpecialToken(raw)) continue;
+            const std::string word = normalizeToken(raw);
+            if (word.empty() || !isBpeWord(word)) continue;
+            auto found = word_indices.find(word);
+            if (found == word_indices.end()) {
+                WordEntry entry;
+                entry.pieces = initialBpeSymbols(word);
+                entry.frequency = 1;
+                const size_t index = words.size();
+                words.push_back(std::move(entry));
+                word_indices.emplace(word, index);
+                for (const auto& piece : words.back().pieces) base_symbols.insert(piece);
+            } else {
+                ++words[found->second].frequency;
             }
         }
     }
-    
-    // 2. Effectuer les merges
-    for (int merge = 0; merge < num_merges && !pair_counts.empty(); ++merge) {
-        // Trouver la paire la plus fréquente
-        auto max_pair = std::max_element(
-            pair_counts.begin(), 
-            pair_counts.end(),
-            [](const auto& a, const auto& b) { return a.second < b.second; }
-        );
-        
-        if (max_pair->second < 2) break;  // Arrêter si fréquence < 2
-        
-        // Merger la paire
-        std::string merged = max_pair->first.first + max_pair->first.second;
-        addToken(merged);
-        bpeMerges[max_pair->first] = merge;
-        
-        if ((merge + 1) % 100 == 0) {
-            std::cerr << "  Merge " << (merge + 1) << "/" << num_merges 
-                      << " : " << max_pair->first.first << " + " 
-                      << max_pair->first.second << " → " << merged 
-                      << " (freq: " << max_pair->second << ")" << std::endl;
-        }
-        
-        pair_counts.erase(max_pair);
+    std::cerr << "[BPE] " << words.size() << " mots distincts préparés; "
+              << base_symbols.size() << " symboles de base." << std::endl;
+
+    size_t base_symbols_added = 0;
+    for (const auto& symbol : base_symbols) {
+        if (vocab.find(symbol) != vocab.end()) continue;
+        const size_t before = vocab.size();
+        addToken(symbol);
+        if (vocab.find(symbol) != vocab.end() && vocab.size() > before)
+            ++base_symbols_added;
     }
-    
-    std::cerr << "  ✓ BPE terminé : " << bpeMerges.size() << " merges appris" << std::endl;
+
+    // Re-apply previously saved merges so a later corpus can extend, rather
+    // than forget, the tokenizer's learned subword inventory.
+    std::vector<std::pair<std::pair<std::string, std::string>, int>> ordered_merges;
+    ordered_merges.reserve(bpeMerges.size());
+    for (const auto& merge : bpeMerges) ordered_merges.push_back(merge);
+    std::sort(ordered_merges.begin(), ordered_merges.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second < b.second;
+        return a.first < b.first;
+    });
+
+    for (auto& word : words) {
+        const bool has_all_base_symbols = std::all_of(
+            word.pieces.begin(), word.pieces.end(),
+            [&](const std::string& piece) { return vocab.find(piece) != vocab.end(); });
+        if (!has_all_base_symbols) {
+            word.pieces.clear();
+            continue;
+        }
+        for (const auto& merge : ordered_merges) {
+            const std::string merged = mergeBpeSymbols(merge.first.first, merge.first.second);
+            if (vocab.find(merged) != vocab.end())
+                applyBpeMerge(word.pieces, merge.first, merged);
+        }
+    }
+
+    int next_rank = 0;
+    for (const auto& merge : bpeMerges) next_rank = std::max(next_rank, merge.second + 1);
+    size_t learned_merges = 0;
+    const int merge_limit = std::max(0, num_merges);
+    for (int merge_index = 0; merge_index < merge_limit; ++merge_index) {
+        std::map<std::pair<std::string, std::string>, size_t> pair_counts;
+        for (const auto& word : words) {
+            if (word.pieces.empty()) continue;
+            for (size_t i = 0; i + 1 < word.pieces.size(); ++i)
+                pair_counts[{word.pieces[i], word.pieces[i + 1]}] += word.frequency;
+        }
+
+        auto best = pair_counts.end();
+        for (auto it = pair_counts.begin(); it != pair_counts.end(); ++it) {
+            if (bpeMerges.find(it->first) != bpeMerges.end()) continue;
+            if (best == pair_counts.end() || it->second > best->second)
+                best = it;
+        }
+        if (best == pair_counts.end() || best->second < 2) break;
+
+        const auto pair = best->first;
+        const std::string merged = mergeBpeSymbols(pair.first, pair.second);
+        if (vocab.find(merged) == vocab.end()) {
+            const size_t before = vocab.size();
+            addToken(merged);
+            if (vocab.find(merged) == vocab.end() || vocab.size() == before) {
+                // Existing tokens are reusable; a full vocabulary with no such
+                // token means this merge cannot be represented by the model.
+                if (vocab.find(merged) == vocab.end()) break;
+            }
+        }
+
+        bpeMerges[pair] = next_rank++;
+        ++learned_merges;
+        for (auto& word : words) {
+            if (!word.pieces.empty()) applyBpeMerge(word.pieces, pair, merged);
+        }
+        if (learned_merges % 100 == 0 || learned_merges == static_cast<size_t>(merge_limit)) {
+            std::cerr << "[BPE] progression " << learned_merges << "/" << merge_limit
+                      << " merges; vocab=" << vocab.size() << "/" << maxVocab << std::endl;
+        }
+    }
+
+    bpeReady = true;
+    std::cerr << "🔤 BPE corpus étudié : " << words.size() << " mots distincts, "
+              << base_symbols_added << " symboles de base ajoutés, "
+              << learned_merges << " merges appris (" << bpeMerges.size()
+              << " au total)." << std::endl;
 }
 
 std::vector<int> Tokenizer::tokenizeBPE(const std::string& text) const {
-    if (bpeMerges.empty()) {
-        // Fallback sur tokenization standard
-        return tokenize(text);
-    }
-    
-    std::vector<std::string> tokens = splitTokens(text);
     std::vector<int> ids;
-    ids.reserve(tokens.size());
-    
-    for (auto& tok : tokens) {
-        std::string normalized = normalizeToken(tok);
-        if (normalized.empty()) continue;
-        
-        // Chercher dans vocab (avec merges BPE appliqués)
-        auto it = vocab.find(normalized);
-        if (it != vocab.end()) {
-            ids.push_back(it->second);
-        } else {
-            ids.push_back(getUnkId());
+    const int bos = getBosId();
+    const int eos = getEosId();
+    const int unk = getUnkId() >= 0 ? getUnkId() : 0;
+    const bool use_bos_eos = bos >= 0 && eos >= 0;
+    auto tokens = splitTokens(text);
+    ids.reserve(tokens.size() + (use_bos_eos ? 2 : 0));
+    if (use_bos_eos) ids.push_back(bos);
+
+    std::vector<std::pair<std::pair<std::string, std::string>, int>> ordered_merges;
+    ordered_merges.reserve(bpeMerges.size());
+    for (const auto& merge : bpeMerges) ordered_merges.push_back(merge);
+    std::sort(ordered_merges.begin(), ordered_merges.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second < b.second;
+        return a.first < b.first;
+    });
+
+    for (const auto& raw : tokens) {
+        const std::string word = normalizeToken(raw);
+        if (word.empty()) continue;
+        const auto exact = vocab.find(word);
+        if (exact != vocab.end()) {
+            ids.push_back(exact->second);
+            continue;
+        }
+        if (!bpeReady || !isBpeWord(word)) {
+            ids.push_back(unk);
+            continue;
+        }
+
+        auto pieces = initialBpeSymbols(word);
+        for (const auto& merge : ordered_merges) {
+            const std::string merged = mergeBpeSymbols(merge.first.first, merge.first.second);
+            if (vocab.find(merged) != vocab.end())
+                applyBpeMerge(pieces, merge.first, merged);
+        }
+        for (const auto& piece : pieces) {
+            const auto found = vocab.find(piece);
+            ids.push_back(found == vocab.end() ? unk : found->second);
         }
     }
-    
+
+    if (use_bos_eos) ids.push_back(eos);
     return ids;
+}
+
+size_t Tokenizer::getBPEMergeCount() const {
+    return bpeMerges.size();
 }
 
 void Tokenizer::initializeUnderstandingDictionaries() {

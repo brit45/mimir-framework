@@ -14,6 +14,11 @@ int main() {
     TASSERT_TRUE(!rt.supportsForwardLayerType(LayerType::Lambda));
     TASSERT_TRUE(rt.supportsForwardLayerType(LayerType::Conv2d));
     TASSERT_TRUE(rt.supportsBackwardLayerType(LayerType::PatchEmbed));
+    TASSERT_TRUE(rt.supportsForwardLayerType(LayerType::Conv3d));
+    TASSERT_TRUE(rt.supportsBackwardLayerType(LayerType::Conv4d));
+    Layer disabled_layer("disabled","Conv2d",0);std::vector<float> disabled_input{1.f};
+    TASSERT_TRUE(rt.queryForwardOperationCapability(disabled_layer,{&disabled_input},false)==RuntimeCapabilityLevel::Unsupported);
+    TASSERT_TRUE(rt.queryBackwardOperationCapability(disabled_layer,{&disabled_input},{&disabled_input},false)==RuntimeCapabilityLevel::Unsupported);
 #if defined(__linux__) || defined(__APPLE__)
     // This is a transport mock, not a TPU numerical implementation.
     const auto path=std::filesystem::temp_directory_path()/("mimir-tpu-mock-"+std::to_string(getpid())+".py");

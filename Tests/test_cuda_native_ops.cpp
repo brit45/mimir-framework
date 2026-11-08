@@ -3,6 +3,7 @@
 #include "runtimes/RuntimeRouter.hpp"
 #include "runtimes/cuda/CudaRuntime.hpp"
 #include "runtimes/cpu/RuntimeLayerDispatch.hpp"
+#include "runtimes/PrimerGeometry.hpp"
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -74,6 +75,16 @@ int main() {
             const auto type=static_cast<LayerType>(value);
             // Lambda callbacks are not implemented by the CPU runtime either.
             if(type==LayerType::Lambda)continue;
+            // These layers currently have CPU/portable kernels, not CUDA kernels.
+            // A native capability claim here would hide a CPU fallback.
+            if (RuntimePrimer::supported(type) || type==LayerType::CausalDepthwiseConv1d || type==LayerType::SwiGLU) {
+                require(runtime.queryForwardCapability(type)==RuntimeCapabilityLevel::HostFallback,
+                        "CPU/portable-only forward must remain an explicit CUDA host fallback");
+                require(runtime.queryBackwardCapability(type)==RuntimeCapabilityLevel::HostFallback,
+                        "CPU/portable-only backward must remain an explicit CUDA host fallback");
+                std::cout << "CUDA_EXPLICIT_CPU_FALLBACK " << type_name(type) << '\n';
+                continue;
+            }
             ++total;
             cpu_backward+=RuntimeLayerDispatch::cpu_supports_backward_layer_type(type);
             forward+=runtimeCapabilityIsNative(runtime.queryForwardCapability(type));
@@ -82,7 +93,7 @@ int main() {
             if(RuntimeLayerDispatch::cpu_supports_backward_layer_type(type) && !runtimeCapabilityIsNative(runtime.queryBackwardCapability(type)))std::cout<<"CUDA_BACKWARD_REMAINING "<<type_name(type)<<'\n';
         }
         std::cout<<"CUDA native types: forward="<<forward<<'/'<<total<<" backward="<<backward<<'/'<<cpu_backward<<'\n';
-        require(forward==total && backward==cpu_backward,"CUDA/CPU type coverage must match CPU");
+        require(forward==total && backward==cpu_backward,"CUDA native baseline type coverage changed");
         require(runtime.initialize(cfg),"CUDA GPU required: no fallback allowed for this test");
         {
             // Check packed bias gradients and accumulation with nonzero gradients.

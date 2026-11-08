@@ -9,7 +9,7 @@
 // - VAE PUREMENT CONVOLUTIONNEL (downsample -> mu/logvar -> reparameterize -> upsample)
 // - Architecture majoritairement convolutionnelle, avec blocs optionnels
 //   SelfAttention spatiale et ResNet.
-// - Couches principales: Conv2d / ConvTranspose2d / GroupNorm|LayerNorm /
+// - Couches principales: Conv2d|Conv3d|Conv4d / GroupNorm|LayerNorm /
 //   SiLU / résidus Add / UpsampleNearest / Reparameterize (+ adaptateurs de
 //   disposition Reshape/Permute pour l'I/O).
 // - Training output packs: [recon(image_dim), mu(latent_dim), logvar(latent_dim)]
@@ -29,6 +29,16 @@ public:
 
         int base_channels = 64;
 
+        // Convolution backend rank: "2d" (legacy), "3d" or "4d".
+        // Image I/O remains HWC: higher ranks add singleton axes before H,W,
+        // with size-one kernels on those axes. No volume/time data is invented.
+        // Higher ranks use nearest_conv instead of ConvTranspose2d.
+        std::string conv_mode = "2d";
+
+        // Optional graph output used for inference (e.g. "vae_conv/mu" to
+        // encode without running the decoder). Empty keeps recon / decoder x.
+        std::string inference_output_tensor;
+
         // Optional latent-only refinement. Defaults preserve existing checkpoints.
         // Local/dilated residual convolutions mix features at constant LH x LW.
         bool latent_spatial_context = false;
@@ -42,6 +52,10 @@ public:
         // Si true, on active le bruit de réparameterisation (z = mu + std * eps).
         // Pour des pipelines type SD/SDXL, on veut généralement un encodeur déterministe.
         bool stochastic_latent = false;
+
+        // Independent per-channel log-variance offset. New training scripts
+        // enable it; false preserves the parameter layout of old checkpoints.
+        bool logvar_head_bias = false;
 
         // ---- Blocs optionnels ----
 

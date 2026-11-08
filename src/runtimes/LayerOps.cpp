@@ -9,54 +9,17 @@
 #include <stdexcept>
 
 #include "SIMD_Ops.hpp"
-
-#if defined(_MSC_VER)
-#include <intrin.h>
-#elif defined(__x86_64__) || defined(__i386__)
-#include <cpuid.h>
-#endif
+#include "runtimes/cpu/Parallel.hpp"
+#include "runtimes/cpu/ConvolutionKernels.hpp"
+#include "runtimes/cpu/NormalizationKernels.hpp"
+#include "runtimes/cpu/PoolingKernels.hpp"
 
 namespace {
 
 std::atomic<bool> g_hardware_acceleration{true};
 
-bool runtimeHasAVX2() {
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    static const bool available = [] {
-        unsigned int eax = 0;
-        unsigned int ebx = 0;
-        unsigned int ecx = 0;
-        unsigned int edx = 0;
-#if defined(_MSC_VER)
-        int regs[4] = {0, 0, 0, 0};
-        __cpuidex(regs, 1, 0);
-        ecx = static_cast<unsigned int>(regs[2]);
-#else
-        if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0) return false;
-#endif
-        if ((ecx & (1u << 27)) == 0 || (ecx & (1u << 28)) == 0) return false;
-#if defined(_MSC_VER)
-        if ((_xgetbv(0) & 0x6ull) != 0x6ull) return false;
-        __cpuidex(regs, 7, 0);
-        ebx = static_cast<unsigned int>(regs[1]);
-#else
-        uint32_t xcr0_lo = 0;
-        uint32_t xcr0_hi = 0;
-        __asm__ volatile ("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
-        (void)xcr0_hi;
-        if ((xcr0_lo & 0x6u) != 0x6u) return false;
-        if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) == 0) return false;
-#endif
-        return (ebx & (1u << 5)) != 0;
-    }();
-    return available;
-#else
-    return false;
-#endif
-}
-
 bool useHardware(const bool requested) {
-    return requested && g_hardware_acceleration.load(std::memory_order_relaxed) && runtimeHasAVX2();
+    return requested && g_hardware_acceleration.load(std::memory_order_relaxed);
 }
 
 void softmaxInPlace(std::vector<float>& values) {
@@ -67,7 +30,8 @@ void softmaxInPlace(std::vector<float>& values) {
         value = std::exp(value - maximum);
         sum += value;
     }
-    for (float& value : values) value /= sum;
+    const float inverse_sum = 1.0f / sum;
+    for (float& value : values) value *= inverse_sum;
 }
 
 } // namespace
@@ -85,34 +49,40 @@ bool hardwareAccelerationEnabled() {
 void computeConv2D(const std::vector<float>& input, std::vector<float>& output,
                    const LayerParams& params, const int in_h, const int in_w,
                    const int in_c, const int out_c, bool) {
-    Conv::conv2d(input, output, params.weights, params.bias, in_h, in_w, in_c, out_c,
-                 params.kernel_size, params.stride, params.padding, params.dilation);
+    if (in_h <= 0 || in_w <= 0 || in_c <= 0 || out_c <= 0 || params.kernel_size <= 0 ||
+        params.stride <= 0 || params.padding < 0 || params.dilation <= 0 ||
+        input.size() / static_cast<size_t>(in_c) < static_cast<size_t>(in_h) * in_w ||
+        params.weights.size() / static_cast<size_t>(out_c) / static_cast<size_t>(in_c) /
+            static_cast<size_t>(params.kernel_size) < static_cast<size_t>(params.kernel_size) ||
+        (!params.bias.empty() && params.bias.size() < static_cast<size_t>(out_c))) {
+        throw std::invalid_argument("RuntimeLayerOps::computeConv2D: dimensions invalides");
+    }
+    CpuConvolution::forward(input, output, params.weights.data(),
+        params.bias.empty() ? nullptr : params.bias.data(), in_h, in_w, in_c, out_c,
+        params.kernel_size, params.stride, params.padding, params.dilation);
 }
 
 void computeLinear(const std::vector<float>& input, std::vector<float>& output,
                    const LayerParams& params, const bool use_hardware) {
     if (params.in_features < 0 || params.out_features < 0 ||
         input.size() < static_cast<size_t>(params.in_features) ||
-        params.weights.size() < static_cast<size_t>(params.in_features) * params.out_features) {
+        params.weights.size() < static_cast<size_t>(params.in_features) * params.out_features ||
+        (!params.bias.empty() && params.bias.size() < static_cast<size_t>(params.out_features))) {
         throw std::invalid_argument("RuntimeLayerOps::computeLinear: dimensions invalides");
     }
     output.assign(static_cast<size_t>(params.out_features), 0.0f);
-#if defined(__AVX2__) || defined(_M_AVX2)
     if (useHardware(use_hardware)) {
-        SIMD::matmul_avx2(output.data(), input.data(), params.weights.data(),
+        SIMD::matmul_transpose_avx2(output.data(), input.data(), params.weights.data(),
                          1, params.out_features, params.in_features);
         if (!params.bias.empty()) {
             SIMD::add_vectors_avx2(output.data(), output.data(), params.bias.data(), params.out_features);
         }
         return;
     }
-#else
-    (void)use_hardware;
-#endif
     for (int output_index = 0; output_index < params.out_features; ++output_index) {
         float sum = 0.0f;
         for (int input_index = 0; input_index < params.in_features; ++input_index) {
-            sum += input[input_index] * params.weights[output_index * params.in_features + input_index];
+            sum = std::fma(input[input_index], params.weights[output_index * params.in_features + input_index], sum);
         }
         if (!params.bias.empty()) sum += params.bias[output_index];
         output[output_index] = sum;
@@ -123,60 +93,80 @@ void computeMaxPool2D(const std::vector<float>& input, std::vector<float>& outpu
                       const int in_h, const int in_w, const int channels,
                       const int kernel_size, int stride, bool) {
     if (stride < 0) stride = kernel_size;
-    Pooling::maxpool2d(input, output, in_h, in_w, channels, kernel_size, stride);
+    CpuPooling::forward2d(input, output, in_h, in_w, channels, kernel_size, kernel_size,
+        stride, stride, 0, 0, CpuPooling::Reduction::Max);
 }
 
 void computeAvgPool2D(const std::vector<float>& input, std::vector<float>& output,
                       const int in_h, const int in_w, const int channels,
                       const int kernel_size, int stride, bool) {
     if (stride < 0) stride = kernel_size;
-    Pooling::avgpool2d(input, output, in_h, in_w, channels, kernel_size, stride);
+    CpuPooling::forward2d(input, output, in_h, in_w, channels, kernel_size, kernel_size,
+        stride, stride, 0, 0, CpuPooling::Reduction::Average);
+}
+
+void computeActivation(std::vector<float>& data, const ActivationType activation_type,
+                       const float param, const bool use_hardware) {
+    if (data.empty() || activation_type == ActivationType::NONE) return;
+    if (activation_type == ActivationType::SOFTMAX && useHardware(use_hardware)) {
+        SIMD::softmax_avx2(data.data(), data.data(), data.size());
+        return;
+    }
+    const auto transform = [&](const auto& operation) {
+        RuntimeParallel::forEach(data.size(), RuntimeParallel::workers(data.size()), [&](size_t index) {
+            data[index] = operation(data[index]);
+        });
+    };
+    int unary_op = -1;
+    switch (activation_type) {
+        case ActivationType::RELU: unary_op = 0; break;
+        case ActivationType::LEAKY_RELU: unary_op = 1; break;
+        case ActivationType::SIGMOID: unary_op = 2; break;
+        case ActivationType::TANH: unary_op = 3; break;
+        case ActivationType::SWISH: unary_op = 4; break;
+        case ActivationType::GELU: unary_op = 5; break;
+        case ActivationType::SOFTPLUS: unary_op = 6; break;
+        case ActivationType::MISH: unary_op = 7; break;
+        case ActivationType::SOFTMAX: softmaxInPlace(data); return;
+        case ActivationType::RELU6:
+            transform([](float value) { return std::clamp(value, 0.0f, 6.0f); });
+            return;
+        case ActivationType::ELU:
+            transform([param](float value) { return value > 0.0f ? value : param * std::expm1(value); });
+            return;
+        case ActivationType::SELU:
+            transform([](float value) {
+                constexpr float alpha = 1.6732632423543773f;
+                constexpr float scale = 1.0507009873554805f;
+                return scale * (value > 0.0f ? value : alpha * std::expm1(value));
+            });
+            return;
+        case ActivationType::SOFTSIGN:
+            transform([](float value) { return value / (1.0f + std::abs(value)); });
+            return;
+        default: return;
+    }
+    // Reuse the host pointwise implementation, including stable Softplus/Mish.
+    unaryForwardHost(data, data, unary_op, param);
 }
 
 void computeActivation(std::vector<float>& data, const std::string& activation_type,
                        const float param, const bool use_hardware) {
-#if defined(__AVX2__) || defined(_M_AVX2)
-    const bool hardware = useHardware(use_hardware);
-    if (activation_type == "gelu" && hardware) {
-        SIMD::gelu_forward_avx2(data.data(), data.data(), data.size());
-        return;
-    }
-    if (activation_type == "relu" && hardware) {
-        const size_t vectorized_size = data.size() & ~static_cast<size_t>(7);
-        const __m256 zero = _mm256_setzero_ps();
-        size_t index = 0;
-        for (; index < vectorized_size; index += 8) {
-            const __m256 values = _mm256_loadu_ps(&data[index]);
-            _mm256_storeu_ps(&data[index], _mm256_max_ps(values, zero));
-        }
-        for (; index < data.size(); ++index) data[index] = std::max(0.0f, data[index]);
-        return;
-    }
-    if (activation_type == "softmax" && hardware) {
-        if (!data.empty()) SIMD::softmax_avx2(data.data(), data.data(), data.size());
-        return;
-    }
-#else
-    (void)use_hardware;
-#endif
-    if (activation_type == "gelu") {
-        constexpr float scale = 0.7978845608f;
-        for (float& value : data) {
-            value = 0.5f * value * (1.0f + std::tanh(scale * (value + 0.044715f * value * value * value)));
-        }
-    } else if (activation_type == "relu") {
-        for (float& value : data) value = std::max(0.0f, value);
-    } else if (activation_type == "leaky_relu") {
-        for (float& value : data) if (value < 0.0f) value *= param;
-    } else if (activation_type == "tanh") {
-        for (float& value : data) value = std::tanh(value);
-    } else if (activation_type == "sigmoid") {
-        for (float& value : data) value = 1.0f / (1.0f + std::exp(-value));
-    } else if (activation_type == "softmax") {
-        softmaxInPlace(data);
-    } else if (activation_type == "elu") {
-        for (float& value : data) value = value >= 0.0f ? value : param * (std::exp(value) - 1.0f);
-    }
+    ActivationType type = ActivationType::NONE;
+    if (activation_type == "relu") type = ActivationType::RELU;
+    else if (activation_type == "relu6") type = ActivationType::RELU6;
+    else if (activation_type == "leaky_relu") type = ActivationType::LEAKY_RELU;
+    else if (activation_type == "elu") type = ActivationType::ELU;
+    else if (activation_type == "selu") type = ActivationType::SELU;
+    else if (activation_type == "gelu") type = ActivationType::GELU;
+    else if (activation_type == "silu" || activation_type == "swish") type = ActivationType::SWISH;
+    else if (activation_type == "mish") type = ActivationType::MISH;
+    else if (activation_type == "tanh") type = ActivationType::TANH;
+    else if (activation_type == "sigmoid") type = ActivationType::SIGMOID;
+    else if (activation_type == "softmax") type = ActivationType::SOFTMAX;
+    else if (activation_type == "softplus") type = ActivationType::SOFTPLUS;
+    else if (activation_type == "softsign") type = ActivationType::SOFTSIGN;
+    computeActivation(data, type, param, use_hardware);
 }
 
 void computeBatchNorm(std::vector<float>& data, const std::vector<float>& gamma,
@@ -184,14 +174,14 @@ void computeBatchNorm(std::vector<float>& data, const std::vector<float>& gamma,
                       const std::vector<float>& running_var, const int batch_size,
                       const int channels, const int spatial_size, const float eps,
                       const bool training, bool) {
-    Normalization::batch_norm(data, gamma, beta, running_mean, running_var,
-                              batch_size, channels, spatial_size, eps, training);
+    CpuNormalization::batchNormInPlace(data, gamma, beta, running_mean, running_var,
+                                     batch_size, channels, spatial_size, eps, training);
 }
 
 void computeLayerNorm(std::vector<float>& data, const std::vector<float>& gamma,
                       const std::vector<float>& beta, const int normalized_size,
                       const float eps, bool) {
-    Normalization::layer_norm(data, gamma, beta, normalized_size, eps);
+    CpuNormalization::layerNormInPlace(data, gamma, beta, normalized_size, eps);
 }
 
 bool prepareLayerNorm(const std::vector<float>& input, const int normalized_size,
@@ -229,63 +219,63 @@ bool prepareLayerNorm(const std::vector<float>& input, const int normalized_size
 void computeConvTranspose2D(const std::vector<float>& input, std::vector<float>& output,
                             const LayerParams& params, const int in_h, const int in_w,
                             const int in_c, const int out_c, bool) {
-    Conv::conv_transpose2d(input, output, params.weights, params.bias, in_h, in_w, in_c, out_c,
-                           params.kernel_size, params.stride, params.padding);
+    if (in_c <= 0 || out_c <= 0 || params.kernel_size <= 0 ||
+        params.weights.size() / static_cast<size_t>(out_c) / static_cast<size_t>(in_c) /
+            static_cast<size_t>(params.kernel_size) < static_cast<size_t>(params.kernel_size) ||
+        (!params.bias.empty() && params.bias.size() < static_cast<size_t>(out_c))) {
+        throw std::invalid_argument("RuntimeLayerOps::computeConvTranspose2D: dimensions invalides");
+    }
+    CpuConvolution::transposeForward(input, output, params.weights.data(),
+        params.bias.empty() ? nullptr : params.bias.data(), in_h, in_w, in_c, out_c,
+        params.kernel_size, params.stride, params.padding);
 }
 
 void computeAttention(const std::vector<float>& query, const std::vector<float>& key,
                       const std::vector<float>& value, std::vector<float>& output,
                       const int seq_len, const int d_model, const int num_heads,
                       const bool use_hardware) {
-    if (seq_len < 0 || d_model < 0 || num_heads <= 0 || d_model % num_heads != 0) {
+    if (seq_len <= 0 || d_model <= 0 || num_heads <= 0 || d_model % num_heads != 0)
         throw std::invalid_argument("RuntimeLayerOps::computeAttention: dimensions invalides");
-    }
     const size_t tensor_size = static_cast<size_t>(seq_len) * d_model;
-    if (query.size() < tensor_size || key.size() < tensor_size || value.size() < tensor_size) {
+    if (query.size() < tensor_size || key.size() < tensor_size || value.size() < tensor_size)
         throw std::invalid_argument("RuntimeLayerOps::computeAttention: tenseur trop petit");
-    }
-    const int head_dim = d_model / num_heads;
+    const size_t head_dim = static_cast<size_t>(d_model / num_heads);
+    const size_t positions = static_cast<size_t>(seq_len);
     output.assign(tensor_size, 0.0f);
-    std::vector<float> attention_scores(static_cast<size_t>(seq_len) * seq_len);
+    std::vector<float> scores(positions * positions), q(positions * head_dim), k(q.size());
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-
     for (int head = 0; head < num_heads; ++head) {
-#if defined(__AVX2__) || defined(_M_AVX2)
+        for (size_t row = 0; row < positions; ++row) {
+            const size_t source = row * d_model + static_cast<size_t>(head) * head_dim;
+            std::copy_n(query.data() + source, head_dim, q.data() + row * head_dim);
+            std::copy_n(key.data() + source, head_dim, k.data() + row * head_dim);
+        }
         if (useHardware(use_hardware)) {
-            SIMD::matmul_transpose_avx2(attention_scores.data(), &query[head * head_dim],
-                                        &key[head * head_dim], seq_len, seq_len, head_dim);
-        } else
-#else
-        (void)use_hardware;
-#endif
-        {
-            for (int query_index = 0; query_index < seq_len; ++query_index) {
-                for (int key_index = 0; key_index < seq_len; ++key_index) {
+            SIMD::matmul_transpose_avx2(scores.data(), q.data(), k.data(), positions, positions, head_dim);
+        } else {
+            for (size_t row = 0; row < positions; ++row)
+                for (size_t column = 0; column < positions; ++column) {
                     float sum = 0.0f;
-                    for (int component = 0; component < head_dim; ++component) {
-                        sum += query[query_index * d_model + head * head_dim + component] *
-                               key[key_index * d_model + head * head_dim + component];
-                    }
-                    attention_scores[query_index * seq_len + key_index] = sum * scale;
+                    for (size_t feature = 0; feature < head_dim; ++feature)
+                        sum = std::fma(q[row * head_dim + feature], k[column * head_dim + feature], sum);
+                    scores[row * positions + column] = sum;
                 }
-            }
         }
-        for (int query_index = 0; query_index < seq_len; ++query_index) {
-            std::vector<float> row(attention_scores.begin() + query_index * seq_len,
-                                   attention_scores.begin() + (query_index + 1) * seq_len);
-            softmaxInPlace(row);
-            std::copy(row.begin(), row.end(), attention_scores.begin() + query_index * seq_len);
+        for (float& score : scores) score *= scale;
+        for (size_t row = 0; row < positions; ++row) {
+            auto begin = scores.begin() + row * positions;
+            std::vector<float> probabilities(begin, begin + positions);
+            softmaxInPlace(probabilities);
+            std::copy(probabilities.begin(), probabilities.end(), begin);
         }
-        for (int query_index = 0; query_index < seq_len; ++query_index) {
-            for (int component = 0; component < head_dim; ++component) {
+        for (size_t row = 0; row < positions; ++row)
+            for (size_t feature = 0; feature < head_dim; ++feature) {
                 float sum = 0.0f;
-                for (int key_index = 0; key_index < seq_len; ++key_index) {
-                    sum += attention_scores[query_index * seq_len + key_index] *
-                           value[key_index * d_model + head * head_dim + component];
-                }
-                output[query_index * d_model + head * head_dim + component] = sum;
+                for (size_t column = 0; column < positions; ++column)
+                    sum = std::fma(scores[row * positions + column],
+                        value[column * d_model + static_cast<size_t>(head) * head_dim + feature], sum);
+                output[row * d_model + static_cast<size_t>(head) * head_dim + feature] = sum;
             }
-        }
     }
 }
 
@@ -317,26 +307,14 @@ void branchMerge(const std::vector<float>& branch1, const std::vector<float>& br
     }
     output.resize(branch1.size());
     size_t index = 0;
-#if defined(__AVX2__) || defined(_M_AVX2)
-    if (useHardware(use_hardware)) {
-        for (; index + 8 <= branch1.size(); index += 8) {
-            const __m256 left = _mm256_loadu_ps(&branch1[index]);
-            const __m256 right = _mm256_loadu_ps(&branch2[index]);
-            __m256 result;
-            switch (merge_op) {
-                case MergeOperation::MULTIPLY: result = _mm256_mul_ps(left, right); break;
-                case MergeOperation::MAX: result = _mm256_max_ps(left, right); break;
-                case MergeOperation::AVERAGE:
-                    result = _mm256_mul_ps(_mm256_add_ps(left, right), _mm256_set1_ps(0.5f));
-                    break;
-                default: result = _mm256_add_ps(left, right); break;
-            }
-            _mm256_storeu_ps(&output[index], result);
-        }
+    if (useHardware(use_hardware) && merge_op == MergeOperation::ADD) {
+        SIMD::add_vectors_avx2(output.data(), branch1.data(), branch2.data(), branch1.size());
+        return;
     }
-#else
-    (void)use_hardware;
-#endif
+    if (useHardware(use_hardware) && merge_op == MergeOperation::MULTIPLY) {
+        SIMD::mul_vectors_avx2(output.data(), branch1.data(), branch2.data(), branch1.size());
+        return;
+    }
     for (; index < branch1.size(); ++index) {
         switch (merge_op) {
             case MergeOperation::MULTIPLY: output[index] = branch1[index] * branch2[index]; break;

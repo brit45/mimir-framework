@@ -1,71 +1,119 @@
 # État de préparation aux LLM
 
-Optimiser, diagnostiquer et stabiliser des runs complexes.
+Cette page décrit les fonctionnalités du checkout actuel pour entraîner et
+utiliser un modèle causal. L'existence de ces mécanismes ne garantit pas la
+qualité linguistique d'un checkpoint : celle-ci dépend des données, de la
+capacité du modèle, de l'entraînement et des résultats sur un holdout.
 
 **Public concerné :** Utilisateur intermédiaire à avancé.
 
-> **Prérequis**
->
-> Avoir déjà exécuté au moins un pipeline complet.
+## Architecture et entraînement natifs
 
-Cette page décrit ce qui est **effectivement** en place dans le codebase pour un LLM, et ce qui manque pour une génération utile au quotidien.
+`CausalLMModel`, sous `src/Models/NLP/`, est une classe dérivée de `Model`,
+enregistrée comme `causal_lm`. Son graphe decoder-only est construit en C++ :
+RMSNorm, RoPE, attention causale groupée, SwiGLU et poids embedding/LM head
+partagés. La version actuelle ajoute un mélange local causal
+`CausalDepthwiseConv1d` optionnel et un goulot latent contextuel optionnel.
+Ces branches sont des transformations apprises, pas une preuve de compréhension.
 
-Point d’entrée conseillé : [04-Source-Code-Map.md](04-Source-Code-Map.md).
+Le modèle possède la préparation du corpus et du tokenizer, l'échantillonnage,
+la loss et sa boucle native d'entraînement. Le script
+`scripts/training/train_causal_lm.lua` configure le modèle, la reprise,
+l'optimiseur, AMP/DDP, le monitoring et les sauvegardes. Il ne définit pas
+l'architecture dans Lua.
 
-## 1) Ce qui existe déjà
+La loss est une cross-entropy sur les positions cibles actives. Les métriques
+incluent perplexité, exactitude top-1 du prochain token, nombre de tokens actifs
+et marge des deux meilleurs logits. La validation périodique expose les mêmes
+mesures ; `validation_source` et `validation_holdout` permettent de vérifier
+si elle utilise réellement des données réservées.
 
-- Une architecture decoder-only native : `src/Models/NLP/CausalLMModel.cpp`,
-  avec RMSNorm, RoPE, GQA, SwiGLU et poids embedding/LM head partagés.
-- Une architecture encodeur Transformer : `src/Models/NLP/TransformerModel.cpp`.
-- Un chemin tokens entiers via `__input__` pour `causal_lm`.
-- Des kernels CPU pour attention et matmul (OpenMP/SIMD selon build) : `src/runtimes/cpu/LayerOps.hpp`, `src/runtimes/cpu/SIMD_Ops.hpp`.
-- Une API tokenizer en Lua via `Mimir.Tokenizer.*` et un bootstrap de
-  tokenizer compatible dans `scripts/modules/causal_lm_tokenizer.lua`.
+## Tokenizer et frontières de séquence
 
-## 2) Ce que `Mimir.Model.infer()` fait vraiment (important)
+`prepareTrainingCorpus(...)` charge un tokenizer disponible, prépare les
+symboles du corpus puis vérifie sa couverture BPE. L'étude est lancée quand
+aucun tokenizer n'est chargé ou que le vocabulaire laisse des `<UNK>` dans le
+corpus ; un tokenizer déjà couvrant n'est pas réétudié à chaque lancement.
+En reprise stricte, le vocabulaire du checkpoint reste gelé et un corpus non
+couvert est refusé.
 
-`Mimir.Model.infer(prompt)` est présent, mais aujourd’hui ce n’est pas une “generation” autoregressive complète :
+Les séquences utilisent `<BOS>` et `<EOS>`. Les balises de rôles et de contexte
+sont traitées par les mécanismes natifs de préparation et de génération lorsque
+les tokens de contrôle sont activés. Leur présence structure les exemples ;
+elle ne fournit pas à elle seule un apprentissage de la logique.
 
-- côté C++ : `src/scriptings/Lua/luaScripting/LuaScripting.cpp` tokenize une string si un tokenizer existe, encode si un encoder existe, puis appelle `Model::forward(output)`.
-- la “décode” ensuite via `Model::eval(...)`.
+`seq_len` est la fenêtre d'entraînement, également configurable par
+`--train-window`. Le générateur dimensionne temporairement son graphe à partir
+du prompt complet et du budget de sortie, puis restaure les dimensions.
+Il ne tronque donc pas le prompt à cette fenêtre. Les limites de mémoire et
+de dimensions entières demeurent ; la qualité au-delà des longueurs apprises
+doit être mesurée.
 
-Or `Model::eval(...)` (voir `src/Model.cpp`) produit actuellement :
+## Génération et conversation
 
-- un MSE trivial sur un `target` binaire,
-- puis des logits uniformes + des tokens top-k “factices” (0..7) si un tokenizer est présent.
+Le chemin dédié est natif :
 
-Conclusion : **ne pas** considérer `infer()` comme une génération LLM valide pour l’instant.
+| API Lua | Méthode C++ |
+| --- | --- |
+| `Mimir.Model.causal_lm_generate(prompt, options)` | `CausalLMModel::generateText` |
+| `Mimir.Model.causal_lm_chat(message, memory_path, options)` | `CausalLMModel::chat` |
+| `Mimir.Model.causal_lm_reset_memory(path)` | `resetConversationMemory` |
+| `Mimir.Model.causal_lm_memory_size(path)` | `conversationMemorySize` |
 
-## 3) Limites actuelles pour un LLM “pratique”
+`GenerationOptions` expose `max_new_tokens`, `temperature`, `top_k`, `top_p`,
+`seed`, `stop_id`, `system_prompt` et `use_memory`. Le sampling est implémenté
+en C++. L'historique de conversation peut être persisté en JSON ; il est
+réinjecté comme contexte et ne modifie pas les poids.
 
-- Pas de frontend Lua de génération autoregressive/sampling pour `causal_lm`.
-- Pas d’API runtime de sampling (top-k/top-p/temperature) côté C++ ; si vous voulez sampler, ça doit être implémenté côté scripts Lua pour l’instant.
-- Offload GPU : l’offload Vulkan/OpenCL est ciblé sur `Linear` en inférence, pas une stack LLM complète (voir `src/Model.cpp`).
+Le script fourni charge la topologie et le tokenizer compatibles avec le
+checkpoint, puis appelle ces méthodes. Exemple à exécuter après avoir produit
+un checkpoint causal dans le dossier indiqué :
 
-## 4) Roadmap minimale (concrète)
+```bash
+./run_mimir.sh --lua scripts/inferences/causal_lm_generate.lua -- \
+  --checkpoint checkpoints/causal_lm \
+  --prompt "Explique la différence entre une hypothèse et une preuve." \
+  --max-new-tokens 128 --temperature 0.8 --top-k 40 --top-p 0.95
+```
 
-Pour passer de “Transformer entraînable” à “LLM utilisable” :
+Pour la conversation, remplacer `--prompt ...` par `--interactive` ;
+`--memory-file` choisit le fichier d'historique, `--no-memory` le désactive.
+Ces commandes nécessitent des poids entraînés et n'ont pas été relancées dans
+le cadre de la relecture documentaire.
 
-1) Exposer des logits utilisables (dernier layer / projection vocab) via une API stable.
-2) Ajouter une API `prefill` + `decode` avec KV-cache (structures + sérialisation).
-3) Ajouter un module de sampling (au moins greedy + top-k) et une boucle de génération.
-4) Optimiser attention/matmul et/ou étendre l’offload.
+## Limites à garder visibles
 
-## 5) Où regarder dans le code
+- Le binding générique `Mimir.Model.infer(prompt)` conserve un chemin historique
+  `Model::forward`/`eval` avec des sorties de démonstration. Utiliser l'API
+  `causal_lm_generate` pour une génération autoregressive réelle.
+- La boucle `generateFromTokenContext` refait un forward du contexte complété
+  à chaque token ; elle n'est pas une API incrémentale optimisée
+  `prefill`/`decode` à KV-cache réutilisé.
+- Les runtimes CPU, Vulkan et OpenCL possèdent des chemins pour les opérations
+  causales. Les capacités CUDA/ROCm sont propres à chaque type ;
+  `CausalDepthwiseConv1d`, `SwiGLU` et les primitives Primer restent en
+  `HostFallback` sur ces deux backends. Une déclaration de capacité ne prouve
+  pas l'exécution effective d'une forme sur un périphérique.
+- Une loss en baisse ou des prédictions top-1 répétitives ne suffisent pas à
+  établir la cohérence d'un texte généré. Contrôler le holdout et essayer des
+  prompts absents de l'entraînement avec le checkpoint effectivement sauvegardé.
 
-- Registry + config merge : `src/Models/Registry/ModelArchitectures.*`.
-- Builder Transformer : `src/Models/NLP/TransformerModel.cpp`.
-- Ops d’attention : `src/runtimes/cpu/LayerOps.hpp`.
-- Bindings Lua (forward, infer, encode prompt) : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`.
+## Sources et vérifications ciblées
 
-Et côté scripts (utile pour comprendre l’intention et l’usage actuel) :
+- `src/Models/NLP/CausalLMModel.hpp` et `.cpp` : graphe, corpus, validation,
+  sampling et mémoire.
+- `src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp` : bindings.
+- `scripts/training/train_causal_lm.lua` et
+  `scripts/inferences/causal_lm_generate.lua` : entrées CLI.
+- `scripts/tests/test_causal_lm_smoke.lua` et
+  `scripts/tests/test_causal_lm_tokenizer_bootstrap.lua` : contrôles ciblés.
 
-- `scripts/examples/example_conf_inference.lua` : inférence config-driven sur architecture transformer.
-- `scripts/benchmarks/benchmark_attention.lua` : cas transformer/attention en benchmark (dont mode causal).
-- `scripts/templates/template_pipeline_only.lua` et `scripts/templates/template_pipeline_args.lua` : pipelines template pour workflows autoregressifs.
+```bash
+ctest --test-dir build --output-on-failure -R 'LuaTest\.CausalLM'
+```
 
 ## Étapes suivantes
 
-- [Page précédente : Debugging & stabilité numérique](02-Debugging.md)
+- [Carte du code source](04-Source-Code-Map.md)
+- [Runtimes GPU](../04-Architecture-Internals/21-GPU-Runtimes.md)
 - [Index de la documentation](../00-INDEX.md)
-- [Page suivante : Advanced — Carte du code source (C/C++)](04-Source-Code-Map.md)

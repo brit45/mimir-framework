@@ -15,7 +15,7 @@ Repères utiles pour naviguer vite.
 
 - `src/` : runtime C++ (Model, layers, backends, sérialisation, bindings Lua).
 - `scripts/` : scripts Lua (training, demos, examples, modules partagés).
-- `docs/` : documentation (réécrite).
+- `docs/` : documentation active et schémas générés.
 - `docs_archive/` : snapshots de l’ancienne documentation.
 - `checkpoint/` / `checkpoints/` : checkpoints produits localement.
 - `build/` : build CMake (généré).
@@ -24,8 +24,10 @@ Repères utiles pour naviguer vite.
 ## Fichiers clefs (source de vérité)
 
 - API Lua : `src/scriptings/Lua/luaScripting/LuaScripting.cpp`
-- Runtime modèle / exécution layers : `src/Model.cpp`
-- Définition layers : `src/Layers.hpp`, `src/LayerTypes.hpp`
+- Cycle de vie et exécution du graphe : `src/Model.cpp`
+- Routage et calcul des opérations : `src/runtimes/RuntimeRouter.cpp`, `src/runtimes/*`
+- Métadonnées et déclaration des layers : `src/Layers.hpp`, `src/LayerTypes.hpp`
+- Architectures natives : `src/Models/`, classes C++ dérivées de `Model`
 - Registre des architectures : `src/Models/Registry/ModelArchitectures.cpp`
 - Sérialisation : `src/Serialization/*`
 - CLI : `src/main.cpp`

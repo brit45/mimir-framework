@@ -2,6 +2,7 @@
 #include "SafeTensorsWriter.hpp"
 #include "../Model.hpp"
 #include "CheckpointState.hpp"
+#include "LayerMetadata.hpp"
 #include "../Tokenizer.hpp"
 #include "../Encoder.hpp"
 #include "HardwareOpt.hpp"
@@ -143,29 +144,12 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
         json layers_array = json::array();
         for (const auto& layer : layers) {
             json layer_obj;
-            layer_obj["name"] = layer.name;
-            layer_obj["type"] = layer.type;
-            layer_obj["params_count"] = layer.params_count;
-            layer_obj["trainable_parameter"] = layer.trainable_parameter;
-            layer_obj["inputs"] = layer.inputs;
-            if (layer.skip_input_index >= 0) layer_obj["skip_input_index"] = layer.skip_input_index;
-            layer_obj["output"] = layer.output;
-            // Common shape fields
-            layer_obj["in_features"] = layer.in_features;
-            layer_obj["out_features"] = layer.out_features;
-            layer_obj["in_channels"] = layer.in_channels;
-            layer_obj["out_channels"] = layer.out_channels;
-            layer_obj["kernel_size"] = layer.kernel_size;
-            layer_obj["stride"] = layer.stride;
-            layer_obj["padding"] = layer.padding;
-            layer_obj["seq_len"] = layer.seq_len;
-            layer_obj["embed_dim"] = layer.embed_dim;
-            layer_obj["num_heads"] = layer.num_heads;
-            // Weight size (if allocated)
+            LayerMetadata::writeCommon(layer_obj, layer);
             layer_obj["weights_size"] = layer.getWeightsSize();
             layers_array.push_back(layer_obj);
         }
         arch["layers"] = layers_array;
+        arch["layer_metadata_version"] = LayerMetadata::version;
 
         std::string s = arch.dump();
         owned_buffers_.push_back(std::vector<uint8_t>(s.begin(), s.end()));
@@ -181,6 +165,10 @@ std::vector<SafeTensorsWriter::TensorData> SafeTensorsWriter::collect_tensors(
     // Collect layer weight blocks (modern allocation)
     for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
         const auto& layer = layers[layer_idx];
+
+        if (!layer.shared_weights_from.empty()) {
+            continue;
+        }
         
         if (!layer.weight_block) {
             continue;  // Layer has no weights

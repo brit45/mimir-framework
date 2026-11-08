@@ -24,9 +24,17 @@ Source de vérité :
 
 ## 1) Concepts
 
-- Une **architecture** = un nom + une config par défaut + une fonction `create(cfg)`.
+- Une **architecture native** = une classe C++ dérivée de `Model`, un nom,
+  une configuration par défaut et une fabrique `create(cfg)`.
 - La config est un JSON (`nlohmann::json`).
-- `create` instancie généralement une classe dérivée (ou configure un `Model`) et construit la liste de `Layer`.
+- Pour une architecture native, `create` instancie la classe dérivée et appelle
+  sa construction C++ de la liste de `Layer`. Lua et JSON sélectionnent et
+  configurent cette fabrique, sans écrire le graphe.
+- Les mécanismes d’import MPK sont l’alternative expérimentale, encore partielle
+  pour la production. Leur enregistrement ne démontre pas un pipeline complet.
+
+La règle commune est définie par le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
 ## 2) API publique
 

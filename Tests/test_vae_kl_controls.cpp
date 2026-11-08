@@ -54,6 +54,18 @@ int main() {
         TASSERT_NEAR(disabled.loss, 0, 1e-6f);
         TASSERT_NEAR(layer.grad_weights[1], 0, 1e-6f);
         TASSERT_NEAR(layer.grad_weights[2], 0, 1e-6f);
+        // exp(logvar)-1 rounded to exactly zero in float near the prior.
+        // The analytical KL derivative must remain nonzero and correctly
+        // signed at logvar=+/-1e-8, for both image and text training paths.
+        TASSERT_TRUE(config->request("kl_logvar_weight", "1", error));
+        for (float tiny : {1e-8f, -1e-8f}) {
+            layer.getWeights()[2] = tiny;
+            const auto near_prior = run();
+            const float expected_gradient = beta * .5f * std::expm1(tiny);
+            TASSERT_TRUE(layer.grad_weights[2] != 0);
+            TASSERT_NEAR(layer.grad_weights[2], expected_gradient, 1e-15f);
+            TASSERT_TRUE(std::isfinite(near_prior.loss) && near_prior.loss >= 0);
+        }
     }
     return 0;
 }

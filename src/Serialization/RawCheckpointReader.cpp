@@ -1,5 +1,6 @@
 #include "runtimes/fpga/FpgaIo.hpp"
 #include "RawCheckpointReader.hpp"
+#include "LayerMetadata.hpp"
 #include "../Model.hpp"
 #include "CheckpointState.hpp"
 #include "../Tokenizer.hpp"
@@ -265,28 +266,35 @@ bool RawCheckpointReader::load_architecture(
             }
         }
         
-        // Load layers structure
-        // IMPORTANT: l'architecture sauvegardée ne contient pas toutes les métadonnées
-        // (in_features/out_features, kernels, etc.). Si le caller a déjà construit
-        // l'architecture via un builder (recommandé), on ne l'écrase pas.
+        // Full metadata is required to reconstruct an ND-containing graph:
+        // companion Permute/Norm/Concat nodes are part of the saved function.
+        // Existing caller-built legacy graphs retain their override semantics.
         if (!options.metadata_only && arch.contains("layers") && model.getLayers().empty()) {
-            model.getMutableLayers().clear();
-            for (const auto& layer_obj : arch["layers"]) {
-                const std::string name = layer_obj.value("name", "");
-                const std::string type = layer_obj.value("type", "");
-                const size_t params_count = layer_obj.value("params_count", 0);
-                Layer layer(name, type, params_count); // initialise type_enum + normalise le type
-                layer.trainable_parameter = layer_obj.value("trainable_parameter", false);
-                layer.skip_input_index = layer_obj.value("skip_input_index", -1);
-                model.getMutableLayers().push_back(std::move(layer));
+            if (LayerMetadata::requiresCompleteArchitecture(arch["layers"]) &&
+                !LayerMetadata::completeArchitecture(arch)) {
+                if (error) *error = "Incomplete layer metadata for automatic ND graph reconstruction; provide a prebuilt architecture";
+                return false;
             }
-
-            // Allocate parameters based on architecture (si on vient de reconstruire)
+            std::vector<Layer> restored;
+            restored.reserve(arch["layers"].size());
+            for (const auto& layer_obj : arch["layers"]) {
+                Layer layer(layer_obj.value("name", ""), layer_obj.value("type", ""),
+                            layer_obj.value("params_count", size_t{0}));
+                LayerMetadata::readCommon(layer, layer_obj);
+                restored.push_back(std::move(layer));
+            }
+            model.getMutableLayers() = std::move(restored);
             model.allocateParams();
         }
-        
-        if (!options.metadata_only && arch.contains("layers")) {
+
+        if (!options.metadata_only && options.load_layer_metadata && arch.contains("layers")) {
+            const bool authoritative = LayerMetadata::requiresCompleteArchitecture(arch["layers"]) &&
+                LayerMetadata::completeArchitecture(arch);
             for (const auto& entry : arch["layers"]) {
+                if (auto* layer = model.getLayerByName(entry.value("name", ""))) {
+                    if (authoritative) LayerMetadata::readCommon(*layer, entry);
+                    else LayerMetadata::readConvolutionND(*layer, entry);
+                }
                 if (entry.contains("skip_input_index")) {
                     if (auto* layer = model.getLayerByName(entry.value("name", "")))
                         layer->skip_input_index = entry["skip_input_index"].get<int>();

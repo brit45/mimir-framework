@@ -17,7 +17,7 @@ Comprendre le fonctionnement interne exact des composants runtime.
 - [Backend ROCm (rocBLAS)](#backend-rocm-rocblas)
 - [Backend CPU](#backend-cpu)
 - [Backends Vulkan / OpenCL](#backends-vulkan-opencl)
-- [Tableau de synthèse](#tableau-de-synthèse)
+- [TPU et services FPGA](#tpu-et-services-fpga)
 - [Voir aussi](#voir-aussi)
 - [Étapes suivantes](#étapes-suivantes)
 
@@ -61,7 +61,7 @@ public:
     virtual bool initialize(const RuntimeConfig& cfg) = 0;
 
     // Tente d'exécuter un layer. Retourne false si ce layer n'est pas supporté
-    // ou si les seuils ne sont pas atteints → Model.cpp retombe sur le runtime suivant.
+    // ou si les gardes refusent l'opération : RuntimeRouter essaie un autre candidat.
     virtual bool forwardLayer(
         const std::vector<const std::vector<float>*>& inputs,
         std::vector<std::vector<float>>& outputs,
@@ -76,17 +76,24 @@ La sélection des opérations dans les runtimes suit une convention explicite : 
 
 ### Ordre de dispatch réellement exécuté
 
-Le forward s'appuie sur le `RuntimeRouter`, qui parcourt les backends initialisés par ordre de priorité et appelle `forwardLayer(...)`.
+Le forward et le backward passent par `RuntimeRouter`. L'ordre de base fourni
+par `setRuntimes(...)` est le suivant ; seuls les runtimes disponibles participent :
 
 ```
 1. ROCm (si compilé, initialisé et activé)
 2. CUDA (si compilé, initialisé et activé)
 3. Vulkan (si compilé, initialisé et activé)
 4. OpenCL (si compilé, initialisé et activé)
-5. CPU (fallback universel)
+5. TPU (lorsqu'il est fourni au routeur)
+6. CPU (repli lorsqu'il est activé)
 ```
 
-Chaque backend décide via son `switch (layer.type_enum)` s'il peut traiter l'opération. Si le backend retourne `false`, le router essaie le suivant.
+Les capacités par type filtrent les routes, puis les capacités par opération
+contrôlent formes, flags et limites numériques. `ExecutionCalibration` peut
+reclasser les candidats natifs pour les opérations rejouables selon leur latence
+mesurée. L'ordre de base ne garantit donc pas le backend exécuté. Un retour
+`false` ou un résultat non fini permet un autre essai ; `selected_runtime` et
+les traces identifient la route effectivement utilisée.
 
 ### Le pattern "do-while-false" dans les runtimes GPU
 
@@ -95,7 +102,7 @@ Chaque fast-path GPU dans `CudaRuntime::forwardLayer` / `RocmRuntime::forwardLay
 ```cpp
 // Exemple simplifié du fast-path Linear
 bool CudaRuntime::forwardLayer(...) {
-    if (layer.type == LayerType::Linear) {
+    if (layer.type_enum == LayerType::Linear) {
         do {
             if (!config_.linear_enabled) break;
             if (compute_ops < config_.linear_min_ops) break;
@@ -107,7 +114,7 @@ bool CudaRuntime::forwardLayer(...) {
             d_output.copyToHost(...);
             return true;  // succès
         } while (false);
-        return false;  // fallback → CPU
+        return false;  // le routeur essaie un autre candidat admissible
     }
     return false;
 }
@@ -128,21 +135,27 @@ struct RuntimeConfig {
     int  device_index    = 0;
 
     bool linear_enabled  = false;
-    int  linear_min_ops  = 1 << 20;   // 1 048 576 MACs (~1 M)
+    int  linear_min_ops  = 0;  // ExecutionPolicy::automatic_minimum
 
     bool conv_enabled    = false;
-    int  conv_min_ops    = 1 << 18;   // 262 144 MACs (~256 K)
+    int  conv_min_ops    = 0;
 
     bool norm_enabled       = false;
-    int  norm_min_elements  = 1 << 12; // 4 096 éléments
+    int  norm_min_elements  = 0;
 
     bool attention_enabled = false;
-    int  attention_min_ops = 1 << 18;  // 262 144 MACs (~256 K)
+    int  attention_min_ops = 0;
 
     static RuntimeConfig fromEnv(const char* backend_upper);
     // Exemple : fromEnv("CUDA") lit MIMIR_CUDA_*, fromEnv("ROCM") lit MIMIR_ROCM_*
 };
 ```
+
+Cet extrait omet le champ `backend`. Les flags sont `false` dans une
+configuration brute et dans `fromEnv()` sans variable correspondante.
+L'initialisation par `Model` applique ensuite ses valeurs par défaut, dont
+l'activation des familles CUDA/ROCm. Les minima de travail restent à zéro
+par défaut ; les budgets de sécurité des kernels sont indépendants de ces minima.
 
 ### Variables d'environnement (CUDA — remplacer `CUDA` par `ROCM` pour AMD)
 
@@ -172,7 +185,8 @@ struct RuntimeConfig {
 
 Calcule `output[M,N] = input[M,K] × W[K,N]` via `cublasSgemm`, puis ajoute le biais via `cublasSaxpy`.
 
-**Seuil de déclenchement :** `M × N × K ≥ linear_min_ops` (défaut ~1 M MACs).
+**Admissibilité :** `M × N × K ≥ linear_min_ops` (défaut `0`), puis validation
+de la géométrie et sélection du runtime.
 
 ### Fast-path Conv2d (im2col + SGEMM)
 
@@ -180,39 +194,37 @@ Les convolutions ne sont pas directement supportées par cuBLAS, mais peuvent ê
 
 **Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer` et appelé via `RuntimeRouter`.
 
-1. **im2col sur CPU** — le tenseur d'entrée `[C, H, W]` est réorganisé en matrice `col[C·kH·kW, H_out·W_out]` qui "aplatit" chaque fenêtre de convolution en une colonne.
-2. **Transfert vers GPU** — `col` et les filtres `W` sont copiés en VRAM.
+1. **Transfert vers GPU** de l'entrée CHW et des filtres.
+2. **im2col sur le device** dans `CudaNativeOps.cuh`.
 3. **SGEMM sur GPU** — `output = W_flat × col` via `cublasSgemm`.
-4. **Biais via `cublasSger`** — outer product pour broadcaster le biais sur toutes les positions spatiales.
+4. **Biais via `cublasSger`**, si `use_bias` est activé.
 
 Supporte : `stride`, `padding`, `dilation`.
 
-> **Important :** ce fast-path est **désactivé en mode `training=true`**. Le backward de la convolution (gradients des filtres et de l'entrée) n'est pas encore implémenté en GPU. En training, Conv2d retombe toujours sur le CPU.
+Le chemin est admissible à l'entraînement. `CudaRuntime::backwardLayer`
+appelle `CudaNativeOps::conv_backward` pour les gradients d'entrée, de poids et
+de biais. La disponibilité déclarée doit être distinguée d'une exécution
+réellement vérifiée sur matériel CUDA.
 
-### Fast-path LayerNorm / RMSNorm (hybride CPU+GPU)
+### Normalisations natives
 
-La normalisation elle-même est conservée sur CPU (calcul de la moyenne et variance, opération de normalisation), mais l'étape **affine** (mise à l'échelle `gamma` + décalage `beta`) est accélérée sur GPU via :
-- `cublasSdgmm` — multiplication terme à terme par `gamma`
-- `cublasSaxpy` — ajout de `beta`
-
-Ce découpage hybride donne un bon rapport perf/complexité sans avoir à porter le calcul de variance sur CUDA.
+`CudaNativeOps.cuh` fournit les calculs de LayerNorm/RMSNorm et
+GroupNorm/InstanceNorm, y compris les réductions et leurs gradients sur device.
+`CudaTrainingOps.cuh` couvre BatchNorm. La géométrie, les paramètres affines et
+les flags sont contrôlés avant exécution.
 
 **Statut de dispatch :** implémenté dans `CudaRuntime::forwardLayer` et appelé via `RuntimeRouter`.
 
-`GroupNorm` et `BatchNorm2d` restent entièrement sur CPU (layout de mémoire incompatible avec cette stratégie).
+Les copies d'entrée/sortie et l'accumulation finale des gradients dans les blocs
+de paramètres du modèle restent du staging hôte.
 
 ### Fast-path Attention (multi-SGEMM)
 
 Pour `SelfAttention`, `MultiHeadAttention` et `CrossAttention` :
 
-1. **Projection QKV sur GPU** — `Q`, `K`, `V` sont calculés via trois SGEMM.
-2. **Split Q/K/V sur CPU** — division des têtes.
-3. **Par tête en boucle :**
-   - Scores : `S = Q × Kᵀ` via `cublasSgemm` avec `CUBLAS_OP_T`
-   - Masque causal optionnel (appliqué sur CPU)
-   - Softmax (appliqué sur CPU, ligne par ligne)
-   - Contexte : `ctx = S × V` via `cublasSgemm`
-4. **Projection de sortie sur GPU** — SGEMM final.
+`CudaAttentionOps.cuh` implémente projections, scores, masque causal, softmax,
+contexte et gradients sur device. Les gardes de `CudaOperationGeometry.hpp`
+déterminent les formes acceptées.
 
 Pour `CrossAttention`, `Q` et `KV` proviennent de deux sources différentes (`qlen ≠ kvlen` est supporté).
 
@@ -234,7 +246,10 @@ struct Impl::DeviceBuf {
 };
 ```
 
-Chaque fast-path alloue ses `DeviceBuf` localement dans le bloc `do { ... } while(false)`. Si l'allocation échoue (VRAM insuffisante), le `break` libère les buffers déjà alloués via leur destructeur.
+Les buffers de scratch persistants dans `Impl` réutilisent leur capacité sous
+mutex. Une allocation n'est agrandie que si nécessaire ; cela ne dispense pas
+de retransférer les poids modifiés. Les destructeurs libèrent les allocations
+lorsque leurs propriétaires sont détruits.
 
 ---
 
@@ -242,7 +257,9 @@ Chaque fast-path alloue ses `DeviceBuf` localement dans le bloc `do { ... } whil
 
 **Prérequis build :** `-DENABLE_ROCM=ON`. Dépendances CMake : `hip::host`, `roc::rocblas`.
 
-L'implémentation est **fonctionnellement identique** au backend CUDA. Les correspondances API sont directes :
+ROCm partage plusieurs conventions d'implémentation avec CUDA et emploie les
+correspondances API suivantes. Sa couverture native doit toutefois être
+vérifiée indépendamment dans `RocmRuntime`, puis sur le matériel concerné :
 
 | CUDA | ROCm/HIP |
 |---|---|
@@ -256,7 +273,10 @@ L'implémentation est **fonctionnellement identique** au backend CUDA. Les corre
 
 Le code est conditionnel via `#ifdef ENABLE_ROCM` / `#endif`. Les variables d'environnement utilisent le préfixe `MIMIR_ROCM_*`.
 
-**Statut de dispatch :** même logique que CUDA; `forwardLayer()` est utilisé via `RuntimeRouter`.
+**Statut de dispatch :** les passes forward et backward passent par
+`RuntimeRouter`. Les 18 primitives Primer, `CausalDepthwiseConv1d` et `SwiGLU`
+restent déclarées `HostFallback` sur CUDA/ROCm ; leurs sources de génération
+portables ne constituent pas une implémentation native de ces backends.
 
 ---
 
@@ -264,7 +284,10 @@ Le code est conditionnel via `#ifdef ENABLE_ROCM` / `#endif`. Les variables d'en
 
 Le backend CPU est le fallback général lorsqu’il est activé. Il peut être désactivé par `MIMIR_DISABLE_CPU=1`, mais cette option n’est utile que pour diagnostiquer la couverture des autres runtimes : un graphe contenant une opération non couverte échouera alors au lieu de retomber sur CPU.
 
-Implémenté via `RuntimeLayerDispatch::cpu_forward_layer`, qui délègue aux fonctions dans `src/runtimes/cpu/LayerOps.hpp` et `src/runtimes/cpu/LayerOpsExt.hpp`.
+Les passes forward et backward passent par `RuntimeLayerDispatch`, qui délègue
+aux kernels sous `src/runtimes/cpu/`. Les primitives Primer utilisent
+`PrimerKernels.hpp` ; les types et métadonnées de couches restent dans
+`LayerTypes.hpp` et `Layers.hpp`.
 
 **Optimisations CPU disponibles :**
 
@@ -275,7 +298,11 @@ bool Model::hasF16C();  // Conversion float16 native
 bool Model::hasBMI2();  // Manipulation de bits avancée
 ```
 
-Les boucles dans `LayerOps` sont parallélisées via **OpenMP** si activé au build.
+Les kernels CPU utilisent **OpenMP** selon la charge si activé au build.
+`RuntimeSimd` sélectionne scalaire, SSE2, AVX/256, AVX2 ou AVX512F pour les
+primitives qui lui sont reliées. La détection CPUID/XGETBV vérifie CPU et OS ;
+une extension détectée ne signifie pas que toute opération possède un kernel
+spécifique à cette extension. Voir les [contrats SIMD](14-Layers-And-Ops.md#43-variantes-simd-cpu).
 
 ---
 
@@ -283,33 +310,39 @@ Les boucles dans `LayerOps` sont parallélisées via **OpenMP** si activé au bu
 
 Ces backends sont exposés via runtimes dédiés (`VulkanRuntime` / `OpenCLRuntime`) et routés par `RuntimeRouter`.
 
-En pratique :
-
 Les backends Vulkan et OpenCL conservent leurs chemins spécialisés et utilisent
-`PortableRuntime` pour les autres opérations et les passes arrière. Leur
-couverture par type correspond au dispatcher CPU exécutable : **72 types en
-forward et 73 en backward**, dont NMS avec stop-gradient. `Lambda` est refusé
+`PortableRuntime` pour les autres opérations et les passes arrière. Le registre
+et les méthodes `queryForwardCapability` / `queryBackwardCapability` constituent
+l'inventaire par type ; l'acceptation d'une opération réelle dépend ensuite de
+ses entrées, dimensions, paramètres et limites de travail. `Lambda` est refusé
 en forward par le dispatcher CPU lui-même ; son backward identité est supporté
-sur CPU, Vulkan et OpenCL. CUDA possède les mêmes familles de kernels mais
-n'implémente pas le backward `Lambda`.
+sur CPU, Vulkan et OpenCL.
 
 Les familles couvertes comprennent convolutions, normalisations, attention,
 projections/embeddings, pooling, transformations de tenseurs, récurrence,
-upsampling, dropout et reparamétrisation. Les configurations, formes de tenseurs
-et limites du device restent vérifiées ; cette couverture par type ne garantit
-pas que toute forme soit acceptée.
+upsampling, dropout et reparamétrisation. Les convolutions ND,
+`CausalDepthwiseConv1d`, `SwiGLU` et les 18
+[primitives Primer](14-Layers-And-Ops.md#primitives-issues-de-létude-primer)
+possèdent aussi des kernels forward et backward CPU et portables.
 
-Les nouveaux kernels de référence OpenCL/Vulkan exécutent leur calcul sur le
-device avec une invocation qui traite le travail logique séquentiellement.
-Ils privilégient la conformité numérique ; leur couverture ne garantit pas des
-performances supérieures au CPU. Le staging des tenseurs et l'accumulation des
-gradients de paramètres retournés restent sur l'hôte. Les calculs forward et
-backward ne sont pas remplacés par un appel arithmétique CPU caché.
+Les kernels portables indépendants par destination, dont ceux de Primer, sont
+lancés en parallèle ; certains chemins de référence restent séquentiels.
+Les réductions et rassemblements de gradients sont bornés avant lancement.
+Cette couverture ne garantit pas des performances supérieures au CPU. Le
+staging des tenseurs et l'accumulation des gradients de paramètres retournés
+restent sur l'hôte ; un calcul natif déclaré n'utilise pas un calcul de référence
+CPU caché.
+
+Pour Primer, les entrées et gradients FP32 subnormaux sont refusés sur le chemin
+portable. Les kernels signalent également un zéro calculé ambigu pouvant cacher
+un sous-flux ; le routeur peut alors réessayer sur CPU sans publier le résultat
+GPU. Le refus est conservateur et peut aussi concerner une annulation exacte.
+Les domaines singuliers et les résultats non finis restent refusés sur CPU.
 
 | Backend | Build flag | Couverture native par type | Variables |
 |---|---|---|---|
-| Vulkan | `ENABLE_VULKAN` | 72 forward / 73 backward | `MIMIR_VULKAN_LINEAR_SPV`, `MIMIR_VULKAN_LINEAR`, `MIMIR_VULKAN_CONV` |
-| OpenCL | `ENABLE_OPENCL` | 72 forward / 73 backward | `MIMIR_OPENCL_LINEAR` |
+| Vulkan | `ENABLE_VULKAN` | Chemins spécialisés et kernels `PortableRuntime`, dont Primer forward/backward | `MIMIR_VULKAN_LINEAR_SPV`, `MIMIR_VULKAN_LINEAR`, `MIMIR_VULKAN_CONV` |
+| OpenCL | `ENABLE_OPENCL` | Chemins spécialisés et kernels `PortableRuntime`, dont Primer forward/backward | `MIMIR_OPENCL_LINEAR` |
 
 `Unsupported`, `HostFallback`, `Native` et `NativeOptimized` désignent des
 niveaux de capacité distincts. Pour l'inventaire actuel du binaire :
@@ -322,7 +355,27 @@ Cet inventaire déclare les capacités ; les traces et les tests avec
 `selected_runtime` prouvent le backend réellement exécuté. Le routeur propose
 au backend suivant toute opération refusée ou en échec.
 
+`RuntimeTest.VulkanPrimerOps` vérifie les valeurs, gradients et replis numériques
+avec contrôle du runtime sélectionné. L'existence des sources OpenCL et leur
+validation syntaxique ne remplacent pas une exécution de ces opérations sur un
+périphérique OpenCL.
+
 ---
+
+## TPU et services FPGA
+
+`TpuRuntime` utilise un worker Python JAX/XLA. Son initialisation dépend du
+worker et de ses dépendances ; une exécution JAX sur CPU ne prouve pas un calcul
+sur TPU. Le routeur accepte ce runtime entre OpenCL et CPU lorsqu'il lui est fourni.
+
+Les sources `FpgaRuntime.cpp`, `FpgaSession.cpp` et `FpgaIo.cpp` sont incluses
+dans `MIMIR_SOURCES`. Le service FPGA détecte la carte et négocie son firmware
+pour le buffering de dataset, les conversions F32/F16/BF16 et le contrôle
+d'intégrité des checkpoints. `MIMIR_DISABLE_FPGA=1` le désactive.
+`FpgaRuntime::forwardLayer`, `linearForward` et les votes de types retournent
+`false` : il ne constitue pas une route de calcul neuronal dans le routeur.
+La détection ou le handshake ne démontre donc pas une accélération de layers.
+Voir [l'étude FPGA et son état d'intégration](../05-Advanced/06-FPGA-iCESugar-Pro-Runtime-Study.md).
 
 ## Voir aussi
 

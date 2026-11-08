@@ -3,6 +3,7 @@
 #include "SkipConnectionControl.hpp"
 #include "MetricsHistory.hpp"
 #include "viz/TensorSelection.hpp"
+#include "viz/LatentSpaceProjection.hpp"
 #include "LiveModelConfig.hpp"
 #include "DebugJsonExportDialog.hpp"
 #include "viz/DatasetBBoxOverlay.hpp"
@@ -13,6 +14,7 @@
 #endif
 #include <vector>
 #include <string>
+#include <map>
 #include <deque>
 #include <array>
 #include <memory>
@@ -25,6 +27,25 @@
 #include "include/json.hpp"
 
 using json = nlohmann::json;
+
+struct GraphReportControl {
+    enum class State : int { Unavailable = 0, Ready = 1, Running = 2, Complete = 3, Failed = 4 };
+    std::atomic<State> state{State::Unavailable};
+    std::atomic<bool> requested{false};
+
+    void setMessage(std::string value) {
+        std::lock_guard<std::mutex> lock(message_mutex);
+        message = std::move(value);
+    }
+    std::string messageSnapshot() const {
+        std::lock_guard<std::mutex> lock(message_mutex);
+        return message;
+    }
+
+private:
+    mutable std::mutex message_mutex;
+    std::string message;
+};
 
 #ifdef ENABLE_VIZ
 class Visualizer {
@@ -59,6 +80,12 @@ public:
     bool consumeStopTrainingRequested();
     void setTrainingPauseControl(std::shared_ptr<std::atomic<bool>> control) { std::atomic_store(&training_paused_, std::move(control)); }
     void setMetricsHistory(const std::vector<MetricsRecord>& records, size_t offset = 0);
+    void setGraphReportControl(std::shared_ptr<GraphReportControl> control) {
+        std::atomic_store(&graph_report_control_, std::move(control));
+    }
+    void setLatentSpaceControl(std::shared_ptr<mimir::viz::LatentSpaceControl> control) {
+        std::atomic_store(&latent_space_control_, std::move(control));
+    }
 
     // Validation runtime: la configuration initialise l'état, puis tout clic
     // utilisateur devient prioritaire jusqu'à la fin de l'entraînement.
@@ -193,6 +220,7 @@ public:
                       float kl_beta_effective = 0.0f,
                       const std::string& val_feedback = std::string(),
                       const DetectionMetrics* detection_metrics = nullptr);
+    void setModelMetrics(const std::map<std::string, double>& metrics);
 
     // Ajouter un point au graphique de loss
     void addLossPoint(float loss);
@@ -464,6 +492,8 @@ private:
     std::array<float, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_scroll_y_{};
     std::array<float, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_scroll_max_{};
     std::array<vizgfx::FloatRect, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_section_rects_{};
+    std::array<vizgfx::FloatRect, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_content_rects_{};
+    std::array<vizgfx::FloatRect, static_cast<size_t>(DatasetTextSection::Count)> dataset_text_scroll_track_rects_{};
     static constexpr float kDatasetTextScrollSpeed = 32.0f;
 
     std::vector<BlockFrame> last_block_frames_;
@@ -481,6 +511,7 @@ private:
     float current_lr;
     float current_mse;
     std::string current_recon_loss_type;
+    std::map<std::string, double> current_model_metrics_;
     float current_kl;
     float current_wass;
     float current_ent;
@@ -610,6 +641,19 @@ private:
         bool allow_drag = true;
     };
     std::array<Panel, static_cast<size_t>(PanelId::Count)> panels_{};
+    bool panel_manager_visible_ = false;
+    bool panel_manager_swallow_release_ = false;
+    size_t panel_manager_selected_ = 0;
+    float panel_manager_scroll_y_ = 0.f, panel_manager_scroll_max_ = 0.f;
+    std::optional<vizgfx::FloatRect> panel_manager_body_rect_, panel_manager_close_rect_;
+    std::optional<vizgfx::FloatRect> panel_manager_list_rect_;
+    std::optional<vizgfx::FloatRect> panel_manager_show_all_rect_, panel_manager_dismiss_rect_;
+    std::array<std::optional<vizgfx::FloatRect>, static_cast<size_t>(PanelId::Count)> panel_manager_row_rects_{};
+    static constexpr float kPanelManagerRowHeight = 36.f;
+    void setPanelVisible(PanelId id, bool visible);
+    void openPanelManager();
+    void layoutPanelManager(bool reveal_selection = false);
+    void renderPanelManagerOverlay();
     bool panels_initialized_ = false;
     bool dragging_panel_ = false;
     PanelId dragged_panel_ = PanelId::Context;
@@ -626,6 +670,8 @@ private:
 
     static constexpr float kPanelTitleH = 22.f;
     static constexpr float kPanelPad = 10.f;
+    static constexpr float kPanelScrollbarWidth = 10.f;
+    static constexpr float kPanelScrollbarGap = 8.f;
 
     void initDefaultPanelsIfNeeded();
     void clampPanelsToWindow();
@@ -634,6 +680,7 @@ private:
     vizgfx::FloatRect panelRect(PanelId id) const;
     float panelHeaderHeight(PanelId id) const;
     vizgfx::FloatRect panelTitleRect(PanelId id) const;
+    vizgfx::FloatRect panelViewportRect(PanelId id) const;
     vizgfx::FloatRect panelContentRect(PanelId id) const;
     vizgfx::FloatRect panelResizeHandleRect(PanelId id) const;
     vizgfx::FloatRect panelCloseButtonRect(PanelId id) const;
@@ -664,6 +711,9 @@ private:
     void rebuildAllTextures();
     void renderHelpOverlay();
     void renderZoomOverlay();
+    void renderLatentSpaceOverlay();
+    void setLatentSpaceVisible(bool visible);
+    bool saveLatentSpaceExport();
 
     // Focus outline
     std::optional<vizgfx::FloatRect> last_dataset_rect_;
@@ -679,6 +729,51 @@ private:
     std::optional<vizgfx::FloatRect> last_stop_button_rect_;
     std::optional<vizgfx::FloatRect> last_validation_button_rect_;
     std::optional<vizgfx::FloatRect> last_skip_button_rect_;
+    std::optional<vizgfx::FloatRect> last_graph_report_button_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_button_rect_;
+    std::shared_ptr<GraphReportControl> graph_report_control_ = std::make_shared<GraphReportControl>();
+    std::shared_ptr<mimir::viz::LatentSpaceControl> latent_space_control_ =
+        std::make_shared<mimir::viz::LatentSpaceControl>();
+    bool show_latent_space_ = false;
+    bool dragging_latent_space_ = false;
+    float latent_space_yaw_ = -0.55f;
+    float latent_space_pitch_ = 0.25f;
+    float latent_space_zoom_ = 1.0f;
+    vizgfx::Vector2f latent_space_last_mouse_{0.f, 0.f};
+    std::optional<vizgfx::FloatRect> last_latent_space_close_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_export_rect_;
+    std::shared_ptr<const mimir::viz::LatentSpaceProjection> latent_space_displayed_projection_;
+    float latent_space_displayed_yaw_ = -0.55f, latent_space_displayed_pitch_ = 0.25f;
+    float latent_space_displayed_zoom_ = 1.f, latent_space_displayed_threshold_ = .65f;
+    unsigned latent_space_displayed_canvas_width_ = 0, latent_space_displayed_canvas_height_ = 0;
+    vizgfx::Vector2u latent_space_displayed_window_size_{};
+    vizgfx::FloatRect latent_space_displayed_bounds_{};
+    bool latent_space_displayed_realtime_ = false;
+    bool latent_space_displayed_available_ = false;
+    bool latent_space_displayed_correlation_all_candidates_ = false;
+    size_t latent_space_displayed_correlation_observations_ = 0;
+    bool latent_space_export_rendering_ = false;
+    std::string latent_space_export_status_, latent_space_displayed_export_status_;
+    std::string last_latent_space_export_path_;
+    std::optional<vizgfx::FloatRect> last_latent_space_realtime_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_correlations_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_neurons_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_live_weights_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_correlation_clear_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_correlation_minus_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_correlation_plus_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_correlation_all_rect_;
+    float latent_space_correlation_threshold_ = 0.65f;
+    bool latent_space_correlation_show_all_candidates_ = false;
+    vizgfx::FloatRect last_latent_space_canvas_rect_{};
+    std::vector<std::pair<vizgfx::FloatRect, size_t>> last_latent_space_point_hits_;
+    struct LatentSpaceEdgeHit {
+        vizgfx::Vector2f source, target;
+        size_t edge_index;
+    };
+    std::vector<LatentSpaceEdgeHit> last_latent_space_correlation_edge_hits_;
+    std::vector<LatentSpaceEdgeHit> last_latent_space_neuron_edge_hits_;
+    std::vector<LatentSpaceEdgeHit> last_latent_space_live_weight_edge_hits_;
 
     // Scroll (Blocks/Layers panel)
     float blocks_scroll_y_ = 0.0f;
@@ -774,6 +869,8 @@ public:
     bool consumeStopTrainingRequested() { return false; }
     void setTrainingPauseControl(std::shared_ptr<std::atomic<bool>>) {}
     void setMetricsHistory(const std::vector<MetricsRecord>&, size_t = 0) {}
+    void setGraphReportControl(std::shared_ptr<GraphReportControl>) {}
+    void setLatentSpaceControl(std::shared_ptr<mimir::viz::LatentSpaceControl>) {}
     void setRuntimeConfiguration(std::shared_ptr<LiveModelConfig> config) {
         std::atomic_store(&runtime_config_, std::move(config));
     }

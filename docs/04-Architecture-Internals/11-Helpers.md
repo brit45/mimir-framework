@@ -63,7 +63,12 @@ Resize nearest-neighbor interne (remplace stb_image_resize ici).
 
 Le header inclut `stb_image.h` et suppose que `STB_IMAGE_IMPLEMENTATION` est défini ailleurs (`src/stb_image_impl.cpp`).
 
-Dans `DatasetItem::loadImage*`, la lecture se fait via `stbi_load(..., 3)` (force 3 canaux), puis resize nearest.
+Les images statiques prises en charge par STB sont décodées en RGB avec
+`stbi_load(..., 3)`. `loadImageRGB` applique ensuite
+`resizeBicubicRGB_SRGBLinear`, également pour les frames animées. Le helper
+nearest reste utilisé pour les masques et certains chemins de repli ; ce
+n'est pas le resize principal des images RGB. WebP utilise FFmpeg quand ce
+backend est compilé ; les variantes BMP refusées par STB peuvent aussi y revenir.
 
 ### `imageToEmbedding(img, iw, ih, dim) -> vector<float>`
 
@@ -90,18 +95,26 @@ Note: `detectModalities()` est un détecteur “grossier” par extension. Le lo
 
 ### `datasetSHA256Hash(dir) -> string`
 
-Calcule un SHA256 déterministe basé sur une liste triée d’entrées `filename|file_size`.
+Calcule une signature SHA256 d'index, versionnée
+`mimir_dataset_index_v4_structured_annotations`, à partir de la racine lexicale
+absolue et d'une liste triée de métadonnées par fichier.
 
 Propriétés importantes:
 
-- Dépend du **nom de fichier** (pas du chemin relatif complet) et de la taille.
-- Ne lit pas le contenu.
+- Chaque entrée contient le chemin relatif lexical, la taille et la date de
+  modification. Les JSON ajoutent un SHA256 de leur contenu.
+- Les fichiers internes et le fichier de cache explicitement exclu ne participent
+  pas à la signature. Les contenus image/audio/vidéo ne sont pas entièrement hachés.
 
-Implication: deux fichiers dans des sous-dossiers différents mais avec le même `filename` et la même taille peuvent produire des collisions dans la signature.
+Deux homonymes de sous-dossiers différents sont donc distingués. Le déplacement
+de la racine invalide aussi le cache ; cette signature n'est pas un hash de
+contenu exhaustif de chaque média.
 
 ### `simpleDatasetHash(dir) -> uint32_t`
 
-Hash rapide type FNV sur les `filename` uniquement (pas les tailles).
+Hash rapide type FNV sur les `filename` uniquement (pas les tailles), dans
+l'ordre du parcours filesystem. Contrairement à la signature d'index, cette
+fonction ne trie pas ses entrées et n'assure pas l'indépendance à cet ordre.
 
 ### `MagicToken` + `makeMagicToken(modality_mask, dir)`
 
@@ -175,9 +188,9 @@ Outil pour charger un sous-ensemble et évincer le reste:
 
 Indexation en deux phases:
 
-1) Parcours récursif et groupement par `stem()` (basename sans extension)
+1) Parcours récursif et groupement par chemin relatif lexical sans extension
 2) Construction des items:
-     - `name = basename`
+     - nom dérivé de la clé relative
      - `is_linked = (paths.size() > 1)`
      - classification par regex d’extension
      - filtrage par `min_modalities`
@@ -186,6 +199,11 @@ Les masques ne deviennent pas des items autonomes. Ils sont liés à leur image 
 `_mask`, `-mask`, `.mask`, `_segmentation`, `-segmentation`, ou via des dossiers frères
 `masks/` / `segmentations/` correspondant à `images/`. Un masque est une annotation et ne compte donc
 pas comme une modalité supplémentaire.
+
+Les clés lexicales préservent le nom des liens symboliques : une image liée
+vers un autre disque reste associée à son sidecar local. Les annotations
+structurées et les captions COCO ont leurs chemins d'indexation dédiés ;
+elles ne doivent pas être confondues avec de simples fichiers de texte libres.
 
 Extensions dans `loadDataset`:
 
@@ -212,7 +230,8 @@ Sauvegarde/restaure un cache JSON:
 ### `loadDatasetCached(root_dir, ..., cache_path="dataset_cache.json", max_ram_mb=10240, lazy_loading=true)`
 
 - Initialise la limite RAM du dataset (`DatasetMemoryManager::setMaxRAM`).
-- Calcule `datasetSHA256Hash(root_dir)`.
+- Combine `datasetSHA256Hash(root_dir, cache_path)` avec les dimensions cibles
+  et `min_modalities` pour la signature du cache.
 - Charge le cache si le hash correspond.
 - Sinon ré-indexe via `loadDataset()` puis écrit le cache.
 
@@ -223,7 +242,9 @@ Modes:
 
 ## Correspondance Lua
 
-Le binding Lua `Mimir.Dataset.load(dir)` utilise le loader `loadDataset(dir)` (pas `loadDatasetCached`).
+Le binding Lua `Mimir.Dataset.load(dir, w, h, min_modalities, use_cache,
+cache_path, max_ram_mb, lazy_loading)` utilise `loadDataset` par défaut.
+Avec `use_cache=true`, il utilise `loadDatasetCached` et les options suivantes.
 
 Pour l’API user, voir `docs/02-User-Guide/03-Data.md`.
 

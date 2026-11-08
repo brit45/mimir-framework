@@ -27,6 +27,16 @@ Expliquer pourquoi Mímir prend ces choix techniques, sans entrer dans les déta
 - Pourquoi un Runtime independant ? Pour pouvoir changer la couche d'execution sans casser le modele.
 - Pourquoi les architectures sont compilees ? Pour lier les graphs au code, eviter les surprises au runtime et garder des builds deterministes.
 
+## Qui définit l’architecture ?
+
+Le graphe DL est défini en C/C++ dans une classe dérivée de `Model`. Le registre
+expose cette classe aux scripts. Lua, les autres bridges et JSON configurent
+et exécutent le modèle ; ils n’écrivent pas sa topologie.
+
+L’autre voie est MPK, qui reste expérimentale et pas entièrement exploitable en
+production. Le [contrat des architectures](07-Devs/08-Architecture-Contract.md)
+précise la séparation entre définition, configuration et exécution.
+
 ## Étapes suivantes
 
 - Consultez l'[index de la documentation](00-INDEX.md).

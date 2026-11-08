@@ -1,246 +1,216 @@
-# Construire un modèle et ses layers
+# Construire une architecture dérivée de `Model`
 
-Implémenter ou modifier des briques techniques sans casser le contrat global.
-
-**Public concerné :** Développeur framework (C/C++/runtime/scripting).
-
-> **Prérequis**
->
-> Comprendre le registre d'architectures et les conventions I/O.
-
-Ce chapitre explique concrètement comment assembler un modèle, configurer ses layers et fiabiliser les routes I/O.
+Ce guide explique où déclarer un graphe de deep learning, comment relier ses
+couches et comment le rendre accessible aux scripts. Il s'adresse aux
+contributeurs qui savent lire du C++ et raisonner sur les dimensions.
 
 ## Sur cette page
 
-- [Lecture guidée](#lecture-guidée)
-- [1. API de base cote C++](#1-api-de-base-cote-c)
-- [2. Exemple minimal C++](#2-exemple-minimal-c)
-- [3. Parametrer les layers](#3-parametrer-les-layers)
-- [4. Regle source de verite: modele declare en C/C++](#4-regle-source-de-verite-modele-declare-en-cc)
-- [5. Cote Lua: creation/chargement, pas definition principale du graphe](#5-cote-lua-creationchargement-pas-definition-principale-du-graphe)
-- [6. API legacy a ne plus utiliser: setlayerio](#6-api-legacy-a-ne-plus-utiliser-setlayerio)
-- [7. Erreurs frequentes](#7-erreurs-frequentes)
-- [8. Checklist avant commit](#8-checklist-avant-commit)
-- [9. Demo correcte - meme intention cote C++ (source de verite)](#9-demo-correcte---meme-intention-cote-c-source-de-verite)
-- [10. Demo script correcte (registre -> create)](#10-demo-script-correcte-registre---create)
-- [11. Criteres metier de validation](#11-criteres-metier-de-validation)
-- [12. Demos existantes a relire](#12-demos-existantes-a-relire)
+- [Contrat de définition des architectures](#contrat-de-définition-des-architectures)
+- [Débutant : reconnaître les responsabilités](#débutant--reconnaître-les-responsabilités)
+- [Intermédiaire : une classe et un graphe valides](#intermédiaire--une-classe-et-un-graphe-valides)
+- [Avancé : configuration et registre](#avancé--configuration-et-registre)
+- [Piloter une architecture existante depuis Lua](#piloter-une-architecture-existante-depuis-lua)
+- [MPK et API internes de construction](#mpk-et-api-internes-de-construction)
+- [Expert : intégrer une opération et son runtime](#expert--intégrer-une-opération-et-son-runtime)
+- [Vérifier et diagnostiquer](#vérifier-et-diagnostiquer)
 - [Étapes suivantes](#étapes-suivantes)
 
-## Lecture guidée
+## Contrat de définition des architectures
 
-Parcours conseillé :
+Le [contrat des architectures](08-Architecture-Contract.md) impose que les
+architectures, ou graphes DL, soient écrites dans le code C/C++ du framework,
+**dans une classe C++ héritant de `Model`**. Les couches, leurs
+connexions, les branches et les paramètres structurels appartiennent à cette
+classe. Le constructeur et les méthodes de construction peuvent appeler un
+helper statique `buildInto(Model&, ...)` défini dans la même classe.
 
-1. Comprendre le rôle de `model.push(...)`.
-2. Construire une topologie minimale claire.
-3. Renseigner explicitement `inputs` et `output`.
-4. Valider par un smoke test.
+L'autre moyen de décrire une architecture est **MPK, encore expérimental et
+pas encore entièrement exploitable en production**. Un package lisible ou
+compilable ne prouve pas que son graphe et ses opérations soient exécutables.
+Pour un modèle à intégrer au framework, le chemin de référence reste une classe
+C++ dérivée de `Model` et enregistrée dans le registre.
 
-Principe clé : la source de vérité de la topologie est côté C/C++, pas côté script.
+Lua, JSON et les autres bridges configurent et exécutent ces architectures.
+Ils ne constituent pas une troisième voie de définition d'un graphe DL.
 
-## 1. API de base cote C++
+## Débutant : reconnaître les responsabilités
 
-La methode cle est :
+| Élément | Responsabilité |
+| --- | --- |
+| Classe `MonModele : public Model` | Topologie, noms des tenseurs, couches et dimensions |
+| `Config` de cette classe | Paramètres structurels autorisés et valeurs par défaut |
+| `ModelArchitectures` | Nom public, conversion JSON et création de la classe |
+| Script Lua / fichier JSON | Choix d'une architecture, données, entraînement, inférence et sauvegarde |
+| Runtime | Calcul des opérations forward/backward, sélection du backend et contrôles numériques |
+| MPK expérimental | Transport ou exploration d'une configuration et d'une description de graphe |
+
+Commencez par `src/Models/MLP/BasicMLPModel.hpp` et `.cpp` : la classe hérite
+explicitement de `Model`; `buildFromConfig` appelle son helper `buildInto`.
+Repérez ensuite la factory `basic_mlp` dans
+`src/Models/Registry/ModelArchitectures.cpp`.
+
+**Exercice :** retrouvez le même chemin pour `VAEConvModel`, puis expliquez où
+sont décidés les layers et où sont lus les arguments CLI.
+
+## Intermédiaire : une classe et un graphe valides
+
+Voici un exemple C++ complet de déclaration, à placer dans un header de votre
+modèle. Il utilise les primitives Primer et ne possède aucun poids appris.
+Le graphe est fixé dans la classe ; l'entrée est un vecteur de six valeurs
+interprété comme une matrice `[2,3]`.
 
 ```cpp
-void Model::push(const std::string &name, const std::string &type, size_t params_count);
+#pragma once
+#include "Model.hpp"
+
+class PrimerReductionModel final : public Model {
+public:
+    PrimerReductionModel() {
+        setModelName("PrimerReductionModel");
+        setHasEncoder(false);
+        buildInto(*this);
+    }
+
+    static void buildInto(Model& model) {
+        model.getMutableLayers().clear();
+        model.modelConfig["type"] = "primer_reduction_tutorial";
+
+        model.push("primer/squared", "SquaredReLU", 0);
+        auto* squared = model.getLayerByName("primer/squared");
+        squared->inputs = {"__input__"};
+        squared->output = "primer/activated";
+
+        model.push("primer/mean", "ReduceMean", 0);
+        auto* mean = model.getLayerByName("primer/mean");
+        mean->inputs = {"primer/activated"};
+        mean->output = "x";
+        mean->shape = {2, 3};
+        mean->axis = -1;
+    }
+};
 ```
 
-Effet : ajoute un `Layer` dans `Model::layers`.
+`Model::push(name, type, params_count)` crée une couche du registre des types.
+`Layer.inputs` et `Layer.output` relient les tenseurs nommés. Ici, la sortie de
+`SquaredReLU` alimente `ReduceMean`, qui conserve la dimension réduite à 1 :
+la sortie contient deux valeurs de forme `[2,1]`.
 
-Ce que fait `push` en pratique :
+Pour l'entrée `{-1,2,3,4,-5,6}`, les sorties attendues sont `13/3` et `52/3`.
+Ce calcul doit passer par les runtimes ; il n'est pas réimplémenté dans la classe.
+Construisez le graphe avant l'allocation. Ne reconstruisez pas une instance
+qui possède déjà des poids et un état optimiseur actifs.
 
-- normalise le type de layer,
-- valide que le type est supporte,
-- applique des champs de `modelConfig` sur le layer (in/out channels, kernel, stride, padding, etc.),
-- calcule certaines dimensions de sortie (ex: Conv2d / ConvTranspose2d),
-- ajoute le layer a la topologie.
+Le nom `primer_reduction_tutorial` ci-dessus n'est pas une architecture livrée
+dans le registre. Pour l'exposer à Lua, effectuez l'intégration décrite dans le
+[tutoriel d'ajout d'un modèle](../08-Tuto/02-Tuto-Ajouter-Modele.md).
 
-Lecture pratique : `push` crée le noeud; le wiring des flux de tenseurs (`inputs/output`) donne la sémantique du graphe.
+**Exercice :** remplacez, dans la classe C++, la réduction moyenne par une somme.
+Calculez les résultats attendus avant d'exécuter un test.
 
-## 2. Exemple minimal C++
+## Avancé : configuration et registre
 
-```cpp
-model.push("enc/conv_in", "Conv2d", 64 * 3 * 3 * 3);
-model.push("enc/act0", "SiLU", 0);
-model.push("enc/res/add", "Add", 0);
-```
+Un modèle entraînable suit généralement ce chemin :
 
-Regle generale :
+1. Définir `class MonModele : public Model` et sa structure `Config` dans un header.
+2. Valider les dimensions, puis construire le graphe dans la classe.
+3. Ajouter son `.cpp` aux sources de `mimir_core` dans `CMakeLists.txt`.
+4. Ajouter un parser JSON et une configuration par défaut au registre.
+5. Faire créer la classe dérivée par la factory du registre.
+6. Tester création, allocation, forward/backward et checkpoint.
 
-- `params_count > 0` pour les layers parametres,
-- `params_count = 0` pour les layers purement operationnels (activation, add, reshape, etc.).
+Le helper `buildInto` n'est pas une architecture autonome : il centralise la
+construction au sein de la classe dérivée, comme dans `BasicMLPModel` et
+`VAEConvModel`. Le registre instancie cette classe avant de construire son graphe.
 
-Bon réflexe : nommer les layers avec une hiérarchie stable (`enc/...`, `mid/...`, `dec/...`) pour faciliter debug et sérialisation.
+Pour un layer `Linear` avec biais, le nombre de paramètres vaut
+`in_features * out_features + out_features`. Les layers sans poids, par exemple
+`SquaredReLU`, `Add` et les réductions Primer, utilisent `params_count=0`.
+Chaque branche doit avoir des noms d'entrées et sorties non ambigus.
 
-## 3. Parametrer les layers
+**Exercice :** ajoutez une dimension dans `Config`, son parser JSON et sa valeur
+par défaut. Vérifiez que la même valeur pilote le nombre de paramètres, les
+métadonnées des couches et le chargement d'un checkpoint compatible.
 
-Le parametrage passe principalement par la config modele, puis est lu dans `push`.
+## Piloter une architecture existante depuis Lua
 
-Exemples de champs utilises par les convs :
-
-- `in_channels`
-- `out_channels`
-- `height` / `width`
-- `kernel`
-- `stride`
-- `padding`
-
-Conseil :
-
-- garder les noms de champs stables,
-- documenter les defaults dans la config d'architecture,
-- eviter les dependances implicites entre layers distants.
-
-Conseil de pédagogie de code : déclarer les champs dimensionnels au plus près de la création du layer pour réduire les ambiguïtés.
-
-## 4. Regle source de verite: modele declare en C/C++
-
-Dans ce framework, la declaration de topologie et le parametrage des layers se font cote C/C++ (classes de modeles + registre), pas cote Lua.
-
-Flux normal :
-
-1. Le registre cree le modele (`ModelArchitectures::create(...)`).
-2. La classe C++ (ex: `VAEConvModel::buildInto`) pousse les layers (`model.push(...)`).
-3. La classe C++ renseigne les I/O (`Layer.inputs`, `Layer.output`) et metadonnees (channels, kernel, stride, etc.).
-
-Exemple reel a lire: `src/Models/Vision/VAEConvModel.cpp`.
-
-Pourquoi ce choix est important :
-
-1. Le graphe reste traçable dans un seul endroit.
-2. Les scripts Lua restent simples (configuration et exécution).
-3. Le risque de divergence train/inférence baisse.
-
-## 5. Cote Lua: creation/chargement, pas definition principale du graphe
-
-Cote script, le chemin standard est :
+Le script demande au registre une architecture déjà écrite en C++ :
 
 ```lua
-local cfg = Mimir.Architectures.default_config("vae_conv")
-cfg.image_w = 512
-cfg.image_h = 512
-cfg.base_channels = 16
-
-local ok, err = Mimir.Model.create("vae_conv", cfg)
-if not ok then error(err) end
+local cfg = Mimir.Architectures.default_config("basic_mlp")
+cfg.input_dim = 2
+cfg.hidden_dim = 4
+cfg.output_dim = 1
+cfg.hidden_layers = 1
+cfg.dropout = 0
+assert(Mimir.Model.create("basic_mlp", cfg))
+assert(Mimir.Model.set_hardware(false))
+assert(Mimir.Model.allocate_params())
+assert(Mimir.Model.init_weights("xavier", 42))
+local prediction = assert(Mimir.Model.forward({0.25, -0.5}, false))
+assert(#prediction == 1)
 ```
 
-Note : `Mimir.Model.build()` est conserve pour compatibilite, mais en mode moderne la construction est deja faite par `Model.create(...)` via le registre.
+Les options `Config` restent celles autorisées par la classe. Le script ne pousse
+aucune couche et ne recâble aucun tenseur. `Mimir.Model.create` construit déjà
+le graphe via sa factory ; `Model.build()` est un no-op de compatibilité dans
+ce chemin et ne doit pas déclencher une seconde construction.
 
-Résumé mental : Lua pilote le run, C++ décrit la structure.
+## MPK et API internes de construction
 
-## 6. API legacy a ne plus utiliser: set_layer_io
+Les bindings `create_empty`, `push_layer` et `set_layer_io` existent dans le
+moteur pour ses tests et certains mécanismes internes, notamment le chargement
+de graphes MPK. Leur existence ne fait pas de la construction directe d'un
+réseau en Lua une méthode d'architecture recommandée ou autorisée par ce contrat.
+Les tutoriels d'architecture utilisent une classe C++ dérivée de `Model`.
 
-`Mimir.Model.set_layer_io(...)` est deprecie/obsolete et ne doit plus etre utilise dans les nouveaux scripts ni dans la documentation d'usage.
+Les outils Lua qui génèrent un MPK produisent une spécification de package ;
+l'architecture alternative reste le MPK expérimental, pas un script de calcul
+Lua autonome. Consultez ses [limites et formats](../02-User-Guide/15-MPK.md)
+avant de tenter une reconstruction dynamique.
 
-Regle projet :
+## Expert : intégrer une opération et son runtime
 
-- declaration des layers: C/C++,
-- wiring I/O (`Layer.inputs`, `Layer.output`): C/C++,
-- scripts Lua: creation via registre + execution/inspection uniquement.
+Une architecture compose des opérations disponibles. Si une primitive manque :
 
-Pour une architecture produit (ex: `vae_conv`, `diffusion`, `hf_vae_decoder`), modifier la topologie dans les fichiers C/C++ du modele et son enregistrement registre.
+1. Enregistrer son type canonique et ses alias dans `src/LayerTypes.hpp`, sans
+   modifier les identifiants existants.
+2. Définir sa géométrie et ses contrôles sous `src/runtimes/`.
+3. Écrire ses calculs forward/backward dans les kernels du backend, pas dans
+   `Layers.hpp` ou dans la description de l'architecture.
+4. Brancher le dispatcher et les capacités déclarées ; `RuntimeRouter` choisit
+   le backend effectif ou un repli explicite.
+5. Préserver métadonnées, planification et sérialisation.
+6. Tester valeurs, gradients, domaines et refus sans publication partielle.
 
-## 7. Erreurs frequentes
+Pour un exemple réel, lisez `src/runtimes/cpu/PrimerKernels.hpp`,
+`src/runtimes/cpu/RuntimeLayerDispatch.hpp` et les
+[contrats des primitives Primer](../04-Architecture-Internals/14-Layers-And-Ops.md#primitives-issues-de-létude-primer).
+Un test GPU doit vérifier le backend réellement choisi ; une capacité déclarée
+ne prouve pas une exécution native.
 
-1. Type de layer invalide dans `push`.
-2. `params_count` incoherent avec la structure reelle du layer.
-3. Inputs non renseignes ou mal orthographies.
-4. Sortie ecrasee accidentellement (meme nom `output` sur plusieurs branches).
-5. Dimensions incompatibles entre layers relies.
+## Vérifier et diagnostiquer
 
-Signaux d'alerte précoces :
+Les tests suivants existent déjà ; ils vérifient les mécanismes du framework,
+pas la classe pédagogique non intégrée de cette page :
 
-1. Un `output` réutilisé sans intention explicite.
-2. Des `inputs` vides sur un layer multi-entrée.
-3. Un `params_count` calculé à la main sans formule documentée.
-
-## 8. Checklist avant commit
-
-- topologie lisible (`name` explicites),
-- I/O explicites pour les layers multi-entrees,
-- shape checks passes,
-- allocate/init/forward passent,
-- test smoke ajoute (script court).
-
-Ajouter si possible :
-
-1. un test qui couvre le chemin nominal,
-2. un test qui couvre au moins un cas de forme invalide.
-
-## 9. Demo correcte - meme intention cote C++ (source de verite)
-
-```cpp
-model.push("blk/conv_main", "Conv2d", 64 * 64 * 3 * 3);
-model.push("blk/act_main", "SiLU", 0);
-model.push("blk/conv_skip", "Conv2d", 64 * 64 * 1 * 1);
-model.push("blk/add", "Add", 0);
+```bash
+ctest --test-dir build --output-on-failure \
+  -R '^(RegistryTest\.(CfgFromConfig|CreateFromConfig|Aliases)|ModelTest\.PrimerOps)$'
 ```
 
-Puis associer les I/O directement en C++ (exemple style `VAEConvModel.cpp`) :
-
-```cpp
-if (auto* l = model.getLayerByName("blk/conv_main")) {
-    l->inputs = {"__input__"};
-    l->output = "blk/main0";
-    l->in_channels = 64;
-    l->out_channels = 64;
-    l->kernel_size = 3;
-    l->stride = 1;
-    l->padding = 1;
-}
-if (auto* l = model.getLayerByName("blk/act_main")) {
-    l->inputs = {"blk/main0"};
-    l->output = "blk/main1";
-}
-if (auto* l = model.getLayerByName("blk/conv_skip")) {
-    l->inputs = {"__input__"};
-    l->output = "blk/skip";
-    l->in_channels = 64;
-    l->out_channels = 64;
-    l->kernel_size = 1;
-    l->stride = 1;
-    l->padding = 0;
-}
-if (auto* l = model.getLayerByName("blk/add")) {
-    l->inputs = {"blk/main1", "blk/skip"};
-    l->output = "x";
-}
-```
-
-## 10. Demo script correcte (registre -> create)
-
-```lua
-local cfg = Mimir.Architectures.default_config("vae_conv")
-cfg.image_w = 512
-cfg.image_h = 512
-cfg.base_channels = 16
-
-assert(Mimir.Model.create("vae_conv", cfg))
-```
-
-Ce qui est important : la topologie vient de C/C++ (classe modele), le script fournit la config et declenche la creation.
-
-## 11. Criteres metier de validation
-
-Definition de done pour ce type d'assemblage :
-
-1. Les noms d'IO restent stables entre entrainement et inference.
-2. Le bloc est serialisable et rechargeable sans renommer les noeuds.
-3. Les outils d'inspection affichent le graphe attendu.
-4. Le bloc accepte une batch de smoke test sans NaN/shape mismatch.
-
-Critère pratique complémentaire : le modèle doit être lisible par quelqu'un qui ne connaît pas votre contexte initial.
-
-## 12. Demos existantes a relire
-
-- `scripts/templates/template_new_model.lua`
-- `scripts/tests/test_vae_conv_resnet_smoke.lua`
-- `scripts/tools/inspect_architectures.lua`
+| Symptôme | Vérification |
+| --- | --- |
+| Type invalide dans `push` | Nom canonique et mapping dans `LayerTypes.hpp` |
+| Couche non exécutée | Noms `inputs`/`output` et sortie principale `x` |
+| Mauvais nombre de paramètres | Formule et dimensions effectives du layer |
+| Erreur de lien de la nouvelle classe | Présence du `.cpp` dans les sources CMake |
+| Reprise incohérente | Topologie, configuration et tokenizer du checkpoint |
+| Graphe MPK exporté mais inexécutable | Couverture des types, champs exportés et limites expérimentales |
 
 ## Étapes suivantes
 
-- [Page précédente : Comment Fonctionne Le Framework](01-How-The-Framework-Works.md)
-- [Index de la documentation](../00-INDEX.md)
-- [Page suivante : Config Et Registre D'Architectures](03-Config-And-Registry.md)
+- [Ajouter un modèle dérivé de Model](../08-Tuto/02-Tuto-Ajouter-Modele.md)
+- [Config et registre](03-Config-And-Registry.md)
+- [Ajouter une opération](../08-Tuto/05-Tuto-Ajouter-Op.md)
+- [MPK expérimental](../08-Tuto/09-Tuto-Creer-MPK.md)

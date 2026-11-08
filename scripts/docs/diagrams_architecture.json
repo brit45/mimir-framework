@@ -1,0 +1,1380 @@
+[
+  {
+    "file": "00_framework_overview.svg",
+    "title": "Vue d’ensemble de Mímir",
+    "subtitle": "Définir le graphe en C++, piloter le run, exécuter et observer.",
+    "description": "La topologie native appartient à une classe C++ dérivée de Model. Les scripts et configurations sélectionnent le modèle ; le routeur, les runtimes et les services de suivi exécutent le run. MPK est une alternative expérimentale.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "native",
+        "title": "Architecture native",
+        "lines": [
+          "Classe C++ : public Model",
+          "Couches, connexions et Config"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "registry",
+        "title": "Registre",
+        "lines": [
+          "ModelArchitectures",
+          "Nom, défauts et fabrique"
+        ],
+        "tone": "purple",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "scripts",
+        "title": "Pilotage du run",
+        "lines": [
+          "CLI, Lua et JSON",
+          "Arguments, données et options"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "mpk",
+        "title": "Alternative MPK",
+        "lines": [
+          "Description de graphe",
+          "Compatibilité encore partielle"
+        ],
+        "tone": "orange",
+        "row": 1,
+        "col": 0,
+        "badge": "EXPÉRIMENTAL"
+      },
+      {
+        "id": "model",
+        "title": "Instance du modèle",
+        "lines": [
+          "Topologie construite en C++",
+          "Poids et état du run"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "data",
+        "title": "Données préparées",
+        "lines": [
+          "Tenseurs / identifiants",
+          "Format propre au modèle"
+        ],
+        "tone": "slate",
+        "row": 1,
+        "col": 2
+      },
+      {
+        "id": "runtimes",
+        "title": "Runtimes de calcul",
+        "lines": [
+          "CPU et backends disponibles",
+          "Kernels forward et backward"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 0
+      },
+      {
+        "id": "execution",
+        "title": "Exécution du graphe",
+        "lines": [
+          "Planner et RuntimeRouter",
+          "Loss, gradients, optimiseur"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 1
+      },
+      {
+        "id": "artifacts",
+        "title": "Suivi et résultats",
+        "lines": [
+          "Viz, Htop et métriques",
+          "Checkpoints et rapports"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 2
+      }
+    ],
+    "edges": [
+      {
+        "from": "native",
+        "to": "registry"
+      },
+      {
+        "from": "scripts",
+        "to": "registry",
+        "label": "sélection"
+      },
+      {
+        "from": "mpk",
+        "to": "registry",
+        "label": "import",
+        "style": "dashed"
+      },
+      {
+        "from": "registry",
+        "to": "model"
+      },
+      {
+        "from": "data",
+        "to": "model",
+        "label": "entrées"
+      },
+      {
+        "from": "model",
+        "to": "execution"
+      },
+      {
+        "from": "runtimes",
+        "to": "execution"
+      },
+      {
+        "from": "execution",
+        "to": "artifacts"
+      }
+    ],
+    "notes": [
+      "Lua/JSON ne définissent pas le graphe DL. MPK n’est pas entièrement exploitable en production.",
+      "CPU-first désigne une référence et un repli : le backend effectif dépend des capacités et du plan."
+    ],
+    "sources": [
+      "src/Models/Registry/ModelArchitectures.cpp",
+      "src/Model.hpp",
+      "src/runtimes/RuntimeRouter.cpp",
+      "src/AsyncMonitor.hpp"
+    ],
+    "related_docs": [
+      "README.md",
+      "docs/00-Framework-Philosophy.md",
+      "docs/08-Tuto/06-Parcours-Complet-Framework.md",
+      "docs/07-Devs/08-Architecture-Contract.md"
+    ]
+  },
+  {
+    "file": "01_layered_architecture.svg",
+    "title": "Architecture en couches",
+    "subtitle": "Des responsabilités distinctes pour la définition, le pilotage et le calcul.",
+    "description": "Le pilotage utilise les fabriques du registre pour obtenir une instance de classe dérivée de Model. Le modèle orchestre le graphe ; les runtimes portent les calculs. Mémoire, sérialisation et observation accompagnent le cycle de vie.",
+    "columns": 2,
+    "nodes": [
+      {
+        "id": "pilot",
+        "title": "Pilotage",
+        "lines": [
+          "CLI, scripts et configuration",
+          "Choix du modèle et du run"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "definition",
+        "title": "Définition native",
+        "lines": [
+          "Classe C++ : public Model",
+          "Config et topologie autorisée"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "registry",
+        "title": "Registre",
+        "lines": [
+          "Noms et fabriques",
+          "Conversion de configuration"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "model",
+        "title": "Modèle construit",
+        "lines": [
+          "Couches et tenseurs nommés",
+          "État, entrées et sorties"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "routing",
+        "title": "Planification et routage",
+        "lines": [
+          "Planner / RuntimeRouter",
+          "Capacités et sélection réelle"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 0
+      },
+      {
+        "id": "kernels",
+        "title": "Calcul des opérations",
+        "lines": [
+          "Kernels CPU / GPU disponibles",
+          "Dérivées et mises à jour"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 1
+      },
+      {
+        "id": "storage",
+        "title": "Mémoire et persistance",
+        "lines": [
+          "Guards, allocateurs, scratch",
+          "RawFolder / SafeTensors"
+        ],
+        "tone": "orange",
+        "row": 3,
+        "col": 0
+      },
+      {
+        "id": "observation",
+        "title": "Observation",
+        "lines": [
+          "Snapshots et métriques",
+          "Viz / Htop / rapports"
+        ],
+        "tone": "purple",
+        "row": 3,
+        "col": 1
+      }
+    ],
+    "edges": [
+      {
+        "from": "pilot",
+        "to": "registry"
+      },
+      {
+        "from": "definition",
+        "to": "registry",
+        "label": "fabrique",
+        "style": "dashed"
+      },
+      {
+        "from": "registry",
+        "to": "model"
+      },
+      {
+        "from": "model",
+        "to": "routing"
+      },
+      {
+        "from": "routing",
+        "to": "kernels"
+      },
+      {
+        "from": "kernels",
+        "to": "storage",
+        "label": "buffers",
+        "style": "dashed"
+      },
+      {
+        "from": "model",
+        "to": "observation",
+        "label": "état",
+        "style": "dashed"
+      }
+    ],
+    "notes": [
+      "Les calculs des couches restent dans les runtimes ; Model orchestre leur exécution.",
+      "MPK est une voie de description alternative, expérimentale et partielle pour la production."
+    ],
+    "sources": [
+      "src/Model.hpp",
+      "src/runtimes/AbstractRuntime.hpp",
+      "src/runtimes/RuntimeRouter.hpp",
+      "src/Planning/Planner.hpp"
+    ],
+    "related_docs": [
+      "docs/00-Framework-Philosophy.md",
+      "docs/07-Devs/01-How-The-Framework-Works.md",
+      "docs/07-Devs/08-Architecture-Contract.md"
+    ]
+  },
+  {
+    "file": "02_component_map.svg",
+    "title": "Carte des composants",
+    "subtitle": "Identifier qui configure, qui décrit le graphe et qui effectue les calculs.",
+    "description": "Neuf repères du framework : CLI, contexte de scripting, configuration, registre, classes de modèles, runtimes, mémoire, checkpoints et observation. Les cartes représentent des responsabilités, pas un pipeline séquentiel.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "cli",
+        "title": "Lanceur et CLI",
+        "lines": [
+          "run_mimir.sh / main.cpp",
+          "Arguments et environnement"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "bridges",
+        "title": "Bridges de scripting",
+        "lines": [
+          "Lua de référence",
+          "Autres bridges selon couverture"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "config",
+        "title": "Configuration JSON",
+        "lines": [
+          "CONF, env, tâches et options",
+          "Reproductibilité des runs"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "registry",
+        "title": "Registre",
+        "lines": [
+          "defaultConfig / create",
+          "Fabriques C++ nommées"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "models",
+        "title": "Classes de modèles",
+        "lines": [
+          "Héritent de Model",
+          "Définissent les graphes DL"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "runtime",
+        "title": "Exécution et kernels",
+        "lines": [
+          "Planner, routeur, dispatcher",
+          "CPU et accélérateurs disponibles"
+        ],
+        "tone": "teal",
+        "row": 1,
+        "col": 2
+      },
+      {
+        "id": "memory",
+        "title": "Gestion mémoire",
+        "lines": [
+          "MemoryGuard et allocateurs",
+          "Stockage et temporaires"
+        ],
+        "tone": "orange",
+        "row": 2,
+        "col": 0
+      },
+      {
+        "id": "checkpoint",
+        "title": "Checkpoints",
+        "lines": [
+          "Poids et métadonnées",
+          "État optimiseur / tokenizer"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 1
+      },
+      {
+        "id": "monitor",
+        "title": "Observation",
+        "lines": [
+          "AsyncMonitor, Viz, Htop",
+          "Métriques et captures 3D"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 2
+      }
+    ],
+    "edges": [],
+    "notes": [
+      "Lua et JSON pilotent les classes natives ; la topologie n’est pas écrite dans les scripts.",
+      "MPK : description alternative expérimentale, pas une garantie d’exécution complète."
+    ],
+    "sources": [
+      "src/main.cpp",
+      "src/scriptings/ScriptingContext.hpp",
+      "src/Model.hpp",
+      "src/AsyncMonitor.hpp"
+    ],
+    "related_docs": [
+      "docs/00-Framework-Philosophy.md",
+      "docs/04-Architecture-Internals/01-Engine-Overview.md",
+      "docs/05-Advanced/04-Source-Code-Map.md"
+    ]
+  },
+  {
+    "file": "04_workflow_lua_json_cli.svg",
+    "title": "Workflow CLI, Lua et JSON",
+    "subtitle": "Plusieurs surfaces de pilotage, une définition native du graphe.",
+    "description": "Le lanceur transmet les arguments au script et injecte la configuration JSON. Le script sélectionne une architecture du registre, configure le run, charge éventuellement son checkpoint et appelle son exécution. Les couches sont définies par la classe C++.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "cli",
+        "title": "Commande CLI",
+        "lines": [
+          "run_mimir.sh / bin/mimir",
+          "--lua, --conf et arguments"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "lua",
+        "title": "Script de run",
+        "lines": [
+          "Préparation et orchestration",
+          "Appels Mimir.Model"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "json",
+        "title": "Configuration JSON",
+        "lines": [
+          "CONF, env et paramètres",
+          "Valeurs reproductibles"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "cpp",
+        "title": "Définition en C++",
+        "lines": [
+          "Classe dérivée de Model",
+          "Topologie et Config typée"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "registry",
+        "title": "Architecture choisie",
+        "lines": [
+          "Registre et fabrique",
+          "Instance du modèle natif"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "checkpoint",
+        "title": "Checkpoint du run",
+        "lines": [
+          "Topologie et poids compatibles",
+          "Tokenizer et état si présents"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 2
+      },
+      {
+        "id": "mpk",
+        "title": "Alternative MPK",
+        "lines": [
+          "Package de description",
+          "Prise en charge partielle"
+        ],
+        "tone": "orange",
+        "row": 2,
+        "col": 0,
+        "badge": "EXPÉRIMENTAL"
+      },
+      {
+        "id": "execute",
+        "title": "Exécution",
+        "lines": [
+          "Forward / validation / train",
+          "Routeur et runtimes"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 1
+      },
+      {
+        "id": "result",
+        "title": "Sorties et suivi",
+        "lines": [
+          "Métriques, logs et rapports",
+          "Checkpoints du même run"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 2
+      }
+    ],
+    "edges": [
+      {
+        "from": "cli",
+        "to": "lua"
+      },
+      {
+        "from": "json",
+        "to": "lua",
+        "label": "configuration"
+      },
+      {
+        "from": "lua",
+        "to": "registry",
+        "label": "sélection"
+      },
+      {
+        "from": "cpp",
+        "to": "registry"
+      },
+      {
+        "from": "checkpoint",
+        "to": "registry",
+        "label": "reprise"
+      },
+      {
+        "from": "mpk",
+        "to": "registry",
+        "label": "import",
+        "style": "dashed"
+      },
+      {
+        "from": "registry",
+        "to": "execute"
+      },
+      {
+        "from": "execute",
+        "to": "result"
+      }
+    ],
+    "notes": [
+      "Les paramètres structurels sont interprétés par le builder de la classe C++.",
+      "Un checkpoint restaure une architecture déjà définie ; MPK reste expérimental pour la production."
+    ],
+    "sources": [
+      "run_mimir.sh",
+      "src/main.cpp",
+      "src/scriptings/Lua/luaScripting/LuaScripting.cpp",
+      "scripts/modules/pipeline_api.lua"
+    ],
+    "related_docs": [
+      "README.md",
+      "docs/01-Getting-Started/03-CLI.md",
+      "docs/02-User-Guide/08-Config-Driven-Scripting.md"
+    ]
+  },
+  {
+    "file": "05_registry_taxonomy.svg",
+    "title": "Familles du registre",
+    "subtitle": "Les noms sont des entrées indépendantes ; leurs niveaux de complétude diffèrent.",
+    "description": "Exemples des familles natives présentes dans ModelArchitectures : MLP, NLP, vision, autoencodeurs, diffusion et GAN. Les composants HF, les métadonnées externes, SD3.5 placeholder et les imports MPK ne constituent pas tous des pipelines complets.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "mlp",
+        "title": "Régression",
+        "lines": [
+          "basic_mlp"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "nlp",
+        "title": "NLP",
+        "lines": [
+          "transformer • causal_lm • t5",
+          "T5 : encodeur + débruitage"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "vision",
+        "title": "Vision",
+        "lines": [
+          "vit • resnet • mobilenet",
+          "vgg16 • vgg19 • vgg16_feat",
+          "unet • medical_detector",
+          "patch_discriminator"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "vae",
+        "title": "Autoencodeurs",
+        "lines": [
+          "vae • vae_conv • vae_conv_decode",
+          "vae_text • vae_text_decode"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "diffusion",
+        "title": "Diffusion",
+        "lines": [
+          "diffusion • cond_diffusion",
+          "lumen_diffusion",
+          "Baselines et pipeline latent"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "gan",
+        "title": "GAN",
+        "lines": [
+          "gan_latent • Gan_Style",
+          "Latent ou image vers image"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 2
+      },
+      {
+        "id": "hf",
+        "title": "Composants HF",
+        "lines": [
+          "hf_clip_text_encoder_1",
+          "hf_clip_text_encoder_2",
+          "hf_vae_decoder",
+          "hf_sdxl_transformer_block"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 0,
+        "badge": "COMPOSANTS"
+      },
+      {
+        "id": "partial",
+        "title": "Entrées particulières",
+        "lines": [
+          "sd3_5 : placeholder",
+          "external_safetensors_base :",
+          "métadonnées de poids externes"
+        ],
+        "tone": "orange",
+        "row": 2,
+        "col": 1,
+        "badge": "PARTIEL"
+      },
+      {
+        "id": "mpk",
+        "title": "Packages MPK",
+        "lines": [
+          "Découverte sous _archi/",
+          "Ex. deeplab, r_cnn, ssd, yolo",
+          "Compatibilité à vérifier"
+        ],
+        "tone": "orange",
+        "row": 2,
+        "col": 2,
+        "badge": "EXPÉRIMENTAL"
+      }
+    ],
+    "edges": [],
+    "notes": [
+      "La présence dans le registre ne garantit ni qualité entraînée ni pipeline métier complet.",
+      "Les graphes natifs sont définis dans des classes C++ dérivées de Model. MPK n’est pas entièrement exploitable en production."
+    ],
+    "sources": [
+      "src/Models/Registry/ModelArchitectures.cpp",
+      "src/Models/NLP/T5Model.hpp",
+      "src/Models/Diffusion/SD35Model.hpp",
+      "scripts/modules/mpk.lua"
+    ],
+    "related_docs": [
+      "docs/03-API-Reference/11-Architectures.md",
+      "docs/00-PROJECT-STATUS.md",
+      "docs/08-Tuto/13-Tuto-Familles-De-Modeles.md"
+    ]
+  },
+  {
+    "file": "06_model_factory_flow.svg",
+    "title": "Ce que fait la fabrique",
+    "subtitle": "create construit la topologie native ; il n’alloue pas encore les poids.",
+    "description": "Le registre reçoit un nom et une configuration, trouve la fabrique de la classe dérivée et appelle sa construction C++. Il retourne une instance dont les noms, formes et tailles de paramètres sont décrits. Allocation et initialisation viennent ensuite.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "request",
+        "title": "Nom et configuration",
+        "lines": [
+          "Ex. basic_mlp / vae_conv",
+          "Valeurs fournies au registre"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "lookup",
+        "title": "Recherche au registre",
+        "lines": [
+          "Nom canonique ou alias",
+          "Configuration autorisée"
+        ],
+        "tone": "purple",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "factory",
+        "title": "Classe dérivée de Model",
+        "lines": [
+          "La fabrique crée l’instance",
+          "Appel buildFromConfig(Config)"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "instance",
+        "title": "Instance construite",
+        "lines": [
+          "Graphe disponible",
+          "Poids à allouer puis init/charger"
+        ],
+        "tone": "teal",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "metadata",
+        "title": "Métadonnées du graphe",
+        "lines": [
+          "Types et noms des tenseurs",
+          "Formes et params_count"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "builder",
+        "title": "Construction en C++",
+        "lines": [
+          "Couches et connexions nommées",
+          "Helper buildInto si nécessaire"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 2
+      }
+    ],
+    "edges": [
+      {
+        "from": "request",
+        "to": "lookup"
+      },
+      {
+        "from": "lookup",
+        "to": "factory"
+      },
+      {
+        "from": "factory",
+        "to": "builder"
+      },
+      {
+        "from": "builder",
+        "to": "metadata"
+      },
+      {
+        "from": "metadata",
+        "to": "instance"
+      }
+    ],
+    "notes": [
+      "Le registre instancie l’architecture choisie ; il ne connecte pas les différentes architectures entre elles.",
+      "Model.build() reste un appel de compatibilité : la construction moderne a déjà lieu lors de create."
+    ],
+    "sources": [
+      "src/Models/Registry/ModelArchitectures.cpp",
+      "src/Models/MLP/BasicMLPModel.hpp",
+      "src/Models/MLP/BasicMLPModel.cpp"
+    ],
+    "related_docs": [
+      "docs/04-Architecture-Internals/19-Models-Registry-And-Builders.md",
+      "docs/02-User-Guide/02-Model-Lifecycle.md",
+      "docs/07-Devs/08-Architecture-Contract.md"
+    ]
+  },
+  {
+    "file": "16_extension_points.svg",
+    "title": "Points d’extension",
+    "subtitle": "Chaque contribution relie définition, calcul, observation et vérification.",
+    "description": "Carte des responsabilités à étendre : classe native, type de couche, runtime, données, bridge, sérialisation, interface et validation. L’architecture hérite de Model ; les calculs restent dans les runtimes et leurs dispatchers.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "model",
+        "title": "Architecture native",
+        "lines": [
+          "Classe C++ : public Model",
+          "Config, graphe et registre"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "layer",
+        "title": "Type de couche",
+        "lines": [
+          "LayerType et géométrie",
+          "Contrat valeurs / gradients"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "runtime",
+        "title": "Runtime",
+        "lines": [
+          "Kernels et capacités",
+          "Dispatcher et RuntimeRouter"
+        ],
+        "tone": "teal",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "data",
+        "title": "Données et tokenizer",
+        "lines": [
+          "Formats, modalités et BPE",
+          "Entrées adaptées au modèle"
+        ],
+        "tone": "slate",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "bridge",
+        "title": "Bridge de scripting",
+        "lines": [
+          "Contexte et callbacks",
+          "Configuration et exécution"
+        ],
+        "tone": "slate",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "storage",
+        "title": "Sérialisation",
+        "lines": [
+          "Poids, formes et connexions",
+          "Reprise et compatibilité"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 2
+      },
+      {
+        "id": "viz",
+        "title": "Interfaces",
+        "lines": [
+          "Snapshots et métriques",
+          "Contrôles et rendu par backend"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 0
+      },
+      {
+        "id": "mpk",
+        "title": "Voie MPK",
+        "lines": [
+          "Description de graphe",
+          "Interopérabilité partielle"
+        ],
+        "tone": "orange",
+        "row": 2,
+        "col": 1,
+        "badge": "EXPÉRIMENTAL"
+      },
+      {
+        "id": "tests",
+        "title": "Vérification",
+        "lines": [
+          "Tests ciblés et négatifs",
+          "Parité, docs et exemples"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 2
+      }
+    ],
+    "edges": [],
+    "notes": [
+      "Pas de calcul tensoriel dans Layers.hpp ; les appels passent par le dispatcher et le routeur.",
+      "Vérifier sorties, gradients et poids après mise à jour ; une compilation GPU ne prouve pas son exécution."
+    ],
+    "sources": [
+      "src/LayerTypes.hpp",
+      "src/runtimes/RuntimeRouter.hpp",
+      "src/Serialization/Serialization.hpp",
+      "Tests/CMakeLists.txt"
+    ],
+    "related_docs": [
+      "docs/06-Contributing/03-Extending-Models-Runtimes-And-Features.md",
+      "docs/08-Tuto/05-Tuto-Ajouter-Op.md",
+      "docs/08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md"
+    ]
+  },
+  {
+    "file": "24_architecture_creation_flow.svg",
+    "title": "Créer et préparer une instance",
+    "subtitle": "De la configuration du run à un modèle natif prêt à être exécuté.",
+    "description": "Le script fournit un nom et des valeurs. Le registre résout la configuration et instancie une classe C++ dérivée de Model. Sa construction produit les couches, puis le run alloue les paramètres et choisit initialisation ou chargement avant le forward.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "request",
+        "title": "Nom et valeurs",
+        "lines": [
+          "Choix depuis Lua / JSON / CLI",
+          "Ex. basic_mlp + dimensions"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "config",
+        "title": "Configuration effective",
+        "lines": [
+          "Valeurs par défaut et overrides",
+          "Champs interprétés par le C++"
+        ],
+        "tone": "purple",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "registry",
+        "title": "Fabrique du registre",
+        "lines": [
+          "ModelArchitectures::create",
+          "Classe dérivée sélectionnée"
+        ],
+        "tone": "purple",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "model",
+        "title": "Instance native",
+        "lines": [
+          "Model et état du run",
+          "Aucune topologie écrite en Lua"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "graph",
+        "title": "Couches et connexions",
+        "lines": [
+          "Types, I/O et dimensions",
+          "Métadonnées des paramètres"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "build",
+        "title": "Construction C++",
+        "lines": [
+          "buildFromConfig / buildInto",
+          "Topologie dans la classe"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 2
+      },
+      {
+        "id": "allocate",
+        "title": "Allocation",
+        "lines": [
+          "allocate_params / allocateParams",
+          "Réservation des poids"
+        ],
+        "tone": "orange",
+        "row": 2,
+        "col": 0
+      },
+      {
+        "id": "weights",
+        "title": "Initialiser ou restaurer",
+        "lines": [
+          "Poids neufs : init_weights",
+          "Reprise : checkpoint compatible"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 1
+      },
+      {
+        "id": "execute",
+        "title": "Exécuter",
+        "lines": [
+          "Forward, validation ou train",
+          "Runtimes choisis par le routeur"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 2
+      }
+    ],
+    "edges": [
+      {
+        "from": "request",
+        "to": "config"
+      },
+      {
+        "from": "config",
+        "to": "registry"
+      },
+      {
+        "from": "registry",
+        "to": "build"
+      },
+      {
+        "from": "build",
+        "to": "graph"
+      },
+      {
+        "from": "graph",
+        "to": "model"
+      },
+      {
+        "from": "model",
+        "to": "allocate"
+      },
+      {
+        "from": "allocate",
+        "to": "weights"
+      },
+      {
+        "from": "weights",
+        "to": "execute"
+      }
+    ],
+    "notes": [
+      "Ne pas réinitialiser les poids après chargement d’un checkpoint.",
+      "MPK est l’alternative de description expérimentale ; il n’est pas un chemin entièrement validé en production."
+    ],
+    "sources": [
+      "src/Models/Registry/ModelArchitectures.cpp",
+      "src/Models/MLP/BasicMLPModel.cpp",
+      "src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp"
+    ],
+    "related_docs": [
+      "docs/04-Architecture-Internals/19-Models-Registry-And-Builders.md",
+      "docs/08-Tuto/02-Tuto-Ajouter-Modele.md",
+      "docs/07-Devs/08-Architecture-Contract.md"
+    ]
+  },
+  {
+    "file": "26_lua_json_inspection.svg",
+    "title": "Quand utiliser Lua, JSON et l’inspection",
+    "subtitle": "Configurer ou observer un modèle n’est pas définir son architecture.",
+    "description": "Lua sert à orchestrer le run ; JSON conserve ses valeurs de configuration. Les outils d’inspection lisent le registre, les capacités et les métadonnées de checkpoints. La définition du graphe demeure en C++ ou dans un MPK expérimental.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "lua",
+        "title": "Lua : orchestrer",
+        "lines": [
+          "Arguments et préparation",
+          "Créer un modèle du registre",
+          "Entraîner, valider, inférer"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "json",
+        "title": "JSON : reproduire",
+        "lines": [
+          "Architecture sélectionnée",
+          "Paramètres, env et tâches",
+          "Même configuration de run"
+        ],
+        "tone": "slate",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "inspection",
+        "title": "Inspection : expliquer",
+        "lines": [
+          "Entrées du registre",
+          "Types et capacités déclarés",
+          "Paramètres et couches"
+        ],
+        "tone": "purple",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "native",
+        "title": "Graphe natif",
+        "lines": [
+          "Classe C++ : public Model",
+          "Couches et connexions",
+          "Config structurelle autorisée"
+        ],
+        "tone": "blue",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "state",
+        "title": "État du run",
+        "lines": [
+          "Poids et état optimiseur",
+          "Tokenizer compatible",
+          "Checkpoint à conserver entier"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "reports",
+        "title": "Analyser des sorties",
+        "lines": [
+          "analyze_model : checkpoint",
+          "show-graph : métriques CSV",
+          "Graphe et rapport du même run"
+        ],
+        "tone": "teal",
+        "row": 1,
+        "col": 2
+      }
+    ],
+    "edges": [],
+    "notes": [
+      "Ni Lua ni JSON ne sont des langages de définition du graphe DL.",
+      "MPK est une description alternative expérimentale, encore partielle pour la production.",
+      "Une capacité déclarée par type ne prouve pas le backend réellement choisi pour une opération."
+    ],
+    "sources": [
+      "scripts/modules/pipeline_api.lua",
+      "src/main.cpp",
+      "scripts/tools/inspect_architectures.lua",
+      "scripts/tools/analyze_model.lua"
+    ],
+    "related_docs": [
+      "docs/02-User-Guide/08-Config-Driven-Scripting.md",
+      "docs/03-API-Reference/18-Layers-Module.md",
+      "docs/08-Tuto/17-Tuto-Scripting-Exports-Tests-Contribution.md"
+    ]
+  },
+  {
+    "file": "28_publication_plate.svg",
+    "title": "De la contribution à la documentation publiée",
+    "subtitle": "Relier sources, preuves, schémas et publication du wiki.",
+    "description": "Parcours de contribution : modifier les sources dans leur couche de responsabilité, vérifier les résultats et les limites, actualiser les pages et schémas, exécuter les contrôles locaux et la CI, puis publier après revue. Le workflow wiki copie les pages et ressources lors des pushes concernés.",
+    "columns": 3,
+    "nodes": [
+      {
+        "id": "change",
+        "title": "Modifier les sources",
+        "lines": [
+          "Classe C++ / runtime / interface",
+          "Périmètre de changement explicite"
+        ],
+        "tone": "blue",
+        "row": 0,
+        "col": 0
+      },
+      {
+        "id": "contract",
+        "title": "Préserver les contrats",
+        "lines": [
+          "Architecture dérivée de Model",
+          "Routage et compatibilité"
+        ],
+        "tone": "purple",
+        "row": 0,
+        "col": 1
+      },
+      {
+        "id": "tests",
+        "title": "Tests ciblés",
+        "lines": [
+          "Sorties, gradients, checkpoints",
+          "Backend effectif si matériel"
+        ],
+        "tone": "teal",
+        "row": 0,
+        "col": 2
+      },
+      {
+        "id": "local",
+        "title": "Contrôles locaux",
+        "lines": [
+          "Liens, API et git diff --check",
+          "Commandes exécutables"
+        ],
+        "tone": "teal",
+        "row": 1,
+        "col": 0
+      },
+      {
+        "id": "diagrams",
+        "title": "Schémas reproductibles",
+        "lines": [
+          "Contexte et sources traçables",
+          "SVG lisibles, sans vieux dumps"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 1
+      },
+      {
+        "id": "docs",
+        "title": "Documenter les résultats",
+        "lines": [
+          "Prérequis, étapes et vérifications",
+          "Limites et statuts expérimentaux"
+        ],
+        "tone": "purple",
+        "row": 1,
+        "col": 2
+      },
+      {
+        "id": "review",
+        "title": "Revue et CI",
+        "lines": [
+          "Tests adaptés au changement",
+          "Résultats par configuration"
+        ],
+        "tone": "teal",
+        "row": 2,
+        "col": 0
+      },
+      {
+        "id": "push",
+        "title": "Fusion et push",
+        "lines": [
+          "Branches main / develop",
+          "Déclencheurs de publication"
+        ],
+        "tone": "slate",
+        "row": 2,
+        "col": 1
+      },
+      {
+        "id": "wiki",
+        "title": "Wiki et ressources",
+        "lines": [
+          "Pages, liens et illustrations",
+          "Workflow publish-wiki"
+        ],
+        "tone": "purple",
+        "row": 2,
+        "col": 2
+      }
+    ],
+    "edges": [
+      {
+        "from": "change",
+        "to": "contract"
+      },
+      {
+        "from": "contract",
+        "to": "tests"
+      },
+      {
+        "from": "tests",
+        "to": "docs"
+      },
+      {
+        "from": "docs",
+        "to": "diagrams"
+      },
+      {
+        "from": "diagrams",
+        "to": "local"
+      },
+      {
+        "from": "local",
+        "to": "review"
+      },
+      {
+        "from": "review",
+        "to": "push"
+      },
+      {
+        "from": "push",
+        "to": "wiki"
+      }
+    ],
+    "notes": [
+      "Un test ignoré faute de device ne constitue pas une preuve GPU. Les statuts partiels doivent rester visibles.",
+      "MPK est expérimental et pas entièrement exploitable en production ; les schémas suivent le même contrat que les pages."
+    ],
+    "sources": [
+      ".github/workflows/unit-tests.yml",
+      ".github/workflows/wiki.yml",
+      "scripts/tools/verify_docs.py",
+      "scripts/tools/verify_api_sync.sh"
+    ],
+    "related_docs": [
+      "docs/06-Contributing/01-Contributing.md",
+      "docs/08-Tuto/17-Tuto-Scripting-Exports-Tests-Contribution.md",
+      "docs/00-STYLE.md"
+    ]
+  }
+]

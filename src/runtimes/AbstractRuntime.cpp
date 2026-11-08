@@ -4,11 +4,15 @@
 
 #include "Layers.hpp"
 #include "runtimes/RuntimeRouter.hpp"
+#include "runtimes/LayerOps.hpp"
+#include "runtimes/ConvolutionND.hpp"
+#include "runtimes/CausalSequenceGeometry.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <climits>
+#include <limits>
 #include <cmath>
 #include <cstring>
 
@@ -116,9 +120,10 @@ bool AbstractRuntime::forwardLayerWithContext(
     if (context.output_mask) context.output_mask->clear();
     const bool sample = training && (layer.type_enum != LayerType::Reparameterize || context.stochastic_latent);
     if (!forwardLayer(inputs, outputs, layer, sample)) return false;
-    if ((layer.type_enum == LayerType::Conv2d || layer.type_enum == LayerType::ConvTranspose2d) &&
+    if ((layer.type_enum == LayerType::Conv2d || layer.type_enum == LayerType::ConvTranspose2d ||
+         layer.type_enum == LayerType::Conv3d || layer.type_enum == LayerType::Conv4d) &&
         layer.activation != ActivationType::NONE && !outputs.empty())
-        Activation::apply_inplace(outputs[0], layer.activation, layer.activation_param);
+        RuntimeLayerOps::computeActivation(outputs[0], layer.activation, layer.activation_param);
     return true;
 }
 
@@ -143,7 +148,8 @@ bool AbstractRuntime::backwardLayerWithContext(
     } else if ((dropout || layer.type_enum == LayerType::Reparameterize) && context.output) {
         saved_inputs.push_back(context.output);
     }
-    if ((layer.type_enum == LayerType::Conv2d || layer.type_enum == LayerType::ConvTranspose2d) &&
+    if ((layer.type_enum == LayerType::Conv2d || layer.type_enum == LayerType::ConvTranspose2d ||
+         layer.type_enum == LayerType::Conv3d || layer.type_enum == LayerType::Conv4d) &&
         layer.activation != ActivationType::NONE) {
         if (gradients.empty() || !gradients[0]) return false;
         gated_gradient = *gradients[0];
@@ -310,6 +316,29 @@ RuntimeCapabilityLevel AbstractRuntime::queryConfiguredForwardOperationCapabilit
                     meets(work, config_.linear_min_ops)
                 ? capability : RuntimeCapabilityLevel::Unsupported;
         }
+        case LayerType::CausalDepthwiseConv1d: {
+            if (!config_.conv_enabled) return RuntimeCapabilityLevel::Unsupported;
+            try {
+                const auto geometry = RuntimeCausalSequence::checkedGeometry(layer, first.size());
+                const auto work = static_cast<long long>(std::min<size_t>(geometry.value_count,
+                    std::numeric_limits<long long>::max() / static_cast<size_t>(geometry.kernel))) * geometry.kernel;
+                return has_weights(geometry.parameter_size) && meets(work, config_.conv_min_ops)
+                    ? capability : RuntimeCapabilityLevel::Unsupported;
+            } catch (...) { return RuntimeCapabilityLevel::Unsupported; }
+        }
+        case LayerType::Conv3d:
+        case LayerType::Conv4d: {
+            if (!config_.conv_enabled) return RuntimeCapabilityLevel::Unsupported;
+            try {
+                const auto geometry = RuntimeConvolutionND::checkedGeometry(layer, first.size());
+                const auto work = static_cast<long long>(std::min<size_t>(
+                    geometry.output_size, std::numeric_limits<long long>::max() /
+                    std::max<size_t>(1, geometry.weight_size / geometry.out_channels))) *
+                    static_cast<long long>(geometry.weight_size / geometry.out_channels);
+                return has_weights(geometry.parameter_size) && meets(work, config_.conv_min_ops)
+                    ? capability : RuntimeCapabilityLevel::Unsupported;
+            } catch (...) { return RuntimeCapabilityLevel::Unsupported; }
+        }
         case LayerType::Conv2d:
         case LayerType::ConvTranspose2d: {
             if (!config_.conv_enabled) return RuntimeCapabilityLevel::Unsupported;
@@ -378,6 +407,7 @@ RuntimeCapabilityLevel AbstractRuntime::queryConfiguredForwardOperationCapabilit
         case LayerType::Add:
         case LayerType::Subtract:
         case LayerType::Multiply:
+        case LayerType::SwiGLU:
         case LayerType::Divide:
             if ((elementwise_requires_linear_flag && !config_.linear_enabled) ||
                 inputs.size() < 2 || !inputs[1] || first.empty() ||

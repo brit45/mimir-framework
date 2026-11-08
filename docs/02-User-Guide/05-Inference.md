@@ -33,8 +33,8 @@ Points importants:
 
 Dans la plupart des scripts, on configure d’abord:
 
-- `Mimir.MemoryGuard.setLimit(gb)` (protection OOM)
-- `Mimir.Allocator.configure({ max_ram_gb=..., enable_compression=true, swap_strategy="lru" })`
+- `Mimir.MemoryGuard.setLimit(gio)` (protection OOM)
+- `Mimir.Allocator.configure({ max_ram_gb=..., enable_compression=true })`
 - `Mimir.Model.set_hardware(true)` (si dispo)
 
 Exemples: `scripts/examples/example_conf_inference.lua`, `scripts/inferences/hf_vae_decoder_infer.lua`.
@@ -48,7 +48,6 @@ pcall(Mimir.Allocator.configure, {
 
   max_ram_gb = 10.0,
   enable_compression = true,
-  swap_strategy = "lru",
 })
 pcall(Mimir.Model.set_hardware, true)
 
@@ -75,7 +74,9 @@ end
 -- 5) Forward (inférence)
 local ids = {}
 for i = 1, cfg.seq_len do ids[i] = 1 end
-local out, ferr = Mimir.Model.forward({ __input__ = ids }, false)
+local neutral = {}
+for i = 1, cfg.d_model do neutral[i] = 0.0 end
+local out, ferr = Mimir.Model.forward({__input__ = ids, mag = neutral, mod = neutral}, false)
 assert(out, ferr)
 print("out_len=", #out)
 ```
@@ -98,10 +99,24 @@ Pour des Transformers causaux (GPT-style):
 - le framework peut exécuter un forward causal (`causal=true` côté config)
 - une génération “token par token” performante nécessite généralement un **KV-cache** (prefill + decode)
 
-Dans l’état actuel, les scripts de démo montrent surtout:
+Le chemin natif fourni est `scripts/inferences/causal_lm_generate.lua`. Il
+reconstruit `causal_lm` depuis les métadonnées de son checkpoint RawFolder ou
+SafeTensors natif, charge le tokenizer associé et appelle les fonctions
+`Mimir.Model.causal_lm_generate` ou `causal_lm_chat`.
 
-- la construction/inférence via config (`scripts/examples/example_conf_inference.lua`)
-- un chemin legacy `Mimir.Model.infer(prompt)`
+```bash
+./run_mimir.sh --lua scripts/inferences/causal_lm_generate.lua -- \
+  --checkpoint checkpoints/causal_demo/final \
+  --prompt "Explique la différence entre hypothèse et preuve." \
+  --max-new-tokens 64 --temperature 0.8
+```
+
+Le prompt est transmis complet, ou lu avec `--prompt-file`. La longueur du
+graphe s'adapte au contexte et au budget de nouveaux tokens, sans plafond égal
+à la fenêtre d'entraînement. Il n'y a pas encore de KV-cache : chaque token
+recalcule le forward et le coût augmente avec la longueur. Le
+[guide causal](12-Transformer-GPT.md#générer-du-texte) décrit le chat, sa mémoire,
+les balises et l'arrêt EOS.
 
 ### `Mimir.Model.infer(prompt)` (legacy)
 

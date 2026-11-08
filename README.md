@@ -14,13 +14,19 @@
 | `develop` | [![unit-tests develop](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/unit-tests.yml) | [![publish-wiki develop](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml/badge.svg?branch=develop)](https://github.com/brit45/mimir-framework/actions/workflows/wiki.yml) |
 
 Version engine : **3.6.0**
-Révision documentation : **2026-10-24**
+Révision documentation : **2026-11-08**
 
 Consultez d'abord l'[état réel du projet](./docs/00-PROJECT-STATUS.md) : cette
 page distingue les chemins stables, partiels, expérimentaux, placeholders et
 matériels testés dans le checkout courant.
 
 **Mímir est un AI Engine C++ de conception, d'entraînement et d'analyse de systèmes IA, pilotable par Lua ou JSON, avec runtime, mémoire, dataset, visualisation et sérialisation intégrés, dans une approche CPU-first orientée recherche et expérimentation.**
+
+Les architectures DL sont définies en C/C++ dans une classe dérivée de `Model`.
+Lua et JSON servent à les configurer et à les exécuter. MPK est l’autre voie de
+description, encore expérimentale et pas entièrement exploitable en production.
+Consultez le [contrat des architectures](./docs/07-Devs/08-Architecture-Contract.md)
+et les [tutoriels du niveau débutant à l’expertise moteur](./docs/08-Tuto/00-INDEX.md).
 
 ---
 
@@ -32,7 +38,9 @@ Points clés:
 
 - AI engine de graphes autonome (runtime + mémoire + planner),
 - registre central d'architectures (vision, NLP, diffusion),
+- [18 primitives issues de Primer](./docs/04-Architecture-Internals/14-Layers-And-Ops.md), dont `SquaredReLU`, les réductions et les masques triangulaires, avec gradients et routage CPU/Vulkan/OpenCL,
 - outillage intégré (datasets, Viz SFML/Qt/GTK/Web, sérialisation, benchmarks),
+- [projection 3D interactive des poids et activations](./docs/02-User-Guide/18-Projection-3D.md), commune aux architectures natives et aux graphes personnalisés,
 - approche orientée expérimentation et inspection interne des modèles.
 
 ---
@@ -42,11 +50,17 @@ Points clés:
 Mímir is a **CPU-first C++ AI Engine**.
 You define model architectures in C++, then orchestrate training/inference with Lua scripts or JSON-driven runs.
 
+Native DL architectures must inherit from `Model`. The alternative MPK format
+is experimental and not yet fully usable in production. Scripts configure and
+run architectures; they do not define the DL graph.
+
 Core strengths:
 
 - autonomous AI runtime and graph execution core,
 - architecture registry (vision, NLP, diffusion),
+- [18 Primer-inspired primitives](./docs/04-Architecture-Internals/14-Layers-And-Ops.md), including `SquaredReLU`, reductions and triangular masks, with gradients and CPU/Vulkan/OpenCL routing,
 - built-in tooling (datasets, visualization, serialization, benchmarking),
+- [interactive 3D projections of model weights and activations](./docs/02-User-Guide/18-Projection-3D.md), shared by native architectures and custom graphs,
 - research-focused workflow for fast experimentation and deep inspection.
 
 ---
@@ -127,7 +141,7 @@ cmake --build build --parallel 2
 ./bin/mimir --lua scripts/tests/test_serialization_smoke.lua
 
 # 5) Premier modèle
-./bin/mimir --lua scripts/templates/template_new_model.lua
+./run_mimir.sh --lua scripts/examples/inspect_vae_conv.lua
 ```
 
 #### Variante Docker Compose (Alpine)
@@ -158,10 +172,10 @@ plus bas.
 
 Notes rapides sur `config.sh`:
 
-- Script Linux (Debian/Ubuntu) qui installe les dependances et configure CMake dans `build/`.
+- Script Bash qui détecte l’OS et le gestionnaire de paquets, propose les dépendances et configure CMake. Le support détecté ne remplace pas une compilation validée sur chaque plateforme.
 - Options : `--gui QT`, `--build-type Debug`, `--enable MIMIR_ENABLE_TESTS`,
   `--disable ENABLE_VULKAN`, `--disable ENABLE_OPENCL` et `--non-interactive`.
-- `--skip-system-deps` omet apt/sudo seulement lorsque les dépendances sont déjà installées.
+- `--skip-system-deps` omet l’installation système lorsque les dépendances sont déjà présentes.
 - Voir la doc detaillee: `docs/01-Getting-Started/02-Installation.md`.
 
 Notes scripts Lua (cross-plateforme):
@@ -345,7 +359,8 @@ Si la tâche est introuvable, mimir liste les tâches disponibles avec leur desc
 
 #### JSON Schema (`--conf`)
 
-Le fichier `configs/conf.schema.json` documente toutes les sections acceptées :
+Le fichier `configs/conf.schema.json` décrit les principales sections communes ;
+les scripts spécialisés définissent leurs champs supplémentaires :
 
 | Section | Rôle |
 |---|---|
@@ -386,12 +401,13 @@ Le registre inclut notamment:
 - VGG16 / VGG19
 - MobileNet
 - GAN Latent
-- Transformer
+- Transformer, CausalLM, T5 encodeur et VAEText
 - Diffusion / Conditional Diffusion
-- SDXL
-- CLIP
-- modèles HuggingFace
-- modèles externes SafeTensors
+- composants HF/SDXL : `hf_sdxl_transformer_block`, `hf_clip_text_encoder_1/2`, `hf_vae_decoder`
+- introspection externe : `external_safetensors_base` (pas un modèle autonome)
+
+Ces noms ne désignent pas tous un pipeline complet. Les statuts et limites
+figurent dans [l’inventaire des architectures](docs/00-PROJECT-STATUS.md#architectures).
 
 ---
 
@@ -400,7 +416,7 @@ Le registre inclut notamment:
 Capacités clés:
 
 - OpenMP
-- SIMD / AVX2 / FMA
+- dispatch SIMD à l’exécution : scalaire, SSE2, AVX/256, AVX2, AVX-512 et variantes FMA/F16C selon le chemin
 - détection matérielle au démarrage
 - dispatch CPU optimisé
 - backends CUDA / ROCm (optionnels, en évolution)
@@ -492,7 +508,9 @@ Fonctions Viz actuelles:
 - barre de progression globale (epochs) + barre dédiée batch courant (sous la globale),
 - couleur de la barre batch pilotée par `batch_time_ms` (rapide=vert, plus lent=orange/rouge),
 - graphe nodal interactif du modèle (`N`) avec export PNG complet (`X`), et export de snapshots configurables (`E`),
-- vue du graphe du modèle et du planner dans HTOP (`G`).
+- vue du graphe du modèle et du planner dans HTOP (`G`),
+- gestionnaire de sections par clic droit, pour rouvrir un panneau fermé,
+- [vues 3D génériques](docs/02-User-Guide/18-Projection-3D.md) : poids/activations, corrélations, neurones et poids actifs, actualisation optionnelle en temps réel et export PNG/JSON/HTML.
 
 Les connexions du graphe sont routées en lignes orthogonales distinctes :
 les embranchements ont des rails dédiés, les connexions simples alignées
@@ -536,7 +554,7 @@ Prérequis principaux:
 - CMake 3.15+
 - compilateur C++17
 - Lua 5.3+
-- OpenMP
+- OpenMP optionnel
 
 Build rapide:
 
@@ -552,7 +570,7 @@ cmake --build build -j
 Exemple avec options:
 
 ```bash
-WORKROOT=/home/user/tensor-2 ENABLE_VULKAN=1 ENABLE_OPENCL=1 ./config.sh
+./config.sh --enable ENABLE_VULKAN --enable ENABLE_OPENCL
 ```
 
 Installation détaillée (Linux/macOS/Windows, options CMake, troubleshooting):

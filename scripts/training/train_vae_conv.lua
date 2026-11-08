@@ -38,6 +38,18 @@ local function opt_bool(k, d)
   return d
 end
 
+local function normalize_conv_mode(value)
+  if value == nil then return "2d" end
+  local mode = tostring(value):lower():match("^%s*(.-)%s*$")
+  local aliases = { ["2"] = "2d", ["3"] = "3d", ["4"] = "4d",
+    conv2d = "2d", conv3d = "3d", conv4d = "4d" }
+  mode = aliases[mode] or mode
+  if mode ~= "2d" and mode ~= "3d" and mode ~= "4d" then
+    error("--conv-mode invalide: " .. tostring(value) .. " (attendu: 2d | 3d | 4d)")
+  end
+  return mode
+end
+
 local BaseTok = dofile(ROOTWORK.."/scripts/modules/base_tokenizer.lua")
 
 local function assert_ok(ok, err, msg)
@@ -167,6 +179,7 @@ local default_out_dir = "checkpoint/vae_conv_512_latent-64-64-32_base-64"
 local out_dir = opt_str("out-dir", conf_training.out_dir or default_out_dir)
 local output_model_dir = opt_str("output-model", opt_str("output_model", ""))
 local save_out_dir = ((output_model_dir ~= nil) and (output_model_dir ~= "")) and output_model_dir or out_dir
+local final_checkpoint_dir = FS.join(save_out_dir, "final")
 local RESUME = opt_bool("resume", conf_training.resume or false)
 local epochs = opt_int("epochs", conf_training.num_epochs or 100)
 local lr = opt_num("lr", conf_training.learning_rate or 3e-5)
@@ -206,6 +219,32 @@ for key, value in pairs(conf_training) do
   cfg[key] = value
 end
 cfg.resume = RESUME
+
+-- Le rang des convolutions appartient à la topologie sérialisée. Un ancien
+-- checkpoint sans cette clé reste en 2D, même si de nouveaux défauts changent.
+do
+  local saved = resume_architecture and resume_architecture.model_config
+  local saved_mode = saved and normalize_conv_mode(saved.conv_mode or "2d") or nil
+  local sources = {
+    { "CONF.model.conv_mode", conf_model.conv_mode },
+    { "CONF.training.conv_mode", conf_training.conv_mode },
+    { "--conv_mode", opts["conv_mode"] },
+    { "--conv-mode", opts["conv-mode"] },
+  }
+  local selected = normalize_conv_mode(cfg.conv_mode or "2d")
+  for _, source in ipairs(sources) do
+    if source[2] ~= nil then
+      local value = normalize_conv_mode(source[2])
+      if saved_mode and value ~= saved_mode then
+        error("Topologie convolutionnelle incompatible avec le checkpoint: " .. source[1] ..
+          "=" .. value .. ", checkpoint=" .. saved_mode ..
+          "; utiliser un nouveau dossier et --resume false pour changer --conv-mode.")
+      end
+      selected = value
+    end
+  end
+  cfg.conv_mode = saved_mode or selected
+end
 
 -- Un checkpoint legacy peut annoncer `dec_norm=groupnorm` dans model_config
 -- alors que son graphe sérialisé ne contient aucune couche de normalisation.
@@ -303,6 +342,11 @@ do
       "Upsampling décodeur invalide: " .. tostring(cfg.decoder_upsample) ..
       " (attendu: nearest_conv, bilinear_conv, pixel_shuffle ou conv_transpose)"
     )
+  end
+  -- Aucune convolution transposée ND n'est utilisée. Le graphe natif conserve
+  -- l'upsampling image 2D puis applique une convolution ND à axes singleton.
+  if cfg.conv_mode ~= "2d" and cfg.decoder_upsample == "conv_transpose" then
+    cfg.decoder_upsample = "nearest_conv"
   end
 end
 
@@ -541,6 +585,29 @@ cfg.stochastic_latent = opt_bool(
   )
 )
 
+-- An affine variance head can adjust uncertainty independently of centered
+-- features. Preserve the exact old weight layout on checkpoint resume.
+do
+  local saved = resume_architecture and resume_architecture.model_config
+  local saved_bias = saved and saved.logvar_head_bias == true or false
+  for _, layer in ipairs(resume_architecture and resume_architecture.layers or {}) do
+    if layer.name == "vae_conv/enc/logvar" and layer.use_bias ~= nil then
+      saved_bias = layer.use_bias == true
+      break
+    end
+  end
+  local default = conf_training.logvar_head_bias
+  if default == nil then default = conf_model.logvar_head_bias end
+  if default == nil then default = true end
+  if saved then default = saved_bias end
+  local selected = opt_bool("logvar-head-bias", opt_bool("logvar_head_bias", default))
+  if saved and (opts["logvar-head-bias"] ~= nil or opts.logvar_head_bias ~= nil) and selected ~= saved_bias then
+    error("Topologie logvar incompatible avec le checkpoint: --logvar-head-bias; " ..
+      "utiliser un nouveau dossier et --resume false pour modifier la tête de variance.")
+  end
+  cfg.logvar_head_bias = selected
+end
+
 -- Texte (optionnel)
 cfg.text_cond = opt_bool("text-cond", cfg.text_cond or false)
 cfg.seq_len = opt_int("seq-len", cfg.seq_len or 64)
@@ -658,11 +725,11 @@ cfg.kl_warmup_steps = opt_int(
   opt_int("kl-warmup", opt_int("kl_warmup", cfg.kl_warmup_steps or 900))
 )
 
--- Auto-sécurité: si l'utilisateur n'a pas explicitement fixé stochastic_latent
--- et qu'on entraîne avec KL>0, un latent déterministe a de fortes chances de
--- collaps-er (mu→0) et le décodeur "ignore" l'information.
--- En resume, on évite de changer ce comportement implicitement.
-if stochastic_opt_absent and (not resume_dir_hint) and ((cfg.kl_beta or 0) > 0) then
+-- New VAE runs sample the posterior even when the KL weight is zero: the
+-- reconstruction must still train logvar. Explicit deterministic settings and
+-- the sampling policy of resumed checkpoints remain authoritative.
+if stochastic_opt_absent and (not resume_dir_hint) and
+    conf_model.stochastic_latent == nil and conf_training.stochastic_latent == nil then
   cfg.stochastic_latent = true
 end
 
@@ -986,11 +1053,10 @@ if ok_train == false and tostring(err_train) == "STOP_REQUESTED" then
   if not last_dir and Ckpt and Ckpt.resolve_dir then
     last_dir = Ckpt.resolve_dir(save_out_dir)
   end
-  if not last_dir then
-    last_dir = save_out_dir
+  if not last_dir or not FS.file_exists(FS.join(last_dir, "manifest.json")) then
+    last_dir = final_checkpoint_dir
   end
 
-  FS.mkdir_p(last_dir)
   local ok_save_stop, err_save_stop = Mimir.Serialization.save(last_dir, "raw_folder", {
     save_optimizer = true,
     save_tokenizer = cfg.text_cond,
@@ -1083,7 +1149,9 @@ do
   log("✓ SafeTensors écrit: " .. st_path)
 end
 
-local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
+-- La racine contient aussi CSV, epochs et exports : seul final/ est remplacé
+-- atomiquement, afin de conserver tous les autres artefacts de ce run.
+local ok_save, err_save = Mimir.Serialization.save(final_checkpoint_dir, "raw_folder", {
   save_optimizer = true,
   save_tokenizer = false,
   save_encoder = false,
@@ -1096,4 +1164,4 @@ local ok_save, err_save = Mimir.Serialization.save(save_out_dir, "raw_folder", {
 })
 assert_ok(ok_save, err_save, "Serialization.save failed")
 
-log("✓ Checkpoint écrit: " .. save_out_dir)
+log("✓ Checkpoint écrit: " .. final_checkpoint_dir)

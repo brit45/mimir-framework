@@ -1,7 +1,8 @@
 #ifndef __HARDWARE_OPT_HPP__
 #define __HARDWARE_OPT_HPP__
 
-#include <immintrin.h>  // AVX2, FMA, F16C, BMI
+#include "SimdDispatch.hpp"
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -34,93 +35,13 @@ inline int matmul_workers(size_t rows,size_t columns,size_t reduction) {
 #define MIMIR_RESTRICT __restrict__
 #endif
 
-// Conversion FP32 -> FP16 avec F16C
-inline void fp32_to_fp16_f16c(uint16_t* dst, const float* src, size_t count) {
-#ifdef __F16C__
-    // Parallélisation OpenMP pour grandes conversions (>1024 éléments)
-    size_t vec_count = (count / 8) * 8; // Nombre d'éléments vectorisés
-    for (size_t i = 0; i < vec_count; i += 8) {
-        __m256 f32 = _mm256_loadu_ps(&src[i]);
-        __m128i f16 = _mm256_cvtps_ph(f32, _MM_FROUND_TO_NEAREST_INT);
-        _mm_storeu_si128((__m128i*)&dst[i], f16);
-    }
-    // Remaining elements (séquentiel)
-    for (size_t i = vec_count; i < count; ++i) {
-        __m128 f32 = _mm_set_ss(src[i]);
-        __m128i f16 = _mm_cvtps_ph(f32, _MM_FROUND_TO_NEAREST_INT);
-        dst[i] = _mm_extract_epi16(f16, 0);
-    }
-#else
-    for (size_t i = 0; i < count; ++i) {
-        uint32_t bits;
-        std::memcpy(&bits, src + i, sizeof(bits));
-        const uint32_t sign = (bits >> 16) & 0x8000u;
-        const uint32_t exponent = (bits >> 23) & 0xffu;
-        uint32_t mantissa = bits & 0x7fffffu;
-        if (exponent == 255) {
-            dst[i] = static_cast<uint16_t>(sign | 0x7c00u | (mantissa ? 0x200u : 0));
-            continue;
-        }
-        const int half_exponent = static_cast<int>(exponent) - 112;
-        if (half_exponent >= 31) {
-            dst[i] = static_cast<uint16_t>(sign | 0x7c00u);
-        } else if (half_exponent <= 0) {
-            if (half_exponent < -10) {
-                dst[i] = static_cast<uint16_t>(sign);
-                continue;
-            }
-            mantissa |= 0x800000u;
-            const unsigned shift = static_cast<unsigned>(14 - half_exponent);
-            const uint32_t rounded = (mantissa + ((1u << (shift - 1)) - 1u)
-                                      + ((mantissa >> shift) & 1u)) >> shift;
-            dst[i] = static_cast<uint16_t>(sign | rounded);
-        } else {
-            // Round to nearest, ties to even; carry may promote the exponent.
-            const uint32_t rounded = (mantissa + 0xfffu + ((mantissa >> 13) & 1u)) >> 13;
-            dst[i] = static_cast<uint16_t>(sign | ((static_cast<uint32_t>(half_exponent) << 10) + rounded));
-        }
-    }
-#endif
+// Legacy names remain source compatible; ISA-specific code lives in the
+// multiversioned dispatcher, never in a globally AVX-compiled header.
+inline void fp32_to_fp16_f16c(uint16_t* dst,const float* src,size_t count) {
+    RuntimeSimd::fp32ToFp16(dst,src,count);
 }
-
-// Conversion FP16 -> FP32 avec F16C
-inline void fp16_to_fp32_f16c(float* dst, const uint16_t* src, size_t count) {
-#ifdef __F16C__
-    // Parallélisation OpenMP pour grandes conversions
-    size_t vec_count = (count / 8) * 8; // Nombre d'éléments vectorisés
-    for (size_t i = 0; i < vec_count; i += 8) {
-        __m128i f16 = _mm_loadu_si128((__m128i*)&src[i]);
-        __m256 f32 = _mm256_cvtph_ps(f16);
-        _mm256_storeu_ps(&dst[i], f32);
-    }
-    // Remaining elements (séquentiel)
-    for (size_t i = vec_count; i < count; ++i) {
-        __m128i f16 = _mm_set1_epi16(src[i]);
-        __m128 f32 = _mm_cvtph_ps(f16);
-        dst[i] = _mm_cvtss_f32(f32);
-    }
-#else
-    for (size_t i = 0; i < count; ++i) {
-        const uint32_t half = src[i];
-        const uint32_t sign = (half & 0x8000u) << 16;
-        const uint32_t exponent = (half >> 10) & 31u;
-        uint32_t mantissa = half & 0x3ffu;
-        uint32_t bits;
-        if (exponent == 0) {
-            bits = sign;
-            if (mantissa) {
-                int unbiased = -14;
-                while ((mantissa & 0x400u) == 0) { mantissa <<= 1; --unbiased; }
-                bits |= (static_cast<uint32_t>(unbiased + 127) << 23) | ((mantissa & 0x3ffu) << 13);
-            }
-        } else if (exponent == 31) {
-            bits = sign | 0x7f800000u | (mantissa << 13);
-        } else {
-            bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
-        }
-        std::memcpy(dst + i, &bits, sizeof(bits));
-    }
-#endif
+inline void fp16_to_fp32_f16c(float* dst,const uint16_t* src,size_t count) {
+    RuntimeSimd::fp16ToFp32(dst,src,count);
 }
 
 // ===== BF16 STORAGE (software, portable) =====
@@ -146,228 +67,60 @@ inline void bf16_to_fp32(float* dst, const uint16_t* src, size_t count) {
     }
 }
 
-// ===== FMA SATURÉ (3 opérations par cycle) =====
-
-// Matmul optimisé avec FMA complètement saturé
-// Pipeline: 3 accumulateurs indépendants pour saturer les 2 ports FMA
-template <bool Accumulate>
-inline void matmul_fma_saturated_impl(float* MIMIR_RESTRICT C,
-                                  const float* MIMIR_RESTRICT A,
-                                  const float* MIMIR_RESTRICT B,
-                                  size_t M, size_t N, size_t K) {
-
-    const size_t column_tiles = (N + 23) / 24;
-    const int workers = matmul_workers(M * column_tiles, 24, K);
-    #pragma omp parallel for collapse(2) if(workers>1) num_threads(workers) schedule(static)
-    for (size_t i = 0; i < M; ++i) {
-        for (size_t tile = 0; tile < column_tiles; ++tile) {
-            const size_t tile_start = tile * 24;
-            const size_t tile_end = std::min(N, tile_start + 24);
-            size_t j = tile_start;
-
-            if (j + 24 <= tile_end) {
-                __m256 acc0 = _mm256_setzero_ps();
-                __m256 acc1 = _mm256_setzero_ps();
-                __m256 acc2 = _mm256_setzero_ps();
-                for (size_t k = 0; k < K; ++k) {
-                    const __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
-                    const size_t row = k * N + j;
-                    acc0 = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[row]), acc0);
-                    acc1 = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[row + 8]), acc1);
-                    acc2 = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[row + 16]), acc2);
-                }
-                if constexpr (Accumulate) acc0 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j]), acc0);
-                _mm256_storeu_ps(&C[i * N + j], acc0);
-                if constexpr (Accumulate) acc1 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j + 8]), acc1);
-                _mm256_storeu_ps(&C[i * N + j + 8], acc1);
-                if constexpr (Accumulate) acc2 = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j + 16]), acc2);
-                _mm256_storeu_ps(&C[i * N + j + 16], acc2);
-                j += 24;
-            }
-
-            for (; j + 8 <= tile_end; j += 8) {
-                __m256 acc = _mm256_setzero_ps();
-                for (size_t k = 0; k < K; ++k) {
-                    const __m256 a_broadcast = _mm256_set1_ps(A[i * K + k]);
-                    acc = _mm256_fmadd_ps(a_broadcast, _mm256_loadu_ps(&B[k * N + j]), acc);
-                }
-                if constexpr (Accumulate) acc = _mm256_add_ps(_mm256_loadu_ps(&C[i * N + j]), acc);
-                _mm256_storeu_ps(&C[i * N + j], acc);
-            }
-
-            for (; j < tile_end; ++j) {
-                float acc = 0.0f;
-                for (size_t k = 0; k < K; ++k) {
-                    acc += A[i * K + k] * B[k * N + j];
-                }
-                if constexpr (Accumulate) C[i * N + j] += acc;
-                else C[i * N + j] = acc;
-            }
-        }
-    }
+// Ordered reductions use the same correctly rounded FMA for vector blocks
+// and scalar tails. The planner still controls independent-row parallelism.
+template<bool Accumulate>
+inline void matmul_fma_saturated_impl(float* C,const float* A,const float* B,
+                                      size_t M,size_t N,size_t K) {
+    RuntimeSimd::matmul(C,A,B,M,N,K,Accumulate,true,matmul_workers(M*((N+23)/24),24,K));
 }
-
-inline void matmul_fma_saturated(float* MIMIR_RESTRICT C,
-                                  const float* MIMIR_RESTRICT A,
-                                  const float* MIMIR_RESTRICT B,
-                                  size_t M, size_t N, size_t K) {
+inline void matmul_fma_saturated(float* C,const float* A,const float* B,
+                                size_t M,size_t N,size_t K) {
     matmul_fma_saturated_impl<false>(C,A,B,M,N,K);
 }
-
-inline void matmul_add_fma_saturated(float* MIMIR_RESTRICT C,
-                                      const float* MIMIR_RESTRICT A,
-                                      const float* MIMIR_RESTRICT B,
-                                      size_t M, size_t N, size_t K) {
+inline void matmul_add_fma_saturated(float* C,const float* A,const float* B,
+                                    size_t M,size_t N,size_t K) {
     matmul_fma_saturated_impl<true>(C,A,B,M,N,K);
 }
 
-// Convolution 2D avec FMA saturé
-inline void conv2d_fma_saturated(float* MIMIR_RESTRICT output,
-                                  const float* MIMIR_RESTRICT input,
-                                  const float* MIMIR_RESTRICT kernel,
-                                  int in_h, int in_w, int out_h, int out_w,
-                                  int kernel_size, int stride, int padding) {
-    std::memset(output, 0, out_h * out_w * sizeof(float));
-
-    #pragma omp parallel for collapse(2) if(RuntimeParallel::workers(static_cast<long long>(out_h) * out_w * kernel_size * kernel_size)>1) num_threads(RuntimeParallel::workers(static_cast<long long>(out_h) * out_w * kernel_size * kernel_size)) schedule(static)
-    for (int oh = 0; oh < out_h; ++oh) {
-        for (int ow = 0; ow < out_w; ++ow) {
-            // 3 accumulateurs pour saturation FMA
-            __m256 acc0 = _mm256_setzero_ps();
-            __m256 acc1 = _mm256_setzero_ps();
-            __m256 acc2 = _mm256_setzero_ps();
-            
-            int k_idx = 0;
-            for (int kh = 0; kh < kernel_size; ++kh) {
-                for (int kw = 0; kw < kernel_size; kw += 3, k_idx += 3) {
-                    int ih = oh * stride + kh - padding;
-                    int iw = oh * stride + kw - padding;
-                    
-                    if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
-                        // Load 3 inputs et 3 kernel weights (FMA saturé)
-                        if (kw < kernel_size) {
-                            __m256 in0 = _mm256_set1_ps(input[ih * in_w + iw]);
-                            __m256 k0 = _mm256_set1_ps(kernel[k_idx]);
-                            acc0 = _mm256_fmadd_ps(in0, k0, acc0);
-                        }
-                        if (kw + 1 < kernel_size) {
-                            __m256 in1 = _mm256_set1_ps(input[ih * in_w + iw + 1]);
-                            __m256 k1 = _mm256_set1_ps(kernel[k_idx + 1]);
-                            acc1 = _mm256_fmadd_ps(in1, k1, acc1);
-                        }
-                        if (kw + 2 < kernel_size) {
-                            __m256 in2 = _mm256_set1_ps(input[ih * in_w + iw + 2]);
-                            __m256 k2 = _mm256_set1_ps(kernel[k_idx + 2]);
-                            acc2 = _mm256_fmadd_ps(in2, k2, acc2);
-                        }
-                    }
-                }
+// Legacy single-channel convolution. Each kernel coefficient contributes
+// exactly once, with complete checks at the right and bottom padded borders.
+inline void conv2d_fma_saturated(float* output,const float* input,const float* kernel,
+                                int in_h,int in_w,int out_h,int out_w,
+                                int kernel_size,int stride,int padding) {
+    const int workers=RuntimeParallel::workers(size_t(out_h)*out_w);
+    RuntimeParallel::forEach(size_t(out_h)*out_w,workers,[&](size_t pos) {
+        const int oh=int(pos/size_t(out_w)),ow=int(pos%size_t(out_w));
+        float sum=0;
+        for(int kh=0;kh<kernel_size;++kh) {
+            const int ih=oh*stride+kh-padding;
+            if(ih<0 || ih>=in_h)continue;
+            for(int kw=0;kw<kernel_size;++kw) {
+                const int iw=ow*stride+kw-padding;
+                if(iw>=0 && iw<in_w)sum=std::fma(input[ih*in_w+iw],kernel[kh*kernel_size+kw],sum);
             }
-            
-            // Sum accumulators
-            __m256 total = _mm256_add_ps(acc0, _mm256_add_ps(acc1, acc2));
-            
-            // Horizontal sum
-            __m128 sum_high = _mm256_extractf128_ps(total, 1);
-            __m128 sum_low = _mm256_castps256_ps128(total);
-            __m128 sum128 = _mm_add_ps(sum_low, sum_high);
-            __m128 shuf = _mm_movehdup_ps(sum128);
-            __m128 sums = _mm_add_ps(sum128, shuf);
-            shuf = _mm_movehl_ps(shuf, sums);
-            sums = _mm_add_ss(sums, shuf);
-            
-            output[oh * out_w + ow] = _mm_cvtss_f32(sums);
         }
-    }
+        output[pos]=sum;
+    });
 }
 
-// ===== BMI (BIT MANIPULATION) POUR QUANTIFICATION =====
-
-#ifdef __BMI2__
-
-// Quantification 8-bit avec BMI2
-inline void quantize_int8_bmi(int8_t* dst, const float* src, size_t count,
-                               float scale, float zero_point) {
-    const float inv_scale = 1.0f / scale;
-    for (size_t i = 0; i < count; i += 8) {
-        __m256 f32 = _mm256_loadu_ps(&src[i]);
-        
-        // Scale et round
-        __m256 scaled = _mm256_mul_ps(f32, _mm256_set1_ps(inv_scale));
-        __m256 shifted = _mm256_add_ps(scaled, _mm256_set1_ps(zero_point));
-        __m256i i32 = _mm256_cvtps_epi32(shifted);
-        
-        // Clamp to int8 range [-128, 127]
-        __m256i clamped = _mm256_max_epi32(i32, _mm256_set1_epi32(-128));
-        clamped = _mm256_min_epi32(clamped, _mm256_set1_epi32(127));
-        
-        // Pack 32->16->8 (utilise registres BMI efficacement)
-        __m128i low = _mm256_castsi256_si128(clamped);
-        __m128i high = _mm256_extracti128_si256(clamped, 1);
-        __m128i packed16 = _mm_packs_epi32(low, high);
-        __m128i packed8 = _mm_packs_epi16(packed16, packed16);
-        
-        _mm_storel_epi64((__m128i*)&dst[i], packed8);
+// Quantization does not require BMI2: these are arithmetic conversions, not
+// PEXT/PDEP operations. Preserve complete tails on every CPU architecture.
+inline void quantize_int8_bmi(int8_t* dst,const float* src,size_t count,float scale,float zero_point) {
+    const float inv_scale=1.0f/scale;
+    for(size_t i=0;i<count;++i)dst[i]=static_cast<int8_t>(std::clamp(std::nearbyint(src[i]*inv_scale+zero_point),-128.0f,127.0f));
+}
+inline void dequantize_int8_bmi(float* dst,const int8_t* src,size_t count,float scale,float zero_point) {
+    for(size_t i=0;i<count;++i)dst[i]=(float(src[i])-zero_point)*scale;
+}
+inline void quantize_int4_bmi(uint8_t* dst,const float* src,size_t count,float scale,float zero_point) {
+    const float inv_scale=1.0f/scale;
+    for(size_t i=0;i<count;i+=2) {
+        const auto low=static_cast<uint8_t>(std::clamp(std::nearbyint(src[i]*inv_scale+zero_point),0.0f,15.0f));
+        const auto high=i+1<count?static_cast<uint8_t>(std::clamp(std::nearbyint(src[i+1]*inv_scale+zero_point),0.0f,15.0f)):uint8_t(0);
+        dst[i/2]=uint8_t(low|(high<<4));
     }
 }
-
-// Dequantification int8 avec BMI2
-inline void dequantize_int8_bmi(float* dst, const int8_t* src, size_t count,
-                                 float scale, float zero_point) {
-    for (size_t i = 0; i < count; i += 8) {
-        // Load 8 int8
-        __m128i i8 = _mm_loadl_epi64((__m128i*)&src[i]);
-        
-        // Unpack 8->16->32 avec BMI
-        __m128i i16 = _mm_cvtepi8_epi16(i8);
-        __m128i low_i32 = _mm_cvtepi16_epi32(i16);
-        __m128i high_i32 = _mm_cvtepi16_epi32(_mm_srli_si128(i16, 8));
-        __m256i i32 = _mm256_set_m128i(high_i32, low_i32);
-        
-        // Convert to float et scale
-        __m256 f32 = _mm256_cvtepi32_ps(i32);
-        __m256 shifted = _mm256_sub_ps(f32, _mm256_set1_ps(zero_point));
-        __m256 scaled = _mm256_mul_ps(shifted, _mm256_set1_ps(scale));
-        
-        _mm256_storeu_ps(&dst[i], scaled);
-    }
-}
-
-// Quantification 4-bit avec BMI2 (packing efficace)
-inline void quantize_int4_bmi(uint8_t* dst, const float* src, size_t count,
-                               float scale, float zero_point) {
-    const float inv_scale = 1.0f / scale;
-    for (size_t i = 0; i < count; i += 16) {
-        __m256 f32_0 = _mm256_loadu_ps(&src[i]);
-        __m256 f32_1 = _mm256_loadu_ps(&src[i + 8]);
-        
-        // Scale et round
-        __m256 scaled_0 = _mm256_mul_ps(f32_0, _mm256_set1_ps(inv_scale));
-        __m256 scaled_1 = _mm256_mul_ps(f32_1, _mm256_set1_ps(inv_scale));
-        
-        __m256i i32_0 = _mm256_cvtps_epi32(scaled_0);
-        __m256i i32_1 = _mm256_cvtps_epi32(scaled_1);
-        
-        // Clamp to 4-bit range [0, 15]
-        __m256i clamped_0 = _mm256_max_epi32(i32_0, _mm256_setzero_si256());
-        clamped_0 = _mm256_min_epi32(clamped_0, _mm256_set1_epi32(15));
-        
-        __m256i clamped_1 = _mm256_max_epi32(i32_1, _mm256_setzero_si256());
-        clamped_1 = _mm256_min_epi32(clamped_1, _mm256_set1_epi32(15));
-        
-        // Pack en utilisant BMI2 pour masking efficace
-        uint32_t vals[16];
-        _mm256_storeu_si256((__m256i*)&vals[0], clamped_0);
-        _mm256_storeu_si256((__m256i*)&vals[8], clamped_1);
-        
-        // Pack 2 nibbles par byte avec PEXT (BMI2)
-        for (size_t j = 0; j < 8; ++j) {
-            dst[i/2 + j] = (vals[j*2] & 0xF) | ((vals[j*2 + 1] & 0xF) << 4);
-        }
-    }
-}
-
-#endif // __BMI2__
 
 // ===== HUGEPAGES + MADVISE =====
 

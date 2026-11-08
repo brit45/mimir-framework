@@ -1,199 +1,116 @@
 # Parcours par niveau de compétence
 
-Proposer plusieurs parcours progressifs, avec des commandes vérifiables et un résultat concret à chaque étape.
+Ces parcours accompagnent la découverte, l’utilisation autonome et le
+développement du framework. Le [catalogue des tutoriels](../08-Tuto/00-INDEX.md)
+permet aussi de choisir un aspect précis.
 
-**Public concerné :** Toute personne qui découvre Mímir ou qui cherche le prochain chapitre adapté à son niveau.
+Les architectures DL sont définies en C/C++ dans une classe dérivée de `Model`.
+Lua et JSON pilotent leur configuration et leur exécution. MPK est l’alternative
+expérimentale, pas encore entièrement exploitable en production. Consultez le
+[contrat des architectures](../07-Devs/08-Architecture-Contract.md).
 
-> **Prérequis**
->
-> Être placé à la racine du dépôt. Pour les parcours utilisateur, le binaire `./bin/mimir` doit être compilé.
+## Choisir un parcours
 
-## Sur cette page
-
-- [Comment choisir son niveau](#comment-choisir-son-niveau)
-- [Parcours A — Découvrir sans dataset](#parcours-a-découvrir-sans-dataset)
-- [Parcours B — Utiliser Lua et les outils](#parcours-b-utiliser-lua-et-les-outils)
-- [Parcours C — Entraîner et reprendre](#parcours-c-entraîner-et-reprendre)
-- [Parcours D — Ajouter ou modifier un modèle](#parcours-d-ajouter-ou-modifier-un-modèle)
-- [Parcours E — Modifier un runtime](#parcours-e-modifier-un-runtime)
-- [Où chercher la vérité](#où-chercher-la-vérité)
-- [Étapes suivantes](#étapes-suivantes)
-
-## Comment choisir son niveau
-
-| Niveau | Vous savez déjà… | Commence par… |
+| Niveau | Vous savez déjà | Votre prochaine réalisation |
 | --- | --- | --- |
-| Débutant | utiliser un terminal, mais pas Mímir | Parcours A |
-| Utilisateur | modifier une config et lire un log | Parcours B |
-| Utilisateur avancé | entraîner/reprendre un modèle | Parcours C |
-| Développeur modèle | lire du C++ et raisonner sur les shapes | Parcours D |
-| Développeur runtime | écrire des kernels et des backward | Parcours E |
+| 1 — Débutant | Utiliser un terminal | Lancer et inspecter un modèle du registre sans dataset. |
+| 2 — Pratiquant | Modifier une configuration | Préparer un corpus et observer un entraînement validé. |
+| 3 — Autonome | Entraîner et reprendre | Reproduire, mesurer et comparer des runs. |
+| 4 — Développeur modèle | Lire C++ et les formes de tenseurs | Ajouter une classe dérivée de `Model` et ses tests. |
+| 5 — Développeur moteur | Écrire un backward ou un kernel | Étendre le dispatch avec une preuve numérique et matérielle. |
 
-## Parcours A — Découvrir sans dataset
+## Niveau 1 — Démarrer sans dataset
 
-### 1. Vérifier le binaire
-
-```bash
-./bin/mimir --help
-```
-
-Vous devez voir la version, les modes `--lua` et `--conf`, puis les capacités matérielles.
-
-### 2. Lister le registre
+Suivez [installation et configuration](../08-Tuto/10-Tuto-Installation-Configuration.md),
+puis le [framework en trois étapes](../08-Tuto/01-Cours-Framework-3-Etapes.md).
+Depuis la racine du dépôt, avec le binaire compilé :
 
 ```bash
-./bin/mimir --lua scripts/tools/inspect_architectures.lua -- -a
+./run_mimir.sh --help
+./run_mimir.sh --lua scripts/tools/inspect_architectures.lua -- --show-archs
 ```
 
-Le registre est la liste canonique des architectures que `Mimir.Model.create()` peut construire.
+Choisissez ensuite [du registre au checkpoint](../08-Tuto/08-Tuto-Registre-Pipeline-Checkpoint.md).
+Vous devez pouvoir expliquer la différence entre architecture, configuration,
+script et checkpoint. Aucun benchmark volumineux n’est nécessaire.
 
-### 3. Construire un petit modèle
+Exercice : inspectez `basic_mlp`, changez une dimension dans sa configuration et
+retrouvez l’effet sur ses paramètres. Le builder C++ reste la source du graphe.
 
-```bash
-./bin/mimir --lua scripts/templates/template_pipeline_args.lua -- \
-  --from-registry --arch basic_mlp \
-  --no-train
-```
+## Niveau 2 — Réaliser un cycle d’apprentissage
 
-Ce chemin effectue `create → allocate_params → init_weights`, sans données.
+1. Préparez les données avec [l’atelier tokenizer et modalités](../08-Tuto/11-Tuto-Donnees-Tokenizer.md).
+2. Effectuez [entraînement, validation, reprise et inférence](../08-Tuto/12-Tuto-Entrainement-Validation-Reprise-Inference.md).
+3. Lisez les métriques avec [Viz et diagnostic](../08-Tuto/14-Tuto-Viz-Metriques-Diagnostic.md).
+4. Comparez les besoins des [familles de modèles](../08-Tuto/13-Tuto-Familles-De-Modeles.md).
 
-### 4. Inspecter un VAE convolutionnel
+Critère de passage : retrouver entrées, tokenizer, courbes train et validation
+et checkpoint d’un même run. Une reprise conserve paramètres et topologie, puis
+avance le compteur d’optimisation.
 
-```bash
-./bin/mimir --lua scripts/examples/inspect_vae_conv.lua
-```
+Exercice : comparez deux petits runs avec le même seed et un seul changement de
+learning rate. Distinguez le fonctionnement technique de la qualité du texte
+produit sur un corpus d’exercice.
 
-Vous pouvez passer au parcours B lorsque vous savez reconnaître :
+## Niveau 3 — Maîtriser les ressources et la reproductibilité
 
-- une architecture ;
-- sa config ;
-- ses layers ;
-- son nombre de paramètres.
+Travaillez [mémoire, performances et routage](../08-Tuto/15-Tuto-Memoire-Performances-Runtimes.md),
+puis [compilation, AMP et DDP](../08-Tuto/16-Tuto-Compilation-Portabilite-AMP-DDP.md).
+Terminez par [scripts, exports et vérifications](../08-Tuto/17-Tuto-Scripting-Exports-Tests-Contribution.md).
 
-## Parcours B — Utiliser Lua et les outils
+Critère de passage : reproduire un résultat avec ses fichiers, mesurer
+forward/backward/optimiseur et montrer le backend choisi. Un gain de temps doit
+être comparé à configuration et précision équivalentes.
 
-Lis d’abord :
+Exercice : observez un petit modèle sur CPU puis, si disponible, sur un GPU.
+Expliquez le coût des transferts et tout repli CPU. L’absence de GPU ne bloque
+pas le parcours CPU ; indiquez la limite de votre preuve.
 
-1. [Scripting Lua](../02-User-Guide/06-Lua-Scripting.md) ;
-2. [Cycle de vie d’un modèle](../02-User-Guide/02-Model-Lifecycle.md) ;
-3. [Scripts et outils Lua](../02-User-Guide/10-Examples.md).
+## Niveau 4 — Développer une architecture native
 
-Puis exécute :
+1. Lisez le [contrat d’architecture](../07-Devs/08-Architecture-Contract.md).
+2. Suivez [l’ajout d’un modèle](../08-Tuto/02-Tuto-Ajouter-Modele.md).
+3. Étudiez [layers et connexions C++](../07-Devs/02-Building-Models-And-Layers.md).
+4. Vérifiez [les opérations et leurs gradients](../08-Tuto/05-Tuto-Ajouter-Op.md).
 
-```bash
-./bin/mimir --lua scripts/tools/inspect_architectures.lua -- \
-  --list vae_conv --params --layers --stats
+Votre livraison comprend une classe `MyModel : public Model`, sa configuration,
+son entrée de registre, ses scripts d’orchestration et ses tests. Un script Lua
+qui empile des couches n’est pas une livraison conforme à ce contrat.
 
-./bin/mimir --lua scripts/benchmarks/benchmark_official.lua -- \
-  --safe --iters 1
-```
+Exercice : remplacez une activation dans une classe native d’exercice, puis
+vérifiez formes, gradients et sauvegarde/rechargement. Explorez ensuite
+[MPK](../08-Tuto/09-Tuto-Creer-MPK.md) pour comprendre son format, en gardant son
+statut expérimental distinct du chemin natif.
 
-Utilise `--help` après le séparateur `--` :
+## Niveau 5 — Contribuer au moteur
 
-```bash
-./bin/mimir --lua scripts/training/train_vae_conv.lua -- --help
-```
+Suivez [le tutoriel runtime](../08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md) et
+[l’ajout d’une opération](../08-Tuto/05-Tuto-Ajouter-Op.md), puis étudiez
+calibration, budgets mémoire et fusion dans
+[l’atelier performances](../08-Tuto/15-Tuto-Memoire-Performances-Runtimes.md).
 
-Le premier `--` appartient au CLI Mímir ; les arguments suivants sont transmis au script Lua dans la table globale `arg`.
+Critère de passage : dispatcher et routeur branchés, entrées invalides refusées
+sans publication partielle, tests de sorties, gradients et paramètres après
+mise à jour. Chaque backend annoncé doit disposer de sa preuve d’exécution.
 
-## Parcours C — Entraîner et reprendre
+Exercice : implémentez une référence CPU, puis une variante GPU. Mesurez les
+deux et justifiez la tolérance numérique. Conservez un repli explicite pour les
+formes ou la précision non prises en charge.
 
-Lis :
+## Où trouver la référence
 
-1. [Données](../02-User-Guide/03-Data.md) ;
-2. [Entraînement](../02-User-Guide/04-Training.md) ;
-3. [Checkpoints](../02-User-Guide/08-Checkpoints.md) ;
-4. le guide de l’architecture choisie, par exemple [VAEConv](../02-User-Guide/14-VAEConv.md).
-
-Avant un long run :
-
-```bash
-# Afficher les options réelles du script
-./bin/mimir --lua scripts/training/train_vae_conv.lua -- --help
-
-# Valider les primitives sans dataset
-ctest --test-dir build --output-on-failure \
-  -R 'ModelTest.VAEConvContract|AutogradTest.Numerical|RuntimeTest.Math'
-```
-
-Règles pratiques :
-
-- commence avec une petite résolution ;
-- fixe un seed ;
-- conserve config, tokenizer et optimizer avec le checkpoint ;
-- ne change pas la topologie lors d’une reprise ;
-- mesure avant d’activer un backend GPU ou une attention coûteuse.
-
-## Parcours D — Ajouter ou modifier un modèle
-
-Lis dans cet ordre :
-
-1. [Construire des modèles et layers](../07-Devs/02-Building-Models-And-Layers.md) ;
-2. [Config et registre](../07-Devs/03-Config-And-Registry.md) ;
-3. [Layers et opérations](../04-Architecture-Internals/14-Layers-And-Ops.md) ;
-4. [Autograd](../04-Architecture-Internals/13-Autograd-Gradients.md) ;
-5. [Tutoriel ajouter un modèle](../08-Tuto/02-Tuto-Ajouter-Modele.md).
-
-Checklist minimale :
-
-```text
-Config publique
-  → parser JSON
-  → default_config du registre
-  → builder C++
-  → noms d’entrées/sorties
-  → allocation et initialisation
-  → forward
-  → backward
-  → sérialisation
-  → test ciblé
-  → documentation
-```
-
-Ne déduis pas le support d’un layer depuis sa seule présence dans `LayerType`. Vérifie ses chemins forward et backward dans les runtimes.
-
-## Parcours E — Modifier un runtime
-
-Lis :
-
-1. [Runtime Development](../07-Devs/04-Runtime-Development.md) ;
-2. [Backends hardware](../04-Architecture-Internals/03-Hardware-Backends.md) ;
-3. [Tutoriel runtime](../08-Tuto/04-Tuto-Modifier-Ou-Ajouter-Runtime.md) ;
-4. [Tutoriel ajouter une op](../08-Tuto/05-Tuto-Ajouter-Op.md).
-
-Le contrat essentiel est :
-
-```text
-RuntimeRouter
-  → essaie les runtimes dans l’ordre configuré
-  → un runtime retourne true seulement si le résultat est valide
-  → false demande le fallback suivant
-  → CPU constitue la référence générale
-```
-
-Après une modification :
-
-```bash
-cmake --build build -j2
-ctest --test-dir build --output-on-failure \
-  -R 'RuntimeTest|AutogradTest|Planner'
-```
-
-## Où chercher la vérité
-
-| Question | Source principale |
+| Question | Source |
 | --- | --- |
 | Quelles architectures existent ? | `src/Models/Registry/ModelArchitectures.cpp` |
-| Quelle config construit un modèle ? | header du modèle + parser du registre |
-| Quelle API Lua existe ? | `LuaScripting::registerAPI()` |
-| Comment un script lit ses flags ? | `scripts/modules/args.lua` |
-| Où part un layer ? | `src/runtimes/RuntimeRouter.cpp` |
-| Quelle implémentation CPU est utilisée ? | `src/runtimes/cpu/RuntimeLayerDispatch.hpp` |
-| Comment les gradients sont accumulés ? | `Model::backwardPass()` et les `backwardLayer()` |
-| Comment un checkpoint est écrit ? | `src/Serialization/` |
+| Qui définit le graphe ? | La classe dérivée sous `src/Models/` |
+| Quelle API de script est disponible ? | `src/scriptings/Lua/luaScripting/` et `mimir-api.lua` |
+| Comment sont lus les arguments ? | `scripts/modules/args.lua` et global standard `arg` |
+| Quel runtime exécute une couche ? | `src/runtimes/RuntimeRouter.cpp` et les traces du run |
+| Où sont les calculs CPU ? | `src/runtimes/cpu/RuntimeLayerDispatch.hpp` et ses kernels |
+| Comment sont restaurés les poids ? | `src/Serialization/` et le résolveur du script |
 
 ## Étapes suivantes
 
-- [Page précédente : Smoketest (5 minutes)](05-Smoketest.md)
-- [Index de la documentation](../00-INDEX.md)
-- [Revenir à la documentation](../00-INDEX.md)
+- [Catalogue et couverture par aspect](../08-Tuto/00-INDEX.md)
+- [Smoketest](05-Smoketest.md)
+- [Index général](../00-INDEX.md)

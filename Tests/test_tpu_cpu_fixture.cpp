@@ -2,6 +2,7 @@
 #include "runtimes/cpu/CpuRuntime.hpp"
 #include "Layers.hpp"
 #include "runtimes/RuntimeRouter.hpp"
+#include "runtimes/ConvolutionND.hpp"
 #include <fstream>
 #include <iostream>
 #include <cmath>
@@ -77,7 +78,14 @@ int main(int argc,char** argv) {
             {"training",training},{"outputs",out},{"go",go},{"gi",gi},{"gw",l.grad_weights},{"gb",l.grad_bias},{"mask",mask}});
     };
     for(int raw=0;raw<int(LayerType::UNKNOWN);++raw) {
-        auto t=static_cast<LayerType>(raw);if(t==LayerType::Lambda)continue;
+        const auto t=static_cast<LayerType>(raw);
+        // This fixture describes the TPU worker's explicit operation set, not
+        // every registered CPU layer. New enums need not be TPU operations.
+        if(!tpu.supportsForwardLayerType(t)) {
+            if(tpu.supportsBackwardLayerType(t))
+                throw std::runtime_error("TPU backward-only fixture type "+LayerRegistry::type_to_string(t));
+            continue;
+        }
         Layer l("fixture",t==LayerType::PatchEmbed?"PatchEmbed":t==LayerType::Reparameterize?"Reparameterize":LayerRegistry::type_to_string(t),0);
         std::vector<std::vector<float>> x={values(8)};
         l.use_bias=true;
@@ -88,6 +96,17 @@ int main(int argc,char** argv) {
             l.in_channels=2;l.out_channels=3;l.input_height=3;l.input_width=4;l.kernel_h=2;l.kernel_w=2;l.stride=1;l.stride_h=1;
             l.params_count=t==LayerType::DepthwiseConv2d?10:27;x={values(24)};break; }
         case LayerType::Conv1d:l.in_channels=2;l.out_channels=3;l.kernel_h=3;l.params_count=21;x={values(12)};break;
+        case LayerType::Conv3d:case LayerType::Conv4d: {
+            const bool four=t==LayerType::Conv4d;
+            l.in_channels=4;l.out_channels=6;l.groups=2;
+            l.input_spatial_shape=four?std::vector<int>{2,3,4,3}:std::vector<int>{3,4,5};
+            l.kernel_shape=four?std::vector<int>{2,1,2,2}:std::vector<int>{2,2,2};
+            l.stride_shape=four?std::vector<int>{1,2,1,1}:std::vector<int>{1,2,1};
+            l.padding_shape=four?std::vector<int>{0,1,1,0}:std::vector<int>{1,1,0};
+            l.dilation_shape=four?std::vector<int>{1,1,2,1}:std::vector<int>{1,2,1};
+            l.shape={2,l.in_channels};l.shape.insert(l.shape.end(),l.input_spatial_shape.begin(),l.input_spatial_shape.end());
+            const auto g=RuntimeConvolutionND::checkedGeometry(l);l.params_count=g.parameter_size;x={values(g.input_size)};break;
+        }
         case LayerType::Embedding:case LayerType::EmbeddingBag:l.vocab_size=5;l.embed_dim=3;l.padding_idx=0;l.params_count=15;x={{0,1,2,2,-1,4}};if(t==LayerType::EmbeddingBag)x.push_back({0,3,6});break;
         case LayerType::LayerNorm:case LayerType::RMSNorm:l.in_features=4;l.params_count=8;break;
         case LayerType::GroupNorm:case LayerType::InstanceNorm2d:case LayerType::BatchNorm2d:case LayerType::BatchNorm1d:

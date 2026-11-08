@@ -49,15 +49,30 @@
           "type": "string",
           "description": "Nom de l'architecture (ex: transformer, vae_conv, diffusion, vgg16)."
         },
+        "conv_mode": {
+          "type": "string",
+          "enum": ["2d", "3d", "4d"],
+          "default": "2d",
+          "description": "VAEConv: rang des convolutions. 3d et 4d ajoutent des axes singleton devant H,W; les données restent des images 2D. Le mode du checkpoint est conservé en reprise."
+        },
         "vocab_size":   { "type": "integer", "minimum": 1 },
         "seq_len":      { "type": "integer", "minimum": 1 },
         "d_model":      { "type": "integer", "minimum": 1 },
         "num_layers":   { "type": "integer", "minimum": 1 },
         "num_heads":    { "type": "integer", "minimum": 1 },
         "mlp_hidden":   { "type": "integer", "minimum": 1 },
+        "causal_arch_version": { "type": "integer", "enum": [1, 2], "description": "Version du graphe CausalLM; les checkpoints historiques gardent la version 1." },
+        "local_conv_kernel": { "type": "integer", "minimum": 0, "description": "CausalLM: noyau causal depthwise par canal (défaut 3); 0 désactive la branche locale." },
+        "local_conv_dilation": { "type": "integer", "minimum": 1, "description": "CausalLM: dilatation de la convolution locale (défaut 1)." },
+        "fused_swiglu": { "type": "boolean", "description": "CausalLM: SwiGLU natif, deux entrées gate/value; true par défaut sur les nouveaux modèles." },
+        "latent_dim":   { "type": "integer", "minimum": 0, "description": "Causal LM: dimension du bottleneck latent contextuel par position; absent = min(128, d_model/2), 0 désactive la branche." },
+        "viz_registered_tips_only": { "type": "boolean", "description": "N’affiche que les couches explicitement repérées dans la Viz." },
+        "viz_taps_max_frames": { "type": "integer", "minimum": 16, "description": "Nombre maximal de vues de couches envoyées à la Viz." },
+        "viz_taps_max_side": { "type": "integer", "minimum": 16, "description": "Dimension maximale des aperçus de tenseurs dans la Viz." },
         "latent_spatial_context": { "type": "boolean", "description": "VAEConv: contexte résiduel local et dilaté dans le latent." },
         "latent_context_channels": { "type": "integer", "minimum": 2, "description": "VAEConv: largeur des features du contexte latent (défaut 32)." },
-        "latent_detail_path": { "type": "boolean", "description": "VAEConv: chemin de détails sous-pixel passant exclusivement par le latent." }
+        "latent_detail_path": { "type": "boolean", "description": "VAEConv: chemin de détails sous-pixel passant exclusivement par le latent." },
+        "logvar_head_bias": { "type": "boolean", "description": "VAEConv: biais entraînable par canal de log-variance. Activé par le script pour les nouveaux entraînements; absent=false dans les anciens checkpoints." }
       },
       "additionalProperties": true
     },
@@ -76,6 +91,11 @@
           "minimum": 1,
           "description": "Taille maximale du vocabulaire."
         },
+        "bpe_merges": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Nombre maximal de merges BPE appris sur le corpus avant l'entraînement causal."
+        },
         "max_sequence_length": {
           "type": "integer",
           "minimum": 1,
@@ -89,6 +109,11 @@
       "type": "object",
       "description": "Hyperparamètres d'entraînement, accessible via CONF.training dans les scripts Lua.",
       "properties": {
+        "steps": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Objectif global de pas d'optimiseur; en reprise, le modèle continue jusqu'à cette valeur."
+        },
         "num_epochs": {
           "type": "integer",
           "minimum": 1,
@@ -160,6 +185,62 @@
           "type": "integer",
           "minimum": 0,
           "description": "Nombre de steps de warmup du learning rate."
+        },
+        "amp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Active l'autocast mixte pour les opérations que le runtime déclare compatibles."
+        },
+        "amp_dtype": {
+          "type": "string",
+          "enum": ["float16", "bfloat16"],
+          "default": "bfloat16",
+          "description": "Précision réduite demandée à AMP. Les accumulations et gradients restent en float32."
+        },
+        "ddp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Synchronise les gradients entre processus MPI avant chaque mise à jour."
+        },
+        "resume": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reprend le dernier checkpoint RawFolder causal_lm présent dans checkpoint_dir."
+        },
+        "validate_every_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 100,
+          "description": "Causal LM : fréquence de l'évaluation avant seule, en pas d'optimiseur; 0 désactive la validation."
+        },
+        "validate_items": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 8,
+          "description": "Nombre maximal d'exemples du holdout évalués à chaque bilan; 0 désactive la validation."
+        },
+        "validate_holdout": {
+          "type": "boolean",
+          "default": true,
+          "description": "Réserve des exemples ou une fin de séquence à la validation; false mesure le jeu d'entraînement."
+        },
+        "validate_holdout_frac": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.1,
+          "description": "Fraction des exemples (ou tokens pour un texte continu) réservée à la validation."
+        },
+        "validate_holdout_items": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Nombre explicite de dialogues réservés; 0 calcule le nombre depuis validate_holdout_frac."
+        },
+        "validate_save_debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Option générique de validation; sans effet sur l'évaluation texte du Causal LM."
         }
       },
       "additionalProperties": true
