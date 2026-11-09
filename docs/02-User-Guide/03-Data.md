@@ -15,6 +15,7 @@ Sources principales :
 
 - API Lua: `src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp` (`lua_loadDataset`, `lua_getDataset`, `lua_prepareSequences`)
 - Indexation + lazy-loading: `src/Helpers.hpp` (`loadDataset`, `DatasetItem`, `DatasetMemoryManager`, `DatasetManager`)
+- Parcours des liens et détection des boucles : `src/DatasetTraversal.hpp`.
 
 ## Sur cette page
 
@@ -67,6 +68,35 @@ Extensions reconnues (actuellement):
 - Deux fichiers `portraits/foo.txt` et `animals/foo.txt` produisent des items distincts. Les chemins lexicaux préservent les associations avec les images symboliques.
 - Un seul fichier par modalité : plusieurs images de même chemin sans extension sont départagées par extension (PNG en premier), puis par chemin. L’éditeur d’annotation demande de renommer les collisions.
 - Le seuil `min_modalities` est configurable dans `Mimir.Dataset.load` et vaut 1 par défaut.
+
+### Liens symboliques de fichiers et de dossiers
+
+Le parcours suit les liens symboliques vers des fichiers ou des dossiers, y
+compris si leur cible se trouve hors du dataset. Les liens relatifs, absolus,
+les chaînes de liens et une racine de dataset elle-même liée sont acceptés.
+L'argument de `Dataset.load` doit toujours désigner un dossier.
+
+Les noms locaux restent les clés d'association : `photo.jpg`, lié vers une
+image externe, est associé au `photo.txt` placé à côté du lien. Un dossier lié
+`lot/` conserve le préfixe `lot/` dans les noms des items. Deux alias vers le
+même dossier constituent donc deux emplacements distincts dans le dataset.
+
+Les liens cassés sont ignorés avec un diagnostic `[dataset] Chemin ignoré`. Une branche qui revient vers
+un dossier ancêtre est également ignorée, ce qui empêche les boucles de parcours.
+Le cache prend en compte les fichiers atteints et leurs cibles résolues ;
+changer la cible d'un lien invalide l'ancien index.
+
+Exemple POSIX, dans un nouveau dossier temporaire :
+
+```bash
+mkdir -p /tmp/mimir_liens/source /tmp/mimir_liens/dataset
+printf 'Un exemple de texte.\n' > /tmp/mimir_liens/source/exemple.txt
+ln -s ../source/exemple.txt /tmp/mimir_liens/dataset/alias.txt
+ln -s ../source /tmp/mimir_liens/dataset/lot
+```
+
+Le chargement de `/tmp/mimir_liens/dataset` trouve les items texte `alias` et
+`lot/exemple`, qui lisent ici le même fichier source sous deux noms locaux.
 
 ## Annotations JSON de l’éditeur Lumen
 

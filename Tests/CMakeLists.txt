@@ -206,6 +206,8 @@ mimir_add_test(AutogradTest.ModelRuntime test_model_runtime_autograd.cpp)
 mimir_add_test(AutogradTest.Convolution test_conv_autograd.cpp)
 
 mimir_add_test(FrameworkTest.DatasetRGB test_dataset_rgb.cpp)
+mimir_add_test(FrameworkTest.DatasetSymlinks test_dataset_symlinks.cpp)
+set_tests_properties(FrameworkTest.DatasetSymlinks PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
 mimir_add_test(FrameworkTest.GifDisposal test_gif_disposal.cpp)
 mimir_add_test(FrameworkTest.DatasetAnnotations test_dataset_annotations.cpp)
 set_tests_properties(FrameworkTest.DatasetAnnotations PROPERTIES TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")

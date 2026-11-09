@@ -557,6 +557,7 @@ set(MIMIR_HEADERS
     src/scriptings/ScriptingBridgeCommon.hpp
     src/scriptings/Lua/luaScripting/LuaScripting.hpp
     src/Helpers.hpp
+    src/DatasetTraversal.hpp
     src/Layers.hpp
     src/Autograd.hpp
     src/runtimes/cpu/SIMD_Ops.hpp

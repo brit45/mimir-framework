@@ -96,15 +96,19 @@ Note: `detectModalities()` est un détecteur “grossier” par extension. Le lo
 ### `datasetSHA256Hash(dir) -> string`
 
 Calcule une signature SHA256 d'index, versionnée
-`mimir_dataset_index_v4_structured_annotations`, à partir de la racine lexicale
+`mimir_dataset_index_v5_directory_symlinks`, à partir de la racine lexicale
 absolue et d'une liste triée de métadonnées par fichier.
 
 Propriétés importantes:
 
-- Chaque entrée contient le chemin relatif lexical, la taille et la date de
-  modification. Les JSON ajoutent un SHA256 de leur contenu.
+- Chaque entrée contient le chemin relatif lexical, la cible résolue, la taille
+  et la date de modification. Les JSON ajoutent un SHA256 de leur contenu.
+- Les dossiers symboliques sont parcourus comme les dossiers ordinaires.
+  Changer la cible d'un lien invalide le cache, même si taille et date des cibles
+  sont identiques.
 - Les fichiers internes et le fichier de cache explicitement exclu ne participent
-  pas à la signature. Les contenus image/audio/vidéo ne sont pas entièrement hachés.
+  pas à la signature, y compris si un alias symbolique mène à ce cache.
+  Les contenus image/audio/vidéo ne sont pas entièrement hachés.
 
 Deux homonymes de sous-dossiers différents sont donc distingués. Le déplacement
 de la racine invalide aussi le cache ; cette signature n'est pas un hash de
@@ -204,6 +208,16 @@ Les clés lexicales préservent le nom des liens symboliques : une image liée
 vers un autre disque reste associée à son sidecar local. Les annotations
 structurées et les captions COCO ont leurs chemins d'indexation dédiés ;
 elles ne doivent pas être confondues avec de simples fichiers de texte libres.
+
+Le parcours `Mimir::DatasetTraversal::forEachRegularFile`, défini dans
+`src/DatasetTraversal.hpp`, est commun à l'indexation, aux hash et à la détection
+des modalités. Il suit
+les liens de fichiers et de dossiers, y compris les chaînes et les cibles hors
+racine. Il résout les dossiers pour détecter les retours vers un ancêtre, sans
+remplacer leur chemin lexical d'indexation. Deux alias non cycliques restent
+distincts ; il n'effectue pas de dédoublonnage global par cible. Les liens cassés
+et les branches cycliques sont ignorés avec un diagnostic. La racine peut être
+un lien vers un dossier, mais l'API attend toujours un dossier.
 
 Extensions dans `loadDataset`:
 

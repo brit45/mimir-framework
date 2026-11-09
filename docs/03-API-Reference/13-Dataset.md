@@ -23,6 +23,14 @@ Charge un dataset multimodal depuis un dossier. `target_w` et `target_h`
 définissent les dimensions du décodage d'image. Les options de cache s'appliquent
 lorsque `use_cache=true` ; `max_ram_mb` est exprimé en Mio.
 
+Le dossier racine peut être un lien symbolique. Le parcours suit aussi les
+liens de fichiers et de sous-dossiers, relatifs ou absolus, y compris vers
+une cible extérieure. Il conserve les chemins locaux pour associer les
+modalités et sidecars. Les liens cassés et les branches cycliques sont ignorés
+avec un diagnostic ; deux alias distincts restent deux groupes d'items.
+Le hash du cache inclut les cibles résolues et les fichiers traversés, afin de
+réindexer après changement de cible. Voir l'[exemple de liens symboliques](../02-User-Guide/03-Data.md#liens-symboliques-de-fichiers-et-de-dossiers).
+
 Le builder `Mimir.Database` prépare le même chargement avec cache :
 
 ```lua

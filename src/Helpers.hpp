@@ -31,6 +31,7 @@ using json = nlohmann::json;
 
 #include "Sha256.hpp"
 #include "DatasetAnnotation.hpp"
+#include "DatasetTraversal.hpp"
 
 #ifdef MIMIR_ENABLE_FFMPEG
 extern "C" {
@@ -959,16 +960,14 @@ static inline unsigned detectModalities(const std::string &dataset_dir)
     static const std::regex re_video(R"(\.(mp4|mkv|avi|mov|webm|flv|ts)$)", std::regex::icase);
 
     unsigned mask = MOD_NONE;
-    for (auto &p : fs::recursive_directory_iterator(dataset_dir))
-    {
-        if (!p.is_regular_file()) continue;
+    Mimir::DatasetTraversal::forEachRegularFile(dataset_dir, [&](const fs::directory_entry& p, const fs::path&) {
         const std::string s = p.path().string();
         if (std::regex_search(s, re_text)) mask |= MOD_TEXT;
         if (std::regex_search(s, re_audio)) mask |= MOD_AUDIO;
         if (std::regex_search(s, re_image)) mask |= MOD_IMAGE;
         if (std::regex_search(s, re_video)) mask |= MOD_VIDEO;
-        if (mask == (MOD_TEXT | MOD_AUDIO | MOD_IMAGE | MOD_VIDEO)) break;
-    }
+        return mask != (MOD_TEXT | MOD_AUDIO | MOD_IMAGE | MOD_VIDEO);
+    });
     return mask;
 }
 
@@ -979,23 +978,24 @@ struct MagicToken
     float embed[8];         // petit embedding fixe (8 dim)
 };
 
-// Hash SHA256 du dataset basé sur les noms et tailles de fichiers
+// Hash SHA256 : chemins locaux, cibles résolues, métadonnées et annotations JSON.
 static inline std::string datasetSHA256Hash(const std::string &dir, const std::string &excluded_cache_path = "")
 {
     // Versionne la sémantique d'indexation afin de ne pas restaurer un cache
     // créé avant la prise en charge des sidecars associés à des symlinks.
     const fs::path lexical_root = fs::absolute(dir).lexically_normal();
     const fs::path excluded = excluded_cache_path.empty() ? fs::path() : fs::absolute(excluded_cache_path).lexically_normal();
-    std::string combined = "mimir_dataset_index_v4_structured_annotations\n" + lexical_root.generic_string() + "\n";
+    const fs::path excluded_target = Mimir::DatasetTraversal::cacheIdentity(excluded_cache_path);
+    std::string combined = "mimir_dataset_index_v5_directory_symlinks\n" + lexical_root.generic_string() + "\n";
     std::vector<std::string> file_infos;
     
     // Collecter tous les fichiers avec leurs métadonnées
-    for (auto &p : fs::recursive_directory_iterator(dir)) {
-        if (!p.is_regular_file()) continue;
+    Mimir::DatasetTraversal::forEachRegularFile(dir, [&](const fs::directory_entry& p, const fs::path& resolved) {
         
         const auto lexical_path = fs::absolute(p.path()).lexically_normal();
-        if (isDatasetInternalFile(p.path()) || lexical_path == excluded) continue;
+        if (isDatasetInternalFile(p.path()) || lexical_path == excluded || resolved == excluded_target) return true;
         std::string info = lexical_path.lexically_relative(lexical_root).generic_string() + "|" +
+                          resolved.generic_string() + "|" +
                           std::to_string(fs::file_size(p.path())) + "|" +
                           std::to_string(fs::last_write_time(p.path()).time_since_epoch().count());
         // JSON edits of equal length must invalidate annotation selection too.
@@ -1008,7 +1008,8 @@ static inline std::string datasetSHA256Hash(const std::string &dir, const std::s
             info += "|" + sha256(content.str());
         }
         file_infos.push_back(info);
-    }
+        return true;
+    });
     
     // Trier pour garantir un ordre déterministe
     std::sort(file_infos.begin(), file_infos.end());
@@ -1025,12 +1026,11 @@ static inline std::string datasetSHA256Hash(const std::string &dir, const std::s
 static inline uint32_t simpleDatasetHash(const std::string &dir)
 {
     uint64_t h = 1469598103934665603ull; // FNV offset basis
-    for (auto &p : fs::recursive_directory_iterator(dir))
-    {
-        if (!p.is_regular_file()) continue;
+    Mimir::DatasetTraversal::forEachRegularFile(dir, [&](const fs::directory_entry& p, const fs::path&) {
         auto s = p.path().filename().string();
         for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
-    }
+        return true;
+    });
     return static_cast<uint32_t>((h ^ (h >> 32)) & 0xFFFFFFFFu);
 }
 
@@ -1885,12 +1885,13 @@ static inline bool loadCocoCaptionsDataset(const std::string &root_dir,
     items.clear();
     const fs::path root(root_dir);
     const fs::path annotations_dir = root / "annotations";
-    if (!fs::exists(annotations_dir) || !fs::is_directory(annotations_dir)) return false;
+    std::error_code path_error;
+    if (!fs::is_directory(annotations_dir, path_error)) return false;
 
     std::vector<fs::path> caption_files;
     for (const char* name : {"captions_train2017.json", "captions_val2017.json", "captions_train2014.json", "captions_val2014.json"}) {
         const fs::path p = annotations_dir / name;
-        if (fs::exists(p) && fs::is_regular_file(p)) caption_files.push_back(p);
+        if (fs::is_regular_file(p, path_error)) caption_files.push_back(p);
     }
     if (caption_files.empty()) return false;
 
@@ -1909,7 +1910,7 @@ static inline bool loadCocoCaptionsDataset(const std::string &root_dir,
             root / "images" / "val2014" / file_name
         };
         for (const auto& c : candidates) {
-            if (fs::exists(c) && fs::is_regular_file(c)) return c.string();
+            if (fs::is_regular_file(c, path_error)) return c.string();
         }
         return std::string();
     };
@@ -2011,7 +2012,8 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
         // Local editor annotations also override historical COCO captions.
         for (auto& item : items) {
             const fs::path sidecar = fs::path(item.image_file).replace_extension(".json");
-            if (!fs::is_regular_file(sidecar)) continue;
+            std::error_code path_error;
+            if (!fs::is_regular_file(sidecar, path_error)) continue;
             try {
                 std::ifstream f(sidecar); json document; f >> document;
                 if (document.is_object() && document.contains("captions")) {
@@ -2041,6 +2043,8 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     // tandis que le sidecar `.txt` gardait sa clé locale. Construire les clés
     // à partir des chemins absolus lexicaux conserve le nom du lien lui-même.
     const fs::path lexical_root = fs::absolute(fs::path(root_dir)).lexically_normal();
+    const fs::path excluded = excluded_cache_path.empty() ? fs::path() : fs::absolute(excluded_cache_path).lexically_normal();
+    const fs::path excluded_target = Mimir::DatasetTraversal::cacheIdentity(excluded_cache_path);
 
     auto lowerString = [](std::string value) {
         std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -2089,13 +2093,11 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
     };
     std::unordered_map<std::string, std::vector<fs::path>> masks_by_key;
 
-    for (auto &p : fs::recursive_directory_iterator(root_dir))
-    {
+    Mimir::DatasetTraversal::forEachRegularFile(root_dir, [&](const fs::directory_entry& p, const fs::path& resolved) {
         try {
-            if (!p.is_regular_file()) continue;
             const auto path = p.path();
-            if (isDatasetInternalFile(path) || (!excluded_cache_path.empty() &&
-                fs::absolute(path).lexically_normal() == fs::absolute(excluded_cache_path).lexically_normal())) continue;
+            if (isDatasetInternalFile(path) || fs::absolute(path).lexically_normal() == excluded ||
+                resolved == excluded_target) return true;
 
             fs::path rel = path;
             try {
@@ -2107,15 +2109,16 @@ static inline std::vector<DatasetItem> loadDataset(const std::string &root_dir, 
             }
             if (std::regex_search(path.string(), re_image) && isMaskPath(rel)) {
                 masks_by_key[canonicalImageKey(rel)].push_back(path);
-                continue;
+                return true;
             }
             rel.replace_extension("");
             const std::string key = rel.generic_string();
             files_by_key[key].push_back(path);
         } catch (...) {
-            continue;
+            return true;
         }
-    }
+        return true;
+    });
     
     // Phase 2: Créer les items SANS charger les données (métadonnées uniquement)
     size_t total_linkables = 0;
