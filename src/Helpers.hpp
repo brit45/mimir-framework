@@ -23,6 +23,8 @@
 #include <iterator>
 #include <optional>
 #include <limits>
+#include <atomic>
+#include <mutex>
 
 namespace fs = std::filesystem;
 
@@ -1111,19 +1113,23 @@ struct DatasetMemoryManager {
     size_t peak_ram_bytes = 0;
     std::unordered_map<void*, size_t> allocations; // Tracker les allocations
     
-    void setMaxRAM(size_t bytes) { max_ram_bytes = bytes; }
+    void setMaxRAM(size_t bytes) { std::lock_guard<std::mutex> lock(mutex_); max_ram_bytes = bytes; }
     
     bool canAllocate(size_t bytes) const {
-        return (current_ram_bytes + bytes) <= max_ram_bytes;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return current_ram_bytes <= max_ram_bytes && bytes <= max_ram_bytes-current_ram_bytes;
     }
     
     void trackAllocation(void* ptr, size_t bytes) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto entry=allocations.emplace(ptr,bytes);
+        if(!entry.second) {current_ram_bytes-=entry.first->second;entry.first->second=bytes;}
         current_ram_bytes += bytes;
         peak_ram_bytes = std::max(peak_ram_bytes, current_ram_bytes);
-        allocations[ptr] = bytes;
     }
     
     void trackDeallocation(void* ptr) {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = allocations.find(ptr);
         if (it != allocations.end()) {
             current_ram_bytes -= it->second;
@@ -1131,27 +1137,32 @@ struct DatasetMemoryManager {
         }
     }
     
-    size_t getCurrentRAM() const { return current_ram_bytes; }
-    size_t getPeakRAM() const { return peak_ram_bytes; }
+    size_t getCurrentRAM() const { std::lock_guard<std::mutex> lock(mutex_); return current_ram_bytes; }
+    size_t getPeakRAM() const { std::lock_guard<std::mutex> lock(mutex_); return peak_ram_bytes; }
+    size_t getMaxRAM() const { std::lock_guard<std::mutex> lock(mutex_); return max_ram_bytes; }
     size_t getAvailableRAM() const { 
+        std::lock_guard<std::mutex> lock(mutex_);
         return max_ram_bytes > current_ram_bytes ? max_ram_bytes - current_ram_bytes : 0; 
     }
     
     float getUsagePercent() const {
-        return 100.0f * static_cast<float>(current_ram_bytes) / static_cast<float>(max_ram_bytes);
+        std::lock_guard<std::mutex> lock(mutex_);
+        return max_ram_bytes ? 100.0f * static_cast<float>(current_ram_bytes) / static_cast<float>(max_ram_bytes) : 0.0f;
     }
     
     void printStats() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         std::cerr << "\n💾 RAM Manager Stats:" << std::endl;
         std::cerr << "   Current: " << (current_ram_bytes / 1024 / 1024) << " MB" << std::endl;
         std::cerr << "   Peak:    " << (peak_ram_bytes / 1024 / 1024) << " MB" << std::endl;
         std::cerr << "   Max:     " << (max_ram_bytes / 1024 / 1024) << " MB" << std::endl;
         std::cerr << "   Usage:   " << std::fixed << std::setprecision(1) 
-                  << getUsagePercent() << "%" << std::endl;
+                  << (max_ram_bytes ? 100.0f*static_cast<float>(current_ram_bytes)/static_cast<float>(max_ram_bytes) : 0.0f) << "%" << std::endl;
         std::cerr << "   Active allocations: " << allocations.size() << std::endl;
     }
     
 private:
+    mutable std::mutex mutex_;
     DatasetMemoryManager() = default;
 };
 
@@ -1284,8 +1295,8 @@ struct DatasetItem {
     
     // Met à jour le timestamp d'accès (pour LRU)
     void touch() const {
-        static uint64_t global_counter = 0;
-        last_access_time = ++global_counter;
+        static std::atomic<uint64_t> global_counter{0};
+        last_access_time = global_counter.fetch_add(1,std::memory_order_relaxed)+1;
     }
     
     // Lazy loaders avec gestion RAM intelligente
@@ -1746,14 +1757,15 @@ struct DatasetItem {
 
 class DatasetItemUnloadGuard {
 public:
-    explicit DatasetItemUnloadGuard(DatasetItem& item) : item_(item) {}
-    ~DatasetItemUnloadGuard() { item_.unload(); }
+    explicit DatasetItemUnloadGuard(DatasetItem& item,bool unload=true) : item_(item),unload_(unload) {}
+    ~DatasetItemUnloadGuard() { if(unload_)item_.unload(); }
 
     DatasetItemUnloadGuard(const DatasetItemUnloadGuard&) = delete;
     DatasetItemUnloadGuard& operator=(const DatasetItemUnloadGuard&) = delete;
 
 private:
     DatasetItem& item_;
+    bool unload_;
 };
 
 // Gestionnaire de Dataset avec éviction LRU intelligente

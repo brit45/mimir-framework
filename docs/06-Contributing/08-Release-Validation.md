@@ -38,6 +38,32 @@ général : leurs dépendances et plateformes optionnelles sont validées
 séparément. Pour les exécuter localement, configurer explicitement leur
 environnement et sélectionner ces labels sans `-LE`.
 
+### Vérifier quel exécutable est utilisé
+
+CTest utilise la cible `mimir` de son build. Le lanceur `run_mimir.sh` utilise
+par défaut `./bin/mimir`, qui peut provenir d'une autre configuration locale.
+Pour exécuter le même binaire qu'un build séparé, fixer son chemin :
+
+```bash
+MIMIR_EXECUTABLE="$PWD/build_ci_linux/bin/mimir" \
+  ./run_mimir.sh --lua scripts/examples/inspect_vae_conv.lua
+```
+
+Si le cache active JavaScript/Rust mais que la CLI annonce les bridges absents,
+comparer le chemin testé avec `MIMIR_RUNTIME_OUTPUT_DIRECTORY` et les options
+`ENABLE_SCRIPTING_*` du cache. Un exécutable copié plus récemment depuis un
+autre profil peut être considéré à jour par le build courant. Pour le profil
+ci-dessus, supprimer seulement cet artefact généré puis rééditer ses liens :
+
+```bash
+cmake -E rm -f build_ci_linux/bin/mimir
+cmake --build build_ci_linux --target mimir --parallel 2
+ctest --test-dir build_ci_linux --output-on-failure --timeout 120 -LE 'TPU|COLAB|JAX'
+```
+
+Adapter le chemin si `MIMIR_RUNTIME_OUTPUT_DIRECTORY` a été personnalisé.
+Cette procédure conserve les sources, paramètres et checkpoints.
+
 ### Windows depuis Linux
 
 Installer MinGW-w64 et les dépendances `lua` et `lz4` du triplet vcpkg
@@ -46,7 +72,7 @@ Installer MinGW-w64 et les dépendances `lua` et `lz4` du triplet vcpkg
 ```bash
 ./config.sh --gui NONE --non-interactive --build-dir build_ci_windows \
   --generator Ninja --enable MIMIR_ENABLE_TESTS \
-  --disable ENABLE_SCRIPTING_JS --enable ENABLE_SCRIPTING_RUST \
+  --disable ENABLE_SCRIPTING_JS --disable ENABLE_SCRIPTING_RUST \
   --enable ENABLE_SCRIPTING_CSHARP \
   --disable ENABLE_VULKAN --disable ENABLE_OPENCL --disable ENABLE_FFMPEG \
   --cmake-arg -DCMAKE_SYSTEM_NAME=Windows \
@@ -59,9 +85,9 @@ Installer MinGW-w64 et les dépendances `lua` et `lz4` du triplet vcpkg
 cmake --build build_ci_windows --parallel 2
 ```
 
-Le bridge JavaScript utilise un transport POSIX et reste désactivé sur Windows.
-Les bridges C#/Rust sont compilés ; leurs tests peuvent être ignorés si les
-interpréteurs externes ne sont pas détectés.
+Les bridges synchrones JavaScript/Rust utilisent un transport POSIX et restent
+désactivés dans ce profil Windows. Le bridge C# est compilé ; ses tests peuvent
+être ignorés si l'interpréteur externe n'est pas détecté.
 
 Vérifier la présence de `build_ci_windows/bin/mimir.exe` et de
 `build_ci_windows/Tests/BridgeTest.API.exe`. Ces fichiers prouvent la compilation
@@ -102,6 +128,55 @@ au test local. Le workflow du wiki sérialise les publications de `main` et
 
 Les journaux de validation sont conservés hors des sources ; les données,
 checkpoints, builds et le hub local non suivi ne font pas partie de la release.
+
+## Résultats locaux du 12 novembre 2026
+
+La configuration Linux Release a compilé le noyau, l'application et tous les
+exécutables de tests, avec OpenMP/SIMD, SFML, FFmpeg, Vulkan/OpenCL et les
+bridges JavaScript/Rust/C# activés. La suite CTest complète a ensuite été
+exécutée avec deux processus, un thread OpenMP par défaut et ROCm désactivé.
+
+| Contrôle | Résultat |
+| --- | --- |
+| CTest complet | 198 tests enregistrés : 194 réussis, 4 ignorés, aucun échec ; 150,22 secondes au dernier passage. |
+| Lecteur et entraînement | Préchargement borné, RGB, symlinks, annotations et comparaison des checkpoints synchrone/anticipé réussis. |
+| Bridges | Commandes CLI et parité native JavaScript/Rust réussies ; C# compilé, sous-test externe ignoré faute de `dotnet-script`/`csi`. |
+| Vulkan/OpenCL | Opérations natives, gradients, calibration et contrôles des buffers exécutés ; aucun gain de performance GPU déduit de ce passage. |
+| Viz | Tests automatisés de rendu et d'événements exécutés avec l'affichage local SFML ; pas de validation manuelle du bureau. |
+| CLI de configuration | 3 tests Python réussis. |
+| Documentation et IDE | Liens locaux, synchronisation API/EmmyLua et génération des helpers vérifiés. |
+
+Les quatre tests ignorés sont `RuntimeTest.TPUReconstructionLoss`,
+`RuntimeTest.TpuModelTrain`, `RuntimeTest.CUDAPointwiseFusion` et
+`RuntimeTest.ROCMPointwiseFusion`. CUDA/ROCm ne sont pas compilés dans ce
+profil et aucun TPU physique n'est disponible. Les références Python/JAX
+optionnelles ne sont pas enregistrées dans cette configuration. Le résultat
+ne valide pas Windows natif ni les workflows GitHub Actions distants.
+
+Le premier passage avait relevé quatre échecs CLI JavaScript/Rust :
+`bin/mimir` provenait d'une configuration sans ces bridges, alors que le
+noyau et les objets du build courant les activaient. La réédition des liens
+de l'exécutable a rétabli les options attendues, puis les 198 tests ont été
+relancés. Aucun changement de formule ou d'API n'a été nécessaire pour
+corriger cet artefact local.
+
+Les tests utilisent des sockets locaux, des pseudo-terminaux pour l'émulation
+FPGA et l'affichage SFML. Ils ont été exécutés hors sandbox des outils, avec
+la commande suivante depuis le build à la racine :
+
+```bash
+MIMIR_DISABLE_ROCM=1 MIMIR_DISABLE_CUDA=1 MIMIR_TPU=0 \
+  OMP_NUM_THREADS=1 OMP_WAIT_POLICY=PASSIVE GOMP_SPINCOUNT=0 \
+  RUSTICL_ENABLE=radeonsi CARGO_NET_OFFLINE=true \
+  ctest --test-dir . --output-on-failure --parallel 2 \
+    --output-junit outputs/ctest/develop-20261112/ctest-final.xml
+```
+
+`RUSTICL_ENABLE=radeonsi` correspond au pilote Mesa AMD local ; l'adapter au
+périphérique utilisé. Les journaux complets, l'inventaire et les empreintes
+des sources sont conservés localement dans
+`outputs/ctest/develop-20261112/`. Les exécutables CTest et les fichiers de
+build générés sont exclus du commit, ainsi que les exports d'entraînement.
 
 
 ## Résultats locaux du 22 octobre 2026

@@ -98,7 +98,7 @@ for (const [alias, name] of Object.entries({model:'Model', architectures:'Archit
 } // namespace
 
 JSScripting::JSScripting() : native_(std::make_unique<LuaScripting>()) {}
-JSScripting::~JSScripting() = default;
+JSScripting::~JSScripting() {JSContext::getInstance().datasetPrefetcher.reset();}
 void JSScripting::setArgs(const std::string& path, const std::vector<std::string>& args) { cacheArgs(path, args); }
 void JSScripting::setSystemConfig(const json& conf, const std::string& path, const std::string& dir) {
     JSContext::getInstance().currentConfig = conf;

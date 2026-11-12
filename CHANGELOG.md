@@ -7,6 +7,40 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+### Préparation anticipée des datasets
+
+- File native bornée pour lire, décoder, redimensionner et préconvertir les
+  prochains échantillons pendant le calcul du modèle. Buffers de conversion
+  réutilisés et déchargement confié au producteur après consommation.
+- Intégration dans `Dataset.get`, les entraînements VAEConv/VAEText,
+  VGG16Feat/VGG16/VGG19, le détecteur médical et l'ordre mélangé/restauré de
+  Lumen. Tokenizer figé pour le producteur, tirages aléatoires conservés sur
+  le thread d'entraînement.
+- `Dataset.prefetch(indices, load_image)` et `Dataset.prefetch_stats()`
+  accessibles depuis Lua, JavaScript et Rust, avec helpers centralisés dans
+  `ide/`. Les permutations acceptent les indices entiers restaurés depuis JSON.
+- Profondeur configurable via `MIMIR_DATASET_PREFETCH` : 10 dans le lanceur,
+  8 dans le lecteur natif sans variable ; budget cible de 64 Mio via
+  `MIMIR_DATASET_PREFETCH_BYTES`. Une valeur nulle désactive l'anticipation.
+- Comparaisons bit à bit des checkpoints et mesures CPU documentées dans
+  le [rapport du lecteur](docs/04-Architecture-Internals/Runtime-Dataset-Prefetch-20261112.md),
+  avec les limites concernant les accès imprévus et les vidéos en streaming.
+
+### Projections, attention et contrôles CPU
+
+- GEMM par blocs pour les projections et gradients de grandes dimensions,
+  en conservant l'ordre des réductions FP32 et les politiques FMA existantes.
+- Backward SelfAttention/CrossAttention par blocs réutilisables, avec
+  accumulateurs poursuivis entre blocs et contrôle des budgets mémoire.
+- Calibration des workers et backends d'attention dans le routeur Model,
+  avec validation numérique avant publication et restauration des gradients
+  après les sondes. Coût de première utilisation et mesures après chauffe
+  distingués dans le [rapport de calibration](docs/04-Architecture-Internals/Runtime-Attention-Policy-20261112.md).
+- Dispatch SIMD portable des contrôles NaN/Inf ; suppression de copies et
+  synchronisations redondantes ciblées dans OpenCL, ROCm et le worker TPU.
+  Les preuves CPU, GPU exécutés, compilation HIP et référence CPU/JAX sont
+  séparées dans les [rapports de performance](docs/05-Advanced/01-Performance.md).
+
 ### Export des graphes 3D
 
 - Bouton **Exporter 3D** et raccourci `X` dans la vue 3D, pour les modes poids,

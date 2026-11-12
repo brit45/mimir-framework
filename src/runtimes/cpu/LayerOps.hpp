@@ -1155,6 +1155,11 @@ inline std::vector<float> self_attention_forward(
         size_t(seq_len)*head_dim,size_t(seq_len)*head_dim,size_t(head_dim)*seq_len,
         size_t(tile_rows)*seq_len,size_t(tile_rows)*head_dim});
     auto qkv=workspace.take(size_t(seq_len)*qkv_dim);
+    if(RuntimeLayerOps::hardwareAccelerationEnabled()) {
+        RuntimeSimd::matmulTransposeBiased(qkv.data(),input.data(),qkv_weight.data(),
+            qkv_bias.empty()?nullptr:qkv_bias.data(),size_t(seq_len),size_t(qkv_dim),size_t(embed_dim),
+            RuntimeParallel::workers(size_t(seq_len)*qkv_dim*embed_dim));
+    } else {
     RuntimeParallel::forEach(seq_len, RuntimeParallel::workers(static_cast<long long>(seq_len) * qkv_dim * embed_dim), [&](int m) {
         const float* xrow = &input[static_cast<size_t>(m) * static_cast<size_t>(embed_dim)];
         float* qkv_row = &qkv[static_cast<size_t>(m) * static_cast<size_t>(qkv_dim)];
@@ -1167,6 +1172,7 @@ inline std::vector<float> self_attention_forward(
             qkv_row[n] = sum;
         }
     });
+    }
 
     // Read head slices directly from the combined projection below.
     // 3-5. Multi-head attention (GEMM-based):

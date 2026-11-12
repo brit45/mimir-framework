@@ -41,6 +41,28 @@
 
 namespace {
 
+static std::shared_ptr<DatasetPrefetcher> _mimir_dataset_queue(
+    LuaContext& ctx,int width,int height,std::shared_ptr<const Tokenizer> tokenizer={},size_t minimum_tokens=0) {
+    if(!tokenizer && ctx.datasetPrefetcher && !ctx.datasetPrefetcher->preparesTokens() &&
+        ctx.datasetPrefetcher->matchesDimensions(width,height))return ctx.datasetPrefetcher;
+    auto options=DatasetPrefetcher::Options::fromEnvironment(width,height);
+    if(tokenizer && options.ahead && options.max_bytes)
+        options.tokenizer=std::make_shared<const Tokenizer>(*tokenizer);
+    options.minimum_tokens=minimum_tokens;if(options.tokenizer)options.pad_id=options.tokenizer->getPadId();
+    ctx.datasetPrefetcher=std::make_shared<DatasetPrefetcher>(ctx.currentDataset,std::move(options));
+    return ctx.datasetPrefetcher;
+}
+struct DatasetOrderScope {
+    std::shared_ptr<DatasetPrefetcher> queue;
+    ~DatasetOrderScope(){if(queue)queue->setOrder({});}
+};
+static void _mimir_prefetch_epoch(const std::shared_ptr<DatasetPrefetcher>& queue,
+    const std::vector<int>& indices,int count,DatasetPrefetcher::Format format) {
+    std::vector<size_t> order;order.reserve(size_t(count));
+    for(int i=0;i<count;++i)order.push_back(size_t(indices[size_t(i)]));
+    queue->setOrder(std::move(order),format);
+}
+
 static LumenLatentDiffusionModel& _mimir_current_lumen_model() {
     auto& ctx = LuaContext::getInstance();
     if (!ctx.currentModel) throw std::runtime_error("Aucun modèle créé");
@@ -2884,9 +2906,12 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             bool stopped_by_ui = false;
             int trained_steps_total = 0;
             bool bbox_log_emitted = false;
+            auto dataset_queue=_mimir_dataset_queue(ctx,image_w,image_h);
+            DatasetOrderScope dataset_order{dataset_queue};
 
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(train_indices.begin(), train_indices.end(), rng);
+                _mimir_prefetch_epoch(dataset_queue,train_indices,use_n,DatasetPrefetcher::Format::MediaHWC);
                 ctx.addLog("Epoch " + std::to_string(epoch_offset + (epoch + 1)) + "/" + std::to_string(total_epochs_display) +
                            " (" + model_type + ") items=" + std::to_string(use_n));
 
@@ -2895,9 +2920,10 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                 for (int k = 0; k < use_n; ++k) {
                     refresh_viz_activation();
-                    DatasetItem& item = ctx.currentDataset[(size_t)train_indices[(size_t)k]];
+                    auto prepared=dataset_queue->acquire(size_t(train_indices[size_t(k)]),DatasetPrefetcher::Format::MediaHWC);
+                    DatasetItem& item = prepared?prepared->item:ctx.currentDataset[(size_t)train_indices[(size_t)k]];
                     if (item.image_file.empty() && item.video_file.empty()) continue;
-                    DatasetItemUnloadGuard unload_item(item);
+                    DatasetItemUnloadGuard unload_item(item,!prepared);
 
                     const bool stream_video = !item.video_file.empty();
 #ifdef MIMIR_ENABLE_FFMPEG
@@ -2934,14 +2960,15 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 #endif
                         } else {
                             more_media_samples = false;
-                            item.loadImageRGB(image_w, image_h);
+                            if(!prepared)item.loadImageRGB(image_w, image_h);
                         }
                         if (!item.img_loaded || item.img.size() != expected_u8) {
                             continue;
                         }
 
-                    // Normalize u8 -> [-1, 1]
-                    for (size_t i = 0; i < expected_u8; ++i) {
+                    // Prepared buffers retain the exact double-to-float conversion.
+                    if(!stream_video && prepared && prepared->input.size()==expected_u8)x.swap(prepared->input);
+                    else for (size_t i = 0; i < expected_u8; ++i) {
                         x[i] = (float)((double)item.img[i] / 127.5 - 1.0);
                     }
 
@@ -3227,15 +3254,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                                 break;
                             }
 
-                            DatasetItem& vitem = ctx.currentDataset[(size_t)val_pick[(size_t)vi]];
+                            auto validation_sample=dataset_queue->acquire(size_t(val_pick[size_t(vi)]),DatasetPrefetcher::Format::HWC);
+                            DatasetItem& vitem = validation_sample?validation_sample->item:ctx.currentDataset[(size_t)val_pick[(size_t)vi]];
                             if (vitem.image_file.empty()) continue;
-                            DatasetItemUnloadGuard unload_vitem(vitem);
+                            DatasetItemUnloadGuard unload_vitem(vitem,!validation_sample);
 
-                            vitem.loadImageRGB(image_w, image_h);
+                            if(!validation_sample)vitem.loadImageRGB(image_w, image_h);
                             if (!vitem.img_loaded || vitem.img.size() != expected_u8) continue;
 
-                            // Normalize u8 -> [-1, 1]
-                            for (size_t i = 0; i < expected_u8; ++i) {
+                            if(validation_sample && validation_sample->input.size()==expected_u8)x.swap(validation_sample->input);
+                            else for (size_t i = 0; i < expected_u8; ++i) {
                                 x[i] = (float)((double)vitem.img[i] / 127.5 - 1.0);
                             }
 
@@ -3650,6 +3678,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             int stopped_epoch = 0;
 
             // Perf stats vgg16_feat -> Viz.
+            auto dataset_queue=_mimir_dataset_queue(ctx,image_w,image_h);
+            DatasetOrderScope dataset_order{dataset_queue};
             std::chrono::steady_clock::time_point last_vgg_metrics_ts;
             bool has_last_vgg_metrics_ts = false;
             auto apply_vgg_perf_stats = [&](AsyncMonitor::Metrics& m) {
@@ -3671,6 +3701,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(indices.begin(), indices.end(), rng);
+                _mimir_prefetch_epoch(dataset_queue,indices,use_n,DatasetPrefetcher::Format::HWC);
                 ctx.addLog("Epoch " + std::to_string(epoch_offset + (epoch + 1)) + "/" + std::to_string(total_epochs_display) +
                            " (vgg16_feat) items=" + std::to_string(use_n));
 
@@ -3678,17 +3709,18 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                 for (int k = 0; k < use_n; ++k) {
                     refresh_viz_activation();
-                    DatasetItem& item = ctx.currentDataset[(size_t)indices[(size_t)k]];
+                    auto prepared=dataset_queue->acquire(size_t(indices[size_t(k)]),DatasetPrefetcher::Format::HWC);
+                    DatasetItem& item = prepared?prepared->item:ctx.currentDataset[(size_t)indices[(size_t)k]];
                     if (item.image_file.empty()) continue;
-                    DatasetItemUnloadGuard unload_item(item);
+                    DatasetItemUnloadGuard unload_item(item,!prepared);
 
-                    item.loadImageRGB(image_w, image_h);
+                    if(!prepared)item.loadImageRGB(image_w, image_h);
                     if (!item.img_loaded || item.img.size() != expected_u8) {
                         continue;
                     }
 
-                    // Normalize u8 -> [-1, 1]
-                    for (size_t i = 0; i < expected_u8; ++i) {
+                    if(prepared && prepared->input.size()==expected_u8)x.swap(prepared->input);
+                    else for (size_t i = 0; i < expected_u8; ++i) {
                         x[i] = (float)((double)item.img[i] / 127.5 - 1.0);
                     }
                     ctx.currentModel->applyRuntimeConfiguration();
@@ -3943,11 +3975,15 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                                            static_cast<size_t>(image_c);
             std::vector<float> image_chw(expected_pixels);
             std::vector<float> target;
-            auto load_image = [&](MedicalSample& sample, DatasetItem** loaded_item) -> bool {
-                DatasetItem& item = ctx.currentDataset[(size_t)sample.dataset_index];
-                item.loadImageRGB(image_w, image_h);
+            auto dataset_queue=_mimir_dataset_queue(ctx,image_w,image_h);
+            DatasetOrderScope dataset_order{dataset_queue};
+            auto load_image = [&](MedicalSample& sample, DatasetItem** loaded_item,DatasetPrefetcher::Lease& prepared) -> bool {
+                prepared=dataset_queue->acquire(size_t(sample.dataset_index),DatasetPrefetcher::Format::FloatCHW);
+                DatasetItem& item = prepared?prepared->item:ctx.currentDataset[(size_t)sample.dataset_index];
+                if(!prepared)item.loadImageRGB(image_w, image_h);
                 if (!item.img_loaded || item.img.size() != expected_pixels) return false;
-                for (int y = 0; y < image_h; ++y) {
+                if(prepared && prepared->input.size()==expected_pixels)image_chw.swap(prepared->input);
+                else for (int y = 0; y < image_h; ++y) {
                     for (int x = 0; x < image_w; ++x) {
                         const size_t pixel = static_cast<size_t>(y * image_w + x) * image_c;
                         for (int channel = 0; channel < image_c; ++channel) {
@@ -4053,8 +4089,9 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                 for (int index = 0; index < count; ++index) {
                     MedicalSample& sample = validation_samples[(size_t)index];
                     DatasetItem* item = nullptr;
-                    if (!load_image(sample, &item)) continue;
-                    DatasetItemUnloadGuard unload(*item);
+                    DatasetPrefetcher::Lease prepared;
+                    if (!load_image(sample, &item,prepared)) continue;
+                    DatasetItemUnloadGuard unload(*item,!prepared);
                     const std::vector<float>& output =
                         ctx.currentModel->forwardPassView(image_chw, false);
                     auto detections = MedicalDetectorModel::decodeDetections(
@@ -4130,12 +4167,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             bool has_last_medical_metrics = false;
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(samples.begin(), samples.end(), rng);
+                std::vector<size_t> dataset_indices;dataset_indices.reserve(samples.size());
+                for(const auto& sample:samples)dataset_indices.push_back(size_t(sample.dataset_index));
+                dataset_queue->setOrder(std::move(dataset_indices),DatasetPrefetcher::Format::FloatCHW);
                 for (size_t sample_index = 0; sample_index < samples.size(); ++sample_index) {
                     refresh_viz_activation();
                     MedicalSample& sample = samples[sample_index];
                     DatasetItem* item = nullptr;
-                    if (!load_image(sample, &item)) continue;
-                    DatasetItemUnloadGuard unload(*item);
+                    DatasetPrefetcher::Lease prepared;
+                    if (!load_image(sample, &item,prepared)) continue;
+                    DatasetItemUnloadGuard unload(*item,!prepared);
                     const auto batch_started = std::chrono::steady_clock::now();
                     MedicalDetectorModel::encodeTarget(
                         sample.boxes, grid_h, grid_w, num_classes, &target);
@@ -4530,6 +4571,8 @@ int LuaScripting::lua_trainModel(lua_State* L) {
             const size_t expected_u8 = (size_t)image_w * (size_t)image_h * (size_t)image_c;
             std::vector<float> x_chw;
             x_chw.resize(expected_u8);
+            auto dataset_queue=_mimir_dataset_queue(ctx,image_w,image_h);
+            DatasetOrderScope dataset_order{dataset_queue};
             std::vector<float> y;
             y.resize((size_t)num_classes);
             double running_loss_sum = 0.0;
@@ -4598,12 +4641,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                 int done = 0;
                 for (int j = 0; j < (int)work.size() && done < want; ++j) {
-                    DatasetItem& item = ctx.currentDataset[(size_t)work[(size_t)j]];
+                    auto prepared=dataset_queue->acquire(size_t(work[size_t(j)]),DatasetPrefetcher::Format::CHW);
+                    DatasetItem& item = prepared?prepared->item:ctx.currentDataset[(size_t)work[(size_t)j]];
                     if (item.image_file.empty() || (!item.text.has_value() && item.text_file.empty() && item.text_inline.empty())) continue;
-                    DatasetItemUnloadGuard unload_item(item);
+                    DatasetItemUnloadGuard unload_item(item,!prepared);
                     if (!item.loadText() || !item.text.has_value()) continue;
 
-                    item.loadImageRGB(image_w, image_h);
+                    if(!prepared)item.loadImageRGB(image_w, image_h);
                     if (!item.img_loaded || item.img.size() != expected_u8) continue;
 
                     ctx.currentModel->applyRuntimeConfiguration();
@@ -4624,15 +4668,18 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         }
                     }
 
-                    // Image -> CHW
-                    for (int yy = 0; yy < image_h; ++yy) {
+                    const bool prepared_input=prepared && prepared->input.size()==expected_u8;
+                    if(prepared_input)x_chw.swap(prepared->input);
+                    // Spatial weighting remains live; decoding/normalization/
+                    // permutation are already complete on the producer.
+                    if(!prepared_input || mask_weights.size()==expected_u8)for (int yy = 0; yy < image_h; ++yy) {
                         for (int xx = 0; xx < image_w; ++xx) {
                             const size_t pix = (size_t)(yy * image_w + xx) * (size_t)image_c;
                             for (int cc = 0; cc < image_c; ++cc) {
                                 const size_t hwc_idx = pix + (size_t)cc;
-                                float v = (float)((double)item.img[hwc_idx] / 127.5 - 1.0);
-                                if (mask_weights.size() == expected_u8) v *= mask_weights[hwc_idx];
                                 const size_t idx = (size_t)cc * (size_t)(image_h * image_w) + (size_t)(yy * image_w + xx);
+                                float v = prepared_input?x_chw[idx]:(float)((double)item.img[hwc_idx] / 127.5 - 1.0);
+                                if (mask_weights.size() == expected_u8) v *= mask_weights[hwc_idx];
                                 x_chw[idx] = v;
                             }
                         }
@@ -4758,6 +4805,7 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(train_indices.begin(), train_indices.end(), rng);
+                _mimir_prefetch_epoch(dataset_queue,train_indices,use_n,DatasetPrefetcher::Format::CHW);
                 ctx.addLog("Epoch " + std::to_string(epoch_offset + (epoch + 1)) + "/" + std::to_string(total_epochs_display) +
                            " (" + std::string(model_type) + " multi-label) items=" + std::to_string(use_n));
 
@@ -4765,16 +4813,17 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                 for (int k = 0; k < use_n; ++k) {
                     refresh_viz_activation();
-                    DatasetItem& item = ctx.currentDataset[(size_t)train_indices[(size_t)k]];
+                    auto prepared=dataset_queue->acquire(size_t(train_indices[size_t(k)]),DatasetPrefetcher::Format::CHW);
+                    DatasetItem& item = prepared?prepared->item:ctx.currentDataset[(size_t)train_indices[(size_t)k]];
                     if (item.image_file.empty() || (!item.text.has_value() && item.text_file.empty() && item.text_inline.empty())) continue;
-                    DatasetItemUnloadGuard unload_item(item);
+                    DatasetItemUnloadGuard unload_item(item,!prepared);
 
                     // Lazy-load text on demand (uses DatasetMemoryManager).
                     if (!item.loadText() || !item.text.has_value()) {
                         continue;
                     }
 
-                    item.loadImageRGB(image_w, image_h);
+                    if(!prepared)item.loadImageRGB(image_w, image_h);
                     if (!item.img_loaded || item.img.size() != expected_u8) {
                         continue;
                     }
@@ -4801,15 +4850,16 @@ int LuaScripting::lua_trainModel(lua_State* L) {
                         }
                     }
 
-                    // Normalize u8 -> [-1, 1] AND permute HWC -> CHW (Conv2d expects CHW)
-                    for (int yy = 0; yy < image_h; ++yy) {
+                    const bool prepared_input=prepared && prepared->input.size()==expected_u8;
+                    if(prepared_input)x_chw.swap(prepared->input);
+                    if(!prepared_input || mask_weights.size()==expected_u8)for (int yy = 0; yy < image_h; ++yy) {
                         for (int xx = 0; xx < image_w; ++xx) {
                             const size_t pix = (size_t)(yy * image_w + xx) * (size_t)image_c;
                             for (int cc = 0; cc < image_c; ++cc) {
                                 const size_t hwc_idx = pix + (size_t)cc;
-                                float v = (float)((double)item.img[hwc_idx] / 127.5 - 1.0);
-                                if (mask_weights.size() == expected_u8) v *= mask_weights[hwc_idx];
                                 const size_t idx = (size_t)cc * (size_t)(image_h * image_w) + (size_t)(yy * image_w + xx);
+                                float v = prepared_input?x_chw[idx]:(float)((double)item.img[hwc_idx] / 127.5 - 1.0);
+                                if (mask_weights.size() == expected_u8) v *= mask_weights[hwc_idx];
                                 x_chw[idx] = v;
                             }
                         }
@@ -5041,10 +5091,13 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
             const int text_viz_every_steps = std::max(1, ctx.modelConfig.value("viz_taps_every_steps",
                 ctx.modelConfig.value("viz_every_steps", log_every)));
+            auto dataset_queue=_mimir_dataset_queue(ctx,64,64,ctx.currentTokenizer,size_t(seq_len));
+            DatasetOrderScope dataset_order{dataset_queue};
             bool text_viz_published = false;
             bool stopped_by_ui = false;
             for (int epoch = 0; epoch < epochs; ++epoch) {
                 std::shuffle(indices.begin(), indices.end(), rng);
+                _mimir_prefetch_epoch(dataset_queue,indices,use_n,DatasetPrefetcher::Format::Text);
                 ctx.addLog("Epoch " + std::to_string(epoch_offset + (epoch + 1)) + "/" + std::to_string(total_epochs_display) +
                            " (vae_text) items=" + std::to_string(use_n));
 
@@ -5052,19 +5105,23 @@ int LuaScripting::lua_trainModel(lua_State* L) {
 
                 for (int k = 0; k < use_n; ++k) {
                     refresh_viz_activation();
-                    DatasetItem& item = ctx.currentDataset[(size_t)indices[(size_t)k]];
+                    auto prepared=dataset_queue->acquire(size_t(indices[size_t(k)]),DatasetPrefetcher::Format::Text);
+                    DatasetItem& item = prepared?prepared->item:ctx.currentDataset[(size_t)indices[(size_t)k]];
                     if (item.text_file.empty()) continue;
-                    DatasetItemUnloadGuard unload_item(item);
+                    DatasetItemUnloadGuard unload_item(item,!prepared);
                     if (!item.text.has_value()) item.loadText();
                     if (!item.text.has_value()) continue;
 
-                    std::vector<int> ids = ctx.currentTokenizer->tokenize(item.text.value());
+                    std::vector<int> fallback_ids;
+                    auto& ids=prepared && prepared->tokenized?prepared->tokens:fallback_ids;
+                    if(!prepared || !prepared->tokenized)ids=ctx.currentTokenizer->tokenize(item.text.value());
                     if ((int)ids.size() < seq_len) ids.resize((size_t)seq_len, pad_id);
                     else if ((int)ids.size() > seq_len) {
                         if (ctx.modelConfig.value("natural_context_windows", true)) {
                             std::uniform_int_distribution<size_t> offset(0, ids.size() - size_t(seq_len));
                             const size_t begin = offset(rng);
-                            ids = std::vector<int>(ids.begin() + begin, ids.begin() + begin + seq_len);
+                            ids.erase(ids.begin(),ids.begin()+begin);
+                            ids.resize(size_t(seq_len));
                         } else ids.resize((size_t)seq_len);
                     }
 

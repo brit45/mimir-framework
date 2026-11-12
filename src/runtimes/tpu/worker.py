@@ -826,7 +826,9 @@ class Engine:
             if cmd=="forward":return {"outputs":1},[selected[:count],np.empty((0,),np.float32)]
             if req["grad_outputs"]!=1 or xs[n+1].size!=count:raise ValueError("NMS gradient shape mismatch")
         if cmd=="forward":
-            noise=jnp.zeros_like(x)
+            # Deterministic operations do not consume noise. Avoid a full-sized
+            # device allocation/kernel for every Linear, norm or activation call.
+            noise=jnp.empty((0,),jnp.float32)
             if training and (t in DROP or t=="Reparameterize"):
                 self.key,key=jax.random.split(self.key)
                 noise=jax.random.normal(key,x.shape) if t=="Reparameterize" else (jax.random.uniform(key,x.shape)>min(1,max(0,l["dropout_p"]))).astype(jnp.float32)

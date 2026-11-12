@@ -55,6 +55,12 @@
     "load": {
       "native_function": true
     },
+    "prefetch": {
+      "native_function": true
+    },
+    "prefetch_stats": {
+      "native_function": true
+    },
     "prepare_sequences": {
       "native_function": true
     },

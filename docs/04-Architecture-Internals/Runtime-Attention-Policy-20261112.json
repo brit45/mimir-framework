@@ -1,0 +1,3813 @@
+{
+  "created_utc": "2026-11-12T15:30:14.452367+00:00",
+  "scope": "Additional attention routing and finite validation optimization, following attention tiling; unchanged public Model API.",
+  "baseline": "Engine after attention tiling, before deterministic attention calibration",
+  "head": "350ad97dbeb50f2a34a8a1061fe3fdd537832b95",
+  "baseline_calibration_sha256": "7a55e4e1d2c1ced531def2de4d063349fd6f96f6513033ba7987bb0fb2a7a3fc",
+  "baseline_core_sha256": "3c7a07ce9909cbefefaf1cac70672424f7a90b5f02bc52f04ebc1d93bd847de5",
+  "current_core_sha256": "fd507ed50801628c5a4c4cc2f16cd914f9acb9d9aa7ae1da908eeb0da4974672",
+  "source_sha256": {
+    "src/Planning/ExecutionCalibration.cpp": "d4aca4725d0745e6f62213b26df2a56f46ce83e9506d129c11bcd784dd092a36",
+    "src/runtimes/RuntimeRouter.cpp": "775bb17950a5265dd8c3c2fed955a287fe6e1b52363db073a0ad9a7c21119f28",
+    "src/runtimes/cpu/FiniteCheckDispatch.cpp": "0424325d67bf7453128fea8376a95887681eaad35a00a0e981247aeb9181fd8b",
+    "src/runtimes/cpu/FiniteCheckDispatch.hpp": "12d1261d7249c06cb0382b641e1cc4298b6720e50f4edbdc569d54a7d21b2aa6",
+    "scripts/benchmarks/benchmark_whole_model.cpp": "5fc80c7ced2d6f41dd4a6a75ee4029f9690ec6a0f8d13d1d6bac59270fad0f2d",
+    "Tests/test_attention_calibration.cpp": "774eeaa5d22e4043a8f00e8c3490565ea8db3f509f41b793807cd5397e73fad6",
+    "Tests/test_runtime_finite_dispatch.cpp": "e63794ffdd9ff76e29b5acc558293a13f6fd81058035e9630238164090279581",
+    "CMakeLists.txt": "eb63130b0091fa73020f0c4997a9fa266f9f2ed2e1fd86c33a2ed289a7e0c774",
+    "Tests/CMakeLists.txt": "9bb4b2e44437ac9a7fc841e312a00125ff2a6adc2ce424ac71201435dc2f69e5"
+  },
+  "environment": {
+    "cpu": "AMD Ryzen 5 5500U with Radeon Graphics",
+    "isa": "AVX2",
+    "compiler": "GCC 15.2.0",
+    "cpu_benchmark_backends_disabled": [
+      "CUDA",
+      "ROCM",
+      "OPENCL",
+      "VULKAN"
+    ],
+    "omp_budget": [
+      1,
+      4
+    ],
+    "launcher": "./run_mimir.sh",
+    "launcher_affinity": {
+      "OMP_PROC_BIND": "false",
+      "OMP_PLACES": "cores",
+      "OMP_DYNAMIC": "false"
+    },
+    "affinity_note": "OMP_PLACES requested by campaign is overwritten by launcher; workers are not reported as pinned. Shared machine, other training active. No fixed frequency."
+  },
+  "method": {
+    "train_warmup": 10,
+    "samples": "3-10 per main profile; 3 paired rounds of 200 for tiny cases",
+    "cold_inference": "one explicit first inference before warm timing",
+    "cpu_bit_parity": "SHA256 of final predictions and weights, same benchmark harness and stage counts",
+    "allocation_scope": "calling-thread C++ new/new[] only; excludes malloc, OpenMP worker allocations and devices"
+  },
+  "profiles": [
+    {
+      "type": "SelfAttention",
+      "dim": 64,
+      "rows": 1,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 7,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.022182,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 1344.0,
+          "p95_ms": 0.038903,
+          "samples_ms": [
+            0.038903,
+            0.022843,
+            0.022102,
+            0.022082,
+            0.022182,
+            0.022202,
+            0.022062
+          ]
+        },
+        "batch": 1,
+        "cold_inference_ms": 4.230525,
+        "cold_trainstep_ms": 45.986911,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001252,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001042,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.011205962859094143,
+        "forward_stage": {
+          "median_ms": 0.024285,
+          "new_allocations_per_call": 123.42857142857143,
+          "new_bytes_per_call": 8901.285714285714,
+          "p95_ms": 0.364484,
+          "samples_ms": [
+            0.364484,
+            0.028794,
+            0.024366,
+            0.024285,
+            0.016992,
+            0.0161,
+            0.01571
+          ]
+        },
+        "inference": {
+          "median_ms": 0.022773,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 4539.0,
+          "p95_ms": 0.054553,
+          "samples_ms": [
+            0.054553,
+            0.035567,
+            0.019577,
+            0.022412,
+            0.022502,
+            0.022773,
+            0.022833
+          ]
+        },
+        "initialize_ms": 2.086789,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 17
+        },
+        "optimizer_backends": {
+          "CPU": 24
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.009357,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.036438,
+          "samples_ms": [
+            0.036438,
+            0.009739,
+            0.009417,
+            0.009357,
+            0.009348,
+            0.009257,
+            0.009178
+          ]
+        },
+        "parameter_checksum": -89627.10390859027,
+        "peak_rss_kib": 33928,
+        "runtime_autotune": true,
+        "steps": 7,
+        "training": {
+          "median_ms": 0.128762,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 7020.0,
+          "p95_ms": 0.235042,
+          "samples_ms": [
+            0.128762,
+            0.127439,
+            0.151434,
+            0.133391,
+            0.124444,
+            0.123732,
+            0.235042
+          ]
+        }
+      },
+      "before_values_sha256": "de86850010cae2fb874f0329fab180805bfcbd45ea9085248db99bc6e17346ae",
+      "before_value_bytes": 65792,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.034965,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 66944.0,
+          "p95_ms": 0.051327,
+          "samples_ms": [
+            0.051327,
+            0.035496,
+            0.034776,
+            0.034965,
+            0.034485,
+            0.036729,
+            0.034625
+          ]
+        },
+        "batch": 1,
+        "cold_inference_ms": 0.667874,
+        "cold_trainstep_ms": 3.366252,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.018855,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.005931,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.0012419999999999998,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.000591,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.011205962859094143,
+        "forward_stage": {
+          "median_ms": 0.021411,
+          "new_allocations_per_call": 135.14285714285714,
+          "new_bytes_per_call": 9235.714285714286,
+          "p95_ms": 0.182894,
+          "samples_ms": [
+            0.182894,
+            0.023253,
+            0.02157,
+            0.0214,
+            0.02135,
+            0.02122,
+            0.021411
+          ]
+        },
+        "inference": {
+          "median_ms": 0.020519,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 4571.0,
+          "p95_ms": 0.028754,
+          "samples_ms": [
+            0.028754,
+            0.02103,
+            0.020498,
+            0.020589,
+            0.020439,
+            0.020458,
+            0.020519
+          ]
+        },
+        "initialize_ms": 1.695023,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 17
+        },
+        "optimizer_backends": {
+          "CPU": 24
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.015209,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.023965,
+          "samples_ms": [
+            0.023965,
+            0.016681,
+            0.015288,
+            0.015209,
+            0.012113,
+            0.011782,
+            0.011792
+          ]
+        },
+        "parameter_checksum": -89627.10390859027,
+        "peak_rss_kib": 34252,
+        "runtime_autotune": true,
+        "steps": 7,
+        "training": {
+          "median_ms": 0.087795,
+          "new_allocations_per_call": 97.0,
+          "new_bytes_per_call": 72652.0,
+          "p95_ms": 0.104997,
+          "samples_ms": [
+            0.088907,
+            0.104997,
+            0.09026,
+            0.087594,
+            0.087754,
+            0.087183,
+            0.087795
+          ]
+        }
+      },
+      "after_values_sha256": "de86850010cae2fb874f0329fab180805bfcbd45ea9085248db99bc6e17346ae",
+      "after_value_bytes": 65792,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 64,
+      "rows": 16,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 7,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.326312,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 12864.0,
+          "p95_ms": 0.3885,
+          "samples_ms": [
+            0.353033,
+            0.295596,
+            0.326312,
+            0.354446,
+            0.3885,
+            0.312256,
+            0.310152
+          ]
+        },
+        "batch": 16,
+        "cold_inference_ms": 0.782018,
+        "cold_trainstep_ms": 3.444529,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008015,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.007124,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.011205961927771568,
+        "forward_stage": {
+          "median_ms": 0.073589,
+          "new_allocations_per_call": 123.42857142857143,
+          "new_bytes_per_call": 28101.285714285714,
+          "p95_ms": 0.217929,
+          "samples_ms": [
+            0.217929,
+            0.073247,
+            0.073589,
+            0.071415,
+            0.071284,
+            0.076614,
+            0.099497
+          ]
+        },
+        "inference": {
+          "median_ms": 0.0692,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 23739.0,
+          "p95_ms": 0.082325,
+          "samples_ms": [
+            0.077787,
+            0.069671,
+            0.0692,
+            0.06916,
+            0.06904,
+            0.068929,
+            0.082325
+          ]
+        },
+        "initialize_ms": 1.400711,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 17
+        },
+        "optimizer_backends": {
+          "CPU": 24
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.015288,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.03181,
+          "samples_ms": [
+            0.03181,
+            0.016731,
+            0.015288,
+            0.013185,
+            0.012163,
+            0.024286,
+            0.013315
+          ]
+        },
+        "parameter_checksum": -89630.37019120686,
+        "peak_rss_kib": 34196,
+        "runtime_autotune": true,
+        "steps": 7,
+        "training": {
+          "median_ms": 0.396765,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 41580.0,
+          "p95_ms": 0.485251,
+          "samples_ms": [
+            0.407876,
+            0.38365,
+            0.396765,
+            0.391916,
+            0.485251,
+            0.437422,
+            0.389251
+          ]
+        }
+      },
+      "before_values_sha256": "41bccf7b5b52fd3f3b9f1a479468eb8d782718036878bde5593fb503d2624852",
+      "before_value_bytes": 69632,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.307548,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 78464.0,
+          "p95_ms": 0.317086,
+          "samples_ms": [
+            0.311475,
+            0.293241,
+            0.31452,
+            0.307548,
+            0.317086,
+            0.305033,
+            0.304592
+          ]
+        },
+        "batch": 16,
+        "cold_inference_ms": 2.792484,
+        "cold_trainstep_ms": 11.830437,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.198283,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.076684,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008656,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.0063419999999999995,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.011205961927771568,
+        "forward_stage": {
+          "median_ms": 0.092083,
+          "new_allocations_per_call": 135.14285714285714,
+          "new_bytes_per_call": 28435.714285714286,
+          "p95_ms": 0.270558,
+          "samples_ms": [
+            0.270558,
+            0.094036,
+            0.092083,
+            0.091973,
+            0.091752,
+            0.091552,
+            0.100539
+          ]
+        },
+        "inference": {
+          "median_ms": 0.089598,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 23771.0,
+          "p95_ms": 0.100649,
+          "samples_ms": [
+            0.100649,
+            0.089598,
+            0.088496,
+            0.088587,
+            0.088586,
+            0.098656,
+            0.089638
+          ]
+        },
+        "initialize_ms": 2.041855,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 17
+        },
+        "optimizer_backends": {
+          "CPU": 24
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.013405,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.123732,
+          "samples_ms": [
+            0.123732,
+            0.015299,
+            0.013165,
+            0.013055,
+            0.013405,
+            0.013455,
+            0.012844
+          ]
+        },
+        "parameter_checksum": -89630.37019120686,
+        "peak_rss_kib": 34056,
+        "runtime_autotune": true,
+        "steps": 7,
+        "training": {
+          "median_ms": 0.545594,
+          "new_allocations_per_call": 97.0,
+          "new_bytes_per_call": 107212.0,
+          "p95_ms": 0.554531,
+          "samples_ms": [
+            0.554531,
+            0.529935,
+            0.545745,
+            0.550013,
+            0.538632,
+            0.545594,
+            0.542378
+          ]
+        }
+      },
+      "after_values_sha256": "41bccf7b5b52fd3f3b9f1a479468eb8d782718036878bde5593fb503d2624852",
+      "after_value_bytes": 69632,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 64,
+      "rows": 512,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 5,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 48.609025,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 393792.0,
+          "p95_ms": 55.196226,
+          "samples_ms": [
+            48.609025,
+            49.033462,
+            55.196226,
+            47.813392,
+            48.109638
+          ]
+        },
+        "batch": 512,
+        "cold_inference_ms": 60.709109,
+        "cold_trainstep_ms": 91.288325,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.15753499999999998,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.13253900000000002,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926329746842384,
+        "forward_stage": {
+          "median_ms": 31.924483,
+          "new_allocations_per_call": 165.0,
+          "new_bytes_per_call": 664792.2,
+          "p95_ms": 32.220629,
+          "samples_ms": [
+            32.053074,
+            31.924483,
+            31.703338,
+            31.823032,
+            32.220629
+          ]
+        },
+        "inference": {
+          "median_ms": 26.519282,
+          "new_allocations_per_call": 41.0,
+          "new_bytes_per_call": 658734.0,
+          "p95_ms": 49.450265,
+          "samples_ms": [
+            36.058166,
+            49.450265,
+            26.519282,
+            24.59051,
+            25.114254
+          ]
+        },
+        "initialize_ms": 1.604803,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.012613,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.038472,
+          "samples_ms": [
+            0.038472,
+            0.014387,
+            0.012574,
+            0.012613,
+            0.012543
+          ]
+        },
+        "parameter_checksum": -66967.83331276236,
+        "peak_rss_kib": 36512,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 97.980352,
+          "new_allocations_per_call": 95.0,
+          "new_bytes_per_call": 1184479.0,
+          "p95_ms": 121.636508,
+          "samples_ms": [
+            87.441771,
+            121.636508,
+            89.977173,
+            112.765829,
+            97.980352
+          ]
+        }
+      },
+      "before_values_sha256": "0fdb5b21d541d0d19d2301ee5829d314ec11b5940a86781823e1ee0e249bdc69",
+      "before_value_bytes": 196608,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 19.724191,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 459392.0,
+          "p95_ms": 25.80517,
+          "samples_ms": [
+            25.80517,
+            18.133774,
+            23.819431,
+            15.524735,
+            19.724191
+          ]
+        },
+        "batch": 512,
+        "cold_inference_ms": 366.157837,
+        "cold_trainstep_ms": 1542.551878,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 15.823185,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 15.392958,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.129002,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.10484600000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926329746842384,
+        "forward_stage": {
+          "median_ms": 11.934252,
+          "new_allocations_per_call": 179.8,
+          "new_bytes_per_call": 665247.6,
+          "p95_ms": 12.12999,
+          "samples_ms": [
+            12.054788,
+            11.934252,
+            11.738625,
+            12.12999,
+            11.871615
+          ]
+        },
+        "inference": {
+          "median_ms": 11.929894,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 658651.0,
+          "p95_ms": 11.98651,
+          "samples_ms": [
+            11.859522,
+            11.929894,
+            11.836559,
+            11.958708,
+            11.98651
+          ]
+        },
+        "initialize_ms": 1.63966,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.011853,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.034034,
+          "samples_ms": [
+            0.034034,
+            0.012894,
+            0.011853,
+            0.011381,
+            0.011252
+          ]
+        },
+        "parameter_checksum": -66967.83331276236,
+        "peak_rss_kib": 38084,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 29.77696,
+          "new_allocations_per_call": 105.0,
+          "new_bytes_per_call": 1250111.0,
+          "p95_ms": 32.768859,
+          "samples_ms": [
+            31.069387,
+            28.655704,
+            29.77696,
+            28.949135,
+            32.768859
+          ]
+        }
+      },
+      "after_values_sha256": "0fdb5b21d541d0d19d2301ee5829d314ec11b5940a86781823e1ee0e249bdc69",
+      "after_value_bytes": 196608,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 64,
+      "rows": 1024,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 5,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 197.87064,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 787008.0,
+          "p95_ms": 301.33964,
+          "samples_ms": [
+            197.87064,
+            205.399239,
+            301.33964,
+            174.366892,
+            159.708464
+          ]
+        },
+        "batch": 1024,
+        "cold_inference_ms": 146.524605,
+        "cold_trainstep_ms": 397.26266,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.34069,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.28763999999999995,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926305532455444,
+        "forward_stage": {
+          "median_ms": 127.031829,
+          "new_allocations_per_call": 165.0,
+          "new_bytes_per_call": 1320152.2,
+          "p95_ms": 137.947619,
+          "samples_ms": [
+            137.420759,
+            124.267608,
+            127.031829,
+            121.386898,
+            137.947619
+          ]
+        },
+        "inference": {
+          "median_ms": 129.574504,
+          "new_allocations_per_call": 41.0,
+          "new_bytes_per_call": 1314094.0,
+          "p95_ms": 230.871906,
+          "samples_ms": [
+            129.574504,
+            119.553335,
+            122.846279,
+            165.980373,
+            230.871906
+          ]
+        },
+        "initialize_ms": 5.956637,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.009368,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.044714,
+          "samples_ms": [
+            0.044714,
+            0.011551,
+            0.009368,
+            0.009308,
+            0.009037
+          ]
+        },
+        "parameter_checksum": -67033.5237418924,
+        "peak_rss_kib": 39532,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 362.798276,
+          "new_allocations_per_call": 95.0,
+          "new_bytes_per_call": 2364127.0,
+          "p95_ms": 376.57036,
+          "samples_ms": [
+            260.424875,
+            374.789085,
+            376.57036,
+            362.798276,
+            345.036531
+          ]
+        }
+      },
+      "before_values_sha256": "956b53141e9152335f9627b5d782853051bfee1e981c3b6b6df47c40c8ab2580",
+      "before_value_bytes": 327680,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 104.360243,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 852608.0,
+          "p95_ms": 137.127457,
+          "samples_ms": [
+            137.127457,
+            101.152198,
+            104.360243,
+            59.108883,
+            135.853274
+          ]
+        },
+        "batch": 1024,
+        "cold_inference_ms": 1507.459615,
+        "cold_trainstep_ms": 4095.093508,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 116.35015899999999,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 48.095902,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.49019099999999993,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.392296,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926305532455444,
+        "forward_stage": {
+          "median_ms": 66.052452,
+          "new_allocations_per_call": 179.8,
+          "new_bytes_per_call": 1320607.6,
+          "p95_ms": 75.160567,
+          "samples_ms": [
+            62.957711,
+            65.120653,
+            66.052452,
+            75.160567,
+            69.112279
+          ]
+        },
+        "inference": {
+          "median_ms": 38.784005,
+          "new_allocations_per_call": 45.0,
+          "new_bytes_per_call": 1314126.0,
+          "p95_ms": 40.440425,
+          "samples_ms": [
+            38.784005,
+            39.95811,
+            38.471868,
+            38.161435,
+            40.440425
+          ]
+        },
+        "initialize_ms": 2.351636,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 6.003223,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 7.661608,
+          "samples_ms": [
+            6.595807,
+            5.998084,
+            5.33593,
+            7.661608,
+            6.003223
+          ]
+        },
+        "parameter_checksum": -67033.5237418924,
+        "peak_rss_kib": 42552,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 156.086151,
+          "new_allocations_per_call": 105.0,
+          "new_bytes_per_call": 2429759.0,
+          "p95_ms": 223.819761,
+          "samples_ms": [
+            156.086151,
+            223.819761,
+            170.736493,
+            125.672285,
+            130.64253
+          ]
+        }
+      },
+      "after_values_sha256": "956b53141e9152335f9627b5d782853051bfee1e981c3b6b6df47c40c8ab2580",
+      "after_value_bytes": 327680,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 512,
+      "rows": 64,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 5,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 28.36076,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 393792.0,
+          "p95_ms": 28.971747,
+          "samples_ms": [
+            28.971747,
+            28.774406,
+            27.896969,
+            28.36076,
+            27.702854
+          ]
+        },
+        "batch": 64,
+        "cold_inference_ms": 58.758004,
+        "cold_trainstep_ms": 473.679894,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.16034099999999998,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.141826,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 512,
+        "final_loss": 0.009574119001626968,
+        "forward_stage": {
+          "median_ms": 9.859225,
+          "new_allocations_per_call": 156.8,
+          "new_bytes_per_call": 664671.8,
+          "p95_ms": 10.832412,
+          "samples_ms": [
+            9.73427,
+            10.384221,
+            9.511653,
+            9.859225,
+            10.832412
+          ]
+        },
+        "inference": {
+          "median_ms": 9.594047,
+          "new_allocations_per_call": 41.0,
+          "new_bytes_per_call": 658734.0,
+          "p95_ms": 20.231163,
+          "samples_ms": [
+            9.594047,
+            20.231163,
+            9.17496,
+            16.510456,
+            9.314893
+          ]
+        },
+        "initialize_ms": 9.077326,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 1.824957,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 2.023841,
+          "samples_ms": [
+            1.391273,
+            1.926739,
+            1.824957,
+            2.023841,
+            1.776386
+          ]
+        },
+        "parameter_checksum": 228138453.1309435,
+        "peak_rss_kib": 76620,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 47.817188,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 1184364.0,
+          "p95_ms": 74.615824,
+          "samples_ms": [
+            74.615824,
+            64.246702,
+            41.017018,
+            47.817188,
+            42.096384
+          ]
+        }
+      },
+      "before_values_sha256": "a39720d9b0f79be387811203da1472abafcdd0ff01fa784f20c29684a0a77f1a",
+      "before_value_bytes": 4325376,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 16.494876,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 4588160.0,
+          "p95_ms": 20.280595,
+          "samples_ms": [
+            20.280595,
+            16.810199,
+            16.372296,
+            15.661311,
+            16.494876
+          ]
+        },
+        "batch": 64,
+        "cold_inference_ms": 477.94368,
+        "cold_trainstep_ms": 652.147736,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 17.18402,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 2.484596,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.135494,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.133821,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 512,
+        "final_loss": 0.009574119001626968,
+        "forward_stage": {
+          "median_ms": 4.157908,
+          "new_allocations_per_call": 179.8,
+          "new_bytes_per_call": 665247.6,
+          "p95_ms": 173.734683,
+          "samples_ms": [
+            173.734683,
+            6.012841,
+            4.157908,
+            4.104769,
+            4.150996
+          ]
+        },
+        "inference": {
+          "median_ms": 10.999606,
+          "new_allocations_per_call": 45.0,
+          "new_bytes_per_call": 658766.0,
+          "p95_ms": 11.996589,
+          "samples_ms": [
+            11.016428,
+            10.976613,
+            11.996589,
+            10.999606,
+            10.004798
+          ]
+        },
+        "initialize_ms": 7.587349,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 1.086691,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 1.190225,
+          "samples_ms": [
+            1.140161,
+            1.074838,
+            1.190225,
+            1.086691,
+            1.073987
+          ]
+        },
+        "parameter_checksum": 228138453.1309435,
+        "peak_rss_kib": 77332,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 23.503909,
+          "new_allocations_per_call": 105.0,
+          "new_bytes_per_call": 5378879.0,
+          "p95_ms": 24.994979,
+          "samples_ms": [
+            24.994979,
+            22.748982,
+            24.118453,
+            23.503909,
+            22.033798
+          ]
+        }
+      },
+      "after_values_sha256": "a39720d9b0f79be387811203da1472abafcdd0ff01fa784f20c29684a0a77f1a",
+      "after_value_bytes": 4325376,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 1024,
+      "rows": 64,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 3,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 179.956247,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 787008.0,
+          "p95_ms": 265.992388,
+          "samples_ms": [
+            265.992388,
+            165.425489,
+            179.956247
+          ]
+        },
+        "batch": 64,
+        "cold_inference_ms": 68.050134,
+        "cold_trainstep_ms": 1135.391409,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.318228,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.25958699999999996,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 1024,
+        "final_loss": 0.07770709693431854,
+        "forward_stage": {
+          "median_ms": 40.764122,
+          "new_allocations_per_call": 234.66666666666666,
+          "new_bytes_per_call": 1323976.3333333333,
+          "p95_ms": 41.73193,
+          "samples_ms": [
+            41.73193,
+            40.764122,
+            38.209826
+          ]
+        },
+        "inference": {
+          "median_ms": 40.112389,
+          "new_allocations_per_call": 41.0,
+          "new_bytes_per_call": 1314094.0,
+          "p95_ms": 41.021326,
+          "samples_ms": [
+            38.859325,
+            41.021326,
+            40.112389
+          ]
+        },
+        "initialize_ms": 28.800035,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 13
+        },
+        "optimizer_backends": {
+          "CPU": 16
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 4.641246,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 4.806837,
+          "samples_ms": [
+            4.806837,
+            4.641246,
+            3.911455
+          ]
+        },
+        "parameter_checksum": 86212518.4078263,
+        "peak_rss_kib": 202644,
+        "runtime_autotune": true,
+        "steps": 3,
+        "training": {
+          "median_ms": 228.305594,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 2364012.0,
+          "p95_ms": 229.33648,
+          "samples_ms": [
+            213.171914,
+            228.305594,
+            229.33648
+          ]
+        }
+      },
+      "before_values_sha256": "f6ea2d99458fe44d6f09b590ffc22843b852451cb00e244bb3d962bd38b49619",
+      "before_value_bytes": 17039360,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 132.584766,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 17564288.0,
+          "p95_ms": 151.029814,
+          "samples_ms": [
+            132.584766,
+            151.029814,
+            109.571588
+          ]
+        },
+        "batch": 64,
+        "cold_inference_ms": 620.305876,
+        "cold_trainstep_ms": 3445.792869,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 51.210409999999996,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 11.759254,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.461516,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.208482,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 1024,
+        "final_loss": 0.07770709693431854,
+        "forward_stage": {
+          "median_ms": 35.3526,
+          "new_allocations_per_call": 265.0,
+          "new_bytes_per_call": 1324838.0,
+          "p95_ms": 72.183276,
+          "samples_ms": [
+            72.183276,
+            35.3526,
+            34.815461
+          ]
+        },
+        "inference": {
+          "median_ms": 30.956845,
+          "new_allocations_per_call": 45.0,
+          "new_bytes_per_call": 1314126.0,
+          "p95_ms": 31.808204,
+          "samples_ms": [
+            29.515098,
+            31.808204,
+            30.956845
+          ]
+        },
+        "initialize_ms": 35.162744,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 13
+        },
+        "optimizer_backends": {
+          "CPU": 16
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 4.892968,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 5.055233,
+          "samples_ms": [
+            4.516201,
+            5.055233,
+            4.892968
+          ]
+        },
+        "parameter_checksum": 86212518.4078263,
+        "peak_rss_kib": 203064,
+        "runtime_autotune": true,
+        "steps": 3,
+        "training": {
+          "median_ms": 126.941539,
+          "new_allocations_per_call": 105.0,
+          "new_bytes_per_call": 19141439.0,
+          "p95_ms": 139.230166,
+          "samples_ms": [
+            126.941539,
+            125.571716,
+            139.230166
+          ]
+        }
+      },
+      "after_values_sha256": "f6ea2d99458fe44d6f09b590ffc22843b852451cb00e244bb3d962bd38b49619",
+      "after_value_bytes": 17039360,
+      "bitwise_equal": true
+    },
+    {
+      "type": "Linear",
+      "dim": 64,
+      "rows": 16,
+      "pairs": 2,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 10,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 3.077289,
+          "new_allocations_per_call": 64.0,
+          "new_bytes_per_call": 55424.0,
+          "p95_ms": 46.100844,
+          "samples_ms": [
+            36.005295,
+            46.100844,
+            32.854869,
+            35.998773,
+            3.077289,
+            0.08003,
+            0.078227,
+            0.079229,
+            0.078277,
+            0.076324
+          ]
+        },
+        "batch": 16,
+        "cold_inference_ms": 34.812906,
+        "cold_trainstep_ms": 10.746391,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.023535,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.011250999999999999,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "Linear"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008235,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.007213000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.023535,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.011250999999999999,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc1",
+            "type": "Linear"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008235,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.007213000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act1",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.005927832331508398,
+        "forward_stage": {
+          "median_ms": 11.996298,
+          "new_allocations_per_call": 196.0,
+          "new_bytes_per_call": 42741.9,
+          "p95_ms": 24.051157,
+          "samples_ms": [
+            24.051157,
+            11.974938,
+            11.996358,
+            11.996298,
+            12.042055,
+            11.969909,
+            5.976123,
+            5.996822,
+            12.997468,
+            11.989886
+          ]
+        },
+        "inference": {
+          "median_ms": 0.061586,
+          "new_allocations_per_call": 58.0,
+          "new_bytes_per_call": 32595.0,
+          "p95_ms": 0.372579,
+          "samples_ms": [
+            0.087384,
+            0.063018,
+            0.061626,
+            0.061185,
+            0.061556,
+            0.061165,
+            0.061506,
+            0.061586,
+            0.061124,
+            0.372579
+          ]
+        },
+        "initialize_ms": 1.951435,
+        "layer_type": "Linear",
+        "layers": 4,
+        "loss_backends": {
+          "CPU": 20
+        },
+        "optimizer_backends": {
+          "CPU": 60
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.015248,
+          "new_allocations_per_call": 15.0,
+          "new_bytes_per_call": 376.0,
+          "p95_ms": 0.030567,
+          "samples_ms": [
+            0.030567,
+            0.021781,
+            0.015209,
+            0.015629,
+            0.015248,
+            0.014017,
+            0.013746,
+            0.023133,
+            0.013986,
+            0.013806
+          ]
+        },
+        "parameter_checksum": 12903.540714958217,
+        "peak_rss_kib": 38560,
+        "runtime_autotune": true,
+        "steps": 10,
+        "training": {
+          "median_ms": 1.038961,
+          "new_allocations_per_call": 179.0,
+          "new_bytes_per_call": 97514.0,
+          "p95_ms": 48.432653,
+          "samples_ms": [
+            1.392494,
+            0.297428,
+            0.329439,
+            0.993215,
+            1.015517,
+            0.482215,
+            48.432653,
+            1.087503,
+            12.946232,
+            1.038961
+          ]
+        }
+      },
+      "before_values_sha256": "b355482307182ec6ba49877e9b73de892f2da7a3ea4c4f816e05a90f95466b9b",
+      "before_value_bytes": 37376,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.291437,
+          "new_allocations_per_call": 64.0,
+          "new_bytes_per_call": 55424.0,
+          "p95_ms": 1.150611,
+          "samples_ms": [
+            0.291437,
+            0.235392,
+            1.150611,
+            0.230513,
+            0.460675,
+            1.042718,
+            0.22862,
+            0.226405,
+            0.240632,
+            0.853553
+          ]
+        },
+        "batch": 16,
+        "cold_inference_ms": 13.705227,
+        "cold_trainstep_ms": 79.083153,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.018104000000000002,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.010509000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "Linear"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.009918999999999999,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.007654,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.018104000000000002,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.010509000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc1",
+            "type": "Linear"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.009918999999999999,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [],
+            "name": "act1",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.005927832331508398,
+        "forward_stage": {
+          "median_ms": 0.049323,
+          "new_allocations_per_call": 177.1,
+          "new_bytes_per_call": 42400.7,
+          "p95_ms": 0.349967,
+          "samples_ms": [
+            0.349967,
+            0.052549,
+            0.049182,
+            0.048762,
+            0.048752,
+            0.048811,
+            0.061766,
+            0.049323,
+            0.048862,
+            0.049393
+          ]
+        },
+        "inference": {
+          "median_ms": 0.046778,
+          "new_allocations_per_call": 58.0,
+          "new_bytes_per_call": 32595.0,
+          "p95_ms": 0.083056,
+          "samples_ms": [
+            0.083056,
+            0.046297,
+            0.059311,
+            0.046778,
+            0.044403,
+            0.044303,
+            0.044504,
+            0.044243,
+            0.049714,
+            0.067236
+          ]
+        },
+        "initialize_ms": 2.705781,
+        "layer_type": "Linear",
+        "layers": 4,
+        "loss_backends": {
+          "CPU": 20
+        },
+        "optimizer_backends": {
+          "CPU": 60
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.01117,
+          "new_allocations_per_call": 15.0,
+          "new_bytes_per_call": 376.0,
+          "p95_ms": 0.022252,
+          "samples_ms": [
+            0.022252,
+            0.011662,
+            0.01117,
+            0.011201,
+            0.011371,
+            0.01086,
+            0.010881,
+            0.01072,
+            0.01074,
+            0.01053
+          ]
+        },
+        "parameter_checksum": 12903.540714958217,
+        "peak_rss_kib": 38560,
+        "runtime_autotune": true,
+        "steps": 10,
+        "training": {
+          "median_ms": 0.370766,
+          "new_allocations_per_call": 163.0,
+          "new_bytes_per_call": 97284.0,
+          "p95_ms": 20.457348,
+          "samples_ms": [
+            0.391395,
+            0.358494,
+            0.370766,
+            0.353514,
+            0.366729,
+            0.369114,
+            0.357832,
+            0.37281,
+            20.457348,
+            12.483303
+          ]
+        }
+      },
+      "after_values_sha256": "b355482307182ec6ba49877e9b73de892f2da7a3ea4c4f816e05a90f95466b9b",
+      "after_value_bytes": 37376,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 64,
+      "rows": 512,
+      "pairs": 1,
+      "omp_threads": 1,
+      "autotune": true,
+      "repetitions": 5,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 52.457252,
+          "new_allocations_per_call": 25.0,
+          "new_bytes_per_call": 393768.0,
+          "p95_ms": 54.307686,
+          "samples_ms": [
+            41.192327,
+            49.454102,
+            52.548503,
+            52.457252,
+            54.307686
+          ]
+        },
+        "batch": 512,
+        "cold_inference_ms": 31.006408,
+        "cold_trainstep_ms": 85.999632,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [],
+            "forward": [],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926329746842384,
+        "forward_stage": {
+          "median_ms": 22.02944,
+          "new_allocations_per_call": 150.2,
+          "new_bytes_per_call": 664109.6,
+          "p95_ms": 23.03042,
+          "samples_ms": [
+            21.578663,
+            23.03042,
+            21.772818,
+            22.02944,
+            22.693156
+          ]
+        },
+        "inference": {
+          "median_ms": 22.698817,
+          "new_allocations_per_call": 31.0,
+          "new_bytes_per_call": 658403.0,
+          "p95_ms": 27.969395,
+          "samples_ms": [
+            26.168833,
+            27.969395,
+            21.960199,
+            22.646789,
+            22.698817
+          ]
+        },
+        "initialize_ms": 2.162682,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.021911,
+          "new_allocations_per_call": 5.0,
+          "new_bytes_per_call": 272.0,
+          "p95_ms": 0.038603,
+          "samples_ms": [
+            0.038603,
+            0.022402,
+            0.021911,
+            0.021801,
+            0.021761
+          ]
+        },
+        "parameter_checksum": -66967.83331276236,
+        "peak_rss_kib": 38560,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 61.697734,
+          "new_allocations_per_call": 85.0,
+          "new_bytes_per_call": 1184167.0,
+          "p95_ms": 67.981875,
+          "samples_ms": [
+            61.697734,
+            67.981875,
+            60.936214,
+            66.372524,
+            61.69522
+          ]
+        }
+      },
+      "before_values_sha256": "0fdb5b21d541d0d19d2301ee5829d314ec11b5940a86781823e1ee0e249bdc69",
+      "before_value_bytes": 196608,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 49.175628,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 393776.0,
+          "p95_ms": 67.211338,
+          "samples_ms": [
+            57.290098,
+            67.211338,
+            47.835752,
+            48.721105,
+            49.175628
+          ]
+        },
+        "batch": 512,
+        "cold_inference_ms": 33.534315,
+        "cold_trainstep_ms": 77.126939,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [],
+            "forward": [],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926329746842384,
+        "forward_stage": {
+          "median_ms": 37.61047,
+          "new_allocations_per_call": 146.0,
+          "new_bytes_per_call": 664021.2,
+          "p95_ms": 57.806877,
+          "samples_ms": [
+            37.61047,
+            38.247596,
+            33.337105,
+            37.227381,
+            57.806877
+          ]
+        },
+        "inference": {
+          "median_ms": 29.506461,
+          "new_allocations_per_call": 39.0,
+          "new_bytes_per_call": 658502.0,
+          "p95_ms": 30.960061,
+          "samples_ms": [
+            28.592515,
+            30.960061,
+            25.55474,
+            29.506461,
+            29.680528
+          ]
+        },
+        "initialize_ms": 2.277076,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.022092,
+          "new_allocations_per_call": 5.0,
+          "new_bytes_per_call": 272.0,
+          "p95_ms": 0.039854,
+          "samples_ms": [
+            0.039854,
+            0.023113,
+            0.022092,
+            0.02169,
+            0.0215
+          ]
+        },
+        "parameter_checksum": -66967.83331276236,
+        "peak_rss_kib": 38560,
+        "runtime_autotune": true,
+        "steps": 5,
+        "training": {
+          "median_ms": 77.32991,
+          "new_allocations_per_call": 83.0,
+          "new_bytes_per_call": 1184092.0,
+          "p95_ms": 79.416369,
+          "samples_ms": [
+            77.32991,
+            77.304122,
+            79.416369,
+            79.271546,
+            71.049236
+          ]
+        }
+      },
+      "after_values_sha256": "0fdb5b21d541d0d19d2301ee5829d314ec11b5940a86781823e1ee0e249bdc69",
+      "after_value_bytes": 196608,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 64,
+      "rows": 1024,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": false,
+      "repetitions": 5,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 188.819761,
+          "new_allocations_per_call": 23.0,
+          "new_bytes_per_call": 786976.0,
+          "p95_ms": 207.709534,
+          "samples_ms": [
+            188.819761,
+            185.417642,
+            181.962042,
+            207.709534,
+            197.225597
+          ]
+        },
+        "batch": 1024,
+        "cold_inference_ms": 138.152261,
+        "cold_trainstep_ms": 341.361755,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [],
+            "forward": [],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926305532455444,
+        "forward_stage": {
+          "median_ms": 99.905766,
+          "new_allocations_per_call": 151.6,
+          "new_bytes_per_call": 1581740.8,
+          "p95_ms": 117.653185,
+          "samples_ms": [
+            90.126061,
+            94.669583,
+            99.905766,
+            101.460756,
+            117.653185
+          ]
+        },
+        "inference": {
+          "median_ms": 96.190659,
+          "new_allocations_per_call": 39.0,
+          "new_bytes_per_call": 1314018.0,
+          "p95_ms": 118.928831,
+          "samples_ms": [
+            118.928831,
+            111.166764,
+            89.458196,
+            90.619918,
+            96.190659
+          ]
+        },
+        "initialize_ms": 3.698395,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.022142,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.040396,
+          "samples_ms": [
+            0.040396,
+            0.023534,
+            0.022142,
+            0.022031,
+            0.022032
+          ]
+        },
+        "parameter_checksum": -67033.5237418924,
+        "peak_rss_kib": 38964,
+        "runtime_autotune": false,
+        "steps": 5,
+        "training": {
+          "median_ms": 310.132048,
+          "new_allocations_per_call": 89.0,
+          "new_bytes_per_call": 2626155.0,
+          "p95_ms": 415.489512,
+          "samples_ms": [
+            415.489512,
+            339.329078,
+            300.627649,
+            310.132048,
+            298.265914
+          ]
+        }
+      },
+      "before_values_sha256": "956b53141e9152335f9627b5d782853051bfee1e981c3b6b6df47c40c8ab2580",
+      "before_value_bytes": 327680,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 192.879194,
+          "new_allocations_per_call": 23.0,
+          "new_bytes_per_call": 786976.0,
+          "p95_ms": 232.284764,
+          "samples_ms": [
+            164.305685,
+            232.284764,
+            204.111336,
+            192.879194,
+            187.486166
+          ]
+        },
+        "batch": 1024,
+        "cold_inference_ms": 123.665205,
+        "cold_trainstep_ms": 316.384769,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [],
+            "forward": [],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 0.017926305532455444,
+        "forward_stage": {
+          "median_ms": 122.957045,
+          "new_allocations_per_call": 151.6,
+          "new_bytes_per_call": 1581740.8,
+          "p95_ms": 152.405186,
+          "samples_ms": [
+            125.346302,
+            152.405186,
+            122.957045,
+            100.790307,
+            95.164402
+          ]
+        },
+        "inference": {
+          "median_ms": 120.254189,
+          "new_allocations_per_call": 39.0,
+          "new_bytes_per_call": 1314018.0,
+          "p95_ms": 133.553524,
+          "samples_ms": [
+            120.254189,
+            133.553524,
+            119.524429,
+            126.639871,
+            119.866792
+          ]
+        },
+        "initialize_ms": 2.413603,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 15
+        },
+        "optimizer_backends": {
+          "CPU": 20
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.023394,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.041809,
+          "samples_ms": [
+            0.041809,
+            0.025277,
+            0.023394,
+            0.023013,
+            0.022933
+          ]
+        },
+        "parameter_checksum": -67033.5237418924,
+        "peak_rss_kib": 39568,
+        "runtime_autotune": false,
+        "steps": 5,
+        "training": {
+          "median_ms": 349.89599,
+          "new_allocations_per_call": 89.0,
+          "new_bytes_per_call": 2626155.0,
+          "p95_ms": 364.552134,
+          "samples_ms": [
+            252.722996,
+            364.552134,
+            349.89599,
+            356.113026,
+            337.549635
+          ]
+        }
+      },
+      "after_values_sha256": "956b53141e9152335f9627b5d782853051bfee1e981c3b6b6df47c40c8ab2580",
+      "after_value_bytes": 327680,
+      "bitwise_equal": true
+    },
+    {
+      "type": "SelfAttention",
+      "dim": 2048,
+      "rows": 64,
+      "pairs": 1,
+      "omp_threads": 4,
+      "autotune": true,
+      "repetitions": 3,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 617.637719,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 1573440.0,
+          "p95_ms": 618.291155,
+          "samples_ms": [
+            611.549957,
+            617.637719,
+            618.291155
+          ]
+        },
+        "batch": 64,
+        "cold_inference_ms": 357.844746,
+        "cold_trainstep_ms": 3143.298815,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.632668,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.5801689999999999,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 2048,
+        "final_loss": 0.12336160242557526,
+        "forward_stage": {
+          "median_ms": 212.727904,
+          "new_allocations_per_call": 243.0,
+          "new_bytes_per_call": 2634820.3333333335,
+          "p95_ms": 297.954524,
+          "samples_ms": [
+            212.727904,
+            297.954524,
+            186.0036
+          ]
+        },
+        "inference": {
+          "median_ms": 175.674193,
+          "new_allocations_per_call": 41.0,
+          "new_bytes_per_call": 2624814.0,
+          "p95_ms": 303.465051,
+          "samples_ms": [
+            303.465051,
+            169.913326,
+            175.674193
+          ]
+        },
+        "initialize_ms": 104.329792,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 13
+        },
+        "optimizer_backends": {
+          "CPU": 16
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 20.031425,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 23.132408,
+          "samples_ms": [
+            18.716526,
+            20.031425,
+            23.132408
+          ]
+        },
+        "parameter_checksum": -5843451532.010778,
+        "peak_rss_kib": 699524,
+        "runtime_autotune": true,
+        "steps": 3,
+        "training": {
+          "median_ms": 769.719872,
+          "new_allocations_per_call": 95.0,
+          "new_bytes_per_call": 4723423.0,
+          "p95_ms": 784.39564,
+          "samples_ms": [
+            769.719872,
+            784.39564,
+            751.344086
+          ]
+        }
+      },
+      "before_values_sha256": "17f651eacdd0d6955a5fd4f44e5dad5001161a66a1f97bebd3d62d2d42b70e20",
+      "before_value_bytes": 67633152,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 303.114118,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 68682368.0,
+          "p95_ms": 311.559257,
+          "samples_ms": [
+            311.559257,
+            287.284764,
+            303.114118
+          ]
+        },
+        "batch": 64,
+        "cold_inference_ms": 4308.924435,
+        "cold_trainstep_ms": 13477.931309,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 268.245864,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 49.886788,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.528653,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.40561200000000003,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 2048,
+        "final_loss": 0.12336160242557526,
+        "forward_stage": {
+          "median_ms": 86.583226,
+          "new_allocations_per_call": 265.0,
+          "new_bytes_per_call": 2635558.0,
+          "p95_ms": 119.739267,
+          "samples_ms": [
+            119.739267,
+            71.303754,
+            86.583226
+          ]
+        },
+        "inference": {
+          "median_ms": 83.430115,
+          "new_allocations_per_call": 45.0,
+          "new_bytes_per_call": 2624846.0,
+          "p95_ms": 134.35366,
+          "samples_ms": [
+            134.35366,
+            83.430115,
+            69.071793
+          ]
+        },
+        "initialize_ms": 111.483866,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 13
+        },
+        "optimizer_backends": {
+          "CPU": 16
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 19.430727,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 21.706701,
+          "samples_ms": [
+            19.234018,
+            19.430727,
+            21.706701
+          ]
+        },
+        "parameter_checksum": -5843451532.010778,
+        "peak_rss_kib": 700288,
+        "runtime_autotune": true,
+        "steps": 3,
+        "training": {
+          "median_ms": 483.060474,
+          "new_allocations_per_call": 105.0,
+          "new_bytes_per_call": 71832383.0,
+          "p95_ms": 559.925501,
+          "samples_ms": [
+            483.060474,
+            559.925501,
+            475.532738
+          ]
+        }
+      },
+      "after_values_sha256": "17f651eacdd0d6955a5fd4f44e5dad5001161a66a1f97bebd3d62d2d42b70e20",
+      "after_value_bytes": 67633152,
+      "bitwise_equal": true
+    }
+  ],
+  "tiny_profiles": [
+    {
+      "repeat": 0,
+      "rows": 1,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.033292,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 1344.0,
+          "p95_ms": 0.042049
+        },
+        "batch": 1,
+        "cold_inference_ms": 0.67093,
+        "cold_trainstep_ms": 70.555147,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001342,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001022,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.212605099138898e-11,
+        "forward_stage": {
+          "median_ms": 0.022492,
+          "new_allocations_per_call": 42.92,
+          "new_bytes_per_call": 4822.92,
+          "p95_ms": 0.023665
+        },
+        "inference": {
+          "median_ms": 0.021821,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 4539.0,
+          "p95_ms": 0.022101
+        },
+        "initialize_ms": 2.354963,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.011471,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.012523
+        },
+        "parameter_checksum": -32677.010490477034,
+        "peak_rss_kib": 34136,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.120205,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 7020.0,
+          "p95_ms": 0.146204
+        }
+      },
+      "before_values_sha256": "f0d9a0481c07585430f74b7be37098e8f9f6690a74f39a820093e66991bff5da",
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.034785,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 66944.0,
+          "p95_ms": 0.039514
+        },
+        "batch": 1,
+        "cold_inference_ms": 1.755096,
+        "cold_trainstep_ms": 3.501014,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.025178,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.007734,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001243,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.000912,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.212605099138898e-11,
+        "forward_stage": {
+          "median_ms": 0.0211,
+          "new_allocations_per_call": 47.19,
+          "new_bytes_per_call": 4865.505,
+          "p95_ms": 0.023895
+        },
+        "inference": {
+          "median_ms": 0.020248,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 4571.0,
+          "p95_ms": 0.0214
+        },
+        "initialize_ms": 2.099192,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.010239,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.105017
+        },
+        "parameter_checksum": -32677.010490477034,
+        "peak_rss_kib": 33832,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.111128,
+          "new_allocations_per_call": 97.0,
+          "new_bytes_per_call": 72652.0,
+          "p95_ms": 0.513304
+        }
+      },
+      "after_values_sha256": "f0d9a0481c07585430f74b7be37098e8f9f6690a74f39a820093e66991bff5da",
+      "bitwise_equal": true
+    },
+    {
+      "repeat": 0,
+      "rows": 16,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.223861,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 12864.0,
+          "p95_ms": 0.252003
+        },
+        "batch": 16,
+        "cold_inference_ms": 35.044171,
+        "cold_trainstep_ms": 17.842647,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008086,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.006833,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.2008173061749403e-11,
+        "forward_stage": {
+          "median_ms": 0.095921,
+          "new_allocations_per_call": 50.925,
+          "new_bytes_per_call": 24138.055,
+          "p95_ms": 0.364023
+        },
+        "inference": {
+          "median_ms": 0.091322,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 23739.0,
+          "p95_ms": 0.101921
+        },
+        "initialize_ms": 1.81069,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.013445,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.014077
+        },
+        "parameter_checksum": -32673.383799256917,
+        "peak_rss_kib": 34044,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.386335,
+          "new_allocations_per_call": 95.0,
+          "new_bytes_per_call": 41695.0,
+          "p95_ms": 5.238317
+        }
+      },
+      "before_values_sha256": "59048d3057cd1ba3253d389416f82514b218f19b366b0e65f035539ca1652db8",
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.299272,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 78464.0,
+          "p95_ms": 0.390814
+        },
+        "batch": 16,
+        "cold_inference_ms": 2.933489,
+        "cold_trainstep_ms": 9.613413,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.19725,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.059892999999999995,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008085,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.006683000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.2008173061749403e-11,
+        "forward_stage": {
+          "median_ms": 0.067276,
+          "new_allocations_per_call": 47.19,
+          "new_bytes_per_call": 24065.505,
+          "p95_ms": 0.103544
+        },
+        "inference": {
+          "median_ms": 0.067837,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 23771.0,
+          "p95_ms": 0.104095
+        },
+        "initialize_ms": 1.610074,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.012784,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.013655
+        },
+        "parameter_checksum": -32673.383799256917,
+        "peak_rss_kib": 34164,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.471375,
+          "new_allocations_per_call": 97.0,
+          "new_bytes_per_call": 107212.0,
+          "p95_ms": 0.712518
+        }
+      },
+      "after_values_sha256": "59048d3057cd1ba3253d389416f82514b218f19b366b0e65f035539ca1652db8",
+      "bitwise_equal": true
+    },
+    {
+      "repeat": 1,
+      "rows": 1,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.035065,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 66944.0,
+          "p95_ms": 0.038562
+        },
+        "batch": 1,
+        "cold_inference_ms": 0.975972,
+        "cold_trainstep_ms": 3.304967,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.019256,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.006241999999999999,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.0012419999999999998,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001212,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.212605099138898e-11,
+        "forward_stage": {
+          "median_ms": 0.0213,
+          "new_allocations_per_call": 47.19,
+          "new_bytes_per_call": 4865.505,
+          "p95_ms": 0.024166
+        },
+        "inference": {
+          "median_ms": 0.019878,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 4571.0,
+          "p95_ms": 0.020509
+        },
+        "initialize_ms": 1.403025,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.011712,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.014878
+        },
+        "parameter_checksum": -32677.010490477034,
+        "peak_rss_kib": 34076,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.125215,
+          "new_allocations_per_call": 97.0,
+          "new_bytes_per_call": 72652.0,
+          "p95_ms": 0.178095
+        }
+      },
+      "after_values_sha256": "f0d9a0481c07585430f74b7be37098e8f9f6690a74f39a820093e66991bff5da",
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.035857,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 1344.0,
+          "p95_ms": 0.043773
+        },
+        "batch": 1,
+        "cold_inference_ms": 0.582023,
+        "cold_trainstep_ms": 2.99797,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001313,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001072,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.212605099138898e-11,
+        "forward_stage": {
+          "median_ms": 0.022362,
+          "new_allocations_per_call": 42.92,
+          "new_bytes_per_call": 4822.92,
+          "p95_ms": 0.023374
+        },
+        "inference": {
+          "median_ms": 0.021981,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 4539.0,
+          "p95_ms": 0.022543
+        },
+        "initialize_ms": 1.774142,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.016291,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.017693
+        },
+        "parameter_checksum": -32677.010490477034,
+        "peak_rss_kib": 33832,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.126237,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 7020.0,
+          "p95_ms": 0.151825
+        }
+      },
+      "before_values_sha256": "f0d9a0481c07585430f74b7be37098e8f9f6690a74f39a820093e66991bff5da",
+      "bitwise_equal": true
+    },
+    {
+      "repeat": 1,
+      "rows": 16,
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.373542,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 78464.0,
+          "p95_ms": 20.629491
+        },
+        "batch": 16,
+        "cold_inference_ms": 2.815578,
+        "cold_trainstep_ms": 10.795062,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.217168,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.082385,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.007924,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.006201,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.2008173061749403e-11,
+        "forward_stage": {
+          "median_ms": 0.107662,
+          "new_allocations_per_call": 47.19,
+          "new_bytes_per_call": 24065.505,
+          "p95_ms": 0.121238
+        },
+        "inference": {
+          "median_ms": 0.088747,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 23771.0,
+          "p95_ms": 0.100629
+        },
+        "initialize_ms": 1.912842,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.01068,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.011381
+        },
+        "parameter_checksum": -32673.383799256917,
+        "peak_rss_kib": 34140,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.458351,
+          "new_allocations_per_call": 97.0,
+          "new_bytes_per_call": 107212.0,
+          "p95_ms": 0.574139
+        }
+      },
+      "after_values_sha256": "59048d3057cd1ba3253d389416f82514b218f19b366b0e65f035539ca1652db8",
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.373642,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 12864.0,
+          "p95_ms": 7.228074
+        },
+        "batch": 16,
+        "cold_inference_ms": 1.472485,
+        "cold_trainstep_ms": 3.664943,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008045,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008005,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.2008173061749403e-11,
+        "forward_stage": {
+          "median_ms": 0.107312,
+          "new_allocations_per_call": 42.92,
+          "new_bytes_per_call": 24022.92,
+          "p95_ms": 0.122029
+        },
+        "inference": {
+          "median_ms": 0.10628,
+          "new_allocations_per_call": 41.0,
+          "new_bytes_per_call": 23854.0,
+          "p95_ms": 0.121318
+        },
+        "initialize_ms": 1.668343,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.013575,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.014026
+        },
+        "parameter_checksum": -32673.383799256917,
+        "peak_rss_kib": 33980,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.544743,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 41580.0,
+          "p95_ms": 0.773873
+        }
+      },
+      "before_values_sha256": "59048d3057cd1ba3253d389416f82514b218f19b366b0e65f035539ca1652db8",
+      "bitwise_equal": true
+    },
+    {
+      "repeat": 2,
+      "rows": 1,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.034024,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 1344.0,
+          "p95_ms": 0.038753
+        },
+        "batch": 1,
+        "cold_inference_ms": 35.08662,
+        "cold_trainstep_ms": 28.15366,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001263,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.000931,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.212605099138898e-11,
+        "forward_stage": {
+          "median_ms": 0.019467,
+          "new_allocations_per_call": 42.92,
+          "new_bytes_per_call": 4822.92,
+          "p95_ms": 0.025969
+        },
+        "inference": {
+          "median_ms": 0.019036,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 4539.0,
+          "p95_ms": 0.021901
+        },
+        "initialize_ms": 1.688401,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.013806,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.01591
+        },
+        "parameter_checksum": -32677.010490477034,
+        "peak_rss_kib": 33908,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.10681,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 7020.0,
+          "p95_ms": 0.24508
+        }
+      },
+      "before_values_sha256": "f0d9a0481c07585430f74b7be37098e8f9f6690a74f39a820093e66991bff5da",
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.034575,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 66944.0,
+          "p95_ms": 0.04257
+        },
+        "batch": 1,
+        "cold_inference_ms": 36.075768,
+        "cold_trainstep_ms": 74.090136,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.024676,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.007914000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.001232,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.0009209999999999999,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.212605099138898e-11,
+        "forward_stage": {
+          "median_ms": 0.02156,
+          "new_allocations_per_call": 47.19,
+          "new_bytes_per_call": 4865.505,
+          "p95_ms": 0.022422
+        },
+        "inference": {
+          "median_ms": 0.020258,
+          "new_allocations_per_call": 37.0,
+          "new_bytes_per_call": 4571.0,
+          "p95_ms": 0.020699
+        },
+        "initialize_ms": 1.822473,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.020168,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.020679
+        },
+        "parameter_checksum": -32677.010490477034,
+        "peak_rss_kib": 34288,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.107682,
+          "new_allocations_per_call": 97.0,
+          "new_bytes_per_call": 72652.0,
+          "p95_ms": 0.140284
+        }
+      },
+      "after_values_sha256": "f0d9a0481c07585430f74b7be37098e8f9f6690a74f39a820093e66991bff5da",
+      "bitwise_equal": true
+    },
+    {
+      "repeat": 2,
+      "rows": 16,
+      "before": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.225824,
+          "new_allocations_per_call": 27.0,
+          "new_bytes_per_call": 12864.0,
+          "p95_ms": 0.280307
+        },
+        "batch": 16,
+        "cold_inference_ms": 1.431899,
+        "cold_trainstep_ms": 117.092331,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [],
+            "forward": [],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 2,
+                "median_host_ms": 0.011462,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.006853000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.2008173061749403e-11,
+        "forward_stage": {
+          "median_ms": 0.091762,
+          "new_allocations_per_call": 42.92,
+          "new_bytes_per_call": 24022.92,
+          "p95_ms": 0.121267
+        },
+        "inference": {
+          "median_ms": 0.070833,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 23739.0,
+          "p95_ms": 0.114184
+        },
+        "initialize_ms": 1.825599,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.015008,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.015239
+        },
+        "parameter_checksum": -32673.383799256917,
+        "peak_rss_kib": 34064,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.369784,
+          "new_allocations_per_call": 87.0,
+          "new_bytes_per_call": 41580.0,
+          "p95_ms": 0.508565
+        }
+      },
+      "before_values_sha256": "59048d3057cd1ba3253d389416f82514b218f19b366b0e65f035539ca1652db8",
+      "after": {
+        "allocation_scope": "calling-thread C++ new/new[]; excludes malloc/device allocations",
+        "backward_stage": {
+          "median_ms": 0.208862,
+          "new_allocations_per_call": 33.0,
+          "new_bytes_per_call": 78464.0,
+          "p95_ms": 0.290335
+        },
+        "batch": 16,
+        "cold_inference_ms": 3.133424,
+        "cold_trainstep_ms": 218.606607,
+        "dtype": "float32",
+        "execution_profiles": [
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.190177,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 1,
+                "median_host_ms": 0.067397,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "fc0",
+            "type": "SelfAttention"
+          },
+          {
+            "backward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.008206000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "forward": [
+              {
+                "cpu_workers": 4,
+                "median_host_ms": 0.006683000000000001,
+                "runtime": "CPU"
+              }
+            ],
+            "name": "act0",
+            "type": "SiLU"
+          }
+        ],
+        "features": 64,
+        "final_loss": 2.2008173061749403e-11,
+        "forward_stage": {
+          "median_ms": 0.091602,
+          "new_allocations_per_call": 55.195,
+          "new_bytes_per_call": 24180.64,
+          "p95_ms": 0.158898
+        },
+        "inference": {
+          "median_ms": 0.091772,
+          "new_allocations_per_call": 45.0,
+          "new_bytes_per_call": 23886.0,
+          "p95_ms": 0.140955
+        },
+        "initialize_ms": 2.152532,
+        "layer_type": "SelfAttention",
+        "layers": 2,
+        "loss_backends": {
+          "CPU": 210
+        },
+        "optimizer_backends": {
+          "CPU": 410
+        },
+        "optimizer_kind": 2,
+        "optimizer_stage": {
+          "median_ms": 0.013716,
+          "new_allocations_per_call": 9.0,
+          "new_bytes_per_call": 320.0,
+          "p95_ms": 0.016691
+        },
+        "parameter_checksum": -32673.383799256917,
+        "peak_rss_kib": 34344,
+        "runtime_autotune": true,
+        "steps": 200,
+        "training": {
+          "median_ms": 0.481514,
+          "new_allocations_per_call": 105.0,
+          "new_bytes_per_call": 107327.0,
+          "p95_ms": 28.751072
+        }
+      },
+      "after_values_sha256": "59048d3057cd1ba3253d389416f82514b218f19b366b0e65f035539ca1652db8",
+      "bitwise_equal": true
+    }
+  ],
+  "finite_classifier": {
+    "isa": "avx2",
+    "samples_per_variant": 11,
+    "profiles": [
+      {
+        "float_count": 16,
+        "calls_per_sample": 131072,
+        "before_us": 0.0296633,
+        "after_us": 0.0244563
+      },
+      {
+        "float_count": 64,
+        "calls_per_sample": 32768,
+        "before_us": 0.0751955,
+        "after_us": 0.022868
+      },
+      {
+        "float_count": 16384,
+        "calls_per_sample": 128,
+        "before_us": 15.8821,
+        "after_us": 1.56355
+      },
+      {
+        "float_count": 1048576,
+        "calls_per_sample": 8,
+        "before_us": 1064.19,
+        "after_us": 206.118
+      }
+    ]
+  },
+  "validation": {
+    "attention_cpu": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/attention_cpu.log",
+      "sha256": "d5150e0fc67e9702c0031f004ee6ede42c57243133249b90547f434ed7d2287e"
+    },
+    "attention_opencl": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/attention_opencl.log",
+      "sha256": "ce7166e2c37c94fb288a85430b8f78037354a4ebd42f816b7413d9f9075e2d4a"
+    },
+    "attention_vulkan": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/attention_vulkan.log",
+      "sha256": "40abd5bd4c1d057d889b7ce1bc4d0850be1fe96daf881f2d707e00cc42eec1eb"
+    },
+    "execution_calibration": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/execution_calibration.log",
+      "sha256": "48140c94b22c0b54e6ce1c85cae12e0444eb8f753fda10cf8db02157e258c250"
+    },
+    "execution_policy": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/execution_policy.log",
+      "sha256": "ed17305997d6d37d55ba25de8a30488ce12f3eb1926372a26d211a503fe9530a"
+    },
+    "fusion": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/fusion.log",
+      "sha256": "6f340371186a6bb2f12cc1d48836092fc2b1199e36f1bfa022938a36e80787cf"
+    },
+    "finite_gcc_scalar": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/finite_gcc_scalar.log",
+      "sha256": "d92f95349e90b81d7a7d204b766b6fc884134d740363e9977fa334fe5b126b7d"
+    },
+    "finite_gcc_sanitizers": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/finite_gcc_sanitizers.log",
+      "sha256": "d92f95349e90b81d7a7d204b766b6fc884134d740363e9977fa334fe5b126b7d"
+    },
+    "finite_clang_portable": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/finite_clang_portable.log",
+      "sha256": "d92f95349e90b81d7a7d204b766b6fc884134d740363e9977fa334fe5b126b7d"
+    },
+    "finite_ctest": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/finite_ctest.log",
+      "sha256": "f8fac45b3c3ead053e731529fcddeb9b13cc3c8f30340d2ca8ef0839afe59626"
+    },
+    "application_build": {
+      "status": "passed",
+      "log": "outputs/benchmarks/attention-policy-20261112/final/application_build.log",
+      "sha256": "ab7636dd104fb0b2f7433088582885422fab5445b1e4f0a1acd6f55c0c8b32be"
+    }
+  },
+  "backend_limits": {
+    "OPENCL": "4 physical AMD Rusticl attention calibration cases, CPU + GPU replayed; final CPU winner on these shapes",
+    "VULKAN": "4 physical AMD RADV attention calibration cases, CPU + GPU replayed; final CPU winner on these shapes",
+    "CUDA": "not compiled or executed in this continuation; no NVIDIA toolchain/device",
+    "ROCM": "execution disabled; no additional validation in this continuation",
+    "TPU": "no physical TPU execution; prior CPU/JAX reference evidence is in earlier report"
+  },
+  "raw_directory": "outputs/benchmarks/attention-policy-20261112/final",
+  "limitations": [
+    "Cold calibration is more expensive; cache refresh remains 1024 uses per geometry.",
+    "Small batches may regress; tuning adds disposable gradient copies and validation.",
+    "No persistent snapshot cache added: failed runtime writes must remain isolated.",
+    "Existing attention bias-gradient limitations remain unchanged; see previous report.",
+    "Synthetic SelfAttention/SiLU whole-model probes, not a real dataset or Viz run."
+  ]
+}

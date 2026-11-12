@@ -72,6 +72,8 @@ void LuaScripting::setArgs(const std::string& script_path, const std::vector<std
 }
 
 LuaScripting::~LuaScripting() {
+    // Stop I/O before process-static FPGA/decoder services are destroyed.
+    LuaContext::getInstance().datasetPrefetcher.reset();
     if (L) {
         lua_close(L);
     }
@@ -504,6 +506,11 @@ void LuaScripting::registerAPI() {
 
     lua_pushcfunction(L, lua_releaseDatasetItem);
     lua_setfield(L, -2, "release");
+
+    lua_pushcfunction(L, lua_prefetchDataset);
+    lua_setfield(L, -2, "prefetch");
+    lua_pushcfunction(L, lua_datasetPrefetchStats);
+    lua_setfield(L, -2, "prefetch_stats");
     
     lua_pushcfunction(L, lua_prepareSequences);
     lua_setfield(L, -2, "prepare_sequences");

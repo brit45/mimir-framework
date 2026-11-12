@@ -9,7 +9,7 @@
 class CSharpScripting : public ScriptingRuntime {
 public:
     CSharpScripting() = default;
-    ~CSharpScripting() override = default;
+    ~CSharpScripting() override;
 
     void setArgs(const std::string& script_path,
                  const std::vector<std::string>& script_args) override;

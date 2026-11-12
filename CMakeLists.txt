@@ -118,7 +118,7 @@ set(MIMIR_RUNTIME_OUTPUT_DIRECTORY
 include(CheckCXXCompilerFlag)
 
 # Keep the executable at the toolchain baseline. ISA-specific kernels are
-# compiled only in SimdDispatch.cpp using function multiversioning and chosen
+# isolated in dispatcher functions using multiversioning and chosen
 # after CPUID and OS extended-register checks. Global -mavx2/-mfma would let the
 # compiler emit illegal instructions in dispatch/initialization code itself.
 if(ENABLE_SIMD)
@@ -131,7 +131,8 @@ check_cxx_compiler_flag("-ffp-contract=off" COMPILER_SUPPORTS_FP_CONTRACT_OFF)
 if(COMPILER_SUPPORTS_FP_CONTRACT_OFF)
     # Explicit FMA intrinsics/std::fma remain fused; other operations retain
     # separate multiply/add rounding across scalar and vector implementations.
-    set_source_files_properties(src/runtimes/cpu/SimdDispatch.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    set_source_files_properties(src/runtimes/cpu/SimdDispatch.cpp src/runtimes/cpu/AttentionBackward.cpp
+        PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 
 # ============================================================================
@@ -497,6 +498,7 @@ set(MIMIR_SOURCES
     src/scriptings/ScriptingBridgeCommon.cpp
     src/ConfigOverrides.cpp
     src/Helpers.cpp
+    src/DatasetPrefetcher.cpp
     src/stb_image_impl.cpp
     src/runtimes/portable/PortableRuntime.cpp
     src/Planning/ExecutionPolicy.cpp
@@ -563,6 +565,7 @@ set(MIMIR_HEADERS
     src/scriptings/ScriptingBridgeCommon.hpp
     src/scriptings/Lua/luaScripting/LuaScripting.hpp
     src/Helpers.hpp
+    src/DatasetPrefetcher.hpp
     src/DatasetTraversal.hpp
     src/Layers.hpp
     src/Autograd.hpp
@@ -665,7 +668,8 @@ if(ENABLE_OPENCL AND OPENCL_LIBRARY)
     list(APPEND MIMIR_SOURCES src/runtimes/opencl/OpenCLRuntime.cpp)
 endif()
 
-list(APPEND MIMIR_SOURCES src/runtimes/LayerOps.cpp src/runtimes/cpu/SimdDispatch.cpp)
+list(APPEND MIMIR_SOURCES src/runtimes/LayerOps.cpp src/runtimes/cpu/SimdDispatch.cpp
+    src/runtimes/cpu/AttentionBackward.cpp src/runtimes/cpu/FiniteCheckDispatch.cpp)
 
 # Variante de sources sans Viz (utile pour builds headless / statiques)
 set(MIMIR_SOURCES_NO_SFML ${MIMIR_SOURCES})

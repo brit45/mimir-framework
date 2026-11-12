@@ -16,6 +16,7 @@ formats des modèles existants sont conservés.
 | Convolution 1×1 | Même header | Chemin CHW direct pour stride 1, padding 0 et certaines formes ; les formes larges gardent le packing. |
 | Concat/Stack forward | `src/runtimes/cpu/FlatJoinKernels.hpp` | Entrées empruntées en lecture seule ; une allocation de sortie, sans copies propriétaires de toutes les entrées. |
 | SelfAttention/MultiHeadAttention/CrossAttention forward | `src/runtimes/cpu/LayerOps.hpp` | Lecture des projections combinées sans copies Q/K/V complètes ; scores et contexte temporaire par blocs de 128 requêtes. |
+| SelfAttention/CrossAttention backward | `src/runtimes/cpu/AttentionBackward.cpp` | Panneaux réutilisés de 64 requêtes, gradients FP32 poursuivis dans le même ordre entre blocs ; stockage temporaire borné par worker. |
 
 Le bloc d’attention contient toutes les clés de chaque ligne : le softmax et
 le masque causal conservent leur sens. Le tampon de scores occupe
@@ -44,14 +45,51 @@ la contraction FMA implicite. Le mode explicite `fused=true` utilise FMA
 - Le routeur réutilise les conteneurs de routes forward, mais réévalue type,
   capacité et initialisation. Le backward garde son instantané de routes sur
   la pile pour les six backends usuels.
-- `src/runtimes/FiniteCheck.hpp` classe les NaN/Inf par groupes SIMD avec reste
-  scalaire. Les contrôles de finitude et le repli après échec restent actifs.
+- `src/runtimes/FiniteCheck.hpp` et `cpu/FiniteCheckDispatch.cpp` classent les
+  NaN/Inf via un dispatch SIMD portable avec reste scalaire. Les contrôles
+  de finitude et le repli après échec restent actifs.
 - Les conversions F32 de `TypedTensor` évitent un remplissage zéro suivi d’une
   copie lorsque les données peuvent être construites directement.
 
 Les scratchpads sont décrits dans
 [RuntimeAllocator et scratchpads](../04-Architecture-Internals/18-RuntimeAllocator-And-Scratchpads.md).
 Leurs compteurs ne représentent pas le RSS total du processus ni la VRAM.
+
+## Lecture et conversion du dataset
+
+`DatasetPrefetcher` recouvre les lectures, le décodage et la préparation des
+prochains échantillons avec le calcul du batch courant. Les buffers de
+normalisation sont réutilisés ; leur restitution ne décharge pas les pixels
+sur le thread d'entraînement. Les boucles natives et les scripts qui annoncent
+leur permutation conservent l'ordre exact des données.
+
+Le lanceur fixe `MIMIR_DATASET_PREFETCH=10` par défaut ; sans variable, le
+lecteur natif choisit 8. `MIMIR_DATASET_PREFETCH_BYTES` vaut 64 Mio. Le premier
+accès peut attendre et augmenter la file ne rend pas un décodeur plus rapide.
+Consulter `Dataset.prefetch_stats()` pour distinguer des données déjà prêtes
+(`hits`) des attentes (`waits`, `wait_ms`). Les compteurs de cette file sont
+distincts des allocations des tenseurs et du RSS du processus.
+
+Le [guide Dataset](../02-User-Guide/03-Data.md#préparer-les-prochains-échantillons)
+montre les réglages et les permutations. Le
+[rapport du lecteur](../04-Architecture-Internals/Runtime-Dataset-Prefetch-20261112.md)
+compare le temps complet des batches avec huit éléments d'avance, les valeurs
+bit à bit et la consommation mémoire sur trois profils synthétiques CPU.
+
+## Calibration des attentions
+
+Le routeur mesure les variantes admissibles de SelfAttention/CrossAttention
+sur des états jetables et vérifie leurs résultats avant de publier un choix.
+Les workers CPU et les backends sont choisis pour la géométrie réelle, y
+compris les têtes et le masque causal. Les gradients du modèle ne reçoivent
+pas les contributions des sondes.
+
+La première utilisation paie la préparation et les mesures de candidats ; les
+appels suivants réutilisent la décision. Pour des runs courts, comparer aussi
+avec `MIMIR_RUNTIME_AUTOTUNE=0`. Le
+[rapport de calibration](../04-Architecture-Internals/Runtime-Attention-Policy-20261112.md)
+distingue ce démarrage des gains après chauffe, et décrit les copies de
+protection qui restent nécessaires.
 
 ## Vulkan/OpenCL et entraînement
 
@@ -130,6 +168,14 @@ paramètres comparées identiques ; les gains d’un kernel ne se transfèrent p
 Pour une procédure réutilisable, voir les
 [benchmarks Colab](07-Colab-Benchmarks.md), avec leurs profils, sources embarquées,
 validations natives, métriques de mémoire et limites de comparaison.
+
+Les campagnes du 12 novembre 2026 détaillent les
+[projections en dimensions 512/1024/2048](../04-Architecture-Internals/Runtime-Dimensions-20261112.md),
+le [backward d'attention par blocs](../04-Architecture-Internals/Runtime-Attention-Tiling-20261112.md)
+et la [sélection mesurée des variantes](../04-Architecture-Internals/Runtime-Attention-Policy-20261112.md).
+Leurs comparaisons conservent les expressions et l'ordre des arrondis
+existants ; les limites préexistantes des gradients de biais d'attention
+restent décrites dans ces rapports.
 
 ## Étapes suivantes
 

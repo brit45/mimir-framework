@@ -1,4 +1,4 @@
-#include "runtimes/FiniteCheck.hpp"
+#include "runtimes/cpu/FiniteCheckDispatch.hpp"
 #include "runtimes/RuntimeRouter.hpp"
 #include "runtimes/cpu/CpuRuntime.hpp"
 #include "tensors.hpp"
@@ -16,7 +16,7 @@ namespace {
 
 bool tensorsAreFinite(const std::vector<std::vector<float>>& tensors) {
     for (const auto& tensor : tensors) {
-        if (!Mimir::RuntimeChecks::allFinite(tensor.data(), tensor.size())) return false;
+        if (!Mimir::RuntimeChecks::allFiniteDispatched(tensor.data(), tensor.size())) return false;
     }
     return true;
 }
@@ -555,7 +555,7 @@ bool RuntimeRouter::dispatchBackwardLayer(
         if(ranking.calibrated){disposable=layer;target=&disposable;}
         if (rt->backwardLayerWithContext(inputs, grad_outputs, local_grad_inputs, *target, training, context) &&
             (layer.type_enum == LayerType::Constant || !local_grad_inputs.empty()) &&
-            (!ranking.calibrated || (Mimir::RuntimeChecks::allFinite(target->grad_weights.data(),target->grad_weights.size()) && Mimir::RuntimeChecks::allFinite(target->grad_bias.data(),target->grad_bias.size()))) &&
+            (!ranking.calibrated || (Mimir::RuntimeChecks::allFiniteDispatched(target->grad_weights.data(),target->grad_weights.size()) && Mimir::RuntimeChecks::allFiniteDispatched(target->grad_bias.data(),target->grad_bias.size()))) &&
             tensorsAreFinite(local_grad_inputs)) {
             if(ranking.calibrated){layer.grad_weights=std::move(disposable.grad_weights);layer.grad_bias=std::move(disposable.grad_bias);}
             grad_inputs = std::move(local_grad_inputs);
@@ -590,7 +590,7 @@ bool RuntimeRouter::dispatchPointwiseForward(const std::vector<const Layer*>& ch
     AbstractRuntime** selected,bool training,Mimir::DType dtype) const {
     if(selected)*selected=nullptr;
     ensureActivatedAndComposed();
-    if(!Mimir::RuntimeChecks::allFinite(input.data(),input.size()))return false;
+    if(!Mimir::RuntimeChecks::allFiniteDispatched(input.data(),input.size()))return false;
     namespace Fusion=Mimir::Planning::FusionCalibration;
     Fusion::Request request;request.layers=chain;request.input=&input;request.training=training;
     request.retain=retain;request.dtype=dtype;request.generation=optimizer_routing_generation_;
@@ -702,7 +702,7 @@ bool RuntimeRouter::dispatchPointwiseBackward(const std::vector<const Layer*>& c
             candidates[i].execute=[&,rt](Fusion::Buffers& output) {
                 std::vector<float> dx;
                 if(!rt->pointwiseFusionBackward(chain,inputs,grad,dx) ||
-                   !Mimir::RuntimeChecks::allFinite(dx.data(),dx.size()))return false;
+                   !Mimir::RuntimeChecks::allFiniteDispatched(dx.data(),dx.size()))return false;
                 output.clear();output.push_back(std::move(dx));return true;
             };
         }
@@ -718,6 +718,6 @@ bool RuntimeRouter::dispatchPointwiseBackward(const std::vector<const Layer*>& c
     Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(decision.cpu_workers);
     std::vector<float> dx;
     if(!decision.runtime->pointwiseFusionBackward(chain,inputs,grad,dx) ||
-        !Mimir::RuntimeChecks::allFinite(dx.data(),dx.size())) {Fusion::invalidate(decision.key);return false;}
+        !Mimir::RuntimeChecks::allFiniteDispatched(dx.data(),dx.size())) {Fusion::invalidate(decision.key);return false;}
     result=std::move(dx);if(selected)*selected=decision.runtime;return true;
 }

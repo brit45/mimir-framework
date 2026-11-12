@@ -11,6 +11,7 @@ limites propres à chaque backend sans recompiler le projet.
 - [2) Configuration par backend (CPU/CUDA/ROCM)](#2-configuration-par-backend-cpucudarocm)
 - [Sélection SIMD CPU](#sélection-simd-cpu)
 - [Sessions TPU et FPGA](#sessions-tpu-et-fpga)
+- [Préchargement des datasets](#préchargement-des-datasets)
 - [3) Vulkan/OpenCL (offload Linear/MatMul + Conv2d/ConvTranspose2d)](#3-vulkanopencl-offload-linearmatmul-conv2dconvtranspose2d)
 - [4) Planner et fusion](#4-planner-et-fusion)
 - [4.1) Verbose runtime et cartographie planner](#41-verbose-runtime-et-cartographie-planner)
@@ -177,6 +178,18 @@ Notes Vulkan SPIR-V:
 - Les shaders sont recherchés dans les emplacements du build et de l'installation,
   dont `bin/shaders` et `build/shaders`. Le réglage `MIMIR_VULKAN_LINEAR_SPV`
   remplace spécifiquement le chemin du shader Linear, pas tous les kernels.
+
+## Préchargement des datasets
+
+| Variable | Type | Défaut | Effet |
+| --- | --- | --- | --- |
+| `MIMIR_DATASET_PREFETCH` | entier | `8` natif ; `10` via `run_mimir.sh` | Nombre fixe d'échantillons anticipés, entre 0 et 256, plus l'échantillon en cours. `0` conserve le chargement synchrone. |
+| `MIMIR_DATASET_PREFETCH_BYTES` | octets | `67108864` | Budget de la file de préparation native. `0` désactive l'anticipation. Un élément demandé trop grand peut être préparé seul, sous les contrôles RAM du dataset. |
+
+Ces réglages sont lus à la création du lecteur lazy. Les scripts et les bridges
+peuvent fournir l'ordre mélangé via `Mimir.Dataset.prefetch(indices)` ; les
+boucles natives le fournissent automatiquement. Voir [l'API Dataset](13-Dataset.md#préchargement-en-arrière-plan)
+pour les compteurs, les durées de vie et les limites de l'anticipation.
 
 ## 4) Planner et fusion
 

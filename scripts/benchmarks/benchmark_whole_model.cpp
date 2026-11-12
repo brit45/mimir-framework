@@ -3,11 +3,13 @@
 // CPU example (set these environment variables before running):
 // OMP_NUM_THREADS=1 MIMIR_DISABLE_VULKAN=1 MIMIR_DISABLE_OPENCL=1
 // ./build/Tests/mimir_bench_whole_model float32 200 2
-// Optional trailing arguments: features (64), batch (16), Linear/SiLU pairs (8).
+// Optional trailing arguments: features (64), batch (16), layer/SiLU pairs (8),
+// layer type (Linear or SelfAttention, default Linear).
 // Optimizer IDs: 0 SGD, 1 Adam, 2 AdamW, 3 Lion, 4 Adafactor,
 // 5 RAdam, 6 NAdam, 7 RMSProp, 8 LAMB (default: SGD).
 #include "Model.hpp"
 #include "runtimes/RuntimeRouter.hpp"
+#include "Planning/ExecutionCalibration.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -54,19 +56,28 @@ int main(int argc, char** argv) {
         const int features=argc>4?std::stoi(argv[4]):64;
         const int batch=argc>5?std::stoi(argv[5]):16;
         const int pairs=argc>6?std::stoi(argv[6]):8;
-        if(features<1 || features>1024 || batch<1 || batch>1024 || pairs<1 || pairs>32)
-            throw std::invalid_argument("features/batch must be in [1,1024], pairs in [1,32]");
+        const std::string layer_type=argc>7?argv[7]:"Linear";
+        if(layer_type!="Linear" && layer_type!="SelfAttention")
+            throw std::invalid_argument("layer type must be Linear or SelfAttention");
+        if(features<1 || features>4096 || batch<1 || batch>1024 || pairs<1 || pairs>32)
+            throw std::invalid_argument("features must be in [1,4096], batch in [1,1024], pairs in [1,32]");
         Model::setFrameworkLogsSuppressed(true);
         const auto initialize_start=std::chrono::steady_clock::now();
         Model model;
         model.setDefaultDType(dtype);
         model.modelConfig = {{"loss", "mse"}};
         for (int i = 0; i < pairs; ++i) {
-            model.push("fc" + std::to_string(i), "Linear", features*features+features);
+            const bool attention=layer_type=="SelfAttention";
+            model.push("fc" + std::to_string(i),layer_type,
+                attention?4*features*features:features*features+features);
             auto& layer = model.getMutableLayers().back();
             layer.in_features = layer.out_features = features;
             layer.seq_len = batch;
-            layer.use_bias = true;
+            layer.use_bias = !attention;
+            if(attention) {
+                layer.embed_dim=features;
+                layer.num_heads=features%8==0?8:1;
+            }
             model.push("act" + std::to_string(i), "SiLU", 0);
         }
         model.getMutableLayers()[0].inputs = {"__input__"};
@@ -122,6 +133,9 @@ int main(int argc, char** argv) {
         };
         float loss = 0;
         const auto training = measure([&]() { loss = train(); },[]{});
+        const auto cold_inference_start=Clock::now();
+        (void)model.forwardPass(input,false);
+        const double cold_inference_ms=elapsed(cold_inference_start);
         const auto inference = measure([&]() { (void)model.forwardPass(input, false); },[]{});
         // Keep the public trainStep above as the main throughput measurement.
         // These synchronized stages locate overhead without timing Lua copies.
@@ -133,6 +147,22 @@ int main(int argc, char** argv) {
             gradient[i]=2.f*(prediction[i]-target[i])/float(gradient.size());
         auto backward_stage=measure([&] {model.backwardPass(gradient);},[&]{model.zeroGradients();(void)model.forwardPassView(input,true);});
         auto optimizer_stage=measure([&] {model.optimizerStep(optimizer,request.learning_rate);},[]{});
+        // Capture actual routed choices before the optional inference dump can
+        // publish another profile. OMP_NUM_THREADS alone is not a worker choice.
+        json execution_profiles=json::array();
+        for(const auto& layer:model.getLayers()) {
+            auto choices=[&](const auto& profiles) {
+                json rows=json::array();
+                const auto at=profiles.find(&layer);
+                if(at!=profiles.end())for(const auto& cost:at->second)
+                    rows.push_back({{"runtime",cost.runtime->name()},{"cpu_workers",cost.cpu_workers},
+                        {"median_host_ms",cost.seconds*1000.0}});
+                return rows;
+            };
+            execution_profiles.push_back({{"name",layer.name},{"type",layer.type},
+                {"forward",choices(Mimir::Planning::Calibration::forward_profiles)},
+                {"backward",choices(Mimir::Planning::Calibration::backward_profiles)}});
+        }
         std::ofstream values;
         if(const char* path=std::getenv("MIMIR_BENCH_VALUES")) {values.open(path,std::ios::binary);if(!values)throw std::runtime_error("Cannot open benchmark value dump");}
         if(values.is_open()) {
@@ -146,10 +176,11 @@ int main(int argc, char** argv) {
                 for (size_t i = 0; i < layer.getWeightsSize(); ++i)
                     checksum += double(i+1)*layer.getWeights()[i];
             }
-        std::cout << json{{"dtype",dtype},{"steps",steps},{"layers",pairs*2},{"batch",batch},{"features",features},
-            {"initialize_ms",initialize_ms},{"cold_trainstep_ms",cold_trainstep_ms},{"peak_rss_kib",peakRssKiB()},{"training",training},{"inference",inference},{"final_loss",loss},
+        std::cout << json{{"dtype",dtype},{"steps",steps},{"layers",pairs*2},{"batch",batch},{"features",features},{"layer_type",layer_type},
+            {"initialize_ms",initialize_ms},{"cold_trainstep_ms",cold_trainstep_ms},{"cold_inference_ms",cold_inference_ms},{"peak_rss_kib",peakRssKiB()},{"training",training},{"inference",inference},{"final_loss",loss},
             {"parameter_checksum",checksum},{"forward_stage",forward_stage},
             {"backward_stage",backward_stage},{"optimizer_stage",optimizer_stage},
+            {"runtime_autotune",Mimir::Planning::Calibration::enabled()},{"execution_profiles",execution_profiles},
             {"allocation_scope","calling-thread C++ new/new[]; excludes malloc/device allocations"},
             {"optimizer_kind",optimizer_kind},{"optimizer_backends",RuntimeRouter::instance().optimizerDispatchCounts()},
             {"loss_backends",RuntimeRouter::instance().reconstructionLossDispatchCounts()}}.dump() << '\n';

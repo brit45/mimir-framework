@@ -71,7 +71,7 @@ bool compile(const std::string& source, const std::string& output) {
 }
 }
 RustScripting::RustScripting() : native_(std::make_unique<LuaScripting>()) {}
-RustScripting::~RustScripting() = default;
+RustScripting::~RustScripting() {RustContext::getInstance().datasetPrefetcher.reset();}
 void RustScripting::setArgs(const std::string& path,const std::vector<std::string>& args) {cacheArgs(path,args);}
 void RustScripting::setSystemConfig(const json& conf,const std::string& path,const std::string& dir) {
     RustContext::getInstance().currentConfig=conf;conf_path_=path;conf_dir_=dir;

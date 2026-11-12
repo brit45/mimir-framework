@@ -10,6 +10,7 @@
 #include "Model.hpp"
 #include "Tokenizer.hpp"
 #include "Encoder.hpp"
+#include "DatasetPrefetcher.hpp"
 #include "include/json.hpp"
 
 class AsyncMonitor;
@@ -43,6 +44,7 @@ public:
         currentEncoder.reset();
         asyncMonitor.reset();
         currentSequences.clear();
+        datasetPrefetcher.reset();
         currentDataset.clear();
         currentConfig = json{};
         modelType.clear();
@@ -61,6 +63,8 @@ public:
 
     // Dataset stocke
     std::vector<DatasetItem> currentDataset;
+    // Declared after the dataset so the producer stops before dataset teardown.
+    std::shared_ptr<DatasetPrefetcher> datasetPrefetcher;
 
     // Configuration du modele
     std::string modelType;

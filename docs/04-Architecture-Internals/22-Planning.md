@@ -148,6 +148,12 @@ prévu par cette calibration. NMS conserve une comparaison exacte de ses indices
 Les opérations aléatoires ou à état non rejouable ne sont pas mesurées de cette
 manière.
 
+SelfAttention et CrossAttention participent à cette comparaison : leurs
+implémentations natives actuelles n'ajoutent ni dropout ni cache KV persistant.
+Leurs clés incluent les têtes, dimensions par tête, causalité et configuration
+RoPE. Le [rapport de mesure de l'attention](Runtime-Attention-Policy-20261112.md)
+détaille les gains après chauffe et le surcoût de la première calibration.
+
 Le budget provient de la mémoire disponible et de `MemoryGuard`, éventuellement
 plafonné par `MIMIR_PLANNER_CALIBRATION_MAX_BYTES`. Il n’existe plus de plafond
 fixe implicite de 64 Mio. Si la mémoire disponible ne peut pas être établie,

@@ -36,6 +36,7 @@ struct ContextScope {
         swap(external.currentSequences, lua.currentSequences);
         swap(external.currentConfig, lua.currentConfig);
         swap(external.currentDataset, lua.currentDataset);
+        swap(external.datasetPrefetcher, lua.datasetPrefetcher);
         swap(external.modelType, lua.modelType);
         swap(external.modelConfig, lua.modelConfig);
         swap(external.logs, lua.logs);

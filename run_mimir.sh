@@ -128,6 +128,8 @@ export MIMIR_PLANNER_DUMP="${MIMIR_PLANNER_DUMP:-0}"
 export MIMIR_PLANNER_JSON="${MIMIR_PLANNER_JSON:-.mimir-spill/execution-plan.json}"
 export MIMIR_PLANNER_DEVICE_RESIDENCY="${MIMIR_PLANNER_DEVICE_RESIDENCY:-0}"
 
+export MIMIR_DATASET_PREFETCH=${MIMIR_DATASET_PREFETCH:-10}
+
 # OpenCL Rusticl (AMD/Mesa): activer automatiquement sur iGPU AMD.
 # Override possible: RUSTICL_ENABLE=... ./run_mimir.sh
 if [ -z "${RUSTICL_ENABLE:-}" ]; then

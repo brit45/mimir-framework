@@ -88,7 +88,7 @@ réutilisent leurs états et dérivées temporaires dans les chemins retenus. Le
 intermédiaires du backward natif commun aux backends passent aussi par ces
 buffers. Concat/Stack écrivent dans le stockage de sortie disponible après
 validation, avec une voie temporaire distincte si une entrée est cette sortie.
-L'attention causale/GQA, le backward SelfAttention et le forward LSTM gardent
+L'attention causale/GQA et le forward LSTM gardent
 leurs temporaires précédents : les conversions mesurées ralentissaient les cas
 contrôlés. La baisse du nombre d'allocations seule ne suffit pas à sélectionner
 une implémentation plus rapide.
@@ -249,6 +249,36 @@ resté désactivé. Les mécanismes d'éviction, de spill et de suivi de mémoir
 restent actifs. Les données brutes, dumps binaires et synthèses de cette
 campagne sont conservés localement dans
 `outputs/benchmarks/engine-stack-20261111-194320/`.
+
+## 8) Latence des grandes projections
+
+La campagne du 12 novembre 2026 couvre les largeurs 512/1024/2048, les
+projections de Linear/SelfAttention/CrossAttention et le chemin public
+`Model::trainStep`. Les produits par blocs conservent l'ordre des réductions,
+les politiques FMA et les biais ; le backward SelfAttention emprunte une arène
+réutilisable. Les transferts OpenCL, les scratchpads pointwise ROCm et le bruit
+du worker TPU ont aussi été examinés et optimisés.
+
+Le [rapport détaillé](Runtime-Dimensions-20261112.md) distingue les mesures
+CPU, les vérifications GPU réellement exécutées, la compilation HIP et la
+référence CPU/JAX. Il fournit les temps avant/après, les limites du contrat
+mathématique existant et les commandes des sondes reproductibles.
+
+La [suite sur le backward d'attention](Runtime-Attention-Tiling-20261112.md)
+remplace les grandes matrices de probabilités par des blocs réutilisables,
+avec poursuite des accumulateurs FP32 entre blocs et vérification bit à bit.
+
+La [suite sur la sélection mesurée de l'attention](Runtime-Attention-Policy-20261112.md)
+active le choix de workers pour SelfAttention/CrossAttention dans le routeur
+Model. Elle accélère aussi les contrôles NaN/Inf avec un dispatch SIMD portable
+et distingue le gain après chauffe du coût de calibration au démarrage.
+
+## 9) Préparation anticipée des données
+
+La [préparation anticipée du dataset](Runtime-Dataset-Prefetch-20261112.md)
+utilise une file bornée et des buffers de conversion réutilisés pour recouvrir
+les lectures et conversions avec le calcul des batches. Le rapport conserve
+les mesures de débit, les budgets et les contrôles de précision.
 
 ## Étapes suivantes
 

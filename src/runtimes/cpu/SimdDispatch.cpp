@@ -219,6 +219,87 @@ template<class Fn>void forRows(std::size_t rows,int workers,const Fn& fn) {
 #endif
     for(std::size_t r=0;r<rows;++r)fn(r);
 }
+// Copy a B^T panel without the power-of-two leading-dimension cache conflicts
+// of a scalar column gather. This is bitwise movement, never a reduction.
+void packTransposeScalar(float* dst,const float* src,size_t columns,size_t reductions,size_t stride) {
+    for(size_t j=0;j<columns;++j)for(size_t r=0;r<reductions;++r)
+        dst[r*columns+j]=src[j*stride+r];
+}
+#ifdef MIMIR_SIMD_MULTIVERSION
+MIMIR_SIMD_TARGET("sse2")
+void packTransposeSse(float* dst,const float* src,size_t columns,size_t reductions,size_t stride) {
+    size_t j=0;
+    for(;j+4<=columns;j+=4) {
+        size_t r=0;
+        for(;r+4<=reductions;r+=4) {
+            __m128 a=_mm_loadu_ps(src+j*stride+r),b=_mm_loadu_ps(src+(j+1)*stride+r);
+            __m128 c=_mm_loadu_ps(src+(j+2)*stride+r),d=_mm_loadu_ps(src+(j+3)*stride+r);
+            _MM_TRANSPOSE4_PS(a,b,c,d);
+            _mm_storeu_ps(dst+r*columns+j,a);_mm_storeu_ps(dst+(r+1)*columns+j,b);
+            _mm_storeu_ps(dst+(r+2)*columns+j,c);_mm_storeu_ps(dst+(r+3)*columns+j,d);
+        }
+        for(;r<reductions;++r)for(size_t lane=0;lane<4;++lane)
+            dst[r*columns+j+lane]=src[(j+lane)*stride+r];
+    }
+    for(;j<columns;++j)for(size_t r=0;r<reductions;++r)dst[r*columns+j]=src[j*stride+r];
+}
+#endif
+using PackTranspose=void(*)(float*,const float*,size_t,size_t,size_t);
+PackTranspose transposePacker() {
+#ifdef MIMIR_SIMD_MULTIVERSION
+    if(selectedIsa()!=Isa::Scalar && features().sse2)return packTransposeSse;
+#endif
+    return packTransposeScalar;
+}
+// Bounded, thread-local stack panels: reuse B over eight independent output
+// rows, retaining increasing k order and adding to an existing C only once.
+// Strides permit attention head slices without full transposes or copies.
+void orderedGemm(float* c,const float* a,const float* b,size_t m,size_t n,size_t k,
+                 size_t ar,size_t ak,size_t bk,size_t bc,size_t cr,
+                 bool accumulate,bool fused,int workers,size_t batches=1,size_t ab=0,size_t bb=0,size_t cb=0,
+                 bool resumeReduction=false) {
+    if(!m || !n || !batches)return;
+    const Row fn=rowFunction(fused);
+    // Contiguous right operands fitting a small cache working set do not need
+    // packing; avoid setup overhead for small layers and convolution tiles.
+    if(!k || (bc==1 && (m==1 || (ak==1 && k<=64) || n<=65536/k))) {
+        const size_t tile=workers>1?192:n,tiles=(n+tile-1)/tile;
+        forRows(batches*m*tiles,workers,[&](size_t task){
+            const size_t batch=task/(m*tiles),row=(task/tiles)%m,j=(task%tiles)*tile;
+            fn(c+batch*cb+row*cr+j,k?a+batch*ab+row*ar:a,k?b+batch*bb+j:b,
+               std::min(tile,n-j),k,ak,bk,accumulate,resumeReduction);});
+        return;
+    }
+    constexpr size_t rowTile=8,columnTile=192,reductionTile=32;
+    const auto pack=transposePacker();
+    const size_t rowTiles=(m+rowTile-1)/rowTile,columnTiles=(n+columnTile-1)/columnTile;
+    forRows(batches*rowTiles*columnTiles,workers,[&](size_t task){
+        const size_t batch=task/(rowTiles*columnTiles);task%=rowTiles*columnTiles;
+        const float* batchA=a+batch*ab;const float* batchB=b+batch*bb;float* batchC=c+batch*cb;
+        alignas(64) std::array<float,reductionTile*columnTile> panel;
+        alignas(64) std::array<float,rowTile*columnTile> sums;
+        const size_t firstRow=(task/columnTiles)*rowTile,firstColumn=(task%columnTiles)*columnTile;
+        const size_t rows=std::min(rowTile,m-firstRow),columns=std::min(columnTile,n-firstColumn);
+        if(resumeReduction)for(size_t row=0;row<rows;++row)
+            std::copy_n(batchC+(firstRow+row)*cr+firstColumn,columns,sums.data()+row*columns);
+        for(size_t firstReduction=0;firstReduction<k;firstReduction+=reductionTile) {
+            const size_t reductions=std::min(reductionTile,k-firstReduction);
+            const float* source=batchB+firstReduction*bk+firstColumn*bc;
+            if(bk==1)pack(panel.data(),source,columns,reductions,bc);
+            else for(size_t r=0;r<reductions;++r) {
+                if(bc==1)std::copy_n(source+r*bk,columns,panel.data()+r*columns);
+                else for(size_t j=0;j<columns;++j)panel[r*columns+j]=source[r*bk+j*bc];
+            }
+            for(size_t row=0;row<rows;++row)
+                fn(sums.data()+row*columns,batchA+(firstRow+row)*ar+firstReduction*ak,
+                   panel.data(),columns,reductions,ak,columns,false,resumeReduction || firstReduction!=0);
+        }
+        for(size_t row=0;row<rows;++row)for(size_t j=0;j<columns;++j) {
+            if(accumulate)batchC[(firstRow+row)*cr+firstColumn+j]+=sums[row*columns+j];
+            else batchC[(firstRow+row)*cr+firstColumn+j]=sums[row*columns+j];
+        }
+    });
+}
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options
 #endif
@@ -254,24 +335,10 @@ Isa selectedIsa() {
 bool requestIsa(Isa isa) {if(!supported(isa))return false;requested.store(int(isa),std::memory_order_relaxed);return true;}
 void clearIsaRequest(){requested.store(-1,std::memory_order_relaxed);}
 void matmul(float* c,const float* a,const float* b,std::size_t m,std::size_t n,std::size_t k,bool accumulate,bool fused,int workers) {
-    if(!m || !n)return;
-    const Row fn=rowFunction(fused);
-    // Column tiles provide independent work even for the one-row GEMMs used
-    // during generation. Serial execution keeps full rows for minimal overhead.
-    const std::size_t tile=workers>1?192:n,tiles=(n+tile-1)/tile;
-    forRows(m*tiles,workers,[&](std::size_t task){
-        const std::size_t r=task/tiles,j=(task%tiles)*tile;
-        fn(c+r*n+j,k?a+r*k:a,k?b+j:b,std::min(tile,n-j),k,1,n,accumulate,false);
-    });
+    orderedGemm(c,a,b,m,n,k,k,1,n,1,n,accumulate,fused,workers);
 }
 void matmulBatched(float* c,const float* a,const float* b,std::size_t batches,std::size_t m,std::size_t n,std::size_t k,bool fused,int workers) {
-    if(!m || !n || !batches)return;
-    const Row fn=rowFunction(fused);
-    const std::size_t tile=workers>1?192:n,tiles=(n+tile-1)/tile;
-    forRows(batches*m*tiles,workers,[&](std::size_t task){
-        const std::size_t r=task/tiles,j=(task%tiles)*tile;
-        fn(c+r*n+j,k?a+r*k:a,k?b+(r/m)*k*n+j:b,std::min(tile,n-j),k,1,n,false,false);
-    });
+    orderedGemm(c,a,b,m,n,k,k,1,n,1,n,false,fused,workers,batches,m*k,k*n,m*n);
 }
 void matmulTranspose(float* c,const float* a,const float* b,std::size_t m,std::size_t n,std::size_t k,bool fused,int workers) {
     if(!m || !n)return;
@@ -280,6 +347,7 @@ void matmulTranspose(float* c,const float* a,const float* b,std::size_t m,std::s
     // Fixed scratch: 24 KiB per active worker, independent of matrix sizes.
     // Keep accumulators live numerically across reduction tiles: resume loads
     // the previous FP32 accumulator, rather than summing partial dot products.
+    const auto pack=transposePacker();
     constexpr std::size_t reductionTile=32,columnTile=192,rowTile=16;
     const std::size_t rowTiles=(m+rowTile-1)/rowTile,columnTiles=(n+columnTile-1)/columnTile;
     forRows(rowTiles*columnTiles,workers,[&](std::size_t task){
@@ -288,21 +356,39 @@ void matmulTranspose(float* c,const float* a,const float* b,std::size_t m,std::s
         const std::size_t columns=std::min(columnTile,n-firstColumn),lastRow=std::min(m,firstRow+rowTile);
         for(std::size_t firstReduction=0;firstReduction<k;firstReduction+=reductionTile) {
             const std::size_t reductions=std::min(reductionTile,k-firstReduction);
-            for(std::size_t r=0;r<reductions;++r)
-                for(std::size_t j=0;j<columns;++j)
-                    packed[r*columns+j]=b[(firstColumn+j)*k+firstReduction+r];
+            pack(packed.data(),b+firstColumn*k+firstReduction,columns,reductions,k);
             for(std::size_t row=firstRow;row<lastRow;++row)
                 fn(c+row*n+firstColumn,a+row*k+firstReduction,packed.data(),columns,reductions,1,columns,false,firstReduction!=0);
         }
     });
 }
 void matmulLeftTranspose(float* c,const float* a,const float* b,std::size_t m,std::size_t n,std::size_t k,bool fused,int workers) {
-    if(!k || !n)return;
-    const Row fn=rowFunction(fused);
-    const std::size_t tile=workers>1?192:n,tiles=(n+tile-1)/tile;
-    forRows(k*tiles,workers,[&](std::size_t task){
-        const std::size_t r=task/tiles,j=(task%tiles)*tile;
-        fn(c+r*n+j,m?a+r:a,m?b+j:b,std::min(tile,n-j),m,k,n,false,false);
+    orderedGemm(c,a,b,k,n,m,1,k,n,1,n,false,fused,workers);
+}
+void matmulStrided(float* c,const float* a,const float* b,size_t m,size_t n,size_t k,
+                   size_t ar,size_t ak,size_t bk,size_t bc,size_t cr,bool accumulate,bool fused,int workers) {
+    orderedGemm(c,a,b,m,n,k,ar,ak,bk,bc,cr,accumulate,fused,workers);
+}
+void matmulStridedContinue(float* c,const float* a,const float* b,size_t m,size_t n,size_t k,
+                          size_t ar,size_t ak,size_t bk,size_t bc,size_t cr,bool fused,int workers) {
+    orderedGemm(c,a,b,m,n,k,ar,ak,bk,bc,cr,false,fused,workers,1,0,0,0,true);
+}
+void matmulTransposeBiased(float* c,const float* a,const float* b,const float* bias,
+                           size_t m,size_t n,size_t k,int workers) {
+    if(!bias){matmulTranspose(c,a,b,m,n,k,false,workers);return;}
+    if(!m || !n)return;
+    const Row fn=rowFunction(false);const auto pack=transposePacker();
+    constexpr size_t kt=32,nt=192,mt=16;
+    const size_t columns=(n+nt-1)/nt,rows=(m+mt-1)/mt;
+    forRows(rows*columns,workers,[&](size_t task){
+        std::array<float,kt*nt> panel;
+        const size_t r0=(task/columns)*mt,j0=(task%columns)*nt;
+        const size_t nr=std::min(mt,m-r0),nc=std::min(nt,n-j0);
+        for(size_t row=0;row<nr;++row)std::copy_n(bias+j0,nc,c+(r0+row)*n+j0);
+        for(size_t k0=0;k0<k;k0+=kt){const size_t nk=std::min(kt,k-k0);
+            pack(panel.data(),b+j0*k+k0,nc,nk,k);
+            for(size_t row=0;row<nr;++row)fn(c+(r0+row)*n+j0,a+(r0+row)*k+k0,panel.data(),nc,nk,1,nc,false,true);
+        }
     });
 }
 void add(float* c,const float* a,const float* b,std::size_t n) {

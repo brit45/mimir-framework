@@ -90,6 +90,21 @@ int LuaScripting::lua_detokenize(lua_State* L) {
 // Dataset
 // ============================================================================
 
+static void configureDatasetPrefetch(LuaContext& ctx,int width,int height,bool lazy=true) {
+    auto options=DatasetPrefetcher::Options::fromEnvironment(width,height);
+    if(!lazy)options.ahead=0; // The explicit eager loader already owns its payloads.
+    ctx.datasetPrefetcher=std::make_shared<DatasetPrefetcher>(ctx.currentDataset,options);
+    ctx.currentConfig["dataset"]["prefetch_samples"]=options.ahead;
+    ctx.currentConfig["dataset"]["prefetch_bytes"]=options.max_bytes;
+}
+
+static void ensureDatasetPrefetch(LuaContext& ctx) {
+    const auto config=ctx.currentConfig.value("dataset",json::object());
+    const int width=config.value("target_w",64),height=config.value("target_h",64);
+    if(!ctx.datasetPrefetcher || ctx.datasetPrefetcher->preparesTokens() || !ctx.datasetPrefetcher->matchesDimensions(width,height))
+        configureDatasetPrefetch(ctx,width,height,config.value("lazy_loading",true));
+}
+
 // ---------------------------------------------------------------------------
 // Database (dataset loader builder with caching)
 // ---------------------------------------------------------------------------
@@ -231,6 +246,8 @@ int LuaScripting::lua_databaseLoad_cache(lua_State* L) {
 
         ctx.addLog("Chargement dataset (cached): " + dataset_dir);
 
+        ctx.datasetPrefetcher.reset();
+
         std::vector<DatasetItem> items = loadDatasetCached(
             dataset_dir,
             target_w,
@@ -261,6 +278,7 @@ int LuaScripting::lua_databaseLoad_cache(lua_State* L) {
         ctx.currentConfig["dataset"]["max_ram_mb"] = max_ram_mb;
         ctx.currentConfig["dataset"]["lazy_loading"] = lazy_loading;
         ctx.currentConfig["dataset"]["loader"] = "cached";
+        configureDatasetPrefetch(ctx,target_w,target_h,lazy_loading);
 
         lua_pushboolean(L, true);
         lua_pushinteger(L, ctx.currentDataset.size());
@@ -304,6 +322,7 @@ int LuaScripting::lua_loadDataset(lua_State* L) {
             return 2;
         }
         
+        ctx.datasetPrefetcher.reset();
         // Charger les items du dataset
         std::vector<DatasetItem> items;
         if (use_cache) {
@@ -351,6 +370,7 @@ int LuaScripting::lua_loadDataset(lua_State* L) {
             ctx.currentConfig["dataset"]["loader"] = "default";
         }
         
+        configureDatasetPrefetch(ctx,target_w,target_h,!use_cache || lazy_loading);
         lua_pushboolean(L, true);
         lua_pushinteger(L, ctx.currentDataset.size());
         return 2;
@@ -380,7 +400,10 @@ int LuaScripting::lua_getDataset(lua_State* L) {
     }
     
     try {
-        auto& item = ctx.currentDataset[index - 1]; // Lua est 1-indexed
+        ensureDatasetPrefetch(ctx);
+        auto prepared=ctx.datasetPrefetcher?ctx.datasetPrefetcher->acquire(size_t(index-1),
+            load_image?DatasetPrefetcher::Format::RGB:DatasetPrefetcher::Format::Text):DatasetPrefetcher::Lease{};
+        auto& item = prepared?prepared->item:ctx.currentDataset[index - 1]; // Lua est 1-indexed
         
         // Créer une table Lua avec les informations de l'item
         lua_newtable(L);
@@ -420,7 +443,7 @@ int LuaScripting::lua_getDataset(lua_State* L) {
         
         // Charger et ajouter le contenu texte si présent
         if ((!item.text_file.empty() || !item.text_inline.empty()) && !item.text.has_value()) {
-            if (!item.loadText() && !item.annotation_file.empty()) {
+            if ((prepared || !item.loadText()) && !item.annotation_file.empty()) {
                 throw std::runtime_error(item.annotation_error.empty() ? "Cannot load dataset annotation (RAM limit?)" : item.annotation_error);
             }
         }
@@ -449,7 +472,7 @@ int LuaScripting::lua_getDataset(lua_State* L) {
 
         // Charger et retourner l'image en bytes RGB u8 (utile pour diffusion).
         if (!item.image_file.empty()) {
-            if (load_image) item.loadImageRGB(target_w, target_h);
+            if (load_image && !prepared) item.loadImageRGB(target_w, target_h);
             if (load_image && item.img_loaded) {
                 lua_newtable(L);
                 for (size_t i = 0; i < item.img.size(); ++i) {
@@ -501,7 +524,7 @@ int LuaScripting::lua_getDataset(lua_State* L) {
             }
 
             if (!item.mask_file.empty()) {
-                if (load_image) item.loadMask(target_w, target_h);
+                if (load_image && !prepared) item.loadMask(target_w, target_h);
                 if (load_image && item.mask_loaded) {
                     lua_newtable(L);
                     for (size_t i = 0; i < item.mask.size(); ++i) {
@@ -530,7 +553,40 @@ int LuaScripting::lua_releaseDatasetItem(lua_State* L) {
         return 2;
     }
     ctx.currentDataset[static_cast<size_t>(index - 1)].unload();
+    if(ctx.datasetPrefetcher)ctx.datasetPrefetcher->invalidate(size_t(index-1));
     lua_pushboolean(L, true);
+    return 1;
+}
+
+int LuaScripting::lua_prefetchDataset(lua_State* L) {
+    auto& ctx=LuaContext::getInstance();
+    try {
+        if(!lua_istable(L,1))throw std::invalid_argument("Dataset.prefetch: expected an ordered table of indices");
+        if(ctx.currentDataset.empty())throw std::runtime_error("Aucun dataset chargé");
+        ensureDatasetPrefetch(ctx);
+        std::vector<size_t> order;const size_t length=lua_rawlen(L,1);order.reserve(length);
+        for(size_t i=0;i<length;++i) {
+            lua_rawgeti(L,1,static_cast<lua_Integer>(i+1));
+            int converted=0;
+            const bool number=lua_type(L,-1)==LUA_TNUMBER;
+            const lua_Integer index=lua_tointegerx(L,-1,&converted);lua_pop(L,1);
+            if(!number || !converted || index<1 || uint64_t(index)>ctx.currentDataset.size())
+                throw std::out_of_range("Dataset.prefetch: index hors limites");
+            order.push_back(size_t(index-1));
+        }
+        const bool images=lua_gettop(L)<2 || lua_toboolean(L,2);
+        ctx.datasetPrefetcher->setOrder(std::move(order),images?DatasetPrefetcher::Format::RGB:DatasetPrefetcher::Format::Text);
+        lua_pushboolean(L,true);lua_pushinteger(L,static_cast<lua_Integer>(length));return 2;
+    }catch(const std::exception& e){lua_pushboolean(L,false);lua_pushstring(L,e.what());return 2;}
+}
+
+int LuaScripting::lua_datasetPrefetchStats(lua_State* L) {
+    auto& ctx=LuaContext::getInstance();
+    const auto s=ctx.datasetPrefetcher?ctx.datasetPrefetcher->stats():DatasetPrefetcher::Stats{};
+    jsonToLuaTable(L,json{{"enabled",s.enabled},{"capacity",s.capacity},{"queued",s.queued},{"ready",s.ready},
+        {"leased",s.leased},{"loading",s.loading},{"resident_bytes",s.resident_bytes},{"peak_bytes",s.peak_bytes},
+        {"requests",s.requests},{"hits",s.hits},{"waits",s.waits},{"prepared",s.prepared},{"recycled",s.recycled},
+        {"errors",s.errors},{"buffer_growths",s.buffer_growths},{"wait_ms",s.wait_ms},{"prepare_ms",s.prepare_ms}});
     return 1;
 }
 

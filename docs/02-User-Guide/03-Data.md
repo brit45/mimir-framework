@@ -16,12 +16,14 @@ Sources principales :
 - API Lua: `src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp` (`lua_loadDataset`, `lua_getDataset`, `lua_prepareSequences`)
 - Indexation + lazy-loading: `src/Helpers.hpp` (`loadDataset`, `DatasetItem`, `DatasetMemoryManager`, `DatasetManager`)
 - Parcours des liens et détection des boucles : `src/DatasetTraversal.hpp`.
+- Préparation en arrière-plan : `src/DatasetPrefetcher.hpp/.cpp`.
 
 ## Sur cette page
 
 - [Vue d’ensemble](#vue-densemble)
 - [Format disque et règle de “linking”](#format-disque-et-règle-de-linking)
 - [API Lua: Mimir.Dataset](#api-lua-mimirdataset)
+- [Préparer les prochains échantillons](#préparer-les-prochains-échantillons)
 - [Détails utiles (mémoire et lazy-loading)](#détails-utiles-mémoire-et-lazy-loading)
 - [Exemples d’usage](#exemples-dusage)
 - [Bonnes pratiques](#bonnes-pratiques)
@@ -31,9 +33,12 @@ Sources principales :
 ## Vue d’ensemble
 
 - `Mimir.Dataset.load(dir)` indexe récursivement un dossier et construit une liste d’items (métadonnées uniquement).
-- `Mimir.Dataset.get(i)` charge le texte et les pixels RGB redimensionnés à la demande.
+- `Mimir.Dataset.get(i)` récupère le texte et les pixels RGB redimensionnés,
+  en utilisant la préparation anticipée lorsqu'elle est activée.
 - `Mimir.Dataset.get(i, false)` retourne texte, chemins et dimensions sans décoder l'image.
 - `Mimir.Dataset.release(i)` libère les buffers lazy de l'item après utilisation.
+- `Mimir.Dataset.prefetch(order)` indique au lecteur l'ordre des prochains
+  indices ; `Mimir.Dataset.prefetch_stats()` expose ses attentes et son occupation.
 - `Mimir.Dataset.prepare_sequences(seq_len)` construit des séquences de tokens à partir des fichiers texte du dataset (tokenizer requis pour que des séquences soient effectivement produites).
 
 ## Format disque et règle de “linking”
@@ -279,6 +284,60 @@ Comportement:
 - Si aucun tokenizer n’est présent, la fonction ne génère pas de tokens (et peut retourner `ok=true` avec `0` séquences). Vérifie la valeur retournée.
 - Les séquences sont stockées en interne (dans le contexte Lua/C++), pas retournées directement à Lua.
 
+## Préparer les prochains échantillons
+
+Le lecteur prépare les fichiers en arrière-plan pendant l'entraînement.
+Le lanceur `./run_mimir.sh` prévoit dix éléments d'avance ; un lancement
+direct sans variable utilise le défaut natif de huit. La file possède un
+emplacement supplémentaire pour l'élément consommé, sous un budget cible
+de 64 Mio. Le budget global du dataset reste distinct.
+
+Pour une lecture séquentielle, `Dataset.get` anticipe automatiquement les
+indices suivants. Si votre script mélange les données, transmettre le même
+ordre au lecteur avant la boucle :
+
+```lua
+local ok, count = Mimir.Dataset.load("/chemin/dataset", 64, 64)
+assert(ok, count)
+local order = {}
+for index = 1, count do order[index] = index end
+for index = count, 2, -1 do
+  local other = math.random(index)
+  order[index], order[other] = order[other], order[index]
+end
+assert(Mimir.Dataset.prefetch(order, true))
+for _, index in ipairs(order) do
+  local item = assert(Mimir.Dataset.get(index))
+  -- Consommer item.image / item.text avec votre modèle.
+  assert(Mimir.Dataset.release(index))
+end
+local stats = Mimir.Dataset.prefetch_stats()
+print("prêts immédiatement", stats.hits, "attentes", stats.waits, stats.wait_ms)
+```
+
+Les boucles natives VAE/VGG/détecteur médical et le script Lumen fournissent
+déjà leur permutation. Les conversions HWC/CHW et les tokens VAEText sont
+préparés selon le consommateur ; les tirages aléatoires restent sur le thread
+d'entraînement. Les appels JavaScript et Rust utilisent le même lecteur.
+
+La profondeur et le budget se règlent avant le lancement :
+
+```bash
+MIMIR_DATASET_PREFETCH=8 MIMIR_DATASET_PREFETCH_BYTES=67108864 \
+  ./run_mimir.sh --lua scripts/training/train_vae_conv.lua -- --help
+```
+
+L'exemple affiche l'aide du script avec ces réglages. Remplacer `--help` par
+vos options d'entraînement pour les appliquer au dataset. Une des deux
+variables à zéro désactive l'anticipation. Un premier accès, une demande
+imprévue ou un lecteur plus lent que le calcul peuvent encore attendre.
+Les tables Lua restent construites sur le thread du langage et les vidéos
+gardent leur streaming de frames. `release` peut différer le déchargement
+natif jusqu'au passage du producteur.
+
+Voir le [contrat et les compteurs](../03-API-Reference/13-Dataset.md#préchargement-en-arrière-plan)
+et les [mesures CPU](../04-Architecture-Internals/Runtime-Dataset-Prefetch-20261112.md).
+
 ## Détails utiles (mémoire et lazy-loading)
 
 Même si `Mimir.Dataset.load()` n’effectue que l’indexation, le C++ contient des loaders lazy (`DatasetItem::loadText/loadImage/loadAudio/loadVideo`) protégés par un petit gestionnaire RAM interne (`DatasetMemoryManager`).
@@ -341,7 +400,10 @@ end
 ## Limites actuelles (et implications)
 
 - `Mimir.Dataset.get()` expose actuellement les pixels image RGB, mais pas les buffers audio ou vidéo.
-- Le chargement image lazy reste explicite côté appelant: utiliser `release(index)` après consommation sur les grands datasets.
+- La préparation anticipée vise les appels Dataset ; une lecture directe
+  via `Mimir.IO.readImageRGBU8` utilise son propre chemin synchrone.
+- Utiliser `release(index)` après consommation ; avec anticipation, le
+  déchargement natif peut être effectué ensuite par le producteur.
 
 ## Étapes suivantes
 

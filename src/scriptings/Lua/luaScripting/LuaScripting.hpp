@@ -241,6 +241,8 @@ private:
     static int lua_loadDataset(lua_State* L);
     static int lua_getDataset(lua_State* L);
     static int lua_releaseDatasetItem(lua_State* L);
+    static int lua_prefetchDataset(lua_State* L);
+    static int lua_datasetPrefetchStats(lua_State* L);
     static int lua_prepareSequences(lua_State* L);
 
     // === Database API (dataset loader with caching builder) ===

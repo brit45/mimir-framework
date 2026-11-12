@@ -95,14 +95,17 @@ def rpc(req,arrays):
 try:
     meta,_=rpc({"command":"hello"},[])
     assert meta["platform"]=="cpu"
-    samples={"Linear":False,"Dropout":True,"Reparameterize":True,"Constant":False,"NMS":False,"Split":False}
-    for t,training in samples.items():
+    samples=[("Linear",False),("LayerNorm",False),("SelfAttention",False),
+             ("Dropout",False),("Dropout",True),("Reparameterize",False),
+             ("Reparameterize",True),("Constant",False),("NMS",False),("Split",False)]
+    for t,training in samples:
         c=next(c for c in cases if c["layer"]["type"]==t and c["training"]==training)
         base={"layer":c["layer"],"inputs":len(c["inputs"]),"training":training}
         meta,out=rpc(dict(base,command="forward",fused=True),c["inputs"]+[c["weights"]])
         assert meta["outputs"]==len(c["outputs"]) and len(out)==len(c["outputs"])+1
         if not training:
             for a,b in zip(out,c["outputs"]):check(t+" wire forward",a,b)
+            if t=="Dropout":check(t+" inference mask",out[-1],np.ones_like(c["inputs"][0]))
         else:
             assert all(np.all(np.isfinite(a)) for a in out)
             if t=="Dropout":check(t+" sampled mask",out[0],np.asarray(c["inputs"][0])*out[-1]/(1-c["layer"]["dropout_p"]))

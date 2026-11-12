@@ -1,0 +1,713 @@
+{
+  "date": "2026-11-12",
+  "validated_utc": "2026-11-12T19:33:51.075040+00:00",
+  "base_head": "350ad97dbeb50f2a34a8a1061fe3fdd537832b95",
+  "worktree": "Includes prior uncommitted engine optimizations; this report compares only dataset preparation with ahead 0 versus 8.",
+  "host": {
+    "cpu": "AMD Ryzen 5 5500U with Radeon Graphics",
+    "platform": "Linux-7.0.0-43-generic-x86_64-inconnu-with-glibc2.43",
+    "cpu_isa": "avx2",
+    "model_workers": 1,
+    "producer_workers": 1,
+    "openmp_producer_workers": 1,
+    "cuda_execution": false,
+    "rocm_execution": false,
+    "opencl_execution": false,
+    "vulkan_execution": false,
+    "physical_tpu_execution": false
+  },
+  "defaults": {
+    "ahead": 8,
+    "consumer_slots": 1,
+    "max_ahead": 256,
+    "prefetch_bytes": 67108864,
+    "disabled_by_zero": true,
+    "launcher_ahead": 10,
+    "ahead_description": "Native fallback without environment; launcher exports launcher_ahead when unset. Timings explicitly use ahead 8."
+  },
+  "measurement": {
+    "launcher": "./run_mimir.sh",
+    "model": "Native Model: Linear, SiLU, float32, MSE, AdamW",
+    "round_order": [
+      "synchronous,prefetch",
+      "prefetch,synchronous",
+      "synchronous,prefetch"
+    ],
+    "aggregation": "Median of three totals; load/training columns are medians of three per-run medians.",
+    "timed": "setOrder, cold sample, all load/convert waits, native trainStep, synchronous unload or asynchronous lease handoff",
+    "excluded": "fixture generation, model construction, metadata snapshot, final stop/join and output hash dump",
+    "limitations": "Synthetic PPM data; filesystem cache, CPU affinity, frequency and background load were not isolated. Producer uses one additional CPU thread; no GPU throughput claim."
+  },
+  "profiles": [
+    {
+      "target_w": 128,
+      "target_h": 128,
+      "source_w": 256,
+      "source_h": 256,
+      "features": 64,
+      "steps": 32,
+      "repetitions": 3,
+      "synchronous": {
+        "ahead": 0,
+        "total_median_ms": 281.849267,
+        "load_median_ms": 5.687603,
+        "training_median_ms": 3.639974,
+        "peak_rss_median_mib": 35.19140625,
+        "totals_ms": [
+          292.247511,
+          281.849267,
+          255.588673
+        ],
+        "waits": [
+          0,
+          0,
+          0
+        ],
+        "hits": [
+          0,
+          0,
+          0
+        ],
+        "buffer_growths": [
+          0,
+          0,
+          0
+        ],
+        "pool_peak_bytes": 0
+      },
+      "prefetch": {
+        "ahead": 8,
+        "total_median_ms": 215.752399,
+        "load_median_ms": 0.001413,
+        "training_median_ms": 4.182231,
+        "peak_rss_median_mib": 37.13671875,
+        "totals_ms": [
+          232.753012,
+          215.752399,
+          189.761512
+        ],
+        "waits": [
+          10,
+          12,
+          13
+        ],
+        "hits": [
+          22,
+          20,
+          19
+        ],
+        "buffer_growths": [
+          9,
+          9,
+          9
+        ],
+        "pool_peak_bytes": 2211840
+      },
+      "throughput_factor": 1.3063551937607887,
+      "throughput_gain_percent": 30.635519376078868,
+      "bitwise_equal": true,
+      "final_values_sha256": "13f76cac01abc65f514cbac35e81967916d9194824aa44fc399e042e5f868ff2"
+    },
+    {
+      "target_w": 128,
+      "target_h": 128,
+      "source_w": 256,
+      "source_h": 256,
+      "features": 512,
+      "steps": 24,
+      "repetitions": 3,
+      "synchronous": {
+        "ahead": 0,
+        "total_median_ms": 483.662985,
+        "load_median_ms": 5.78737,
+        "training_median_ms": 14.211794,
+        "peak_rss_median_mib": 38.73828125,
+        "totals_ms": [
+          549.000158,
+          483.662985,
+          482.826606
+        ],
+        "waits": [
+          0,
+          0,
+          0
+        ],
+        "hits": [
+          0,
+          0,
+          0
+        ],
+        "buffer_growths": [
+          0,
+          0,
+          0
+        ],
+        "pool_peak_bytes": 0
+      },
+      "prefetch": {
+        "ahead": 8,
+        "total_median_ms": 340.611142,
+        "load_median_ms": 0.001593,
+        "training_median_ms": 13.652786,
+        "peak_rss_median_mib": 41.07421875,
+        "totals_ms": [
+          340.611142,
+          357.777727,
+          314.713721
+        ],
+        "waits": [
+          1,
+          1,
+          1
+        ],
+        "hits": [
+          23,
+          23,
+          23
+        ],
+        "buffer_growths": [
+          9,
+          9,
+          9
+        ],
+        "pool_peak_bytes": 2211840
+      },
+      "throughput_factor": 1.4199858001121997,
+      "throughput_gain_percent": 41.998580011219964,
+      "bitwise_equal": true,
+      "final_values_sha256": "04500aba235bcafc8c64915294504e0f3b324190c9698d7fc2badf00fb37cd93"
+    },
+    {
+      "target_w": 256,
+      "target_h": 256,
+      "source_w": 512,
+      "source_h": 512,
+      "features": 512,
+      "steps": 24,
+      "repetitions": 3,
+      "synchronous": {
+        "ahead": 0,
+        "total_median_ms": 1780.212587,
+        "load_median_ms": 22.747056,
+        "training_median_ms": 50.265537,
+        "peak_rss_median_mib": 44.7890625,
+        "totals_ms": [
+          1780.212587,
+          1797.297729,
+          1671.513061
+        ],
+        "waits": [
+          0,
+          0,
+          0
+        ],
+        "hits": [
+          0,
+          0,
+          0
+        ],
+        "buffer_growths": [
+          0,
+          0,
+          0
+        ],
+        "pool_peak_bytes": 0
+      },
+      "prefetch": {
+        "ahead": 8,
+        "total_median_ms": 1193.525735,
+        "load_median_ms": 0.001523,
+        "training_median_ms": 47.558191,
+        "peak_rss_median_mib": 54.8203125,
+        "totals_ms": [
+          1193.525735,
+          1168.393077,
+          1244.452975
+        ],
+        "waits": [
+          1,
+          1,
+          1
+        ],
+        "hits": [
+          23,
+          23,
+          23
+        ],
+        "buffer_growths": [
+          9,
+          9,
+          9
+        ],
+        "pool_peak_bytes": 8847360
+      },
+      "throughput_factor": 1.4915577727362537,
+      "throughput_gain_percent": 49.15577727362537,
+      "bitwise_equal": true,
+      "final_values_sha256": "6cf17387417ed1db502a577163c9719ae792381c670dcf64fdf6767b6d645cb6"
+    }
+  ],
+  "native_training_parity": {
+    "vae_conv": {
+      "tensor_payloads": 24,
+      "ahead_values": [
+        0,
+        3
+      ],
+      "reference_before_change": true,
+      "bitwise_equal": true,
+      "loader_requests": 18,
+      "tensor_sha256": {
+        "tensors/grads/vae_conv/dec/conv_in/weights.bin": "ae3af21a317f7396ee4f25d6ef11b1698dab0c2618e4d4110c16efd8169a9c6a",
+        "tensors/grads/vae_conv/dec/out/weights.bin": "e2e67c63285ebc6742b73fe2bd58fc403294803178d3f36cc608f8735b28ce4f",
+        "tensors/grads/vae_conv/dec/up1/up/weights.bin": "878c3e7fec997d287423ae7af82fe0d999485836418990c5f815519acdc837bb",
+        "tensors/grads/vae_conv/dec/up2/up/weights.bin": "2380dcb640e28f694baccf7b20899040e14cfad917d03104cf992641aa0fd06c",
+        "tensors/grads/vae_conv/enc/conv_in/weights.bin": "77e913a9e0eb670452497dd9d2a59cf82e4282300bcddc2e8325be37c4a863c9",
+        "tensors/grads/vae_conv/enc/down1/conv/weights.bin": "fadbdf00460e69d2fec030452495959d4cc1d0aa8c1a6f3773c2027d4811b44f",
+        "tensors/grads/vae_conv/enc/down2/conv/weights.bin": "434bed506530aa2c43547efd74bc2e3fe1b8fdcb2911c213038544f7e2bf8c9e",
+        "tensors/grads/vae_conv/enc/logvar/weights.bin": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+        "tensors/grads/vae_conv/enc/logvar_pre_conv/weights.bin": "81c611f35bff79491538b2f7cf201c7597a661a5c549633541c62bdc8af1613f",
+        "tensors/grads/vae_conv/enc/mu/weights.bin": "580bb3284918980f0822d4cfa4fa5315cdf0e56c862f5d5b415c7c5666524090",
+        "tensors/grads/vae_conv/enc/proj/weights.bin": "c9a922997c160e7eb9d37653774c5c1c534e6087396d6d326c55b7c47a38c8b8",
+        "tensors/optimizer/m.bin": "db14e4df69eb2f4431d826cbf8fe447048940a6e1cf84f97de149465e1527fc2",
+        "tensors/optimizer/v.bin": "2e97559d69e4cc62d27fe03204c49fa026fce2e86706474d9d09fc3fb455d3d1",
+        "tensors/vae_conv/dec/conv_in_weights.bin": "a9aedd9b18011f40487b127f105a4186d6a10eef584b43eac4dfee0c1edb215d",
+        "tensors/vae_conv/dec/out_weights.bin": "2949147fe13f2e623958d83a3dd6cfde9b8f53ae1cefe71f2946dfd15be6303c",
+        "tensors/vae_conv/dec/up1/up_weights.bin": "731f8883b9d68bca281e57124015b2c1525990f1d7a66687f86c205849015e9a",
+        "tensors/vae_conv/dec/up2/up_weights.bin": "09d6e14868b6c2e555c61590843a61526cc56983d7573efc5ce30e261561cf4d",
+        "tensors/vae_conv/enc/conv_in_weights.bin": "ebec3552cc1c5c9be3dc55fc5bdd37b6938136f50ebb0f08fe102f3cbd42dd70",
+        "tensors/vae_conv/enc/down1/conv_weights.bin": "71254950e2374bf6610fae77b390ff7cff2a84bd7e48e79b0de93c200c7dbe62",
+        "tensors/vae_conv/enc/down2/conv_weights.bin": "4977e8515c8a57ec1180474d72163804d80723430d097d07744840b88a9f86c2",
+        "tensors/vae_conv/enc/logvar_pre_conv_weights.bin": "d6626284b297761b6e47da96aae29842d7fafb22793f2cecf9088825aec1af92",
+        "tensors/vae_conv/enc/logvar_weights.bin": "44044cbdb25370908a37dc9c1cd208748089cdc8a2ef4cd11e0b8dd52254de6d",
+        "tensors/vae_conv/enc/mu_weights.bin": "acd773dd24c66faebc7d258a9effba51396d149071d9e29b67e5b384473f7465",
+        "tensors/vae_conv/enc/proj_weights.bin": "a5ed29cd90bcd141d50c3e615e59029e8fbaf1f5a6b468e87710ed54939c4875"
+      }
+    },
+    "vae_text": {
+      "tensor_payloads": 48,
+      "ahead_values": [
+        0,
+        3
+      ],
+      "reference_before_change": true,
+      "bitwise_equal": true,
+      "loader_requests": 12,
+      "tensor_sha256": {
+        "tensors/grads/vae_text/content/head/weights.bin": "a7dc2978472aa711ddb103a1eee17491dce826e7d1f0457c75907586c51b698b",
+        "tensors/grads/vae_text/context/dialog/weights.bin": "aa3ad9a1d24edf8c0298ad76c8b9224394e5b36e6b7076a7a82b0ea5fa35e859",
+        "tensors/grads/vae_text/context/semantic/weights.bin": "22c206c1d3d8f7b8dd136aa179f331b1f4e1294cf5479180766ff3144c2ff70c",
+        "tensors/grads/vae_text/context/thematic/weights.bin": "ba7dbdf7cdfe8aeac9f5ac2853c3c2cb72107fd00ed738f7d1cb655687162ee7",
+        "tensors/grads/vae_text/dec/block1/ln1/weights.bin": "afcc9f5a5636bbbb016084e1494c62c9d6405ded359a6086ee10bde125e1224d",
+        "tensors/grads/vae_text/dec/block1/ln2/weights.bin": "cf68f03967774d2ab5651695d08b19dc58d0b21015e7f80188ea9674e373b095",
+        "tensors/grads/vae_text/dec/block1/mlp_fc1/weights.bin": "d48461d5efe1458016ffa408700d6c30e44c4a9ac41c118a215783987a45febe",
+        "tensors/grads/vae_text/dec/block1/mlp_fc2/weights.bin": "9bb48e706e0cf62f3bce7086107aed8c0bfc6b1e0cd4c97f2496bdde9fccafae",
+        "tensors/grads/vae_text/dec/block1/self_attn/weights.bin": "07e83f343c42cec536cf1f5c654fc62057bc15da9629ddc3e6f852c821502287",
+        "tensors/grads/vae_text/dec/init/weights.bin": "59a790b36c4906c92a987e8a59b6e87bb0808fba1464272a17fb66bbe4bf64e9",
+        "tensors/grads/vae_text/dec/lm_head/weights.bin": "a0a2e7b18599d2f70b693ba7c5946dfe3ee62cc27d746263343364a2cdf85f7e",
+        "tensors/grads/vae_text/enc/block1/ln1/weights.bin": "9c123134c58b4da99f4ee023b26b2697a3c7c267f6194c2eae65d12b8a4f129a",
+        "tensors/grads/vae_text/enc/block1/ln2/weights.bin": "ecaa381f8738805fe866f3c1019dddba48e6232c43d92d8eba519a88a7f75d1d",
+        "tensors/grads/vae_text/enc/block1/mlp_fc1/weights.bin": "a36d85be66d3a1fb558df3cbc847b57d027fa2a677127794c5999da629cbf3d6",
+        "tensors/grads/vae_text/enc/block1/mlp_fc2/weights.bin": "9cc938cb6fb4b67ff69fb3220fc5627a261753d9d37bafc7d340554f2504fb31",
+        "tensors/grads/vae_text/enc/block1/self_attn/weights.bin": "cf27a9fe27ab4facf934751771018835345d20409289ef6e4e4bf1774b94a493",
+        "tensors/grads/vae_text/enc/position/weights.bin": "0091d6eb3199e41f65f24124ec1ab41c70e947c4a959dd97166e1c15a15ad069",
+        "tensors/grads/vae_text/img_proj/weights.bin": "04be60a80018899e5aeb97f2a24df9c253cbfb41850156d38d06e04fc29b57c0",
+        "tensors/grads/vae_text/logvar/weights.bin": "ceac9976a29cffbd4e76d059161b02e2420020f97ebd1d78add28575ba23baaa",
+        "tensors/grads/vae_text/mu/weights.bin": "3737cc4ab81e4846ddd80d0387cf0e9b0985c984776f9bd9413a64f924c6d33b",
+        "tensors/grads/vae_text/text_proj/weights.bin": "2d5565fb483d8ea4525a7a9229677d1038ad34b6e22c8d5152e1d7f7b9817597",
+        "tensors/grads/vae_text/tok_emb/weights.bin": "65a281665b2205585ef50fc71cce285ad920651209a7fbc19d6663dcac2387c3",
+        "tensors/optimizer/m.bin": "3af48ebe1436afc0fce3f4d173adc6c355682490937185b05b1adad5be4b7359",
+        "tensors/optimizer/v.bin": "9216e6fcbe882bb1f1dc7b143d5f2c713afa89f74b32485dbf71e6036779633b",
+        "tensors/vae_text/cond/enc_proj_weights.bin": "d0f74e04b0a82331281a44cf1b01c945d9ebad42c69a67e82a41d20973f9c9b5",
+        "tensors/vae_text/cond/tgt_proj_weights.bin": "95504df995bf1ad8318498acfb0b087b662b8a61bfabe327dc750ec263260f2b",
+        "tensors/vae_text/content/head_weights.bin": "73d090f8a96d1e8dd4097ccaded3cd0101343e113c9c8e871c371664ee6a7f06",
+        "tensors/vae_text/context/dialog_weights.bin": "70b2f8ea29136b95876a2de6d400b40bdc3e18ffd98d887f553026c0a4596ba5",
+        "tensors/vae_text/context/semantic_weights.bin": "61b3bfaed96755c10779f0d80e5215e35a09de61a39c889efb39d0a6366747a1",
+        "tensors/vae_text/context/thematic_weights.bin": "a5efdb69315b49b8275962ff85b8da59713df13737b2e822e89a4e6d64bfaa2e",
+        "tensors/vae_text/dec/block1/ln1_weights.bin": "cc86f104e12cd1c8e6a3c30abd25209f2109bf3182e1ac14ad2a2d07cf256d60",
+        "tensors/vae_text/dec/block1/ln2_weights.bin": "4ea41d633136e3201fbd28969a52f34413db9c023206c1c6ea55ee4e25ddae7a",
+        "tensors/vae_text/dec/block1/mlp_fc1_weights.bin": "58273950ae06023b6085b7b4bfb73ddf051309b7d38f01e056ef881db7d532de",
+        "tensors/vae_text/dec/block1/mlp_fc2_weights.bin": "7af7454ef86547c3dc908f5937a9b9081f70abeb4dd5871c520067c724dbf64c",
+        "tensors/vae_text/dec/block1/self_attn_weights.bin": "9b143b15bef170094cbb55cf591271edfc6473edf2ece20fde5abc7a219b415c",
+        "tensors/vae_text/dec/init_weights.bin": "5a8b51b82e9e1ba0b714c8d5995a1be29be258687fb36cb82fb33b07814332f7",
+        "tensors/vae_text/dec/lm_head_weights.bin": "acc05e7d0ffcbdbd4324c4f637edf32b7330c0af2c8130e458e5d5c573af7993",
+        "tensors/vae_text/enc/block1/ln1_weights.bin": "d746e451e4d5e7cee314ed9b48722a600d0d5d394a677a67c4c6c78d0cfdae10",
+        "tensors/vae_text/enc/block1/ln2_weights.bin": "8a0ae42bb099485c17e8765fab920e46ebb6b2684346a93b1ef170803e472954",
+        "tensors/vae_text/enc/block1/mlp_fc1_weights.bin": "74936665ec9aa5f95fc26ba9abf183b784581146249ebe22efb7be235b3c7e82",
+        "tensors/vae_text/enc/block1/mlp_fc2_weights.bin": "84193e5dcbfcc345fb87f8819acf720960ccd151c61c66d50cff0b3ea84673e7",
+        "tensors/vae_text/enc/block1/self_attn_weights.bin": "68feaf1357aa6ffc303b9ef34a3233213e8db927aa48e8b185d4650175009593",
+        "tensors/vae_text/enc/position_weights.bin": "e49e4683e722aab834189e7d3c593b8be982e409eb63b0bbd8d7560336693d30",
+        "tensors/vae_text/img_proj_weights.bin": "4a246dffdaa13f408ffa34097a891347f68bd80ffab7108829b3f18c535cb565",
+        "tensors/vae_text/logvar_weights.bin": "1b6596d406e084a78f46b7fbd0096ad7d8ce6d9fcf5088508613ca8fa3f9cc1a",
+        "tensors/vae_text/mu_weights.bin": "9e1fa3fd5a5b77c70433e797b41c30eb7afa8efef0590d564090d75adcefd2c8",
+        "tensors/vae_text/text_proj_weights.bin": "77a523d56b5b6c3a0b781128c0c36befbc2b6b19389dc2239260b84fe40c0d85",
+        "tensors/vae_text/tok_emb_weights.bin": "58a7d421eb2a5c69647df1081ce1cc85af956266de0ca8d46fe14bdb5389106b"
+      }
+    },
+    "vgg16_feat": {
+      "tensor_payloads": 74,
+      "ahead_values": [
+        0,
+        3
+      ],
+      "reference_before_change": true,
+      "bitwise_equal": true,
+      "loader_requests": 12,
+      "tensor_sha256": {
+        "tensors/grads/vgg16_feat/b1/c1/gn/weights.bin": "edd9ed495648f435f5b0a799bf1fc54ade190d710069d3b2362e4b4fc73f0269",
+        "tensors/grads/vgg16_feat/b1/c1/weights.bin": "9e4f441724106b15f7515ded98771f31731ae26cead25b7d95cf942d9fb065a3",
+        "tensors/grads/vgg16_feat/b1/c2/gn/weights.bin": "e10f9853ad57a34596ee29b6dd4a4112cd4505bf7bf945686b8e4c2cc3ee4e3f",
+        "tensors/grads/vgg16_feat/b1/c2/weights.bin": "5732025bbe4bf5d9e5d340d14621e7ad5b1bdb0d3545f7634f6a76ca8992e6d4",
+        "tensors/grads/vgg16_feat/b1/down/gn/weights.bin": "055d235c70ff38abc5876976938864aab3b1128e780f7fb5b868c24a39caba20",
+        "tensors/grads/vgg16_feat/b1/down/weights.bin": "ceda94e130cefed387475cffd79853eaed9a14236d90caf57830b0f91cd2d685",
+        "tensors/grads/vgg16_feat/b2/c1/gn/weights.bin": "2834e7fbc7ec38f9d8dae6ee54d6a8878e456bad30f435fe59128907d8aa5691",
+        "tensors/grads/vgg16_feat/b2/c1/weights.bin": "5c7abf550cc96b52e8e9d64d18984b4faffa7c812c67d1faa376613cde77e21c",
+        "tensors/grads/vgg16_feat/b2/c2/gn/weights.bin": "0c9b266e8b95c1834f583d5b65b3df2d72eabb137217659d6612dc8b0bd9c436",
+        "tensors/grads/vgg16_feat/b2/c2/weights.bin": "c2365b6099eefbc2cb2518b6bb22c388df79c47cf2ba36570939fe4ab4c89e6b",
+        "tensors/grads/vgg16_feat/b2/down/gn/weights.bin": "719aea9df4619093eafdb3b40c26c959bf5079d2a54263f179042c13dea045bc",
+        "tensors/grads/vgg16_feat/b2/down/weights.bin": "dfdd5e89913c1cb40ff8d926bb1fec36cb804ba21a9968401cb0c6cbc62868f3",
+        "tensors/grads/vgg16_feat/b3/c1/gn/weights.bin": "dcc0290dd1b82e8e71d66c8af775854aa66829d8bfd544aeabf4b161ad5eab5b",
+        "tensors/grads/vgg16_feat/b3/c1/weights.bin": "ac26c871b143f43f9670a6430a1dacc838c23c793f143863f85086df979e54bc",
+        "tensors/grads/vgg16_feat/b3/c2/gn/weights.bin": "fb14e3295c793a7dd6c14470202d18db983d61acb1ce79efce357ba42024f367",
+        "tensors/grads/vgg16_feat/b3/c2/weights.bin": "2152900d9854b96728d4003760d60105839f2fd58e208da9954afe331d538125",
+        "tensors/grads/vgg16_feat/b3/c3/gn/weights.bin": "faa63b99b7423bd1320f2d64bcb0cc5b288d71ce93d49e71c8b221d4b9634694",
+        "tensors/grads/vgg16_feat/b3/c3/weights.bin": "8364e4520f58402dfded991abd052916d3f5a1f93594fb1dd9fcd0fbb7cf150b",
+        "tensors/grads/vgg16_feat/b3/down/gn/weights.bin": "5dafd375ea770306c77bc103354d16b210b6c86d1b9de29e6634d35adb62cedf",
+        "tensors/grads/vgg16_feat/b3/down/weights.bin": "1a19e7a7107fd1206f4685c82637878b5cb3e5a56aa040e4df2f69b2fcbe87ef",
+        "tensors/grads/vgg16_feat/b4/c1/gn/weights.bin": "a6199dd763721832e490a0ff49508f7589a10431b26f4af7e44fe2a9b9b8d52c",
+        "tensors/grads/vgg16_feat/b4/c1/weights.bin": "5f756d89c1305e140390f04d5368d63f3ae85f68c4f999985666c50f0adeec04",
+        "tensors/grads/vgg16_feat/b4/c2/gn/weights.bin": "c6a98db40044c989bc28e60fd61cc82adac79c76485b4d2243ec3cdd2bfc2a0d",
+        "tensors/grads/vgg16_feat/b4/c2/weights.bin": "74c97389ce858098eec9c36c7b688da5662d8f824cf25d35ee0a180e10e528f6",
+        "tensors/grads/vgg16_feat/b4/c3/gn/weights.bin": "f0667f16826481aa36df52fab68807598d3a18888f63f1bc79685019e5236421",
+        "tensors/grads/vgg16_feat/b4/c3/weights.bin": "18444d22b81cd875093a0e92271c724fa0c87381e3ca127d48303d9bdc3578e5",
+        "tensors/grads/vgg16_feat/b4/down/gn/weights.bin": "61788cc8de586f0e6313a6f3184ccda492f12ffa4db404faad6450e1af27d798",
+        "tensors/grads/vgg16_feat/b4/down/weights.bin": "db1a621049cb51b38b7efce3e4be5dde8463f03cd78a938bb335dfcac51e00bd",
+        "tensors/grads/vgg16_feat/b5/c1/gn/weights.bin": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+        "tensors/grads/vgg16_feat/b5/c1/weights.bin": "1c0273095382988333e2f2b5ae487cea460737ed9be65cbad9c5de537f95bf75",
+        "tensors/grads/vgg16_feat/b5/c2/gn/weights.bin": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+        "tensors/grads/vgg16_feat/b5/c2/weights.bin": "1c0273095382988333e2f2b5ae487cea460737ed9be65cbad9c5de537f95bf75",
+        "tensors/grads/vgg16_feat/b5/c3/gn/weights.bin": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+        "tensors/grads/vgg16_feat/b5/c3/weights.bin": "1c0273095382988333e2f2b5ae487cea460737ed9be65cbad9c5de537f95bf75",
+        "tensors/grads/vgg16_feat/b5/down/gn/weights.bin": "4279e870cae1db5176022d479436a797f769bb6d59012d2eb64bd250423d2089",
+        "tensors/grads/vgg16_feat/b5/down/weights.bin": "1c0273095382988333e2f2b5ae487cea460737ed9be65cbad9c5de537f95bf75",
+        "tensors/optimizer/m.bin": "838a0a8f1cb0d2c6df7d6b8985e0a5bb845707d6984036bcabe39c40f6e94aee",
+        "tensors/optimizer/v.bin": "d30f216fe389248e333c610ce2ea61378897d86b32b9435078e5a8f92c861015",
+        "tensors/vgg16_feat/b1/c1/gn_weights.bin": "fca2c06b3654e988b71b0fc62abffe496e8a987e4bd5f0c958d7c194525b1ca9",
+        "tensors/vgg16_feat/b1/c1_weights.bin": "5ae9e253d3b6b73d55dffed7758cadb205156efb44497437f4efc6a09247f560",
+        "tensors/vgg16_feat/b1/c2/gn_weights.bin": "c30c1d486ba89061eebe150fba6618bd0f8feb1c18bc4fbc707a37caccdd26a9",
+        "tensors/vgg16_feat/b1/c2_weights.bin": "ed276b7b68b47d07afb5a7a7a4a968fb7ed6b4e7b0904c11d89910a47b1548f1",
+        "tensors/vgg16_feat/b1/down/gn_weights.bin": "4d3e263e743250fbcf658dfb5669a4b560aed52cf2813992a52635c82f87cbaa",
+        "tensors/vgg16_feat/b1/down_weights.bin": "d644cd3b45b0a98536ecfad36ad1d77eea4bddb5356a39d08ad91320c22ed556",
+        "tensors/vgg16_feat/b2/c1/gn_weights.bin": "c6e5e4cbde904776acfa265797b72f57b9365160645139d9fa3e88fa0c26c40d",
+        "tensors/vgg16_feat/b2/c1_weights.bin": "be27acd84a1bf4a3b45295d5a76b03a418f83a43a713579f8c753b83ab9653c5",
+        "tensors/vgg16_feat/b2/c2/gn_weights.bin": "7d5717707c088d05c4fdf865974c1bb8107c54e1ca82c57df1795f3aa3203820",
+        "tensors/vgg16_feat/b2/c2_weights.bin": "b3eddd266b86f52565506f72cba955517beded029c2c1436d077fed552e05add",
+        "tensors/vgg16_feat/b2/down/gn_weights.bin": "9c0332b1919c4f72dd62ce1b33f62168c56f92bcca60fac7e8d844a93fafd716",
+        "tensors/vgg16_feat/b2/down_weights.bin": "fe4d249f780b45f6c0fad04db15bc50628c91c2cc447dd96c26f6d9d2a1f37c1",
+        "tensors/vgg16_feat/b3/c1/gn_weights.bin": "837d2e94c945e33aea7079a18913a84562796c6e08e458e36ab082de31ae26ab",
+        "tensors/vgg16_feat/b3/c1_weights.bin": "c6c3695848b038f87939c0d3cf4bdf0e148aad23ac31d8d58fa0f93d437ad596",
+        "tensors/vgg16_feat/b3/c2/gn_weights.bin": "87fe3ff79dee823c9642da6bf3e8d761ffc3a6233feafd7659aa714f0f7b8016",
+        "tensors/vgg16_feat/b3/c2_weights.bin": "8c76596cfd7ed9dd9e5f536960d23dc20d064069892e539f42b3507ea960933d",
+        "tensors/vgg16_feat/b3/c3/gn_weights.bin": "2fe260e60e7da980cf85fe8fb9f7eaaeda35058fd1c6d9e0ecccc33703d5e8be",
+        "tensors/vgg16_feat/b3/c3_weights.bin": "5c8f8782ba5913a25295383bd1ccb6e8917e077a5f41df49f692b203db339513",
+        "tensors/vgg16_feat/b3/down/gn_weights.bin": "0f98563de0d543e3e86dfa53ad713c73770ac832d36c291a5098e41c3c8151f6",
+        "tensors/vgg16_feat/b3/down_weights.bin": "f8a174aa0f6f30cdc2efccd84604f541f5d6d259856a436b343d3d7e7129bfab",
+        "tensors/vgg16_feat/b4/c1/gn_weights.bin": "20748566c5ebda2a9402f030be94394f88af94cfea01879943766c74fc09db1e",
+        "tensors/vgg16_feat/b4/c1_weights.bin": "0de8af6aae7eddad93b5836c35a71202e2b31c3c400452f1bbf49a3722e194cf",
+        "tensors/vgg16_feat/b4/c2/gn_weights.bin": "469c70c0fbe0febe281e57b792c4f8083554c29fc5a28f326e01beaf258dde26",
+        "tensors/vgg16_feat/b4/c2_weights.bin": "b6839e6c3e470ce421881367a778bc365839b0338c5d7d86a054762a59305f3a",
+        "tensors/vgg16_feat/b4/c3/gn_weights.bin": "b7404c9cc60b44e89a899098cf6ebb43d6b9b01ded35c001e7550c273ec83646",
+        "tensors/vgg16_feat/b4/c3_weights.bin": "f1154832a638e806803f682c134cc8accae83c6886673c623e8dc841472422cb",
+        "tensors/vgg16_feat/b4/down/gn_weights.bin": "79cc9edc11eeb4dff7abe77ecf6c032e958a20e60313fa77220d595cb664962a",
+        "tensors/vgg16_feat/b4/down_weights.bin": "4a4f4374d3bff4c74263123126af38019eecfd2bfab2ba758fd158a7c6f4f4fa",
+        "tensors/vgg16_feat/b5/c1/gn_weights.bin": "75b6884ba53f1f2e84324c47d3e0e94db6f2bdb3dc2c455a99196a39c2f9c543",
+        "tensors/vgg16_feat/b5/c1_weights.bin": "729a79d5f5cf7ab36655cde295c8cc695b898a25992421d28fe53e4158b37d97",
+        "tensors/vgg16_feat/b5/c2/gn_weights.bin": "af6e8914f52a067d18176275455f8ed6e018dd8d248c22be46de37b08b35e34c",
+        "tensors/vgg16_feat/b5/c2_weights.bin": "dd56676b7a36236ede034a28f5ac1ac2a62cc2a9d3ad340e2aa20a5785c2f5e7",
+        "tensors/vgg16_feat/b5/c3/gn_weights.bin": "abbcfcf07087f1627d1212fbfbb1ff4d93f10f7ec42aba17956cdb127d67ee95",
+        "tensors/vgg16_feat/b5/c3_weights.bin": "f1eb043853208e6e23667a69cb8e67cf2ce6b3ea979957723343705d62de6924",
+        "tensors/vgg16_feat/b5/down/gn_weights.bin": "4bd3fb060accf2a0f0a54e06f21ef75d077bb2b9a85a233950535726954a51bb",
+        "tensors/vgg16_feat/b5/down_weights.bin": "aef8bcfa1e87c3d8f8c037023e3fb294b98b825326c6a131d48f95fe90607d37"
+      }
+    },
+    "vgg16": {
+      "tensor_payloads": 44,
+      "ahead_values": [
+        0,
+        3
+      ],
+      "reference_before_change": true,
+      "bitwise_equal": true,
+      "loader_requests": 20,
+      "tensor_sha256": {
+        "tensors/grads/vgg16/b1/c1/weights.bin": "603f4548cc54877a4e2d82b851f76acdbf3ec1e93aecfd7a493bf7265a7f3b99",
+        "tensors/grads/vgg16/b1/c2/weights.bin": "a9f34300e2f64e72d5fa8151855597497a87b2f49d356af4c3bcd5fcfb17d53f",
+        "tensors/grads/vgg16/b1/down/weights.bin": "16c1d527e96054efdcae9f9ca68c74469fcb558a9617acee9a42dc2206346e7a",
+        "tensors/grads/vgg16/b2/c1/weights.bin": "e3572f7aeeb624d594d5be881199d7e5d4a98542b7596892c145ce849aa6c39a",
+        "tensors/grads/vgg16/b2/c2/weights.bin": "d0a7582449eca4a07d59b30eac5818266bbf3fdc894fdbc5255d4e92d0e7762e",
+        "tensors/grads/vgg16/b2/down/weights.bin": "e3e4d5e7a1a948d5bb50d0a08044f3b2f6cb3f178945c0ac50dc4f42498d08af",
+        "tensors/grads/vgg16/b3/c1/weights.bin": "c1c25a6156253292ee5515b1da460407ab8706c8baa77e86d4761dded077ab38",
+        "tensors/grads/vgg16/b3/c2/weights.bin": "b6493443dec779b3f7c326a803365b7acb71f17357b7818fe02f469565bb2aa9",
+        "tensors/grads/vgg16/b3/c3/weights.bin": "de6bc2d732843721dad2c44b2ef5f129288dd33cb7a05667164ee7ee5403b373",
+        "tensors/grads/vgg16/b3/down/weights.bin": "24611045991db755a4b907837860d9a05aecc390099145cd2c43b655f349db98",
+        "tensors/grads/vgg16/b4/c1/weights.bin": "e9daa1374a8f48c30ec59c36aa9624889dfe67ebc0962011ce247a0c4c598a4a",
+        "tensors/grads/vgg16/b4/c2/weights.bin": "c408a0056c8e59376ccd69c3b708ffd5177b87fdb76fa83502359ed8718588c4",
+        "tensors/grads/vgg16/b4/c3/weights.bin": "3a62d8eb94205f3aa13dede54cd89a78c61ccb3f0667e060223b3a517cc2f0a5",
+        "tensors/grads/vgg16/b4/down/weights.bin": "631ca6908a7118aeee55f62a8e141e05b2b3976a038e7bce8c982c21c02aa742",
+        "tensors/grads/vgg16/b5/c1/weights.bin": "6a71d500f517d55f385167e2759377e1cd683d18a8a4b58585fafb1a480f1690",
+        "tensors/grads/vgg16/b5/c2/weights.bin": "d137a1f590ffe9d1b09ec5f56a6adaecba3d6cb346cf2b6330bcf514e2db60cc",
+        "tensors/grads/vgg16/b5/c3/weights.bin": "bb4327fca5cd293562040a59579cebe9b6958437dab20c1a584f105ca8174410",
+        "tensors/grads/vgg16/b5/down/weights.bin": "3d53c58a73b543733dcff7edd96ad208a4c8cd11dc9a8d02d6cddcbdffc1c705",
+        "tensors/grads/vgg16/fc1/weights.bin": "bbfd52c5acf43c16c85de9a7b47da90d22a064774ba6f6f5f24543d0df895e38",
+        "tensors/grads/vgg16/fc2/weights.bin": "3eb1a1ff22875cdcf789c697a12d649b0b59162c21fba221df1eb43c00a0de86",
+        "tensors/grads/vgg16/head/weights.bin": "174232226bc9fb6be5608e995f281ee2d9b2c086aecd29d393e30ab5a249142d",
+        "tensors/optimizer/m.bin": "5ea7679b1824fa78639b9286da4a41bf511d005fd8990ac2516bf04a315095ea",
+        "tensors/optimizer/v.bin": "a8345042d6ad48772996f74e3a4145c584f1295e0b497aee7382a17d54320d54",
+        "tensors/vgg16/b1/c1_weights.bin": "90172ab84f813ec34708f6e5cfa3e73089be74be6d8bbfe6ff50d9e4455ef39f",
+        "tensors/vgg16/b1/c2_weights.bin": "147a69af3ec54549631c2f7423301f3d438d8d6c6c8adc86012460697c1a35e5",
+        "tensors/vgg16/b1/down_weights.bin": "9a992217cc23b4b713ccc755d499d91fff4c78a433d510250be604e3eac7b7ab",
+        "tensors/vgg16/b2/c1_weights.bin": "70f17dad57b8f2bb924156f19c878b7ecc6355b4ab734d0c69bad1992b1c6e2c",
+        "tensors/vgg16/b2/c2_weights.bin": "ce11b1a4e3adfda7b6a71aeebf05fdd114349a97538f980b18ef7260b119c532",
+        "tensors/vgg16/b2/down_weights.bin": "951fd83258d30a3c76c79ba3315688832b0218943cd2de5b6793eaa60bf45e2e",
+        "tensors/vgg16/b3/c1_weights.bin": "e23a53b905337d1691e90e0b7f486c4bffa5e595e36ced43484effe1d3ac8fb4",
+        "tensors/vgg16/b3/c2_weights.bin": "095a07406b477c95840f187b45cad5470443a333a01b4990712ea4481e8bebdf",
+        "tensors/vgg16/b3/c3_weights.bin": "5e2a71fabee544407f4cdc40debd1c0713ab861dc29da15a0e6ea712edee5718",
+        "tensors/vgg16/b3/down_weights.bin": "dcea724a07b539f907e9270a303f213feb59da3c0689cb8227d563ca93152efd",
+        "tensors/vgg16/b4/c1_weights.bin": "c48e498b222a15acac7d7f44cf41d979035ee1135511e5af4ab350b990ace799",
+        "tensors/vgg16/b4/c2_weights.bin": "2de36682f0422e4297146446b04236afca73fb09d4955ce0d746f11e7dc3fa23",
+        "tensors/vgg16/b4/c3_weights.bin": "0cc3e81340f534310436027025727069de6d022a9acdcf68512a73148e334e22",
+        "tensors/vgg16/b4/down_weights.bin": "d53854b184104965d0e8ea32eb054891a764c0a19555ed2b03b54c0c7ee540e3",
+        "tensors/vgg16/b5/c1_weights.bin": "6eb855b60ee9a80698fb494aff1a6793aedbd36e3dba1946dccc95369cac28ea",
+        "tensors/vgg16/b5/c2_weights.bin": "39d9961aa0b61ebd4dd2150a2dfcd8396f93e7f228a46556a89a144b676ca79f",
+        "tensors/vgg16/b5/c3_weights.bin": "046f769cb0035c00d625f4202a3c53b37399f4d673f5395e2acb1c39b63715fc",
+        "tensors/vgg16/b5/down_weights.bin": "b6dd7a956fbc40b1719e70ff691f1f7ec0e5ca982802521154345c196e6b01ac",
+        "tensors/vgg16/fc1_weights.bin": "a5a9274ba84cb5b0b0ee4c6c52d7c8a5cc3b1ff08f82ebdf6c61e34c5c17dd37",
+        "tensors/vgg16/fc2_weights.bin": "a859d628919e34330bbf8b92e3446a168a7b6f58d0592c72e1e9576f71b52a71",
+        "tensors/vgg16/head_weights.bin": "2b4e94d35e6d69d8103feaf6e011a93bb7aee54835293de90acce00889b35763"
+      }
+    },
+    "vgg19": {
+      "tensor_payloads": 40,
+      "ahead_values": [
+        0,
+        3
+      ],
+      "reference_before_change": true,
+      "bitwise_equal": true,
+      "loader_requests": 20,
+      "tensor_sha256": {
+        "tensors/grads/vgg19/conv1_1/weights.bin": "d78ab940522cb96fc4d21240c23c699435acd32bb73509794f48bb793f3f6f17",
+        "tensors/grads/vgg19/conv1_2/weights.bin": "5d1006feb6b1b9790f112606f0be4a6e419d3b985cfcc1412b2d5b4090a70fd6",
+        "tensors/grads/vgg19/conv2_1/weights.bin": "eba0658c8005711792035ea312daaae09ce9075383854cffa8d45fbd35dc7ae2",
+        "tensors/grads/vgg19/conv2_2/weights.bin": "f931e073e818efaaa3b3c49e264a21990acc11015fd4b6e89983798f9fe1be1a",
+        "tensors/grads/vgg19/conv3_1/weights.bin": "d23fe29f33fe4a90014cc7b01b1285346571d954b2286702d8a3b71b63cf066b",
+        "tensors/grads/vgg19/conv3_2/weights.bin": "c257cd78c1b403cd320d031c520e9a834061ec6104125c252367fcfc587fe70f",
+        "tensors/grads/vgg19/conv3_3/weights.bin": "918b7b8e0b65a19bd11077d5847ff24c008fff2951af3f41df0cd41d6a545636",
+        "tensors/grads/vgg19/conv3_4/weights.bin": "3a9ad748675954b34e860108a2cddccdd5dea46311320368a7dad7501f9af4e3",
+        "tensors/grads/vgg19/conv4_1/weights.bin": "bb10aca251baf28f88a509ac9ceb0137b5d51f210cb56e019b05e66f9c5c184e",
+        "tensors/grads/vgg19/conv4_2/weights.bin": "58cb504c13643a3bb4993cf99282aa93eb38a910313b3b3ea39a308085159809",
+        "tensors/grads/vgg19/conv4_3/weights.bin": "654c37da2c32cb3f12a6ccc56f917141ed42e7c6d869121700bbef457a4b3485",
+        "tensors/grads/vgg19/conv4_4/weights.bin": "b19e37b73a56f05a191adfb9d5297d02206c81aeb1a2320230ebdf28c40e8f62",
+        "tensors/grads/vgg19/conv5_1/weights.bin": "ffc3071d670e428577785a4ef03fdd95f47596c1a67dbefea21e721710e8eda9",
+        "tensors/grads/vgg19/conv5_2/weights.bin": "980ac0e2d71c0f7ac21c5b97f589025177aec53d1d14a02f9d2ba587dfed2423",
+        "tensors/grads/vgg19/conv5_3/weights.bin": "e724121a8c8667d1a10a6df99af1314b072e33b4b8789c7179e30c0560ea3dda",
+        "tensors/grads/vgg19/conv5_4/weights.bin": "75f70c724c30e3ef6878ec9c412ecbfa3567f04523287ea304b1a788c6760ae1",
+        "tensors/grads/vgg19/fc1/weights.bin": "c975d4e1b863fdc8f264b3630ee715624970ba738e4f4eb5a068b0f3ba663187",
+        "tensors/grads/vgg19/fc2/weights.bin": "d813c780bbb409ac1782e009fdb6a253f14bbe5ff7cfb0c707a42b27597caf98",
+        "tensors/grads/vgg19/head/weights.bin": "52b2e395f989a48c05d46597a868a2efb6feb23f2cb7f160244ce2ce1d730f51",
+        "tensors/optimizer/m.bin": "73b936a4ce54a7ccb1dab7510a924cef38060f2fd840415329335a3511cdad20",
+        "tensors/optimizer/v.bin": "d7acd0772d4def350acba5399f28536c992f8b78ecf8707753f3102345ff0875",
+        "tensors/vgg19/conv1_1_weights.bin": "0ec925b9f3893f995f886b9e9b7398eda9860fb3ebe1578f649cb89139aba9da",
+        "tensors/vgg19/conv1_2_weights.bin": "33abbb20844c36c7e3e1112f290851c22eaaf3845367e1d759b021fb6f5c12e9",
+        "tensors/vgg19/conv2_1_weights.bin": "8107daaf5ac1bbab91b4e040c6cb92cc47f8e36a0944f68d7d377fda2d36156d",
+        "tensors/vgg19/conv2_2_weights.bin": "e1f32068dd0361856e9a55ea303c6a3f7fdffb148ffc1b2eff5984593bbfd7ed",
+        "tensors/vgg19/conv3_1_weights.bin": "492667d8502843f9172a162d4a2cc4639e331829d009f5a901c02a2b96c0c54e",
+        "tensors/vgg19/conv3_2_weights.bin": "01b792eded82eb610c44208ae728646f1b8c779b120d909483a4dac10a11eec5",
+        "tensors/vgg19/conv3_3_weights.bin": "fec92ea91791d09e465cb99a11ee22618df4f3bb4184a6041ceb87e0153aef35",
+        "tensors/vgg19/conv3_4_weights.bin": "093f68c7ce4b33b5501b8dc2e665328786da37eca81e62713a47356c82b21182",
+        "tensors/vgg19/conv4_1_weights.bin": "10b827b3078b7e7fc5fa8447e303794b820ee476bc8261c8c1e641215f41e2d6",
+        "tensors/vgg19/conv4_2_weights.bin": "85592a37df29a81c0b2c985a4b7e97a9ec487149e5c91674aeef200945af3441",
+        "tensors/vgg19/conv4_3_weights.bin": "f41486d96010bbe0ba57773dc1d9747a635db6b79541c8a5e8c5cc6eec4d9933",
+        "tensors/vgg19/conv4_4_weights.bin": "f116fe9c1a7de8befddd28dee39c2d667d93149654e34771582e9150d8fa6fca",
+        "tensors/vgg19/conv5_1_weights.bin": "64280928b174bb09beb3a47d273aea77bd5bdf755b7330eac30d84c7ed34c62c",
+        "tensors/vgg19/conv5_2_weights.bin": "1e2a9fe15b5d7f527e6bd763e2e26a4da8b79b7494bcd5ee3db87d359c786db4",
+        "tensors/vgg19/conv5_3_weights.bin": "6b6e81384df035b93edef0837835838f1dfbf189faa30e4377ce257045ce530e",
+        "tensors/vgg19/conv5_4_weights.bin": "63751c19da6ab0f294167e043010ce6e548028f74ecd7d10e23c1d916756654d",
+        "tensors/vgg19/fc1_weights.bin": "c2f946788439e779b9596f6a5cb96c1009fdae4cbb58d5c15003a7a4d93ca11c",
+        "tensors/vgg19/fc2_weights.bin": "4fc27542bdc35bedc66a74cccb14aabd18696c23b26994247cbf9c2a9225be78",
+        "tensors/vgg19/head_weights.bin": "b6fcdc08f3695ad7f05b690dc1d85b6fdce7588c110f652c46c1dff63097bec8"
+      }
+    },
+    "medical_detector": {
+      "tensor_payloads": 14,
+      "ahead_values": [
+        0,
+        3
+      ],
+      "reference_before_change": true,
+      "bitwise_equal": true,
+      "loader_requests": 12,
+      "tensor_sha256": {
+        "tensors/grads/medical_detector/b1/conv/weights.bin": "eab99c2324bd32cdef40f9d425cd650e210883d57cfa0d574f8873745616de30",
+        "tensors/grads/medical_detector/b2/conv/weights.bin": "76e3100048cb08d548f8816c6d68f33f09689d6436458c978cf3ce1d19e4b545",
+        "tensors/grads/medical_detector/b3/conv/weights.bin": "16f57cd733929b175ab64791ca36be269b5515401414d43c5a164b1bcb365d9d",
+        "tensors/grads/medical_detector/b4/conv/weights.bin": "8402d860a8af19e83420445c3ad6db03d2a54dca60bc9f84ed516fd32604f247",
+        "tensors/grads/medical_detector/b5/conv/weights.bin": "253f25783f05f3b457467069070cdbe4b5d86b375e341661eb9465502d906587",
+        "tensors/grads/medical_detector/head/weights.bin": "5c7165e17f24e06f1044fa5e6df94c8e9121535a72eead117491e2c1c71f0f51",
+        "tensors/medical_detector/b1/conv_weights.bin": "31cf29cad07970c84fa7b3e19991921b5d7febfe535c354c311b8a1ad4c0bc52",
+        "tensors/medical_detector/b2/conv_weights.bin": "49297e0f68ed000eb6fd65d5258a1376d1ceb5e16f7ee9e821a13ad4cbc2164f",
+        "tensors/medical_detector/b3/conv_weights.bin": "a7e4956b2038a2f228531c662ce3702731e4d689db63b4f5686d8e12197aa622",
+        "tensors/medical_detector/b4/conv_weights.bin": "8d9ac6b8d62a180d3150b292b912887f1abbd7db21b4624bb6210a6bfd5ba4b2",
+        "tensors/medical_detector/b5/conv_weights.bin": "f4c81e123826d27dbd2c6bb1ff11a8db6fc0b4d32bf05530aacf28a322db887c",
+        "tensors/medical_detector/head_weights.bin": "1592e31aa4e51a585db84b2f62cf8d4a3e4257112baf5649b60d3481fa58cb35",
+        "tensors/optimizer/m.bin": "5ec61baa170dd61345a6c3c3e116ecd17b0eca2a5adba5dae46bee41d2593aa0",
+        "tensors/optimizer/v.bin": "5a954d9014bf3a803da5d6fbb430a15725cd1e16d114bbb34d12af2eb99988cc"
+      }
+    },
+    "video_vae_conv": {
+      "tensor_payloads": 24,
+      "ahead_values": [
+        0,
+        3
+      ],
+      "reference_before_change": true,
+      "bitwise_equal": true,
+      "loader_requests": 2,
+      "tensor_sha256": {
+        "tensors/grads/vae_conv/dec/conv_in/weights.bin": "e46a03281ea9e8bcf076f18338dbad2bb02a4e39b9cb44a38bbd90e72060e7e9",
+        "tensors/grads/vae_conv/dec/out/weights.bin": "694c24e49ac14b9f72404c4d42b7fe80fb7c165def1f1239a3758780ac9eb7f3",
+        "tensors/grads/vae_conv/dec/up1/up/weights.bin": "e9bb0366214cf3a6f827419ea803d1025b561859e325aa93fd6e8702d07e08bf",
+        "tensors/grads/vae_conv/dec/up2/up/weights.bin": "95e70339b3cf6ed00da840838d6f1cdb4c019f3f0ada2372dbd43b919348bbdc",
+        "tensors/grads/vae_conv/enc/conv_in/weights.bin": "a5d2b45354df94b91e7f224fdd6aa9d83e2cc5df9f1c37ccaed9ef7319e10be8",
+        "tensors/grads/vae_conv/enc/down1/conv/weights.bin": "4259191ff72855fa2ec9f2de63fc6ef02e42f6edb8741ac1052075112c275638",
+        "tensors/grads/vae_conv/enc/down2/conv/weights.bin": "85e15eacdf501be3c8357d5d817a1a73ab09aa53bcf1b5e8b23cde06dc7d2711",
+        "tensors/grads/vae_conv/enc/logvar/weights.bin": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+        "tensors/grads/vae_conv/enc/logvar_pre_conv/weights.bin": "81c611f35bff79491538b2f7cf201c7597a661a5c549633541c62bdc8af1613f",
+        "tensors/grads/vae_conv/enc/mu/weights.bin": "c678cba5b86a8704b0005fd91d3ef4f72aa55351f5760f3cf5a8a8cf8b7d0f06",
+        "tensors/grads/vae_conv/enc/proj/weights.bin": "fc4e14ff6ad884e5e278c313502ed08b126cacac847e0703e938c2246cd89ca6",
+        "tensors/optimizer/m.bin": "012b0f859da1dd88c6cf27ae34550d0836aab64c5107a655220876dc5ae90cfb",
+        "tensors/optimizer/v.bin": "c8dc0e5ab0f244758dd5bd4b69d9d770706b083f409647eff6b23d1e1a4ceaeb",
+        "tensors/vae_conv/dec/conv_in_weights.bin": "9e018a29d9ecc8ff9df046443d820ec21fa12ccf88b1ce85bc548865b7474b7c",
+        "tensors/vae_conv/dec/out_weights.bin": "3e00c38a866e2fd0f9aabae87495ad98b260d052aca8511e78f8282ea23b9288",
+        "tensors/vae_conv/dec/up1/up_weights.bin": "a95009b5f82f2a4b25da6f99416f0a204a674d8daa0c49c10fb9df9228e4d547",
+        "tensors/vae_conv/dec/up2/up_weights.bin": "827993ea0496bc1dd6994f9c590329aaaefaa7485698a9ee6fdac5e9556706d2",
+        "tensors/vae_conv/enc/conv_in_weights.bin": "ff99fdbb1c61860d26174c3bbb6f5f97c5e789364b487e5621bd6f152542122a",
+        "tensors/vae_conv/enc/down1/conv_weights.bin": "19c6ac8ceaff28914f0299bfcf7cda1d1cef198f7fe6f12dec2aefbc90c1049c",
+        "tensors/vae_conv/enc/down2/conv_weights.bin": "551d43cce674b5edcaed7249843dac78e35d8885c23e5da039f7c9b7689ba7a6",
+        "tensors/vae_conv/enc/logvar_pre_conv_weights.bin": "06dbea48044e22ff26e3e10af8620f066043ea739476e6fa60ac51da748eced8",
+        "tensors/vae_conv/enc/logvar_weights.bin": "60fcbcf5bf4d51277b323dbed302a571e0edec06e65aa2b9504dd69c9ea5cffc",
+        "tensors/vae_conv/enc/mu_weights.bin": "e3a5bd92f25f52616fedc81d81cc8b268e1891db5e6a882198f6e6aa477d0d7d",
+        "tensors/vae_conv/enc/proj_weights.bin": "50e24c9fafbcad9584c2a30807ab15db9d756cde04621ddff87d7fb5fcfddcaa"
+      }
+    }
+  },
+  "exact_native_tensor_payloads": 268,
+  "validation": {
+    "build": "Release native binary rebuilt after integral Lua index acceptance fix",
+    "ctest_targeted": {
+      "passed": 7,
+      "failed": 0,
+      "driver": "/tmp/mimir-dataset-native-ctest",
+      "core": "Actual root libmimir_core.a; focused sources run through launcher"
+    },
+    "post_fix_lua_ctest": {
+      "passed": 3,
+      "failed": 0
+    },
+    "asan_ubsan": {
+      "passed": true,
+      "leak_detection": false
+    },
+    "tsan": {
+      "passed": true,
+      "openmp": false
+    },
+    "sanitizer_scope": "Actual DatasetPrefetcher/Helpers/Tokenizer/stb; FPGA staging is a no-op in isolated sanitizer harness. Native full-core test uses real staging.",
+    "repeated_lifecycle_runs": 20,
+    "lumen_epoch_and_mid_epoch_resume": {
+      "ahead_0": true,
+      "ahead_3": true
+    },
+    "javascript_bridge": true,
+    "rust_bridge": true,
+    "docs": true,
+    "api_sync": true,
+    "ide_helpers": {
+      "namespaces": 18,
+      "functions": 383,
+      "synchronized": true
+    },
+    "bridge_environment": "Local JavaScript/Rust sockets require running outside this tool sandbox; both tested successfully.",
+    "diff_check": true,
+    "full_repository_ctest": {
+      "tests": 198,
+      "passed": 194,
+      "skipped": [
+        "RuntimeTest.TPUReconstructionLoss",
+        "RuntimeTest.TpuModelTrain",
+        "RuntimeTest.CUDAPointwiseFusion",
+        "RuntimeTest.ROCMPointwiseFusion"
+      ],
+      "failures": [],
+      "seconds": 150.22,
+      "native_binary_sha256": "589558fb160774079f59355f0db20c5f14fa2241ed17ff2bc8d2785826485bb0",
+      "anomaly_resolved": "Stale generated bin/mimir disabled JS/Rust while current object files and core enabled them. Forced CMake relink; full suite rerun successfully.",
+      "summary": "outputs/ctest/develop-20261112/summary.json"
+    }
+  },
+  "source_sha256": {
+    "CMakeLists.txt": "bbc01760cfd076a9cf03a7e79216a48754b1000968929539233f9057352eac70",
+    "src/Helpers.hpp": "51a8334d5fd81747a92cf671972a3953094896889f583f6b343ff3b309c532d8",
+    "src/DatasetPrefetcher.hpp": "12aae33dfc7efb20642a0da27de43826679050fe78a5c6454ad2c27a06d0b17f",
+    "src/DatasetPrefetcher.cpp": "c22b4432679e8957104468d0599a2f6206c9c10f6627bc24a14a48eaa9d9a17f",
+    "src/scriptings/ScriptingContext.hpp": "53c1739c802bb02e9e28fcad203dd430c591a0e653f43b158e1760404b2a6f62",
+    "src/scriptings/NativeBridge.cpp": "eb20b4e7770d6d8e8a94c21a2a63ea431d27b7939dbbd5b6c3d6bfee7b481197",
+    "src/scriptings/Lua/luaScripting/LuaScripting.hpp": "f07c730cfb15edd7148f56985b5a0d8aab0fa2db78952f15b6caffcec7d0e1a9",
+    "src/scriptings/Lua/luaScripting/LuaScripting.cpp": "ae0f4ab5dbdcece2c5d3cca43124bcfd3780a5f0de11772f2c26e1f6d06c3631",
+    "src/scriptings/Lua/luaScripting/LuaScriptingTokenizerDataset.cpp": "536aefc8f49774314bcf0170e9f74c6601c72208a4c5f501283b474c3b365e2d",
+    "src/scriptings/Lua/luaScripting/LuaScriptingModelAndRegistry.cpp": "66dd4ea351acbf566c1ffa9c80c7f86523f33a0d1ee00fac0eb471a05f808d37",
+    "src/scriptings/JavaScript/jsScripting/JSScripting.cpp": "b7eb1c2bc321824f4b0433465f41c0a22a637a0aef901f49e3078a9fb32bde77",
+    "src/scriptings/Rust/rustScripting/RustScripting.cpp": "3536c86a7f9707613a82c8be3439a542dd0acc28769268d0ba977da70df0b3a3",
+    "src/scriptings/CSharp/csharpScripting/CSharpScripting.hpp": "016d8111698cfce3f4f92c85597d7daa5d3481a68a2bb8ac3d5237ec374df9ef",
+    "src/scriptings/CSharp/csharpScripting/CSharpScripting.cpp": "05946f9eabbed8f18e220d62a19dab45d7b873df081a053ee3c4cd0ccfc6df67",
+    "scripts/training/train_lumen_diffusion.lua": "d22eab10c036b27e9f796a1ca2bb702059a94d59568a1fa70f2c370dd3ddd482",
+    "scripts/benchmarks/benchmark_dataset_prefetch.cpp": "d3a89d74247d4ff9d384ccd2d9b8f001e777499e1fa80e085051b31855ba91de",
+    "Tests/test_dataset_prefetch.cpp": "703c4527951bd70159d5ec85647e523f827252074e186974f1866eaec5a70391",
+    "Tests/CMakeLists.txt": "085d5a6c36a152c69c7822174ec78f1c0acb14ef46bb8daa1766eefb1efde0b1",
+    "scripts/tests/test_dataset_prefetch.lua": "3c62613bdbe2086eec56740e8bffc2627f6e992ea99e6bfe4de3a43564a58384",
+    "scripts/tests/test_dataset_training_prefetch.py": "a99b7a126da22c70245e29a7fb96150af1b0898a763e276f62af69874f8e2aa1",
+    "docs/04-Architecture-Internals/Runtime-Dataset-Prefetch-20261112.md": "ea42cc56c52af1b15f7b74359508e0b130733c5dd910b83a7d9fa359a5099a32",
+    "docs/03-API-Reference/13-Dataset.md": "813f25bab5558f9652650c5ac00b96653b9be65bb3506e626427f1959565e0ff",
+    "docs/03-API-Reference/22-Environment-Variables.md": "1614138dd537c9978e297961ea6e0894c4dae61ce247a908ce8ceab13bd203a8",
+    "docs/04-Architecture-Internals/18-RuntimeAllocator-And-Scratchpads.md": "a6ef71178884df687775daa37bedaab18985d99e485cfbe6eb59b0ebdb9b3591",
+    "ide/lua/mimir-api.lua": "3327bffdc2aa064d6d03bc6c2476396b6f9299811f84fa585e2aa4491c6e3585",
+    "ide/javascript/mimir.d.ts": "7141bd9693f57c5e5ad0e4ef104e8af4d2ec550eabfedbcf0f08b33fc771da70",
+    "ide/rust/src/api.rs": "d19c193392977f70d7873e583032b54c1ffe28c53d36fefd3e642e5db02b0044",
+    "ide/api-manifest.json": "b6bf73ad7235b22ecee5e17ba782d5ff643038c8a4b56e24e545e86b16276b66",
+    "run_mimir.sh": "4b79fda5c38310fdd516b2bbf1925b65bcb4fb8e85f7c88e21d97908489f29b9"
+  },
+  "binary_sha256": {
+    "native": "589558fb160774079f59355f0db20c5f14fa2241ed17ff2bc8d2785826485bb0",
+    "reference_before_change": "0aa128160ff67fec8e4177c66c77a469eeeedc0c689bac0c478837fe1d83cb11",
+    "benchmark": "9cf072c896d01c55bde92ad11c9374fcc8f0fb839bd98db18700eab4a6d5bc63"
+  },
+  "artifact_sha256": {
+    "outputs/benchmarks/dataset-prefetch-20261112/throughput/comparison.json": "a67253509b22e0eaca73be4a7ad564d2e1008d138cb690886f55ff79ce797d89",
+    "outputs/benchmarks/dataset-prefetch-20261112/native-validated/report.json": "8e9b04c263cf9f7599a193ff893eb230565347b951bd36de09e12b5ea5e33cb9",
+    "outputs/benchmarks/dataset-prefetch-20261112/video-validated/report.json": "08f5cf9cd86bd2ee9448abfb119fe74d6724a8f171f0d17b0502309e68ee8aab",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-api-check.log": "a614c0d3f4487188d8b314b398bf0e36a7c2100e73e45fa80e2768476f2937e6",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-cmake-check.log": "6e48d64fe0ab591a1d1e163ec52a7213d2dfbe11e92cb8460d98ad4f6f27c124",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-ctest-final.log": "99de624920fec62b936e8492c323eb3d105b879561c3d2c0d77b831bf0030c0d",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-docs-check.log": "1d6ae608359365e73c0b6083c07a18f45a9352d0936c97077c3c6b891f41edce",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-final-verification.log": "204b4d969a78a0436c0a44d2dab88d5e2a5d61d61f5f9c751087c85487277c46",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-ide-check.log": "c5ea42764e1d6c47fda7231a514c14cf54bb8ddb7120efa77990e4609b6f85d4",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-integral-index-build.log": "049e5a5b8659d111f2719260e72174d96ec73c6692569e54a3647c0cae053e81",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-integral-index-tests.log": "bff1c1d6ebc89200b1b44bd8217373cd6c4f405dd2ff69127f9f10f627cff413",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-js-prefetch.log": "efb055982d0a53e04094871b0be95a04a0abf0869cdd8e21ddc90b726966f156",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-lumen-resume.log": "6b29fc27a8f9b2bde7b6fa77fa31e448279bb21637b1f5a41a7f788bdf1693ea",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-lumen-sync-resume.log": "6b29fc27a8f9b2bde7b6fa77fa31e448279bb21637b1f5a41a7f788bdf1693ea",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-native-validated.log": "edcd97cf057951088fce25334dd7faf7e662c8065f4823ca741c688542e0ac9c",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-rust-prefetch.log": "44616795b3e8a1898bf092386b622b1c53ea1948e1779ddb2277a8ff41939962",
+    "outputs/benchmarks/dataset-prefetch-20261112/validation/mimir-dataset-video-validated.log": "8aeb7213523188b3d85fec65c25f6ad386b1e22a6bcf2898ab1958937226b3f9"
+  }
+}

@@ -75,6 +75,22 @@ bool gradient_check(
             }
         }
     }
+    for (size_t i = 0; i < layer.weights.size(); ++i) {
+        if (layer.grad_weights.size() != layer.weights.size()) return false;
+        const float original = layer.weights[i];
+        layer.weights[i] = original + h;
+        const auto plus = forward(inputs, layer);
+        layer.weights[i] = original - h;
+        const auto minus = forward(inputs, layer);
+        layer.weights[i] = original;
+        if (plus.size() != grad_output.size() || minus.size() != grad_output.size()) return false;
+        const float numerical = (dot(plus, grad_output) - dot(minus, grad_output)) / (2.0f * h);
+        if (!std::isfinite(numerical) || std::fabs(numerical - layer.grad_weights[i]) > tolerance) {
+            std::cerr << "parameter gradient mismatch element=" << i
+                      << " analytical=" << layer.grad_weights[i] << " numerical=" << numerical << '\n';
+            return false;
+        }
+    }
     return true;
 }
 
@@ -140,6 +156,39 @@ int main() {
             {{0.8f, -0.3f, 0.2f, 1.1f}},
             {0.4f, -0.7f, 1.2f, 0.3f},
             7e-3f));
+    }
+
+    {
+        Layer layer = elementwise_layer(LayerType::Linear);
+        layer.in_features = 3;
+        layer.out_features = 5;
+        layer.seq_len = 7;
+        layer.use_bias = true;
+        layer.weights.resize(20);
+        std::vector<float> input(21), upstream(35);
+        for (size_t i=0;i<layer.weights.size();++i) layer.weights[i]=.2f*std::sin(float(i));
+        for (size_t i=0;i<input.size();++i) input[i]=.4f*std::cos(float(i));
+        for (size_t i=0;i<upstream.size();++i) upstream[i]=.3f*std::sin(float(i)*.7f);
+        TASSERT_TRUE(gradient_check(layer,{input},upstream,5e-4f));
+    }
+
+    // Different query/key lengths and multiple heads exercise both transposed
+    // projection gradients. Bias-free attention follows the native derivative
+    // contract; legacy attention bias behavior is tested by runtime parity.
+    for (bool causal : {false,true}) {
+        Layer layer = elementwise_layer(LayerType::CrossAttention);
+        layer.embed_dim = layer.in_features = 4;
+        layer.seq_len = 3;
+        layer.num_heads = 2;
+        layer.causal = causal;
+        layer.use_bias = false;
+        layer.weights.resize(64);
+        std::vector<float> query(12), kv(20), upstream(12);
+        for (size_t i=0;i<layer.weights.size();++i) layer.weights[i]=.2f*std::cos(float(i)*.31f);
+        for (size_t i=0;i<query.size();++i) query[i]=.4f*std::cos(float(i)*.13f);
+        for (size_t i=0;i<kv.size();++i) kv[i]=.4f*std::sin(float(i)*.17f);
+        for (size_t i=0;i<upstream.size();++i) upstream[i]=.3f*std::sin(float(i)*.7f);
+        TASSERT_TRUE(gradient_check(layer,{query,kv},upstream,5e-4f));
     }
 
     {

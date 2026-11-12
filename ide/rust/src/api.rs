@@ -41,6 +41,10 @@
     pub fn r#get(args: &[crate::Value]) -> crate::Result<crate::Value> { crate::call("Dataset.get", args) }
     /// Native Mimir.Dataset.load(dir, target_w, target_h, min_modalities, use_cache, cache_path, max_ram_mb, lazy_loading).
     pub fn r#load(args: &[crate::Value]) -> crate::Result<crate::Value> { crate::call("Dataset.load", args) }
+    /// Native Mimir.Dataset.prefetch(indices, load_image).
+    pub fn r#prefetch(args: &[crate::Value]) -> crate::Result<crate::Value> { crate::call("Dataset.prefetch", args) }
+    /// Native Mimir.Dataset.prefetch_stats().
+    pub fn r#prefetch_stats(args: &[crate::Value]) -> crate::Result<crate::Value> { crate::call("Dataset.prefetch_stats", args) }
     /// Native Mimir.Dataset.prepare_sequences(max_length).
     pub fn r#prepare_sequences(args: &[crate::Value]) -> crate::Result<crate::Value> { crate::call("Dataset.prepare_sequences", args) }
     /// Native Mimir.Dataset.release(index).

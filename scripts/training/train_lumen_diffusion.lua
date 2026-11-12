@@ -813,6 +813,14 @@ for epoch = next_epoch, next_epoch + epochs - 1 do
     end
   end
 
+  -- Preserve the shuffled/resumed order while native decoding runs ahead.
+  local pending_order = {}
+  for position = first_position, training_count do
+    pending_order[#pending_order + 1] = order[position]
+  end
+  local ok_prefetch, prefetch_err = Mimir.Dataset.prefetch(pending_order)
+  check(ok_prefetch, prefetch_err, "Dataset.prefetch")
+
   for position = first_position, training_count do
     next_epoch = position == training_count and epoch + 1 or epoch
     next_position = position == training_count and 1 or position + 1

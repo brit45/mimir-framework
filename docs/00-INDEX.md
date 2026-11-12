@@ -43,7 +43,8 @@ Pour choisir un parcours adapté à votre expérience, consultez les
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DMIMIR_VIZ_BACKEND=NONE -DENABLE_VULKAN=OFF -DENABLE_OPENCL=OFF
 cmake --build build --parallel 2
-./run_mimir.sh --lua scripts/examples/inspect_vae_conv.lua
+MIMIR_EXECUTABLE="$PWD/build/bin/mimir" \
+  ./run_mimir.sh --lua scripts/examples/inspect_vae_conv.lua
 ```
 
 ## Prologue
@@ -151,6 +152,9 @@ complètent la couverture ; ils ne garantissent pas une amélioration de vitesse
 ## Aller plus loin
 
 - [Performance](05-Advanced/01-Performance.md)
+- [Préchargement et conversion anticipée des datasets](03-API-Reference/13-Dataset.md#préchargement-en-arrière-plan)
+- [Mesures des projections, attentions et runtimes](04-Architecture-Internals/Runtime-Dimensions-20261112.md)
+- [Mesures du lecteur de dataset](04-Architecture-Internals/Runtime-Dataset-Prefetch-20261112.md)
 - [Benchmarks Colab : profils, runtimes et mesures](05-Advanced/07-Colab-Benchmarks.md)
 - [Débogage et stabilité numérique](05-Advanced/02-Debugging.md)
 - [État de préparation LLM](05-Advanced/03-LLM-Readiness.md)

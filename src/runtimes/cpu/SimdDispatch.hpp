@@ -36,6 +36,19 @@ void matmulTranspose(float* c,const float* a,const float* b,std::size_t m,std::s
 // A[m,k], B[m,n] -> C[k,n].
 void matmulLeftTranspose(float* c,const float* a,const float* b,std::size_t m,std::size_t n,
                          std::size_t k,bool fused=false,int workers=1);
+// Internal strided GEMM: A[row*ar+k*ak], B[k*bk+col*bc], C[row*cr+col].
+// Each output reduces in increasing k order; accumulate adds the completed dot once.
+void matmulStrided(float* c,const float* a,const float* b,std::size_t m,std::size_t n,std::size_t k,
+                   std::size_t ar,std::size_t ak,std::size_t bk,std::size_t bc,std::size_t cr,
+                   bool accumulate,bool fused,int workers=1);
+// Resume each ordered reduction from C. Unlike accumulate=true, this adds
+// every product to the existing accumulator, rather than adding a partial dot.
+void matmulStridedContinue(float* c,const float* a,const float* b,std::size_t m,std::size_t n,std::size_t k,
+                          std::size_t ar,std::size_t ak,std::size_t bk,std::size_t bc,std::size_t cr,
+                          bool fused=false,int workers=1);
+// Separate multiply/add with a bias SEED, preserving attention's original rounding.
+void matmulTransposeBiased(float* c,const float* a,const float* b,const float* bias,
+                          std::size_t m,std::size_t n,std::size_t k,int workers=1);
 void add(float* out,const float* a,const float* b,std::size_t count);
 void mul(float* out,const float* a,const float* b,std::size_t count);
 // out[i] += scale*x[i]; exact in-place aliasing is supported.

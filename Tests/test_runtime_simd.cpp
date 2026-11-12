@@ -1,6 +1,7 @@
 #include "runtimes/cpu/SimdDispatch.hpp"
 #include "runtimes/cpu/SIMD_Ops.hpp"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -18,8 +19,8 @@ static int verify() {
     using namespace RuntimeSimd;
     const Isa original=selectedIsa();
     std::cout<<"CPU SIMD selected="<<isaName(original)<<" fma="<<features().fma<<" f16c="<<features().f16c<<'\n';
-    for(bool fused:{false,true})for(std::size_t n:{1u,3u,4u,7u,8u,15u,16u,23u,24u,31u,47u,48u,67u,193u,257u}) {
-        const std::size_t m=n>67?17:3,k=129;
+    for(bool fused:{false,true})for(std::size_t n:{1u,3u,4u,7u,8u,15u,16u,23u,24u,31u,47u,48u,67u,193u,257u,1024u,2048u}) {
+        const std::size_t m=n>67?17:3,k=n==2048?64:129;
         std::vector<float> a(m*k),b(k*n),bt(n*k),reference(m*n),actual(m*n),leftReference(k*n),leftActual(k*n);
         for(std::size_t i=0;i<a.size();++i)a[i]=std::sin(float(i%137)*.13f)*.1f;
         for(std::size_t i=0;i<b.size();++i)b[i]=std::cos(float(i%173)*.17f)*.1f;
@@ -49,6 +50,71 @@ static int verify() {
             matmulBatched(batchC.data(),batchA.data(),batchB.data(),2,m,n,k,fused,2);
             CHECK(std::memcmp(batchC.data(),reference.data(),reference.size()*sizeof(float))==0);
             CHECK(std::memcmp(batchC.data()+m*n,reference.data(),reference.size()*sizeof(float))==0);
+        }
+    }
+    // Independent ordered reference with padded and transposed views. Exercise
+    // all panel boundaries, output padding, nonzero gradient accumulation and
+    // zero reductions (which may legally receive null input pointers).
+    for (const auto shape : {std::array<size_t,3>{1,7,0}, {1,193,33},
+            {9,197,65}, {17,257,129}, {9,1024,129}, {3,19,2048}}) {
+        const auto m=shape[0], n=shape[1], k=shape[2];
+        for (bool transposed : {false,true}) for (bool fused : {false,true}) {
+            const size_t ar=k*2+3, ak=2, bc=transposed?k+3:1, bk=transposed?1:n+5, cr=n+7;
+            std::vector<float> a(m*ar), b(k*bk+n*bc+1), expected(m*cr,17.f), actual;
+            for(size_t i=0;i<a.size();++i)a[i]=std::sin(float(i%137)*.13f)*.1f;
+            for(size_t i=0;i<b.size();++i)b[i]=std::cos(float(i%173)*.17f)*.1f;
+            for(bool accumulate : {false,true}) {
+                std::fill(expected.begin(),expected.end(),17.f);
+                for(size_t i=0;i<m;++i)for(size_t j=0;j<n;++j) {
+                    float sum=0;
+                    for(size_t r=0;r<k;++r) {
+                        if(fused)sum=std::fma(a[i*ar+r*ak],b[r*bk+j*bc],sum);
+                        else sum+=a[i*ar+r*ak]*b[r*bk+j*bc];
+                    }
+                    expected[i*cr+j]=accumulate?17.f+sum:sum;
+                }
+                for(Isa isa:{Isa::Scalar,Isa::SSE2,Isa::AVX,Isa::AVX2,Isa::AVX512})if(supported(isa)) {
+                    CHECK(requestIsa(isa));
+                    for(int workers:{1,3}) {
+                        actual.assign(m*cr,17.f);
+                        matmulStrided(actual.data(),k?a.data():nullptr,k?b.data():nullptr,
+                            m,n,k,ar,ak,bk,bc,cr,accumulate,fused,workers);
+                        CHECK(equal(expected,actual));
+                    }
+                }
+            }
+            std::fill(expected.begin(),expected.end(),17.f);
+            for(size_t i=0;i<m;++i)for(size_t j=0;j<n;++j)for(size_t r=0;r<k;++r) {
+                float& value=expected[i*cr+j];
+                if(fused)value=std::fma(a[i*ar+r*ak],b[r*bk+j*bc],value);
+                else value+=a[i*ar+r*ak]*b[r*bk+j*bc];
+            }
+            for(Isa isa:{Isa::Scalar,Isa::SSE2,Isa::AVX,Isa::AVX2,Isa::AVX512})if(supported(isa)) {
+                CHECK(requestIsa(isa));
+                for(int workers:{1,3}) {
+                    actual.assign(m*cr,17.f);
+                    const size_t split=std::min(size_t(31),k);
+                    matmulStridedContinue(actual.data(),k?a.data():nullptr,k?b.data():nullptr,
+                        m,n,split,ar,ak,bk,bc,cr,fused,workers);
+                    matmulStridedContinue(actual.data(),k?a.data()+split*ak:nullptr,k?b.data()+split*bk:nullptr,
+                        m,n,k-split,ar,ak,bk,bc,cr,fused,workers);
+                    CHECK(equal(expected,actual));
+                }
+            }
+        }
+        std::vector<float> a(m*k), bt(n*k), bias(n), expected(m*n), actual(m*n);
+        for(size_t i=0;i<a.size();++i)a[i]=std::sin(float(i)*.13f)*.1f;
+        for(size_t i=0;i<bt.size();++i)bt[i]=std::cos(float(i)*.17f)*.1f;
+        for(size_t j=0;j<n;++j)bias[j]=std::cos(float(j)*.07f);
+        for(size_t i=0;i<m;++i)for(size_t j=0;j<n;++j) {
+            float sum=bias[j]; // Bias must seed the reduction, not be added after.
+            for(size_t r=0;r<k;++r)sum+=a[i*k+r]*bt[j*k+r];
+            expected[i*n+j]=sum;
+        }
+        for(Isa isa:{Isa::Scalar,Isa::SSE2,Isa::AVX,Isa::AVX2,Isa::AVX512})if(supported(isa)) {
+            CHECK(requestIsa(isa));
+            matmulTransposeBiased(actual.data(),a.data(),bt.data(),bias.data(),m,n,k,3);
+            CHECK(equal(expected,actual));
         }
     }
     for(std::size_t count:{0u,1u,3u,4u,7u,8u,15u,16u,17u,31u,67u,1027u}) {

@@ -18,6 +18,15 @@ dist/
 
 # Artefacts CTest (générés à la racine lors de l'exécution des tests)
 Testing/
+CTestTestfile.cmake
+DartConfiguration.tcl
+/Tests/Makefile
+/Tests/*Test.*
+/Tests/*Bench.*
+/Tests/GpuBackwardParity
+/Tests/PortableNativeOps
+/Tests/mimir_bench_*
+/runtime_dispatch_audit.json
 
 # Variantes locales de build (ex: build_sfml, build_static, build_verify...)
 build_*/

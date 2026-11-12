@@ -58,6 +58,12 @@ declare namespace Mimir {
     /** Native Mimir.Dataset.load(dir, target_w, target_h, min_modalities, use_cache, cache_path, max_ram_mb, lazy_loading). Throws on native errors. */
     function load(dir: string, target_w?: number, target_h?: number, min_modalities?: number, use_cache?: boolean, cache_path?: string, max_ram_mb?: number, lazy_loading?: boolean): MimirValue;
     namespace load { function results(...args: any[]): MimirValue[]; }
+    /** Native Mimir.Dataset.prefetch(indices, load_image). Throws on native errors. */
+    function prefetch(indices: (number)[], load_image?: boolean): MimirValue;
+    namespace prefetch { function results(...args: any[]): MimirValue[]; }
+    /** Native Mimir.Dataset.prefetch_stats(). Throws on native errors. */
+    function prefetch_stats(): MimirValue;
+    namespace prefetch_stats { function results(...args: any[]): MimirValue[]; }
     /** Native Mimir.Dataset.prepare_sequences(max_length). Throws on native errors. */
     function prepare_sequences(max_length: number): MimirValue;
     namespace prepare_sequences { function results(...args: any[]): MimirValue[]; }

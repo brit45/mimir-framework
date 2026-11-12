@@ -1788,6 +1788,19 @@ function Mimir.Dataset.get(index, load_image) end
 ---@return string? err
 function Mimir.Dataset.release(index) end
 
+---Prépare en arrière-plan l'ordre réel de consommation (indices Lua à partir de 1).
+---Une file bornée remplit les prochains éléments sans modifier cet ordre.
+---Un tableau vide restaure la lecture séquentielle automatique.
+---@param indices integer[] Ordre des échantillons, y compris les doublons.
+---@param load_image? boolean Charger RGB et masques (défaut true).
+---@return boolean ok
+---@return integer|string count_or_error
+function Mimir.Dataset.prefetch(indices, load_image) end
+
+---Compteurs de préparation et d'attente du préchargement natif.
+---@return table stats capacity, queued, ready, leased, loading, resident_bytes, hits, waits, prepare_ms, wait_ms.
+function Mimir.Dataset.prefetch_stats() end
+
 ---Préparer les séquences (stockées dans le contexte interne).
 ---La séquence length est utilisée ensuite par Mimir.Model.train().
 ---@param max_length integer

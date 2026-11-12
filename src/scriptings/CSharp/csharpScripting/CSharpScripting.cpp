@@ -15,6 +15,8 @@
 #include "Models/Registry/ModelArchitectures.hpp"
 #include "scriptings/ScriptingBridgeCommon.hpp"
 
+CSharpScripting::~CSharpScripting() {CSharpContext::getInstance().datasetPrefetcher.reset();}
+
 namespace {
 
 static std::string shellQuote(const std::string& s) {

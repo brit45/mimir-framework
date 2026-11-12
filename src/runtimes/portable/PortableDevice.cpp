@@ -98,8 +98,12 @@ public:
         if(!reserve(cachedData,dataCapacity,memory.size()*sizeof(float),CL_MEM_READ_WRITE) ||
            !reserve(cachedParams,paramCapacity,arguments.size()*sizeof(int),CL_MEM_READ_ONLY))return false;
         cl_mem data=cachedData,params=cachedParams;
-        if(clEnqueueWriteBuffer(queue,data,CL_TRUE,0,upload_bytes,memory.data(),0,nullptr,nullptr)!=CL_SUCCESS ||
-           clEnqueueWriteBuffer(queue,params,CL_TRUE,0,arguments.size()*sizeof(int),arguments.data(),0,nullptr,nullptr)!=CL_SUCCESS)return false;
+        // In-order queue: the final blocking read completes both immutable host
+        // uploads before memory/arguments can change. Drain every error path too.
+        if(clEnqueueWriteBuffer(queue,data,CL_FALSE,0,upload_bytes,memory.data(),0,nullptr,nullptr)!=CL_SUCCESS ||
+           clEnqueueWriteBuffer(queue,params,CL_FALSE,0,arguments.size()*sizeof(int),arguments.data(),0,nullptr,nullptr)!=CL_SUCCESS) {
+            clFinish(queue);return false;
+        }
         bool ok=clSetKernelArg(kernel,0,sizeof(data),&data)==CL_SUCCESS && clSetKernelArg(kernel,1,sizeof(params),&params)==CL_SUCCESS;
         if(optimizer_) {
             std::vector<int> passes{0};if(!loss_ && (arguments[2]==4 || arguments[2]==8)){passes.push_back(1);passes.push_back(3);passes.push_back(2);}
@@ -116,6 +120,7 @@ public:
         const size_t result_bytes = optimizer_ && !loss_
             ? optimizerResultCount(arguments)*sizeof(float) : memory.size()*sizeof(float);
         if(ok)ok=clEnqueueReadBuffer(queue,data,CL_TRUE,0,result_bytes,memory.data(),0,nullptr,nullptr)==CL_SUCCESS;
+        if(!ok)clFinish(queue); // Failed submission/read must not outlive its host buffers.
         return ok;
     }
     bool runBatch(std::vector<float>& memory,const std::vector<std::vector<int>>& commands,const std::vector<MemoryRange>& downloads={}) override {

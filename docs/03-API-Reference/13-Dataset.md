@@ -61,6 +61,70 @@ et du masque, tout en conservant l'accès aux chemins et au texte.
 `release(index: int) -> true | (false, err)` décharge les contenus de l'item tout
 en gardant son entrée dans le dataset.
 
+## Préchargement en arrière-plan
+
+En mode lazy, le lecteur prépare un nombre fixe d'échantillons d'avance, dans
+une file bornée, avec un emplacement supplémentaire pour l'échantillon utilisé.
+`./run_mimir.sh` fixe ce nombre à **10** si la variable n'est pas définie ;
+le défaut natif, pour un lancement direct sans variable, reste **8**.
+Un worker natif lit les fichiers, décode/redimensionne les images RGB et les
+masques, et prépare le texte et les annotations. Les boucles natives de VAEConv,
+VGG et du détecteur médical demandent aussi la normalisation et la disposition
+HWC/CHW attendues. VAEText prépare la tokenisation et le padding avec une copie
+stable du tokenizer ; les fenêtres aléatoires restent sur le thread d'entraînement.
+Les tampons de conversion sont réutilisés et les contenus natifs sont déchargés
+sur le worker après leur dernière utilisation.
+
+`get` anticipe les indices suivants en lecture séquentielle. Pour un ordre
+mélangé ou une reprise à une position donnée, fournir l'ordre réel avant la boucle :
+
+```lua
+local order = { 7, 2, 2, 11, 1 } -- indices 1-based, doublons permis
+assert(Mimir.Dataset.prefetch(order, true))
+for _, index in ipairs(order) do
+    local item = assert(Mimir.Dataset.get(index))
+    -- Consommer item.image et item.text.
+    assert(Mimir.Dataset.release(index))
+end
+local stats = Mimir.Dataset.prefetch_stats()
+print(stats.hits, stats.waits, stats.wait_ms)
+```
+
+`prefetch(indices, load_image=true) -> (true, count) | (false, err)` ne change
+ni l'ordre ni le nombre d'éléments consommés. Un tableau vide rétablit
+l'anticipation séquentielle au prochain `get`. `load_image=false` prépare
+uniquement le texte, les annotations et les métadonnées. Les boucles natives
+fournissent automatiquement leur permutation ; le script Lumen fournit aussi
+son ordre sauvegardé/mélangé. Les mêmes fonctions sont accessibles via les
+bridges JavaScript et Rust.
+
+`prefetch_stats() -> table` expose `enabled`, `capacity`, `queued`, `ready`,
+`leased`, `loading`, `resident_bytes`, `peak_bytes`, `requests`, `hits`, `waits`,
+`prepared`, `recycled`, `errors`, `buffer_growths`, `wait_ms` et `prepare_ms`.
+`buffer_growths` compte les agrandissements des buffers de conversion réutilisés,
+pas toutes les allocations des décodeurs. Un hit indique un échantillon déjà
+prêt lors de l'appel. Les temps de préparation et d'attente sont des cumuls.
+
+Les variables `MIMIR_DATASET_PREFETCH` (nombre d'éléments, défaut natif 8,
+défaut du lanceur 10, maximum 256)
+et `MIMIR_DATASET_PREFETCH_BYTES` (budget de préchargement en octets, défaut
+64 Mio) sont lues au chargement. Mettre l'une à `0` conserve le chemin synchrone.
+Le chargement explicitement eager (`lazy_loading=false` avec cache) conserve
+son comportement. Les contrôles RAM du dataset et du décodeur restent actifs.
+Si le prochain élément est plus grand que le budget d'anticipation, il peut
+être préparé seul à la demande ; il doit encore tenir dans la RAM autorisée.
+
+Le premier élément, un accès imprévu ou un producteur plus lent que le calcul
+peuvent encore nécessiter une attente. La libération native demandée par
+`release` peut être différée jusqu'au passage du worker. Les tables Lua/JSON
+restent construites sur le thread du langage. Les vidéos gardent leur lecteur
+de frames en streaming ; cette file ne préconvertit pas toutes leurs frames.
+Un rechargement ou la fermeture du runtime arrête le worker et attend la
+lecture déjà engagée, sans parcourir le reste du dataset.
+
+Le [rapport de mesures et de validation](../04-Architecture-Internals/Runtime-Dataset-Prefetch-20261112.md)
+détaille les gains CPU, la consommation mémoire et les comparaisons numériques.
+
 ## `prepare_sequences(seq_len: int) -> (bool, n|err)`
 
 Recharge le dossier courant et prépare des séquences par mots avec padding ou

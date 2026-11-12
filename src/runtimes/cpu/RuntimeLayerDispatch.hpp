@@ -22,6 +22,7 @@
 #include "MatMulKernels.hpp"
 #include "FlatJoinKernels.hpp"
 #include "CausalAttentionKernels.hpp"
+#include "AttentionBackward.hpp"
 #include "CausalSequenceKernels.hpp"
 #include "PrimerKernels.hpp"
 
@@ -1467,21 +1468,26 @@ inline bool cpu_backward_layer(
                 constexpr int tile = 64;
                 const long long work = static_cast<long long>(batch) * in_f * out_f;
                 const int input_tiles = (in_f + tile - 1) / tile;
-                #pragma omp parallel for collapse(2) schedule(static) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work))
-                for (int b = 0; b < batch; ++b) {
-                    for (int tile_idx = 0; tile_idx < input_tiles; ++tile_idx) {
-                        const float* row_go = go.data() + static_cast<size_t>(b) * out_f;
-                        float* row_gx = grad_inputs[0].data() + static_cast<size_t>(b) * in_f;
-                        const int base = tile_idx * tile;
-                        alignas(64) float sums[tile] = {};
-                        const int count = std::min(tile, in_f - base);
-                        for (int o = 0; o < out_f; ++o) {
-                            const float g = row_go[o];
-                            const float* row_w = w + static_cast<size_t>(o) * in_f + base;
-                            #pragma omp simd
-                            for (int i = 0; i < count; ++i) sums[i] += g * row_w[i];
+                if(RuntimeLayerOps::hardwareAccelerationEnabled()) {
+                    RuntimeSimd::matmul(grad_inputs[0].data(),go.data(),w,batch,in_f,out_f,false,false,
+                        RuntimeParallel::workers(size_t(work)));
+                } else {
+                    #pragma omp parallel for collapse(2) schedule(static) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work))
+                    for (int b = 0; b < batch; ++b) {
+                        for (int tile_idx = 0; tile_idx < input_tiles; ++tile_idx) {
+                            const float* row_go = go.data() + static_cast<size_t>(b) * out_f;
+                            float* row_gx = grad_inputs[0].data() + static_cast<size_t>(b) * in_f;
+                            const int base = tile_idx * tile;
+                            alignas(64) float sums[tile] = {};
+                            const int count = std::min(tile, in_f - base);
+                            for (int o = 0; o < out_f; ++o) {
+                                const float g = row_go[o];
+                                const float* row_w = w + static_cast<size_t>(o) * in_f + base;
+                                #pragma omp simd
+                                for (int i = 0; i < count; ++i) sums[i] += g * row_w[i];
+                            }
+                            std::copy_n(sums, count, row_gx + base);
                         }
-                        std::copy_n(sums, count, row_gx + base);
                     }
                 }
 
@@ -1498,24 +1504,27 @@ inline bool cpu_backward_layer(
                         #pragma omp simd
                         for (int i = 0; i < in_f; ++i) row_gw[i] += g * x[static_cast<size_t>(i)];
                     });
+                } else if(RuntimeLayerOps::hardwareAccelerationEnabled()) {
+                    RuntimeSimd::matmulStrided(layer.grad_weights.data(),go.data(),x.data(),out_f,in_f,batch,
+                        1,out_f,in_f,1,in_f,true,false,RuntimeParallel::workers(size_t(work)));
                 } else {
-                #pragma omp parallel for collapse(2) schedule(static) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work))
-                for (int o = 0; o < out_f; ++o) {
-                    for (int tile_idx = 0; tile_idx < output_tiles; ++tile_idx) {
-                        float* row_gw = layer.grad_weights.data() + static_cast<size_t>(o) * in_f;
-                        const int base = tile_idx * tile;
-                        alignas(64) float sums[tile] = {};
-                        const int count = std::min(tile, in_f - base);
-                        for (int b = 0; b < batch; ++b) {
-                            const float g = go[static_cast<size_t>(b) * out_f + o];
-                            const float* row_x = x.data() + static_cast<size_t>(b) * in_f + base;
+                    #pragma omp parallel for collapse(2) schedule(static) if(RuntimeParallel::workers(work)>1) num_threads(RuntimeParallel::workers(work))
+                    for (int o = 0; o < out_f; ++o) {
+                        for (int tile_idx = 0; tile_idx < output_tiles; ++tile_idx) {
+                            float* row_gw = layer.grad_weights.data() + static_cast<size_t>(o) * in_f;
+                            const int base = tile_idx * tile;
+                            alignas(64) float sums[tile] = {};
+                            const int count = std::min(tile, in_f - base);
+                            for (int b = 0; b < batch; ++b) {
+                                const float g = go[static_cast<size_t>(b) * out_f + o];
+                                const float* row_x = x.data() + static_cast<size_t>(b) * in_f + base;
+                                #pragma omp simd
+                                for (int i = 0; i < count; ++i) sums[i] += g * row_x[i];
+                            }
                             #pragma omp simd
-                            for (int i = 0; i < count; ++i) sums[i] += g * row_x[i];
+                            for (int i = 0; i < count; ++i) row_gw[base + i] += sums[i];
                         }
-                        #pragma omp simd
-                        for (int i = 0; i < count; ++i) row_gw[base + i] += sums[i];
                     }
-                }
                 }
 
                 if (layer.use_bias && layer.getWeightsSize() >= w_elems + static_cast<size_t>(out_f)) {
@@ -3616,18 +3625,42 @@ inline bool cpu_backward_layer(
                 const int head_dim = embed_dim / num_heads;
                 const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-                std::vector<float> qkv(static_cast<size_t>(seq_len) * static_cast<size_t>(3 * embed_dim), 0.0f);
-                for (int i = 0; i < seq_len; ++i) {
-                    const float* xrow = &x[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    float* yrow = &qkv[static_cast<size_t>(i) * static_cast<size_t>(3 * embed_dim)];
-                    for (int n = 0; n < 3 * embed_dim; ++n) {
-                        float sum = 0.0f;
-                        for (int k = 0; k < embed_dim; ++k) {
-                            sum += xrow[static_cast<size_t>(k)] *
-                                   Wqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
-                                         static_cast<size_t>(k)];
+                const bool optimized=RuntimeLayerOps::hardwareAccelerationEnabled();
+                const size_t tokens = static_cast<size_t>(seq_len) * embed_dim;
+                const size_t scores = static_cast<size_t>(seq_len) * seq_len;
+                const size_t probabilityCount=optimized?0:size_t(num_heads)*scores;
+                const size_t derivativeCount=optimized?0:scores;
+                RuntimeScratch::FloatArena workspace({3*tokens, probabilityCount,
+                    tokens, tokens, tokens, tokens, tokens, derivativeCount, derivativeCount, 3*tokens});
+                auto qkv = workspace.take(3*tokens);
+                auto P = workspace.take(probabilityCount);
+                auto attended = workspace.take(tokens);
+                auto dAtt = workspace.take(tokens);
+                auto dQ = workspace.take(tokens);
+                auto dK = workspace.take(tokens);
+                auto dV = workspace.take(tokens);
+                auto dP = workspace.take(derivativeCount);
+                auto dS = workspace.take(derivativeCount);
+                auto dqkv = workspace.take(3*tokens);
+                // Every other slice is overwritten before it is read. These
+                // gradients retain += accumulation and therefore start at zero.
+                if (!optimized) { dQ.fill(0.0f); dK.fill(0.0f); dV.fill(0.0f); }
+                if(optimized) {
+                    RuntimeSimd::matmulTranspose(qkv.data(),x.data(),Wqkv,seq_len,3*embed_dim,embed_dim,false,
+                        RuntimeParallel::workers(size_t(seq_len)*3*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < seq_len; ++i) {
+                        const float* xrow = &x[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        float* yrow = &qkv[static_cast<size_t>(i) * static_cast<size_t>(3 * embed_dim)];
+                        for (int n = 0; n < 3 * embed_dim; ++n) {
+                            float sum = 0.0f;
+                            for (int k = 0; k < embed_dim; ++k) {
+                                sum += xrow[static_cast<size_t>(k)] *
+                                       Wqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
+                                             static_cast<size_t>(k)];
+                            }
+                            yrow[static_cast<size_t>(n)] = sum;
                         }
-                        yrow[static_cast<size_t>(n)] = sum;
                     }
                 }
 
@@ -3641,59 +3674,70 @@ inline bool cpu_backward_layer(
                     return qkv[static_cast<size_t>(t) * static_cast<size_t>(3 * embed_dim) + static_cast<size_t>(2 * embed_dim + d)];
                 };
 
-                std::vector<float> P(static_cast<size_t>(num_heads) * static_cast<size_t>(seq_len) * static_cast<size_t>(seq_len), 0.0f);
-                std::vector<float> attended(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
 
-                for (int h = 0; h < num_heads; ++h) {
-                    const int hoff = h * head_dim;
-                    for (int i = 0; i < seq_len; ++i) {
-                        float maxv = -1e30f;
-                        for (int j = 0; j < seq_len; ++j) {
-                            float s = -1e9f;
-                            if (!(causal && j > i)) {
-                                float dot = 0.0f;
-                                for (int k = 0; k < head_dim; ++k) dot += q_at(i, hoff + k) * k_at(j, hoff + k);
-                                s = dot * scale;
+                if (!optimized) {
+                    for (int h = 0; h < num_heads; ++h) {
+                        const int hoff = h * head_dim;
+                        for (int i = 0; i < seq_len; ++i) {
+                            float maxv = -1e30f;
+                            for (int j = 0; j < seq_len; ++j) {
+                                float s = -1e9f;
+                                if (!(causal && j > i)) {
+                                    float dot = 0.0f;
+                                    for (int k = 0; k < head_dim; ++k) dot += q_at(i, hoff + k) * k_at(j, hoff + k);
+                                    s = dot * scale;
+                                }
+                                const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
+                                P[idx] = s;
+                                if (s > maxv) maxv = s;
                             }
-                            const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
-                            P[idx] = s;
-                            if (s > maxv) maxv = s;
-                        }
-                        float sum = 0.0f;
-                        for (int j = 0; j < seq_len; ++j) {
-                            const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
-                            const float e = std::exp(P[idx] - maxv);
-                            P[idx] = e;
-                            sum += e;
-                        }
-                        const float inv = 1.0f / (sum + 1e-9f);
-                        for (int j = 0; j < seq_len; ++j) {
-                            const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
-                            P[idx] *= inv;
-                        }
-
-                        for (int k = 0; k < head_dim; ++k) {
-                            float acc = 0.0f;
+                            float sum = 0.0f;
                             for (int j = 0; j < seq_len; ++j) {
                                 const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
-                                acc += P[idx] * v_at(j, hoff + k);
+                                const float e = std::exp(P[idx] - maxv);
+                                P[idx] = e;
+                                sum += e;
                             }
-                            attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] = acc;
+                            const float inv = 1.0f / (sum + 1e-9f);
+                            for (int j = 0; j < seq_len; ++j) {
+                                const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
+                                P[idx] *= inv;
+                            }
+
+                            for (int k = 0; k < head_dim; ++k) {
+                                float acc = 0.0f;
+                                for (int j = 0; j < seq_len; ++j) {
+                                    const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
+                                    acc += P[idx] * v_at(j, hoff + k);
+                                }
+                                attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] = acc;
+                            }
                         }
                     }
                 }
 
-                std::vector<float> dAtt(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
-                for (int i = 0; i < seq_len; ++i) {
-                    const float* dy = &grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    float* da = &dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    for (int k = 0; k < embed_dim; ++k) {
-                        float sum = 0.0f;
-                        for (int n = 0; n < embed_dim; ++n) {
-                            sum += dy[static_cast<size_t>(n)] * Wout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                if(optimized) {
+                    RuntimeSimd::matmulTranspose(dAtt.data(),grad_out.data(),Wout,seq_len,embed_dim,embed_dim,false,
+                        RuntimeParallel::workers(size_t(seq_len)*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < seq_len; ++i) {
+                        const float* dy = &grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        float* da = &dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        for (int k = 0; k < embed_dim; ++k) {
+                            float sum = 0.0f;
+                            for (int n = 0; n < embed_dim; ++n) {
+                                sum += dy[static_cast<size_t>(n)] * Wout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                            }
+                            da[static_cast<size_t>(k)] = sum;
                         }
-                        da[static_cast<size_t>(k)] = sum;
                     }
+                }
+
+                if (optimized) {
+                    CpuAttention::backward(qkv.data(),qkv.data()+embed_dim,qkv.data()+2*embed_dim,
+                        3*size_t(embed_dim),3*size_t(embed_dim),dAtt.data(),attended.data(),
+                        dQ.data(),dK.data(),dV.data(),seq_len,seq_len,embed_dim,num_heads,causal,
+                        RuntimeParallel::workers(size_t(seq_len)*seq_len*embed_dim));
                 }
 
                 if (layer.grad_weights.size() != layer.getWeightsSize()) {
@@ -3703,83 +3747,85 @@ inline bool cpu_backward_layer(
                 float* gradWqkv = layer.grad_weights.data();
                 float* gradWout = layer.grad_weights.data() + static_cast<size_t>(qkv_size);
 
-                for (int k = 0; k < embed_dim; ++k) {
-                    for (int n = 0; n < embed_dim; ++n) {
-                        float sum = 0.0f;
-                        for (int i = 0; i < seq_len; ++i) {
-                            sum += attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
-                                 * grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                if(optimized) {
+                    RuntimeSimd::matmulStrided(gradWout,attended.data(),grad_out.data(),embed_dim,embed_dim,seq_len,
+                        1,embed_dim,embed_dim,1,embed_dim,true,false,
+                        RuntimeParallel::workers(size_t(seq_len)*embed_dim*embed_dim));
+                } else {
+                    for (int k = 0; k < embed_dim; ++k) {
+                        for (int n = 0; n < embed_dim; ++n) {
+                            float sum = 0.0f;
+                            for (int i = 0; i < seq_len; ++i) {
+                                sum += attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
+                                     * grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                            }
+                            gradWout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)] += sum;
                         }
-                        gradWout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)] += sum;
                     }
                 }
 
-                std::vector<float> dQ(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
-                std::vector<float> dK(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
-                std::vector<float> dV(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
 
-                for (int h = 0; h < num_heads; ++h) {
-                    const int hoff = h * head_dim;
+                if (!optimized) {
+                    for (int h = 0; h < num_heads; ++h) {
+                        const int hoff = h * head_dim;
 
-                    for (int j = 0; j < seq_len; ++j) {
-                        for (int k = 0; k < head_dim; ++k) {
-                            float sum = 0.0f;
-                            for (int i = 0; i < seq_len; ++i) {
-                                const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
-                                sum += P[idx] * dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)];
-                            }
-                            dV[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum;
-                        }
-                    }
-
-                    std::vector<float> dP(static_cast<size_t>(seq_len) * static_cast<size_t>(seq_len), 0.0f);
-                    for (int i = 0; i < seq_len; ++i) {
                         for (int j = 0; j < seq_len; ++j) {
-                            float sum = 0.0f;
                             for (int k = 0; k < head_dim; ++k) {
-                                sum += dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] * v_at(j, hoff + k);
+                                float sum = 0.0f;
+                                for (int i = 0; i < seq_len; ++i) {
+                                    const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len) + static_cast<size_t>(j);
+                                    sum += P[idx] * dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)];
+                                }
+                                dV[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum;
                             }
-                            dP[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] = sum;
                         }
-                    }
 
-                    std::vector<float> dS(static_cast<size_t>(seq_len) * static_cast<size_t>(seq_len), 0.0f);
-                    for (int i = 0; i < seq_len; ++i) {
-                        const float* p_row = &P[(static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len)];
-                        const float* dp_row = &dP[static_cast<size_t>(i) * static_cast<size_t>(seq_len)];
-                        float dot = 0.0f;
-                        for (int j = 0; j < seq_len; ++j) dot += dp_row[j] * p_row[j];
-                        for (int j = 0; j < seq_len; ++j) {
-                            if (causal && j > i) {
-                                dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] = 0.0f;
-                                continue;
-                            }
-                            dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] = (dp_row[j] - dot) * p_row[j];
-                        }
-                    }
-
-                    for (int i = 0; i < seq_len; ++i) {
-                        for (int k = 0; k < head_dim; ++k) {
-                            float sum = 0.0f;
+                        for (int i = 0; i < seq_len; ++i) {
                             for (int j = 0; j < seq_len; ++j) {
-                                sum += dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] * k_at(j, hoff + k);
+                                float sum = 0.0f;
+                                for (int k = 0; k < head_dim; ++k) {
+                                    sum += dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] * v_at(j, hoff + k);
+                                }
+                                dP[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] = sum;
                             }
-                            dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
                         }
-                    }
 
-                    for (int j = 0; j < seq_len; ++j) {
-                        for (int k = 0; k < head_dim; ++k) {
-                            float sum = 0.0f;
-                            for (int i = 0; i < seq_len; ++i) {
-                                sum += dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] * q_at(i, hoff + k);
+                        for (int i = 0; i < seq_len; ++i) {
+                            const float* p_row = &P[(static_cast<size_t>(h) * static_cast<size_t>(seq_len) + static_cast<size_t>(i)) * static_cast<size_t>(seq_len)];
+                            const float* dp_row = &dP[static_cast<size_t>(i) * static_cast<size_t>(seq_len)];
+                            float dot = 0.0f;
+                            for (int j = 0; j < seq_len; ++j) dot += dp_row[j] * p_row[j];
+                            for (int j = 0; j < seq_len; ++j) {
+                                if (causal && j > i) {
+                                    dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] = 0.0f;
+                                    continue;
+                                }
+                                dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] = (dp_row[j] - dot) * p_row[j];
                             }
-                            dK[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
+                        }
+
+                        for (int i = 0; i < seq_len; ++i) {
+                            for (int k = 0; k < head_dim; ++k) {
+                                float sum = 0.0f;
+                                for (int j = 0; j < seq_len; ++j) {
+                                    sum += dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] * k_at(j, hoff + k);
+                                }
+                                dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
+                            }
+                        }
+
+                        for (int j = 0; j < seq_len; ++j) {
+                            for (int k = 0; k < head_dim; ++k) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < seq_len; ++i) {
+                                    sum += dS[static_cast<size_t>(i) * static_cast<size_t>(seq_len) + static_cast<size_t>(j)] * q_at(i, hoff + k);
+                                }
+                                dK[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
+                            }
                         }
                     }
                 }
 
-                std::vector<float> dqkv(static_cast<size_t>(seq_len) * static_cast<size_t>(3 * embed_dim), 0.0f);
                 for (int t = 0; t < seq_len; ++t) {
                     float* row = &dqkv[static_cast<size_t>(t) * static_cast<size_t>(3 * embed_dim)];
                     for (int d = 0; d < embed_dim; ++d) {
@@ -3789,31 +3835,42 @@ inline bool cpu_backward_layer(
                     }
                 }
 
-                for (int n = 0; n < 3 * embed_dim; ++n) {
-                    for (int k = 0; k < embed_dim; ++k) {
-                        float sum = 0.0f;
-                        for (int i = 0; i < seq_len; ++i) {
-                            sum += x[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
-                                 * dqkv[static_cast<size_t>(i) * static_cast<size_t>(3 * embed_dim) + static_cast<size_t>(n)];
+                if(optimized) {
+                    RuntimeSimd::matmulStrided(gradWqkv,dqkv.data(),x.data(),3*embed_dim,embed_dim,seq_len,
+                        1,3*embed_dim,embed_dim,1,embed_dim,true,false,
+                        RuntimeParallel::workers(size_t(seq_len)*3*embed_dim*embed_dim));
+                } else {
+                    for (int n = 0; n < 3 * embed_dim; ++n) {
+                        for (int k = 0; k < embed_dim; ++k) {
+                            float sum = 0.0f;
+                            for (int i = 0; i < seq_len; ++i) {
+                                sum += x[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
+                                     * dqkv[static_cast<size_t>(i) * static_cast<size_t>(3 * embed_dim) + static_cast<size_t>(n)];
+                            }
+                            gradWqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
+                                     static_cast<size_t>(k)] += sum;
                         }
-                        gradWqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
-                                 static_cast<size_t>(k)] += sum;
                     }
                 }
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(static_cast<size_t>(seq_len) * static_cast<size_t>(embed_dim), 0.0f);
-                for (int i = 0; i < seq_len; ++i) {
-                    const float* drow = &dqkv[static_cast<size_t>(i) * static_cast<size_t>(3 * embed_dim)];
-                    float* xrow = &grad_inputs[0][static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    for (int k = 0; k < embed_dim; ++k) {
-                        float sum = 0.0f;
-                        for (int n = 0; n < 3 * embed_dim; ++n) {
-                            sum += drow[n] *
-                                   Wqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
-                                         static_cast<size_t>(k)];
+                if(optimized) {
+                    RuntimeSimd::matmul(grad_inputs[0].data(),dqkv.data(),Wqkv,seq_len,embed_dim,3*embed_dim,false,false,
+                        RuntimeParallel::workers(size_t(seq_len)*3*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < seq_len; ++i) {
+                        const float* drow = &dqkv[static_cast<size_t>(i) * static_cast<size_t>(3 * embed_dim)];
+                        float* xrow = &grad_inputs[0][static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        for (int k = 0; k < embed_dim; ++k) {
+                            float sum = 0.0f;
+                            for (int n = 0; n < 3 * embed_dim; ++n) {
+                                sum += drow[n] *
+                                       Wqkv[static_cast<size_t>(n) * static_cast<size_t>(embed_dim) +
+                                             static_cast<size_t>(k)];
+                            }
+                            xrow[static_cast<size_t>(k)] = sum;
                         }
-                        xrow[static_cast<size_t>(k)] = sum;
                     }
                 }
                 return true;
@@ -3895,23 +3952,26 @@ inline bool cpu_backward_layer(
                 const int head_dim = embed_dim / num_heads;
                 const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
+                const bool optimized=RuntimeLayerOps::hardwareAccelerationEnabled();
+                const size_t probabilityCount=optimized?0:size_t(num_heads)*query_len*kv_len;
+                const size_t derivativeCount=optimized?0:size_t(query_len)*kv_len;
                 RuntimeScratch::FloatArena workspace({
                     static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
                     static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim),
-                    static_cast<size_t>(num_heads) * static_cast<size_t>(query_len) * static_cast<size_t>(kv_len),
+                    probabilityCount,
                     static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
                     static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
                     static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
                     static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim),
                     static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim),
-                    static_cast<size_t>(query_len) * static_cast<size_t>(kv_len),
-                    static_cast<size_t>(query_len) * static_cast<size_t>(kv_len),
+                    derivativeCount,
+                    derivativeCount,
                     static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim)});
                 auto Q_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
                 float* MIMIR_CPU_SCRATCH_RESTRICT Q=Q_slice.data();
                 auto KV_slice=workspace.take(static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim));
                 float* MIMIR_CPU_SCRATCH_RESTRICT KV=KV_slice.data();
-                auto P_slice=workspace.take(static_cast<size_t>(num_heads) * static_cast<size_t>(query_len) * static_cast<size_t>(kv_len));
+                auto P_slice=workspace.take(probabilityCount);
                 float* MIMIR_CPU_SCRATCH_RESTRICT P=P_slice.data();
                 auto attended_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
                 float* MIMIR_CPU_SCRATCH_RESTRICT attended=attended_slice.data();
@@ -3923,30 +3983,40 @@ inline bool cpu_backward_layer(
                 float* MIMIR_CPU_SCRATCH_RESTRICT dK=dK_slice.data();
                 auto dV_slice=workspace.take(static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim));
                 float* MIMIR_CPU_SCRATCH_RESTRICT dV=dV_slice.data();
-                auto dP_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(kv_len));
+                auto dP_slice=workspace.take(derivativeCount);
                 float* MIMIR_CPU_SCRATCH_RESTRICT dP=dP_slice.data();
-                auto dS_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(kv_len));
+                auto dS_slice=workspace.take(derivativeCount);
                 float* MIMIR_CPU_SCRATCH_RESTRICT dS=dS_slice.data();
                 auto dKV_slice=workspace.take(static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim));
                 float* MIMIR_CPU_SCRATCH_RESTRICT dKV=dKV_slice.data();
                 std::fill_n(Q,Q_slice.size(),0.0f);
                 std::fill_n(KV,KV_slice.size(),0.0f);
-                for (int i = 0; i < query_len; ++i) {
-                    const float* xrow = &q_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    float* yrow = &Q[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    for (int n = 0; n < embed_dim; ++n) {
-                        float sum = 0.0f;
-                        for (int k = 0; k < embed_dim; ++k) sum += xrow[k] * Wq[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
-                        yrow[n] = sum;
+                if(optimized) {
+                    RuntimeSimd::matmul(Q,q_in.data(),Wq,query_len,embed_dim,embed_dim,false,false,
+                        RuntimeParallel::workers(size_t(query_len)*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < query_len; ++i) {
+                        const float* xrow = &q_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        float* yrow = &Q[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        for (int n = 0; n < embed_dim; ++n) {
+                            float sum = 0.0f;
+                            for (int k = 0; k < embed_dim; ++k) sum += xrow[k] * Wq[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                            yrow[n] = sum;
+                        }
                     }
                 }
-                for (int i = 0; i < kv_len; ++i) {
-                    const float* xrow = &kv_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    float* yrow = &KV[static_cast<size_t>(i) * static_cast<size_t>(2 * embed_dim)];
-                    for (int n = 0; n < 2 * embed_dim; ++n) {
-                        float sum = 0.0f;
-                        for (int k = 0; k < embed_dim; ++k) sum += xrow[k] * Wkv[static_cast<size_t>(k) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)];
-                        yrow[n] = sum;
+                if(optimized) {
+                    RuntimeSimd::matmul(KV,kv_in.data(),Wkv,kv_len,2*embed_dim,embed_dim,false,false,
+                        RuntimeParallel::workers(size_t(kv_len)*2*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < kv_len; ++i) {
+                        const float* xrow = &kv_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        float* yrow = &KV[static_cast<size_t>(i) * static_cast<size_t>(2 * embed_dim)];
+                        for (int n = 0; n < 2 * embed_dim; ++n) {
+                            float sum = 0.0f;
+                            for (int k = 0; k < embed_dim; ++k) sum += xrow[k] * Wkv[static_cast<size_t>(k) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)];
+                            yrow[n] = sum;
+                        }
                     }
                 }
 
@@ -3954,135 +4024,162 @@ inline bool cpu_backward_layer(
                 auto k_at = [&](int t, int d) -> float { return KV[static_cast<size_t>(t) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(d)]; };
                 auto v_at = [&](int t, int d) -> float { return KV[static_cast<size_t>(t) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(embed_dim + d)]; };
 
-                std::fill_n(P,P_slice.size(),0.0f);
-                std::fill_n(attended,attended_slice.size(),0.0f);
-                for (int h = 0; h < num_heads; ++h) {
-                    const int hoff = h * head_dim;
-                    for (int i = 0; i < query_len; ++i) {
-                        float maxv = -1e30f;
-                        for (int j = 0; j < kv_len; ++j) {
-                            float s = -1e9f;
-                            if (!(causal && j > i)) {
-                                float dot = 0.0f;
-                                for (int k = 0; k < head_dim; ++k) dot += q_at(i, hoff + k) * k_at(j, hoff + k);
-                                s = dot * scale;
+                if (!optimized) {
+                    std::fill_n(P,P_slice.size(),0.0f);
+                    std::fill_n(attended,attended_slice.size(),0.0f);
+                    for (int h = 0; h < num_heads; ++h) {
+                        const int hoff = h * head_dim;
+                        for (int i = 0; i < query_len; ++i) {
+                            float maxv = -1e30f;
+                            for (int j = 0; j < kv_len; ++j) {
+                                float s = -1e9f;
+                                if (!(causal && j > i)) {
+                                    float dot = 0.0f;
+                                    for (int k = 0; k < head_dim; ++k) dot += q_at(i, hoff + k) * k_at(j, hoff + k);
+                                    s = dot * scale;
+                                }
+                                const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
+                                P[idx] = s;
+                                if (s > maxv) maxv = s;
                             }
-                            const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
-                            P[idx] = s;
-                            if (s > maxv) maxv = s;
-                        }
-                        float sum = 0.0f;
-                        for (int j = 0; j < kv_len; ++j) {
-                            const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
-                            const float e = std::exp(P[idx] - maxv);
-                            P[idx] = e;
-                            sum += e;
-                        }
-                        const float inv = 1.0f / (sum + 1e-9f);
-                        for (int j = 0; j < kv_len; ++j) {
-                            const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
-                            P[idx] *= inv;
-                        }
-                        for (int k = 0; k < head_dim; ++k) {
-                            float acc = 0.0f;
+                            float sum = 0.0f;
                             for (int j = 0; j < kv_len; ++j) {
                                 const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
-                                acc += P[idx] * v_at(j, hoff + k);
+                                const float e = std::exp(P[idx] - maxv);
+                                P[idx] = e;
+                                sum += e;
                             }
-                            attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] = acc;
+                            const float inv = 1.0f / (sum + 1e-9f);
+                            for (int j = 0; j < kv_len; ++j) {
+                                const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
+                                P[idx] *= inv;
+                            }
+                            for (int k = 0; k < head_dim; ++k) {
+                                float acc = 0.0f;
+                                for (int j = 0; j < kv_len; ++j) {
+                                    const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
+                                    acc += P[idx] * v_at(j, hoff + k);
+                                }
+                                attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] = acc;
+                            }
                         }
                     }
                 }
 
                 std::fill_n(dAtt,dAtt_slice.size(),0.0f);
-                for (int i = 0; i < query_len; ++i) {
-                    const float* dy = &grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    float* da = &dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    for (int k = 0; k < embed_dim; ++k) {
-                        float sum = 0.0f;
-                        for (int n = 0; n < embed_dim; ++n) sum += dy[n] * Wout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
-                        da[k] = sum;
-                    }
-                }
-
-                for (int k = 0; k < embed_dim; ++k) {
-                    for (int n = 0; n < embed_dim; ++n) {
-                        float sum = 0.0f;
-                        for (int i = 0; i < query_len; ++i) {
-                            sum += attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
-                                 * grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                if(optimized) {
+                    RuntimeSimd::matmulTranspose(dAtt,grad_out.data(),Wout,query_len,embed_dim,embed_dim,false,
+                        RuntimeParallel::workers(size_t(query_len)*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < query_len; ++i) {
+                        const float* dy = &grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        float* da = &dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        for (int k = 0; k < embed_dim; ++k) {
+                            float sum = 0.0f;
+                            for (int n = 0; n < embed_dim; ++n) sum += dy[n] * Wout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                            da[k] = sum;
                         }
-                        gWout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)] += sum;
                     }
                 }
 
-                std::fill_n(dQ,dQ_slice.size(),0.0f);
-                std::fill_n(dK,dK_slice.size(),0.0f);
-                std::fill_n(dV,dV_slice.size(),0.0f);
+                if (optimized) {
+                    CpuAttention::backward(Q,KV,KV+embed_dim,embed_dim,2*size_t(embed_dim),
+                        dAtt,attended,dQ,dK,dV,query_len,kv_len,embed_dim,num_heads,causal,
+                        RuntimeParallel::workers(size_t(query_len)*kv_len*embed_dim));
+                }
 
-                for (int h = 0; h < num_heads; ++h) {
-                    const int hoff = h * head_dim;
-                    for (int j = 0; j < kv_len; ++j) {
-                        for (int k = 0; k < head_dim; ++k) {
+                if(optimized) {
+                    RuntimeSimd::matmulStrided(gWout,attended,grad_out.data(),embed_dim,embed_dim,query_len,
+                        1,embed_dim,embed_dim,1,embed_dim,true,false,
+                        RuntimeParallel::workers(size_t(query_len)*embed_dim*embed_dim));
+                } else {
+                    for (int k = 0; k < embed_dim; ++k) {
+                        for (int n = 0; n < embed_dim; ++n) {
                             float sum = 0.0f;
                             for (int i = 0; i < query_len; ++i) {
-                                const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
-                                sum += P[idx] * dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)];
+                                sum += attended[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
+                                     * grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
                             }
-                            dV[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum;
-                        }
-                    }
-
-                    std::fill_n(dP,dP_slice.size(),0.0f);
-                    for (int i = 0; i < query_len; ++i) {
-                        for (int j = 0; j < kv_len; ++j) {
-                            float sum = 0.0f;
-                            for (int k = 0; k < head_dim; ++k) {
-                                sum += dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] * v_at(j, hoff + k);
-                            }
-                            dP[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] = sum;
-                        }
-                    }
-
-                    std::fill_n(dS,dS_slice.size(),0.0f);
-                    for (int i = 0; i < query_len; ++i) {
-                        const float* p_row = &P[(static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len)];
-                        const float* dp_row = &dP[static_cast<size_t>(i) * static_cast<size_t>(kv_len)];
-                        float dot = 0.0f;
-                        for (int j = 0; j < kv_len; ++j) dot += dp_row[j] * p_row[j];
-                        for (int j = 0; j < kv_len; ++j) {
-                            if (causal && j > i) {
-                                dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] = 0.0f;
-                                continue;
-                            }
-                            dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] = (dp_row[j] - dot) * p_row[j];
-                        }
-                    }
-
-                    for (int i = 0; i < query_len; ++i) {
-                        for (int k = 0; k < head_dim; ++k) {
-                            float sum = 0.0f;
-                            for (int j = 0; j < kv_len; ++j) sum += dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] * k_at(j, hoff + k);
-                            dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
-                        }
-                    }
-                    for (int j = 0; j < kv_len; ++j) {
-                        for (int k = 0; k < head_dim; ++k) {
-                            float sum = 0.0f;
-                            for (int i = 0; i < query_len; ++i) sum += dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] * q_at(i, hoff + k);
-                            dK[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
+                            gWout[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)] += sum;
                         }
                     }
                 }
 
-                for (int k = 0; k < embed_dim; ++k) {
-                    for (int n = 0; n < embed_dim; ++n) {
-                        float sum = 0.0f;
-                        for (int i = 0; i < query_len; ++i) {
-                            sum += q_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
-                                 * dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                if (!optimized) {
+                    std::fill_n(dQ,dQ_slice.size(),0.0f);
+                    std::fill_n(dK,dK_slice.size(),0.0f);
+                    std::fill_n(dV,dV_slice.size(),0.0f);
+
+                    for (int h = 0; h < num_heads; ++h) {
+                        const int hoff = h * head_dim;
+                        for (int j = 0; j < kv_len; ++j) {
+                            for (int k = 0; k < head_dim; ++k) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < query_len; ++i) {
+                                    const size_t idx = (static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len) + static_cast<size_t>(j);
+                                    sum += P[idx] * dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)];
+                                }
+                                dV[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum;
+                            }
                         }
-                        gWq[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)] += sum;
+
+                        std::fill_n(dP,dP_slice.size(),0.0f);
+                        for (int i = 0; i < query_len; ++i) {
+                            for (int j = 0; j < kv_len; ++j) {
+                                float sum = 0.0f;
+                                for (int k = 0; k < head_dim; ++k) {
+                                    sum += dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] * v_at(j, hoff + k);
+                                }
+                                dP[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] = sum;
+                            }
+                        }
+
+                        std::fill_n(dS,dS_slice.size(),0.0f);
+                        for (int i = 0; i < query_len; ++i) {
+                            const float* p_row = &P[(static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len)];
+                            const float* dp_row = &dP[static_cast<size_t>(i) * static_cast<size_t>(kv_len)];
+                            float dot = 0.0f;
+                            for (int j = 0; j < kv_len; ++j) dot += dp_row[j] * p_row[j];
+                            for (int j = 0; j < kv_len; ++j) {
+                                if (causal && j > i) {
+                                    dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] = 0.0f;
+                                    continue;
+                                }
+                                dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] = (dp_row[j] - dot) * p_row[j];
+                            }
+                        }
+
+                        for (int i = 0; i < query_len; ++i) {
+                            for (int k = 0; k < head_dim; ++k) {
+                                float sum = 0.0f;
+                                for (int j = 0; j < kv_len; ++j) sum += dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] * k_at(j, hoff + k);
+                                dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
+                            }
+                        }
+                        for (int j = 0; j < kv_len; ++j) {
+                            for (int k = 0; k < head_dim; ++k) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < query_len; ++i) sum += dS[static_cast<size_t>(i) * static_cast<size_t>(kv_len) + static_cast<size_t>(j)] * q_at(i, hoff + k);
+                                dK[static_cast<size_t>(j) * static_cast<size_t>(embed_dim) + static_cast<size_t>(hoff + k)] += sum * scale;
+                            }
+                        }
+                    }
+                }
+
+                if(optimized) {
+                    RuntimeSimd::matmulStrided(gWq,q_in.data(),dQ,embed_dim,embed_dim,query_len,
+                        1,embed_dim,embed_dim,1,embed_dim,true,false,
+                        RuntimeParallel::workers(size_t(query_len)*embed_dim*embed_dim));
+                } else {
+                    for (int k = 0; k < embed_dim; ++k) {
+                        for (int n = 0; n < embed_dim; ++n) {
+                            float sum = 0.0f;
+                            for (int i = 0; i < query_len; ++i) {
+                                sum += q_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
+                                     * dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                            }
+                            gWq[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)] += sum;
+                        }
                     }
                 }
 
@@ -4094,14 +4191,20 @@ inline bool cpu_backward_layer(
                         row[embed_dim + d] = dV[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(d)];
                     }
                 }
-                for (int k = 0; k < embed_dim; ++k) {
-                    for (int n = 0; n < 2 * embed_dim; ++n) {
-                        float sum = 0.0f;
-                        for (int i = 0; i < kv_len; ++i) {
-                            sum += kv_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
-                                 * dKV[static_cast<size_t>(i) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)];
+                if(optimized) {
+                    RuntimeSimd::matmulStrided(gWkv,kv_in.data(),dKV,embed_dim,2*embed_dim,kv_len,
+                        1,embed_dim,2*embed_dim,1,2*embed_dim,true,false,
+                        RuntimeParallel::workers(size_t(kv_len)*2*embed_dim*embed_dim));
+                } else {
+                    for (int k = 0; k < embed_dim; ++k) {
+                        for (int n = 0; n < 2 * embed_dim; ++n) {
+                            float sum = 0.0f;
+                            for (int i = 0; i < kv_len; ++i) {
+                                sum += kv_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim) + static_cast<size_t>(k)]
+                                     * dKV[static_cast<size_t>(i) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)];
+                            }
+                            gWkv[static_cast<size_t>(k) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)] += sum;
                         }
-                        gWkv[static_cast<size_t>(k) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)] += sum;
                     }
                 }
 
@@ -4109,22 +4212,32 @@ inline bool cpu_backward_layer(
                 grad_inputs[0].assign(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
                 grad_inputs[1].assign(static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim), 0.0f);
 
-                for (int i = 0; i < query_len; ++i) {
-                    const float* drow = &dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    float* xrow = &grad_inputs[0][static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    for (int k = 0; k < embed_dim; ++k) {
-                        float sum = 0.0f;
-                        for (int n = 0; n < embed_dim; ++n) sum += drow[n] * Wq[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
-                        xrow[k] = sum;
+                if(optimized) {
+                    RuntimeSimd::matmulTranspose(grad_inputs[0].data(),dQ,Wq,query_len,embed_dim,embed_dim,false,
+                        RuntimeParallel::workers(size_t(query_len)*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < query_len; ++i) {
+                        const float* drow = &dQ[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        float* xrow = &grad_inputs[0][static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        for (int k = 0; k < embed_dim; ++k) {
+                            float sum = 0.0f;
+                            for (int n = 0; n < embed_dim; ++n) sum += drow[n] * Wq[static_cast<size_t>(k) * static_cast<size_t>(embed_dim) + static_cast<size_t>(n)];
+                            xrow[k] = sum;
+                        }
                     }
                 }
-                for (int i = 0; i < kv_len; ++i) {
-                    const float* drow = &dKV[static_cast<size_t>(i) * static_cast<size_t>(2 * embed_dim)];
-                    float* xrow = &grad_inputs[1][static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
-                    for (int k = 0; k < embed_dim; ++k) {
-                        float sum = 0.0f;
-                        for (int n = 0; n < 2 * embed_dim; ++n) sum += drow[n] * Wkv[static_cast<size_t>(k) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)];
-                        xrow[k] = sum;
+                if(optimized) {
+                    RuntimeSimd::matmulTranspose(grad_inputs[1].data(),dKV,Wkv,kv_len,embed_dim,2*embed_dim,false,
+                        RuntimeParallel::workers(size_t(kv_len)*2*embed_dim*embed_dim));
+                } else {
+                    for (int i = 0; i < kv_len; ++i) {
+                        const float* drow = &dKV[static_cast<size_t>(i) * static_cast<size_t>(2 * embed_dim)];
+                        float* xrow = &grad_inputs[1][static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
+                        for (int k = 0; k < embed_dim; ++k) {
+                            float sum = 0.0f;
+                            for (int n = 0; n < 2 * embed_dim; ++n) sum += drow[n] * Wkv[static_cast<size_t>(k) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(n)];
+                            xrow[k] = sum;
+                        }
                     }
                 }
                 return true;

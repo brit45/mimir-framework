@@ -122,7 +122,7 @@ struct RocmRuntime::Impl {
         }
     };
 
-    // Scratch is shared by consecutive Linear calls, never by tensor identity:
+    // Scratch is shared by Linear and pointwise calls, never by tensor identity:
     // parameters are uploaded every time, including external in-place updates.
     std::array<DeviceBuf, 5> linear_scratch;
     std::mutex linear_scratch_mutex;
@@ -310,92 +310,56 @@ static void rocm_apply_binary_host(const float* a, const float* b, float* output
     }
 }
 
-static bool rocm_run_unary(const std::vector<float>& input, std::vector<float>& output, RocmUnaryOp op, float alpha) {
+// The runtime owns these buffers; the lock protects reuse across callers.
+// Inputs/parameters are uploaded on every call, including in-place edits.
+template<class Scratch>
+static bool rocm_run_unary(Scratch& scratch, std::mutex& mutex,
+    const std::vector<float>& input, std::vector<float>& output, RocmUnaryOp op, float alpha) {
     const int n = static_cast<int>(input.size());
     if (n <= 0) return false;
-
-    float* d_in = nullptr;
-    float* d_out = nullptr;
-    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
-
-    if (hipMalloc(&d_in, bytes) != hipSuccess) return false;
-    if (hipMalloc(&d_out, bytes) != hipSuccess) {
-        hipFree(d_in);
-        return false;
-    }
-
-    bool ok = true;
-    if (hipMemcpy(d_in, input.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
-
 #if defined(__HIPCC__) || defined(__HIP_PLATFORM_HCC__)
-    if (ok) {
-        const int threads = 256;
-        const int blocks = (n + threads - 1) / threads;
-        hipLaunchKernelGGL(rocm_unary_kernel, dim3(blocks), dim3(threads), 0, 0, d_in, d_out, n, static_cast<int>(op), alpha);
-        if (hipGetLastError() != hipSuccess || hipDeviceSynchronize() != hipSuccess) ok = false;
-    }
-
-    if (ok) {
-        output.resize(static_cast<size_t>(n));
-        if (hipMemcpy(output.data(), d_out, bytes, hipMemcpyDeviceToHost) != hipSuccess) ok = false;
-    }
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& in = scratch[0]; auto& out = scratch[1];
+    const size_t bytes = input.size() * sizeof(float);
+    if (!in.alloc(bytes) || !out.alloc(bytes) || !in.copyFromHost(input.data(),bytes)) return false;
+    const int threads = 256;
+    hipLaunchKernelGGL(rocm_unary_kernel, dim3((n + threads - 1) / threads), dim3(threads),
+        0, 0, static_cast<float*>(in.ptr), static_cast<float*>(out.ptr), n, static_cast<int>(op), alpha);
+    if (hipGetLastError() != hipSuccess) return false;
+    output.resize(input.size());
+    // Blocking D2H already waits for the default-stream kernel to finish.
+    return out.copyToHost(output.data(),bytes);
 #else
-    output.resize(static_cast<size_t>(n));
+    (void)scratch; (void)mutex;
+    output.resize(input.size());
     rocm_apply_unary_host(input.data(), output.data(), n, op, alpha);
-    ok = true;
+    return true;
 #endif
-
-    static_cast<void>(hipFree(d_in));
-    static_cast<void>(hipFree(d_out));
-    return ok;
 }
 
-static bool rocm_run_binary(const std::vector<float>& a, const std::vector<float>& b, std::vector<float>& output, RocmBinaryOp op) {
+template<class Scratch>
+static bool rocm_run_binary(Scratch& scratch, std::mutex& mutex,
+    const std::vector<float>& a, const std::vector<float>& b, std::vector<float>& output, RocmBinaryOp op) {
     const int n = static_cast<int>(a.size());
     if (n <= 0 || a.size() != b.size()) return false;
-
-    float* d_a = nullptr;
-    float* d_b = nullptr;
-    float* d_out = nullptr;
-    const size_t bytes = static_cast<size_t>(n) * sizeof(float);
-
-    if (hipMalloc(&d_a, bytes) != hipSuccess) return false;
-    if (hipMalloc(&d_b, bytes) != hipSuccess) {
-        hipFree(d_a);
-        return false;
-    }
-    if (hipMalloc(&d_out, bytes) != hipSuccess) {
-        hipFree(d_a);
-        hipFree(d_b);
-        return false;
-    }
-
-    bool ok = true;
-    if (hipMemcpy(d_a, a.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
-    if (ok && hipMemcpy(d_b, b.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
-
 #if defined(__HIPCC__) || defined(__HIP_PLATFORM_HCC__)
-    if (ok) {
-        const int threads = 256;
-        const int blocks = (n + threads - 1) / threads;
-        hipLaunchKernelGGL(rocm_binary_kernel, dim3(blocks), dim3(threads), 0, 0, d_a, d_b, d_out, n, static_cast<int>(op));
-        if (hipGetLastError() != hipSuccess || hipDeviceSynchronize() != hipSuccess) ok = false;
-    }
-
-    if (ok) {
-        output.resize(static_cast<size_t>(n));
-        if (hipMemcpy(output.data(), d_out, bytes, hipMemcpyDeviceToHost) != hipSuccess) ok = false;
-    }
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& in_a = scratch[0]; auto& in_b = scratch[1]; auto& out = scratch[2];
+    const size_t bytes = a.size() * sizeof(float);
+    if (!in_a.alloc(bytes) || !in_b.alloc(bytes) || !out.alloc(bytes) ||
+        !in_a.copyFromHost(a.data(),bytes) || !in_b.copyFromHost(b.data(),bytes)) return false;
+    const int threads = 256;
+    hipLaunchKernelGGL(rocm_binary_kernel, dim3((n + threads - 1) / threads), dim3(threads),
+        0, 0, static_cast<float*>(in_a.ptr), static_cast<float*>(in_b.ptr), static_cast<float*>(out.ptr), n, static_cast<int>(op));
+    if (hipGetLastError() != hipSuccess) return false;
+    output.resize(a.size());
+    return out.copyToHost(output.data(),bytes);
 #else
-    output.resize(static_cast<size_t>(n));
+    (void)scratch; (void)mutex;
+    output.resize(a.size());
     rocm_apply_binary_host(a.data(), b.data(), output.data(), n, op);
-    ok = true;
+    return true;
 #endif
-
-    static_cast<void>(hipFree(d_a));
-    static_cast<void>(hipFree(d_b));
-    static_cast<void>(hipFree(d_out));
-    return ok;
 }
 #endif
 
@@ -985,7 +949,7 @@ bool RocmRuntime::forwardLayer(
             const RocmBinaryOp op = static_cast<RocmBinaryOp>(op_code);
 
             outputs.resize(1);
-            if (!rocm_run_binary(a, b, outputs[0], op)) {
+            if (!rocm_run_binary(impl_->linear_scratch, impl_->linear_scratch_mutex, a, b, outputs[0], op)) {
                 RuntimeLayerOps::binaryForwardHost(a, b, outputs[0], op_code);
             }
             return true;
@@ -1015,7 +979,7 @@ bool RocmRuntime::forwardLayer(
             const RocmUnaryOp op = static_cast<RocmUnaryOp>(op_code);
 
             outputs.resize(1);
-            if (!rocm_run_unary(in, outputs[0], op, alpha)) {
+            if (!rocm_run_unary(impl_->linear_scratch, impl_->linear_scratch_mutex, in, outputs[0], op, alpha)) {
                 RuntimeLayerOps::unaryForwardHost(in, outputs[0], op_code, alpha);
             }
             return true;

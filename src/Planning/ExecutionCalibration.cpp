@@ -5,7 +5,7 @@
 #include "MemoryGuard.hpp"
 #include "runtimes/LayerOps.hpp"
 #include "runtimes/AbstractRuntime.hpp"
-#include "runtimes/FiniteCheck.hpp"
+#include "runtimes/cpu/FiniteCheckDispatch.hpp"
 #include "runtimes/PrimerGeometry.hpp"
 #include "runtimes/cpu/SimdDispatch.hpp"
 #include <algorithm>
@@ -51,6 +51,9 @@ bool replayable(LayerType type){
     if (RuntimePrimer::supported(type)) return true;
     switch(type){
         case LayerType::Linear:case LayerType::MatMul:case LayerType::BatchMatMul:
+        // These native attention operations have no dropout or persistent KV
+        // state. Probe them independently of stochastic/stateful layer types.
+        case LayerType::SelfAttention:case LayerType::CrossAttention:
         case LayerType::Conv2d:case LayerType::Conv3d:case LayerType::Conv4d:
         case LayerType::CausalDepthwiseConv1d:case LayerType::SwiGLU:
         case LayerType::LayerNorm:case LayerType::RMSNorm:
@@ -74,7 +77,7 @@ bool replayable(LayerType type){
     }
 }
 bool finite(const std::vector<std::vector<float>>& outputs){
-    for(const auto& o:outputs)if(!RuntimeChecks::allFinite(o.data(),o.size()))return false;
+    for(const auto& o:outputs)if(!RuntimeChecks::allFiniteDispatched(o.data(),o.size()))return false;
     return true;
 }
 bool close(const std::vector<float>& a,const std::vector<float>& b){
@@ -95,6 +98,10 @@ size_t signature(const Layer& l,bool backward,bool training,uint64_t generation,
     for(int v:{l.in_features,l.out_features,l.in_channels,l.out_channels,l.input_height,l.input_width,l.output_height,l.output_width,l.kernel_size,l.kernel_h,l.kernel_w,l.stride,l.stride_h,l.stride_w,l.padding,l.pad_h,l.pad_w,l.dilation,l.dilation_h,l.dilation_w,l.groups,l.num_groups,l.embed_dim,l.seq_len,l.axis,int(l.affine),int(l.use_bias),int(l.activation),l.skip_input_index})mix(h,size_t(v));
     for(float v:{l.eps,l.alpha,l.negative_slope,l.leaky_relu_alpha,l.activation_param})mix(h,std::hash<float>{}(v));
     for(int v:{l.padding_idx,l.concat_axis,l.num_splits,l.split_axis,l.num_chunks,l.stack_axis,l.squeeze_dim,l.unsqueeze_dim,l.out_h,l.out_w,l.patch_dim,l.num_patches,l.seq_text})mix(h,size_t(v));
+    if(l.type_enum==LayerType::SelfAttention || l.type_enum==LayerType::CrossAttention){
+        for(int v:{l.num_heads,l.num_kv_heads,l.head_dim,int(l.causal)})mix(h,size_t(v));
+        mix(h,std::hash<float>{}(l.rope_theta));
+    }
     for(float v:{l.scale_h,l.scale_w})mix(h,std::hash<float>{}(v));
     if(l.type_enum==LayerType::NMS){
         mix(h,std::hash<float>{}(l.nms_iou_threshold));mix(h,std::hash<float>{}(l.nms_score_threshold));
@@ -186,8 +193,8 @@ Ranking rank(const RuntimeRoute& candidates,const Layer& layer,
                 ExecutionPolicy::CpuScope scope(workers,algorithm);
                 const auto start=std::chrono::steady_clock::now();
                 try{valid=execute(*rt,disposable,outputs) && (!outputs.empty() || (backward && inputs.empty())) && finite(outputs) &&
-                    (!backward || (RuntimeChecks::allFinite(disposable.grad_weights.data(),disposable.grad_weights.size()) &&
-                    RuntimeChecks::allFinite(disposable.grad_bias.data(),disposable.grad_bias.size())));}catch(...){valid=false;}
+                    (!backward || (RuntimeChecks::allFiniteDispatched(disposable.grad_weights.data(),disposable.grad_weights.size()) &&
+                    RuntimeChecks::allFiniteDispatched(disposable.grad_bias.data(),disposable.grad_bias.size())));}catch(...){valid=false;}
                 const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
                 if(!valid)break;
                 if(!have_reference) {reference=outputs;reference_w=disposable.grad_weights;reference_b=disposable.grad_bias;have_reference=true;}
