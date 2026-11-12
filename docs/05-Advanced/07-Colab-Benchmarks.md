@@ -90,6 +90,35 @@ dans REPO. Elle fonctionne même avec un ancien checkout. Cela ne met pas à jou
 le binaire : après changement des sources ou du pilote, reprendre l’extraction,
 la compilation, puis la validation.
 
+### Reprendre après une alerte de provenance de la matrice
+
+Une ancienne cellule enregistrait `colab_config_matrix.py` dans
+`provenance['sources']`, puis comparait cet inventaire aux seuls fichiers
+`colab_real_*` et `colab_architecture_*`. L'assertion pouvait donc échouer
+après les essais sans modification réelle des sources. Le contrôle actuel
+inclut aussi les helpers enregistrés par les cellules suivantes et indique
+les fichiers manquants, ajoutés ou modifiés.
+
+Si les essais sont terminés et que `REAL_RECORDS` est encore présent dans la
+session, vérifier les empreintes dans une cellule séparée, sans relancer
+l'entraînement :
+
+```python
+paths = {p.name: p for pattern in ('colab_real_*', 'colab_architecture_*')
+         for p in real_source.glob(pattern) if p.is_file()}
+paths.update({name: real_source / name for name in provenance['sources']})
+actual = {name: REAL_SUITE.sha256(path) for name, path in paths.items() if path.is_file()}
+assert provenance['sources'] == actual, 'Sources réellement modifiées'
+assert REAL_DATA_MANIFEST['files'] == {
+    p.name: REAL_SUITE.sha256(p) for p in REAL_DATA.iterdir()
+    if p.suffix in {'.u8', '.f32'}
+}, 'Données réellement modifiées'
+```
+
+Si ces contrôles passent, reprendre la cellule de comparaison d'usage réel
+et d'export du rapport. Les résultats et les fichiers de `REAL_DIR` sont
+conservés ; la vérification ne modifie pas les empreintes de référence.
+
 ## Validation effectuée et limites
 
 Le 18 octobre 2026, les onze cas standard ont passé la référence NumPy sur CPU

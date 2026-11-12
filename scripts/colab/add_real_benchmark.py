@@ -81,15 +81,17 @@ cmake_language(DEFER CALL mimir_colab_add_real_benchmark)
         process_timeout_s=REAL_PROCESS_TIMEOUT_S,host_rss_plus_swap_limit_mib=REAL_HOST_MEMORY_MIB,
         min_test_accuracy=REAL_MIN_TEST_ACCURACY,cpu_affinity=CPU_AFFINITY,threads=THREADS,
         seed=SEED,dataset=REAL_DATA_MANIFEST,source_snapshot_sha256=globals().get('SOURCE_SHA256'),
-        sources={p.name:REAL_SUITE.sha256(p) for p in real_source.glob('colab_real_*') if p.is_file()},
+        sources={p.name:REAL_SUITE.sha256(p) for pattern in ('colab_real_*','colab_architecture_*')
+                 for p in real_source.glob(pattern) if p.is_file()},
         contract='persistent weights; public whole-model APIs; host batch preprocessing and device transfer; synchronized SGD/Adam/AdamW; fixed validation schedule; final held-out inference',
         fp32=True,tf32=False,mimir_options=REAL_MIMIR_OPTIONS,cmake_args=list(map(str,CMAKE_ARGS)),
         mimir_layers='production planner; CPU/native accelerator placement allowed; native host loss; optimizer dispatched by runtime router; see plans and runtime audit',
         gpu_memory_limit='physical capacity only; no artificial VRAM/HBM cap',memory_poll_s=.05)
     (REAL_DIR/'protocol.json').write_text(json.dumps(provenance,indent=2))
     (REAL_DIR/'sources').mkdir(exist_ok=True)
-    for p in real_source.glob('colab_real_*'):
-        if p.is_file():shutil.copy2(p,REAL_DIR/'sources'/p.name)
+    for pattern in ('colab_real_*','colab_architecture_*'):
+        for p in real_source.glob(pattern):
+            if p.is_file():shutil.copy2(p,REAL_DIR/'sources'/p.name)
     print('Usage reel :',len(REAL_CASES),'cas,',REAL_TRIALS,'essais,',REAL_STEPS,'updates/cas ;',REAL_DIR)
 '''
 MEASURE='''
@@ -98,7 +100,17 @@ if RUN_REAL_BENCH:
     REAL_RECORDS=REAL_SUITE.run_suite(REAL_DIR,REAL_CASES,FRAMEWORKS,PYTHONS,REAL_BINARY,REAL_WORKER,
         RUNTIME_ENV,CPU_AFFINITY,REAL_TRIALS,REAL_PROCESS_TIMEOUT_S,REAL_HOST_MEMORY_MIB,
         REAL_MIN_TEST_ACCURACY,SEED,INSTALL_ERRORS)
-    assert provenance['sources']=={p.name:REAL_SUITE.sha256(p) for p in real_source.glob('colab_real_*') if p.is_file()}, 'Sources du benchmark modifiees pendant les essais'
+    source_paths={p.name:p for pattern in ('colab_real_*','colab_architecture_*')
+                  for p in real_source.glob(pattern) if p.is_file()}
+    # Include helpers registered by later cells, such as colab_config_matrix.py.
+    source_paths.update({name:real_source/name for name in provenance['sources']})
+    current_sources={name:REAL_SUITE.sha256(path) for name,path in source_paths.items() if path.is_file()}
+    missing_sources=sorted(set(provenance['sources'])-set(current_sources))
+    added_sources=sorted(set(current_sources)-set(provenance['sources']))
+    changed_sources=sorted(name for name in set(provenance['sources'])&set(current_sources)
+                           if provenance['sources'][name]!=current_sources[name])
+    assert provenance['sources']==current_sources, ('Sources du benchmark modifiees pendant les essais : '
+        f'manquantes={missing_sources}, ajoutees={added_sources}, modifiees={changed_sources}')
     assert REAL_DATA_MANIFEST['files']=={p.name:REAL_SUITE.sha256(p) for p in sorted(REAL_DATA.iterdir()) if p.suffix in {'.u8','.f32'}}, 'Donnees modifiees pendant les essais'
 '''
 REPORT='''

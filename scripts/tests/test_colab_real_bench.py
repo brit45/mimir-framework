@@ -19,6 +19,62 @@ except ImportError:
     np=None
 
 
+class Provenance(unittest.TestCase):
+    @staticmethod
+    def checks(source):
+        body=ast.parse(source).body[0].body
+        measured=next(i for i,node in enumerate(body) if isinstance(node,ast.Assign)
+                      and any(isinstance(target,ast.Name) and target.id=='REAL_RECORDS'
+                              for target in node.targets))
+        return compile(ast.Module(body=body[measured+1:],type_ignores=[]),'<real-benchmark-integrity>','exec')
+
+    def test_notebook_and_generator_check_registered_helpers_and_real_mutations(self):
+        notebook=json.loads((ROOT/'Colab-bench-multi-framework.ipynb').read_text())
+        notebook_source=next(''.join(cell['source']) for cell in notebook['cells']
+                             if 'REAL_RECORDS=REAL_SUITE.run_suite(' in ''.join(cell.get('source',[])))
+        generator=ast.parse((ROOT/'scripts/colab/add_real_benchmark.py').read_text())
+        generated_source=next(ast.literal_eval(node.value) for node in generator.body
+                              if isinstance(node,ast.Assign)
+                              and any(isinstance(target,ast.Name) and target.id=='MEASURE'
+                                      for target in node.targets))
+        mutations={
+            'unchanged':None,
+            'changed_matrix':'colab_config_matrix.py',
+            'removed_matrix':'colab_config_matrix.py',
+            'changed_worker':'colab_real_worker.py',
+            'changed_architecture':'colab_architecture_worker.py',
+            'added_real':'colab_real_added.py',
+            'added_architecture':'colab_architecture_added.py',
+            'changed_data':'Donnees modifiees',
+            'unrelated_file':None,
+        }
+        for origin,source in [('notebook',notebook_source),('generator',generated_source)]:
+            checks=self.checks(source)
+            for mutation,error in mutations.items():
+                with self.subTest(origin=origin,mutation=mutation),tempfile.TemporaryDirectory() as temporary:
+                    root=Path(temporary);real_source=root/'sources';real_source.mkdir()
+                    for name in ['colab_real_suite.py','colab_real_worker.py','colab_real_model.cpp',
+                                 'colab_architecture_suite.py','colab_architecture_worker.py','colab_config_matrix.py']:
+                        (real_source/name).write_text('original fixture\n')
+                    expected={p.name:suite.sha256(p) for p in real_source.iterdir()}
+                    real_data=root/'data';real_data.mkdir()
+                    for name in ['train.images.u8','train.labels.u8','weights-2-0.f32']:
+                        (real_data/name).write_bytes(b'\x01\x02\x03\x04')
+                    expected_data={p.name:suite.sha256(p) for p in real_data.iterdir()}
+                    provenance={'sources':dict(expected)}
+                    if mutation=='removed_matrix':(real_source/'colab_config_matrix.py').unlink()
+                    elif mutation=='changed_data':(real_data/'train.images.u8').write_bytes(b'changed')
+                    elif mutation=='unrelated_file':(real_source/'notes.txt').write_text('not a benchmark source')
+                    elif error:(real_source/error).write_text('modified or newly added\n')
+                    environment=dict(provenance=provenance,real_source=real_source,REAL_SUITE=suite,
+                                     REAL_DATA=real_data,REAL_DATA_MANIFEST={'files':dict(expected_data)})
+                    if error:
+                        with self.assertRaisesRegex(AssertionError,error):exec(checks,environment)
+                    else:exec(checks,environment)
+                    self.assertEqual(provenance['sources'],expected)
+                    self.assertEqual(environment['REAL_DATA_MANIFEST']['files'],expected_data)
+
+
 class Budgets(unittest.TestCase):
     @unittest.skipIf(np is None,'requires numpy and pandas')
     def test_report_keeps_optimizer_cases_separate(self):
