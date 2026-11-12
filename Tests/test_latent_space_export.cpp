@@ -1,4 +1,5 @@
 #include "viz/LatentSpaceExport.hpp"
+#include "viz/TrainingCapture.hpp"
 
 #include <array>
 #include <cmath>
@@ -134,7 +135,7 @@ void documentCases() {
         check(model.at("d_model") == 64 && model.at("latent_dim") == 17 &&
               model.at("sequence_length") == 113 && model.at("position_encoding") == "rope",
               "model projection configuration lost");
-        check(result.at("view") == Json{{"yaw", -.6875}, {"pitch", .3125}, {"zoom", 2.25},
+        check(result.at("view") == Json{{"organic", false}, {"heatspots", false}, {"yaw", -.6875}, {"pitch", .3125}, {"zoom", 2.25},
               {"correlation_threshold", .8125}, {"correlation_show_all_candidates", false},
               {"width", 931}, {"height", 617}},
               "camera, displayed dimensions or correlation threshold changed");
@@ -310,6 +311,42 @@ void htmlCase() {
           "HTML embedding changed model labels, graph data or double precision");
 }
 
+void captureCase() {
+    const auto root = std::filesystem::temp_directory_path() / ("mimir-capture-test-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{root};
+    TrainingCapture capture;
+    auto projection = fixture();
+    const auto csv = (root / "loss.csv").string();
+    capture.append(projection, csv, Json{{"loss",.25},{"optimizer_step",321}});
+    const auto path = capture.path();
+    projection.optimizer_step++;
+    projection.points[0].vector_norm = 7.25f;
+    capture.append(projection, csv, Json{{"loss",.125},{"optimizer_step",322}});
+    std::ifstream input(path);
+    std::string line;
+    std::getline(input,line); const auto first = Json::parse(line);
+    std::getline(input,line); const auto second = Json::parse(line);
+    check(!std::getline(input,line), "unexpected capture frames");
+    check(first.at("format") == "mimir.training-capture" && first.at("version") == 1,
+          "capture schema missing");
+    check(first.at("metrics").at("loss") == .25 && second.at("metrics").at("loss") == .125,
+          "capture changed training measurements");
+    check(first.at("graph").at("model").at("optimizer_step") == 321 &&
+          second.at("graph").at("model").at("optimizer_step") == 322 &&
+          second.at("graph").at("points").at(0).at("vector_norm") == 7.25,
+          "capture lost chronological step or exact values");
+    check(second.at("capture").at("elapsed_ms").get<double>() >= first.at("capture").at("elapsed_ms").get<double>(),
+          "nonmonotonic capture timestamps");
+    check(std::filesystem::file_size(path.string()+".html") > 1000, "offline replay viewer missing");
+    LatentSpaceExportView view; view.organic = true;
+    check(latentSpaceExportDocument(projection,view).at("view").at("organic") == true,
+          "organic export style lost");
+    TrainingCapture separate;
+    separate.append(projection,csv,Json::object());
+    check(separate.path() != path, "new training session overwrote the previous capture");
+}
+
 void nonfiniteCase() {
     auto projection = fixture();
     auto view = viewFixture();
@@ -335,6 +372,7 @@ int main() {
         sequencePathsCase();
         htmlCase();
         nonfiniteCase();
+        captureCase();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

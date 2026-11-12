@@ -10,7 +10,7 @@ import sys
 
 root = Path(sys.argv[1])
 source = (root / "src/scriptings/Lua/luaScripting/LuaScripting.cpp").read_text(encoding="utf-8")
-stub = (root / "mimir-api.lua").read_text(encoding="utf-8")
+stub = (root / "ide/lua/mimir-api.lua").read_text(encoding="utf-8")
 
 # registerAPI() construit les tables publiques. Une fonction C suivie d'un
 # lua_setfield expose le nom indiqué; les autres lua_setfield remplissent des

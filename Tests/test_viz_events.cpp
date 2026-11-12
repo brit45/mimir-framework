@@ -389,11 +389,42 @@ struct VisualizerEventTestAccess {
         control->setLiveWeightsEnabled(false);control->setLiveWeightsEnabled(true);
         TASSERT_TRUE(!v.saveLatentSpaceExport()); // A new delta session cannot export the preceding one.
         publish(22,"fresh live weight ");draw();
+        TASSERT_TRUE(!v.latent_space_organic_ && v.last_latent_space_organic_rect_);
+        key(vizgfx::Keyboard::Key::O);TASSERT_TRUE(v.latent_space_organic_);
+        key(vizgfx::Keyboard::Key::O);TASSERT_TRUE(!v.latent_space_organic_);
+        click(v.last_latent_space_organic_rect_);TASSERT_TRUE(v.latent_space_organic_);draw();
+        const auto organicImage=events->captureImage();
+        const auto organicPanel=v.latent_space_displayed_bounds_;
+        TASSERT_TRUE(!v.last_latent_space_point_hits_.empty());
+        const auto organicHit=v.last_latent_space_point_hits_.front().first;
+        const auto organicPixel=vizgfx::Vector2u{unsigned(organicHit.position.x+organicHit.size.x*.5f),
+            unsigned(organicHit.position.y+organicHit.size.y*.5f)};
+        key(vizgfx::Keyboard::Key::O);TASSERT_TRUE(!v.latent_space_organic_);
+        key(vizgfx::Keyboard::Key::X);checkNewPath();document=readDocument();
+        TASSERT_TRUE(document.at("view").at("organic")==true);
+        TASSERT_TRUE(png.loadFromFile(fs::path(v.last_latent_space_export_path_).parent_path()/"vue.png"));
+        TASSERT_TRUE(png.getPixel({organicPixel.x-unsigned(organicPanel.position.x),
+            organicPixel.y-unsigned(organicPanel.position.y)})==organicImage.getPixel(organicPixel));
+
+        control->setRealtimeEnabled(false);
+        key(vizgfx::Keyboard::Key::B);
+        TASSERT_TRUE(v.latent_space_organic_ && control->live_weights_enabled.load() && control->realtime_enabled.load());
+        draw();TASSERT_TRUE(v.last_latent_space_brain_rect_);
+        key(vizgfx::Keyboard::Key::O);TASSERT_TRUE(!v.latent_space_organic_);
+        click(v.last_latent_space_brain_rect_);TASSERT_TRUE(v.latent_space_organic_);
+
+        key(vizgfx::Keyboard::Key::H);TASSERT_TRUE(v.latent_space_heatspots_);draw();
+        TASSERT_TRUE(v.last_latent_space_heatspots_rect_ && v.latent_space_heatspot_texture_.getSize().x==64);
+        const auto cachedHeatmap=v.latent_space_heatspot_cached_projection_;draw();
+        TASSERT_TRUE(v.latent_space_heatspot_cached_projection_==cachedHeatmap);
+        key(vizgfx::Keyboard::Key::X);checkNewPath();document=readDocument();
+        TASSERT_TRUE(document.at("view").at("heatspots")==true);
+        click(v.last_latent_space_heatspots_rect_);TASSERT_TRUE(!v.latent_space_heatspots_);
 
         // The export action participates in the same wrapped controls layout.
         for(int width:{420,740,1400}) {
             v.window_width=width;events->setSize({unsigned(width),1000});draw();
-            const std::optional<vizgfx::FloatRect>* controls[]={&v.last_latent_space_export_rect_,
+            const std::optional<vizgfx::FloatRect>* controls[]={&v.last_latent_space_export_rect_, &v.last_latent_space_organic_rect_,
                 &v.last_latent_space_realtime_rect_,&v.last_latent_space_correlations_rect_,
                 &v.last_latent_space_neurons_rect_,&v.last_latent_space_live_weights_rect_,
                 &v.last_latent_space_correlation_all_rect_,

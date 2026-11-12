@@ -34,7 +34,8 @@ print('mock tool 1.0')
         result,calls=self.run_config('--enable','MIMIR_ENABLE_TESTS','--enable','ENABLE_SCRIPTING_JS','--generator','Ninja')
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn(['apt-get','update'],calls)
-        install=next(c for c in calls if c[:2]==['apt-get','install'])
+        # config.sh installs required and optional dependencies in separate calls.
+        install=[item for call in calls if call[:2]==['apt-get','install'] for item in call]
         for dependency in ['ninja-build','liblua5.3-dev','liblz4-dev']:
             self.assertIn(dependency,install)
         self.assertNotIn('libavcodec-dev',install)

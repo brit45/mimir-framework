@@ -119,6 +119,9 @@ public:
     void setFillColor(Color color) { fill_=color; }
     void setOutlineColor(Color color) { outline_=color; }
     void setOutlineThickness(float value) { thickness_=value; }
+    Color getFillColor() const { return fill_; }
+    Color getOutlineColor() const { return outline_; }
+    float getOutlineThickness() const { return thickness_; }
     Color fill() const { return fill_; }
     Color outline() const { return outline_; }
     float thickness() const { return thickness_; }

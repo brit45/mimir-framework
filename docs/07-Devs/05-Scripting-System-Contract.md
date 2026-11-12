@@ -20,7 +20,8 @@ expérimentale, pas entièrement exploitable en production, conformément au
 
 - Lua est le bridge de reference et reste le seul contrat complet et stable aujourd'hui.
 - JS expose désormais la surface des callbacks natifs de référence par des appels synchrones Node.js vers C++ ; voir [le contrat JS et ses limites](../03-API-Reference/21-JavaScript-API.md).
-- Les bindings C# et Rust restent incomplets.
+- Rust utilise le même transport synchrone et les callbacks de référence ; voir [le contrat Rust](../03-API-Reference/23-Rust-API.md).
+- Le binding C# reste incomplet.
 - La parite progresse par morceaux: certaines APIs sont disponibles, d'autres renvoient encore une erreur explicite ou une sortie partielle.
 - Toute documentation ou demo pour un bridge non-Lua doit le signaler clairement.
 
@@ -125,7 +126,7 @@ Exemple de commande (bridge Lua actuel) :
 
 Si un bridge ne passe pas cette matrice, il n'est pas pret pour un workflow metier stable.
 
-La matrice de contrat JS est couverte par `BridgeTest.API`, avec configuration également injectable par `--conf`. Les autres bridges restent à valider au cas par cas. Les limites de transport JS sont documentées dans sa référence API.
+La matrice de contrat JS est couverte par `BridgeTest.API`, avec configuration également injectable par `--conf`. Rust est couvert par `BridgeTest.RustParity` et `BridgeTest.RustConf`. C# reste à valider séparément. Les limites des transports sont documentées dans leurs références API.
 
 ## 9. Regle d'evolution API
 

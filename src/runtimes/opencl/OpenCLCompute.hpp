@@ -7,6 +7,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <array>
+#include <mutex>
 
 #ifdef ENABLE_OPENCL
 #define CL_TARGET_OPENCL_VERSION 300
@@ -26,6 +28,7 @@ public:
     ComputeEngine& operator=(const ComputeEngine&) = delete;
 
     bool initialize() {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
 #ifndef ENABLE_OPENCL
         initialized_ = false;
         return false;
@@ -95,10 +98,12 @@ public:
 #endif
     }
 
-    bool isInitialized() const { return initialized_; }
+    bool isInitialized() const { std::lock_guard<std::recursive_mutex> lock(mutex_);return initialized_; }
 
     void cleanup() {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
 #ifdef ENABLE_OPENCL
+        clearBufferCache();
         if (kernel_binary_) { clReleaseKernel(kernel_binary_); kernel_binary_ = nullptr; }
         if (kernel_unary_) { clReleaseKernel(kernel_unary_); kernel_unary_ = nullptr; }
         if (kernel_batch_matmul_) { clReleaseKernel(kernel_batch_matmul_); kernel_batch_matmul_ = nullptr; }
@@ -128,6 +133,8 @@ public:
         (void)input; (void)weights; (void)bias_or_null; (void)output; (void)batch; (void)in_f; (void)out_f;
         return false;
 #else
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        CacheScope cache_scope(*this);
         if (!initialized_ || !context_ || !queue_ || !kernel_linear_) return false;
         if (!input || !weights || !output) return false;
         if (batch <= 0 || in_f <= 0 || out_f <= 0) return false;
@@ -138,14 +145,14 @@ public:
         const size_t bytes_b = static_cast<size_t>(out_f) * sizeof(float);
         const size_t bytes_out = static_cast<size_t>(batch) * static_cast<size_t>(out_f) * sizeof(float);
 
-        // Note: allocation simple par appel. Optimisable via cache/pool ensuite.
-        cl_mem buf_in = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_in, nullptr, &err);
+        // Borrow grow-only slots; all inputs are uploaded again on every call.
+        cl_mem buf_in = acquireBuffer(0, bytes_in, err);
         if (err != CL_SUCCESS || !buf_in) return false;
-        cl_mem buf_w = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_w, nullptr, &err);
+        cl_mem buf_w = acquireBuffer(1, bytes_w, err);
         if (err != CL_SUCCESS || !buf_w) { clReleaseMemObject(buf_in); return false; }
-        cl_mem buf_b = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_b, nullptr, &err);
+        cl_mem buf_b = acquireBuffer(2, bytes_b, err);
         if (err != CL_SUCCESS || !buf_b) { clReleaseMemObject(buf_in); clReleaseMemObject(buf_w); return false; }
-        cl_mem buf_out = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes_out, nullptr, &err);
+        cl_mem buf_out = acquireBuffer(3, bytes_out, err);
         if (err != CL_SUCCESS || !buf_out) { clReleaseMemObject(buf_in); clReleaseMemObject(buf_w); clReleaseMemObject(buf_b); return false; }
 
         err = clEnqueueWriteBuffer(queue_, buf_in, CL_TRUE, 0, bytes_in, input, 0, nullptr, nullptr);
@@ -196,6 +203,8 @@ public:
         (void)a; (void)b; (void)c; (void)M; (void)K; (void)N;
         return false;
 #else
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        CacheScope cache_scope(*this);
     if (!initialized_ || !context_ || !queue_ || !kernel_matmul_) return false;
         if (!a || !b || !c) return false;
         if (M <= 0 || K <= 0 || N <= 0) return false;
@@ -205,11 +214,11 @@ public:
     const size_t bytes_b = static_cast<size_t>(K) * static_cast<size_t>(N) * sizeof(float);
     const size_t bytes_c = static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float);
 
-    cl_mem buf_a = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_a, nullptr, &err);
+    cl_mem buf_a = acquireBuffer(0, bytes_a, err);
     if (err != CL_SUCCESS || !buf_a) return false;
-    cl_mem buf_b = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_b, nullptr, &err);
+    cl_mem buf_b = acquireBuffer(1, bytes_b, err);
     if (err != CL_SUCCESS || !buf_b) { clReleaseMemObject(buf_a); return false; }
-    cl_mem buf_c = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes_c, nullptr, &err);
+    cl_mem buf_c = acquireBuffer(3, bytes_c, err);
     if (err != CL_SUCCESS || !buf_c) { clReleaseMemObject(buf_a); clReleaseMemObject(buf_b); return false; }
 
     err = clEnqueueWriteBuffer(queue_, buf_a, CL_TRUE, 0, bytes_a, a, 0, nullptr, nullptr);
@@ -257,6 +266,8 @@ public:
         (void)a; (void)b; (void)c; (void)B; (void)M; (void)K; (void)N;
         return false;
 #else
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        CacheScope cache_scope(*this);
         if (!initialized_ || !context_ || !queue_ || !kernel_batch_matmul_) return false;
         if (!a || !b || !c) return false;
         if (B <= 0 || M <= 0 || K <= 0 || N <= 0) return false;
@@ -266,11 +277,11 @@ public:
         const size_t bytes_b = static_cast<size_t>(B) * static_cast<size_t>(K) * static_cast<size_t>(N) * sizeof(float);
         const size_t bytes_c = static_cast<size_t>(B) * static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float);
 
-        cl_mem buf_a = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_a, nullptr, &err);
+        cl_mem buf_a = acquireBuffer(0, bytes_a, err);
         if (err != CL_SUCCESS || !buf_a) return false;
-        cl_mem buf_b = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes_b, nullptr, &err);
+        cl_mem buf_b = acquireBuffer(1, bytes_b, err);
         if (err != CL_SUCCESS || !buf_b) { clReleaseMemObject(buf_a); return false; }
-        cl_mem buf_c = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes_c, nullptr, &err);
+        cl_mem buf_c = acquireBuffer(3, bytes_c, err);
         if (err != CL_SUCCESS || !buf_c) { clReleaseMemObject(buf_a); clReleaseMemObject(buf_b); return false; }
 
         err = clEnqueueWriteBuffer(queue_, buf_a, CL_TRUE, 0, bytes_a, a, 0, nullptr, nullptr);
@@ -318,15 +329,17 @@ public:
         (void)in; (void)out; (void)n; (void)op; (void)alpha;
         return false;
 #else
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        CacheScope cache_scope(*this);
         if (!initialized_ || !context_ || !queue_ || !kernel_unary_) return false;
         if (!in || !out || n <= 0) return false;
 
         cl_int err = CL_SUCCESS;
         const size_t bytes = static_cast<size_t>(n) * sizeof(float);
 
-        cl_mem buf_in = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes, nullptr, &err);
+        cl_mem buf_in = acquireBuffer(0, bytes, err);
         if (err != CL_SUCCESS || !buf_in) return false;
-        cl_mem buf_out = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes, nullptr, &err);
+        cl_mem buf_out = acquireBuffer(3, bytes, err);
         if (err != CL_SUCCESS || !buf_out) { clReleaseMemObject(buf_in); return false; }
 
         err = clEnqueueWriteBuffer(queue_, buf_in, CL_TRUE, 0, bytes, in, 0, nullptr, nullptr);
@@ -363,17 +376,19 @@ public:
         (void)a; (void)b; (void)out; (void)n; (void)op; (void)alpha;
         return false;
 #else
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        CacheScope cache_scope(*this);
         if (!initialized_ || !context_ || !queue_ || !kernel_binary_) return false;
         if (!a || !b || !out || n <= 0) return false;
 
         cl_int err = CL_SUCCESS;
         const size_t bytes = static_cast<size_t>(n) * sizeof(float);
 
-        cl_mem buf_a = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes, nullptr, &err);
+        cl_mem buf_a = acquireBuffer(0, bytes, err);
         if (err != CL_SUCCESS || !buf_a) return false;
-        cl_mem buf_b = clCreateBuffer(context_, CL_MEM_READ_ONLY, bytes, nullptr, &err);
+        cl_mem buf_b = acquireBuffer(1, bytes, err);
         if (err != CL_SUCCESS || !buf_b) { clReleaseMemObject(buf_a); return false; }
-        cl_mem buf_out = clCreateBuffer(context_, CL_MEM_WRITE_ONLY, bytes, nullptr, &err);
+        cl_mem buf_out = acquireBuffer(3, bytes, err);
         if (err != CL_SUCCESS || !buf_out) { clReleaseMemObject(buf_a); clReleaseMemObject(buf_b); return false; }
 
         err = clEnqueueWriteBuffer(queue_, buf_a, CL_TRUE, 0, bytes, a, 0, nullptr, nullptr);
@@ -401,8 +416,83 @@ public:
 #endif
     }
 
-private:
+    std::string deviceName() const {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
 #ifdef ENABLE_OPENCL
+        char name[256]{};
+        if(device_ && clGetDeviceInfo(device_,CL_DEVICE_NAME,sizeof(name),name,nullptr)==CL_SUCCESS)return name;
+#endif
+        return "unavailable";
+    }
+    bool deviceIsGpu() const {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+#ifdef ENABLE_OPENCL
+        cl_device_type type=0;
+        return device_ && clGetDeviceInfo(device_,CL_DEVICE_TYPE,sizeof(type),&type,nullptr)==CL_SUCCESS && (type&CL_DEVICE_TYPE_GPU);
+#else
+        return false;
+#endif
+    }
+    size_t bufferAllocationCount() const {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+#ifdef ENABLE_OPENCL
+        return buffer_allocations_;
+#else
+        return 0;
+#endif
+    }
+    size_t cachedBufferBytes() const {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+#ifdef ENABLE_OPENCL
+        size_t bytes=0;for(const auto& slot:buffer_cache_)bytes+=slot.capacity;return bytes;
+#else
+        return 0;
+#endif
+    }
+
+private:
+    mutable std::recursive_mutex mutex_;
+#ifdef ENABLE_OPENCL
+    struct BufferSlot { cl_mem memory=nullptr;size_t capacity=0; };
+    std::array<BufferSlot,4> buffer_cache_{};
+    size_t buffer_allocations_=0;
+    static constexpr size_t buffer_cache_limit_=64ULL*1024*1024;
+    void clearBufferCache() {
+        for(auto& slot:buffer_cache_) {
+            if(slot.memory)clReleaseMemObject(slot.memory);
+            slot={};
+        }
+    }
+    void trimBufferCache() {
+        size_t bytes=0;for(const auto& slot:buffer_cache_)bytes+=slot.capacity;
+        if(bytes>buffer_cache_limit_)clearBufferCache();
+    }
+    struct CacheScope {
+        ComputeEngine& engine;
+        explicit CacheScope(ComputeEngine& value):engine(value) {}
+        ~CacheScope(){engine.trimBufferCache();}
+    };
+    cl_mem acquireBuffer(size_t index,size_t bytes,cl_int& error) {
+        auto& slot=buffer_cache_[index];
+        // Share input roles across kernels, but keep a distinct output slot.
+        // Preserve the original read-only/write-only kernel access flags.
+        const cl_mem_flags flags=index==3?CL_MEM_WRITE_ONLY:CL_MEM_READ_ONLY;
+        if(slot.capacity<bytes) {
+            auto replacement=clCreateBuffer(context_,flags,bytes,nullptr,&error);
+            if(error!=CL_SUCCESS || !replacement) {
+                // Reclaim idle cache ownership before falling back under VRAM
+                // pressure. Earlier arguments retain their caller references.
+                clearBufferCache();
+                replacement=clCreateBuffer(context_,flags,bytes,nullptr,&error);
+                if(error!=CL_SUCCESS || !replacement)return nullptr;
+            }
+            if(slot.memory)clReleaseMemObject(slot.memory);
+            slot={replacement,bytes};++buffer_allocations_;
+        }
+        error=clRetainMemObject(slot.memory);
+        return error==CL_SUCCESS?slot.memory:nullptr;
+    }
+
     cl_platform_id platform_ = nullptr;
     cl_device_id device_ = nullptr;
     cl_context context_ = nullptr;

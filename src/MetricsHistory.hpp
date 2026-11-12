@@ -122,8 +122,10 @@ inline void row(std::ostream& file, const MetricsRecord& r, size_t columns=36) {
     } else {for(size_t i=30;i<columns;++i) file << ',';}
     file << '\n';
 }
-inline bool append(const std::string& path, const MetricsRecord& r) {
+template<class Iterator,class Select>
+inline bool appendRange(const std::string& path, Iterator first_record,Iterator last_record,Select select) {
     if(path.empty()) return false;
+    if(first_record==last_record) return true;
     std::error_code ec; const auto parent=std::filesystem::path(path).parent_path();
     if(!parent.empty()) std::filesystem::create_directories(parent,ec);
     std::ifstream existing(path); std::string first; std::getline(existing,first);
@@ -137,7 +139,15 @@ inline bool append(const std::string& path, const MetricsRecord& r) {
     std::ofstream file(path,std::ios::app); if(!file) return false;
     if(needs_newline) file << '\n';
     if(first.empty()) file << header << '\n';
-    row(file,r,columns); file.flush(); return bool(file);
+    for(auto it=first_record;it!=last_record;++it)row(file,select(*it),columns);
+    file.flush(); return bool(file);
+}
+template<class Iterator>
+inline bool appendRange(const std::string& path,Iterator first,Iterator last) {
+    return appendRange(path,first,last,[](const MetricsRecord& record)->const MetricsRecord&{return record;});
+}
+inline bool append(const std::string& path,const MetricsRecord& record) {
+    return appendRange(path,&record,&record+1);
 }
 inline bool write(const std::string& path, const std::vector<MetricsRecord>& records) {
     std::error_code ec; const auto parent = std::filesystem::path(path).parent_path();

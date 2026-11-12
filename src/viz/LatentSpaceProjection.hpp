@@ -869,7 +869,8 @@ struct LatentSpaceControl {
                                : "ACP en cours sur les vecteurs capturés…");
         return true;
     }
-    bool publishProjection(LatentSpaceProjection projection) {
+    bool publishProjection(LatentSpaceProjection projection,
+            std::shared_ptr<const LatentSpaceProjection>* published = nullptr) {
         std::lock_guard<std::mutex> lock(session_mutex_);
         if(!available.load(std::memory_order_acquire) || projection.generation!=generation.load(std::memory_order_acquire))return false;
         if (projection.correlation_mode != correlations_enabled.load(std::memory_order_acquire)) return false;
@@ -885,8 +886,9 @@ struct LatentSpaceControl {
         const bool neurons = projection.neuron_mode;
         const bool live_weights = projection.live_weight_mode;
         const std::string correlation_message = projection.correlation_status;
-        std::atomic_store_explicit(&projection_,
-            std::make_shared<const LatentSpaceProjection>(std::move(projection)),std::memory_order_release);
+        auto immutable = std::make_shared<const LatentSpaceProjection>(std::move(projection));
+        if (published) *published = immutable;
+        std::atomic_store_explicit(&projection_, std::move(immutable), std::memory_order_release);
         finishInflight();
         const bool pending=requested.load(std::memory_order_acquire);
         state.store(pending?State::Requested:State::Complete,std::memory_order_release);

@@ -1,0 +1,1181 @@
+{
+  "Allocator": {
+    "configure": {
+      "native_function": true
+    },
+    "getStats": {
+      "native_function": true
+    },
+    "get_stats": {
+      "native_function": true
+    },
+    "printStats": {
+      "native_function": true
+    },
+    "print_stats": {
+      "native_function": true
+    }
+  },
+  "Architectures": {
+    "available": {
+      "native_function": true
+    },
+    "default_config": {
+      "native_function": true
+    },
+    "dtypes": {
+      "native_function": true
+    },
+    "info": {
+      "native_function": true
+    }
+  },
+  "Benchmark": {
+    "now": {
+      "native_function": true
+    }
+  },
+  "Checkpoint": {
+    "load": {
+      "native_function": true
+    },
+    "save": {
+      "native_function": true
+    }
+  },
+  "Database": {
+    "load": {
+      "native_function": true
+    }
+  },
+  "Dataset": {
+    "get": {
+      "native_function": true
+    },
+    "load": {
+      "native_function": true
+    },
+    "prepare_sequences": {
+      "native_function": true
+    },
+    "release": {
+      "native_function": true
+    }
+  },
+  "Distributed": {
+    "barrier": {
+      "native_function": true
+    },
+    "initialize": {
+      "native_function": true
+    },
+    "is_main_process": {
+      "native_function": true
+    },
+    "rank": {
+      "native_function": true
+    },
+    "shutdown": {
+      "native_function": true
+    },
+    "world_size": {
+      "native_function": true
+    }
+  },
+  "Guard": {
+    "getStats": {
+      "native_function": true
+    },
+    "get_stats": {
+      "native_function": true
+    },
+    "printStats": {
+      "native_function": true
+    },
+    "print_stats": {
+      "native_function": true
+    },
+    "reset": {
+      "native_function": true
+    },
+    "setLimit": {
+      "native_function": true
+    },
+    "set_limit": {
+      "native_function": true
+    }
+  },
+  "Htop": {
+    "clear": {
+      "native_function": true
+    },
+    "create": {
+      "native_function": true
+    },
+    "enable": {
+      "native_function": true
+    },
+    "render": {
+      "native_function": true
+    },
+    "update": {
+      "native_function": true
+    }
+  },
+  "IO": {
+    "readImageRGBU8": {
+      "native_function": true
+    },
+    "read_image_rgb_u8": {
+      "native_function": true
+    },
+    "suppressStdoutLogs": {
+      "native_function": true
+    },
+    "suppress_stdout_logs": {
+      "native_function": true
+    }
+  },
+  "Layers": {
+    "Abs": {
+      "native_function": true
+    },
+    "AdaptiveAvgPool2d": {
+      "native_function": true
+    },
+    "Add": {
+      "native_function": true
+    },
+    "AlphaDropout": {
+      "native_function": true
+    },
+    "AvgPool1d": {
+      "native_function": true
+    },
+    "AvgPool2d": {
+      "native_function": true
+    },
+    "BatchMatMul": {
+      "native_function": true
+    },
+    "BatchNorm1d": {
+      "native_function": true
+    },
+    "BatchNorm2d": {
+      "native_function": true
+    },
+    "Bilinear": {
+      "native_function": true
+    },
+    "CausalDepthwiseConv1d": {
+      "native_function": true
+    },
+    "Chunk": {
+      "native_function": true
+    },
+    "Concat": {
+      "native_function": true
+    },
+    "Constant": {
+      "native_function": true
+    },
+    "Conv1d": {
+      "native_function": true
+    },
+    "Conv2d": {
+      "native_function": true
+    },
+    "Conv3d": {
+      "native_function": true
+    },
+    "Conv4d": {
+      "native_function": true
+    },
+    "ConvTranspose2d": {
+      "native_function": true
+    },
+    "Cos": {
+      "native_function": true
+    },
+    "CrossAttention": {
+      "native_function": true
+    },
+    "DepthwiseConv2d": {
+      "native_function": true
+    },
+    "Divide": {
+      "native_function": true
+    },
+    "Dropout": {
+      "native_function": true
+    },
+    "Dropout2d": {
+      "native_function": true
+    },
+    "Embedding": {
+      "native_function": true
+    },
+    "EmbeddingBag": {
+      "native_function": true
+    },
+    "Exp": {
+      "native_function": true
+    },
+    "Flatten": {
+      "native_function": true
+    },
+    "GEGLU": {
+      "native_function": true
+    },
+    "GELU": {
+      "native_function": true
+    },
+    "GRU": {
+      "native_function": true
+    },
+    "GlobalAvgPool2d": {
+      "native_function": true
+    },
+    "GroupNorm": {
+      "native_function": true
+    },
+    "HardSigmoid": {
+      "native_function": true
+    },
+    "HardSwish": {
+      "native_function": true
+    },
+    "Identity": {
+      "native_function": true
+    },
+    "InstanceNorm2d": {
+      "native_function": true
+    },
+    "LSTM": {
+      "native_function": true
+    },
+    "Lambda": {
+      "native_function": true
+    },
+    "LayerNorm": {
+      "native_function": true
+    },
+    "LeakyReLU": {
+      "native_function": true
+    },
+    "Linear": {
+      "native_function": true
+    },
+    "LogAbs": {
+      "native_function": true
+    },
+    "LogSoftmax": {
+      "native_function": true
+    },
+    "LowerTriangular": {
+      "native_function": true
+    },
+    "MatMul": {
+      "native_function": true
+    },
+    "MaxPool1d": {
+      "native_function": true
+    },
+    "MaxPool2d": {
+      "native_function": true
+    },
+    "Maximum": {
+      "native_function": true
+    },
+    "Minimum": {
+      "native_function": true
+    },
+    "Mish": {
+      "native_function": true
+    },
+    "MultiHeadAttention": {
+      "native_function": true
+    },
+    "Multiply": {
+      "native_function": true
+    },
+    "NMS": {
+      "native_function": true
+    },
+    "PatchEmbed": {
+      "native_function": true
+    },
+    "Permute": {
+      "native_function": true
+    },
+    "PixelShuffle": {
+      "native_function": true
+    },
+    "RMSNorm": {
+      "native_function": true
+    },
+    "RNN": {
+      "native_function": true
+    },
+    "ReLU": {
+      "native_function": true
+    },
+    "ReciprocalNoNan": {
+      "native_function": true
+    },
+    "ReduceMax": {
+      "native_function": true
+    },
+    "ReduceMean": {
+      "native_function": true
+    },
+    "ReduceMin": {
+      "native_function": true
+    },
+    "ReduceProd": {
+      "native_function": true
+    },
+    "ReduceSum": {
+      "native_function": true
+    },
+    "ReflectionPad2d": {
+      "native_function": true
+    },
+    "Reparameterize": {
+      "native_function": true
+    },
+    "ReplicationPad2d": {
+      "native_function": true
+    },
+    "Reshape": {
+      "native_function": true
+    },
+    "SelfAttention": {
+      "native_function": true
+    },
+    "SiLU": {
+      "native_function": true
+    },
+    "Sigmoid": {
+      "native_function": true
+    },
+    "Sign": {
+      "native_function": true
+    },
+    "Sin": {
+      "native_function": true
+    },
+    "Softmax": {
+      "native_function": true
+    },
+    "Softplus": {
+      "native_function": true
+    },
+    "Split": {
+      "native_function": true
+    },
+    "SqrtAbs": {
+      "native_function": true
+    },
+    "Square": {
+      "native_function": true
+    },
+    "SquaredReLU": {
+      "native_function": true
+    },
+    "Squeeze": {
+      "native_function": true
+    },
+    "Stack": {
+      "native_function": true
+    },
+    "Subtract": {
+      "native_function": true
+    },
+    "SwiGLU": {
+      "native_function": true
+    },
+    "Tanh": {
+      "native_function": true
+    },
+    "TokenMeanPool": {
+      "native_function": true
+    },
+    "Transpose": {
+      "native_function": true
+    },
+    "Unsqueeze": {
+      "native_function": true
+    },
+    "UpsampleBicubic": {
+      "native_function": true
+    },
+    "UpsampleBilinear": {
+      "native_function": true
+    },
+    "UpsampleNearest": {
+      "native_function": true
+    },
+    "View": {
+      "native_function": true
+    },
+    "ZeroPad2d": {
+      "native_function": true
+    },
+    "abs": {
+      "native_function": true
+    },
+    "activation": {
+      "native_function": true
+    },
+    "adaptiveavgpool2d": {
+      "native_function": true
+    },
+    "add": {
+      "native_function": true
+    },
+    "alphadropout": {
+      "native_function": true
+    },
+    "attention": {
+      "native_function": true
+    },
+    "available": {
+      "native_function": true
+    },
+    "avgpool1d": {
+      "native_function": true
+    },
+    "avgpool2d": {
+      "native_function": true
+    },
+    "batchmatmul": {
+      "native_function": true
+    },
+    "batchnorm": {
+      "native_function": true
+    },
+    "batchnorm1d": {
+      "native_function": true
+    },
+    "batchnorm2d": {
+      "native_function": true
+    },
+    "bilinear": {
+      "native_function": true
+    },
+    "by_type": {
+      "native_function": true
+    },
+    "causaldepthwiseconv1d": {
+      "native_function": true
+    },
+    "chunk": {
+      "native_function": true
+    },
+    "concat": {
+      "native_function": true
+    },
+    "constant": {
+      "native_function": true
+    },
+    "conv1d": {
+      "native_function": true
+    },
+    "conv2d": {
+      "native_function": true
+    },
+    "conv3d": {
+      "native_function": true
+    },
+    "conv4d": {
+      "native_function": true
+    },
+    "convtranspose2d": {
+      "native_function": true
+    },
+    "cos": {
+      "native_function": true
+    },
+    "crossattention": {
+      "native_function": true
+    },
+    "depthwiseconv2d": {
+      "native_function": true
+    },
+    "divide": {
+      "native_function": true
+    },
+    "dropout": {
+      "native_function": true
+    },
+    "dropout2d": {
+      "native_function": true
+    },
+    "embedding": {
+      "native_function": true
+    },
+    "embeddingbag": {
+      "native_function": true
+    },
+    "exp": {
+      "native_function": true
+    },
+    "flatten": {
+      "native_function": true
+    },
+    "geglu": {
+      "native_function": true
+    },
+    "gelu": {
+      "native_function": true
+    },
+    "globalavgpool2d": {
+      "native_function": true
+    },
+    "groupnorm": {
+      "native_function": true
+    },
+    "gru": {
+      "native_function": true
+    },
+    "hardsigmoid": {
+      "native_function": true
+    },
+    "hardswish": {
+      "native_function": true
+    },
+    "identity": {
+      "native_function": true
+    },
+    "instancenorm2d": {
+      "native_function": true
+    },
+    "lambda": {
+      "native_function": true
+    },
+    "layernorm": {
+      "native_function": true
+    },
+    "leakyrelu": {
+      "native_function": true
+    },
+    "linear": {
+      "native_function": true
+    },
+    "logabs": {
+      "native_function": true
+    },
+    "logsoftmax": {
+      "native_function": true
+    },
+    "lowertriangular": {
+      "native_function": true
+    },
+    "lstm": {
+      "native_function": true
+    },
+    "matmul": {
+      "native_function": true
+    },
+    "maximum": {
+      "native_function": true
+    },
+    "maxpool1d": {
+      "native_function": true
+    },
+    "maxpool2d": {
+      "native_function": true
+    },
+    "minimum": {
+      "native_function": true
+    },
+    "mish": {
+      "native_function": true
+    },
+    "multiheadattention": {
+      "native_function": true
+    },
+    "multiply": {
+      "native_function": true
+    },
+    "nms": {
+      "native_function": true
+    },
+    "patchembed": {
+      "native_function": true
+    },
+    "permute": {
+      "native_function": true
+    },
+    "pixelshuffle": {
+      "native_function": true
+    },
+    "reciprocalnonan": {
+      "native_function": true
+    },
+    "reducemax": {
+      "native_function": true
+    },
+    "reducemean": {
+      "native_function": true
+    },
+    "reducemin": {
+      "native_function": true
+    },
+    "reduceprod": {
+      "native_function": true
+    },
+    "reducesum": {
+      "native_function": true
+    },
+    "reflectionpad2d": {
+      "native_function": true
+    },
+    "relu": {
+      "native_function": true
+    },
+    "reparameterize": {
+      "native_function": true
+    },
+    "replicationpad2d": {
+      "native_function": true
+    },
+    "reshape": {
+      "native_function": true
+    },
+    "rmsnorm": {
+      "native_function": true
+    },
+    "rnn": {
+      "native_function": true
+    },
+    "selfattention": {
+      "native_function": true
+    },
+    "sigmoid": {
+      "native_function": true
+    },
+    "sign": {
+      "native_function": true
+    },
+    "silu": {
+      "native_function": true
+    },
+    "sin": {
+      "native_function": true
+    },
+    "softmax": {
+      "native_function": true
+    },
+    "softplus": {
+      "native_function": true
+    },
+    "split": {
+      "native_function": true
+    },
+    "sqrtabs": {
+      "native_function": true
+    },
+    "square": {
+      "native_function": true
+    },
+    "squaredrelu": {
+      "native_function": true
+    },
+    "squeeze": {
+      "native_function": true
+    },
+    "stack": {
+      "native_function": true
+    },
+    "subtract": {
+      "native_function": true
+    },
+    "swiglu": {
+      "native_function": true
+    },
+    "tanh": {
+      "native_function": true
+    },
+    "tokenmeanpool": {
+      "native_function": true
+    },
+    "transpose": {
+      "native_function": true
+    },
+    "unsqueeze": {
+      "native_function": true
+    },
+    "upsamplebicubic": {
+      "native_function": true
+    },
+    "upsamplebilinear": {
+      "native_function": true
+    },
+    "upsamplenearest": {
+      "native_function": true
+    },
+    "view": {
+      "native_function": true
+    },
+    "zeropad2d": {
+      "native_function": true
+    }
+  },
+  "Memory": {
+    "clear": {
+      "native_function": true
+    },
+    "config": {
+      "native_function": true
+    },
+    "getStats": {
+      "native_function": true
+    },
+    "getUsage": {
+      "native_function": true
+    },
+    "get_stats": {
+      "native_function": true
+    },
+    "get_usage": {
+      "native_function": true
+    },
+    "printStats": {
+      "native_function": true
+    },
+    "print_stats": {
+      "native_function": true
+    },
+    "setLimit": {
+      "native_function": true
+    },
+    "set_limit": {
+      "native_function": true
+    }
+  },
+  "MemoryGuard": {
+    "getCurrentUsage": {
+      "native_function": true
+    },
+    "getLimit": {
+      "native_function": true
+    },
+    "getPeakUsage": {
+      "native_function": true
+    },
+    "getStats": {
+      "native_function": true
+    },
+    "printStats": {
+      "native_function": true
+    },
+    "reset": {
+      "native_function": true
+    },
+    "setLimit": {
+      "native_function": true
+    }
+  },
+  "Model": {
+    "allocate_params": {
+      "native_function": true
+    },
+    "backward": {
+      "native_function": true
+    },
+    "build": {
+      "native_function": true
+    },
+    "causal_lm_chat": {
+      "native_function": true
+    },
+    "causal_lm_generate": {
+      "native_function": true
+    },
+    "causal_lm_memory_size": {
+      "native_function": true
+    },
+    "causal_lm_prepare_corpus": {
+      "native_function": true
+    },
+    "causal_lm_reset_memory": {
+      "native_function": true
+    },
+    "causal_lm_train": {
+      "native_function": true
+    },
+    "clear_layers": {
+      "native_function": true
+    },
+    "conditioning_prompt": {
+      "native_function": true
+    },
+    "create": {
+      "native_function": true
+    },
+    "create_empty": {
+      "native_function": true
+    },
+    "create_from_config": {
+      "native_function": true
+    },
+    "dtype": {
+      "native_function": true
+    },
+    "forward": {
+      "native_function": true
+    },
+    "get_config": {
+      "native_function": true
+    },
+    "get_gradients": {
+      "native_function": true
+    },
+    "get_layers": {
+      "native_function": true
+    },
+    "hardware_caps": {
+      "native_function": true
+    },
+    "infer": {
+      "native_function": true
+    },
+    "init_weights": {
+      "native_function": true
+    },
+    "load": {
+      "native_function": true
+    },
+    "lumen_add_vae_calibration_image": {
+      "native_function": true
+    },
+    "lumen_begin_vae_calibration": {
+      "native_function": true
+    },
+    "lumen_finish_vae_calibration": {
+      "native_function": true
+    },
+    "lumen_text2img": {
+      "native_function": true
+    },
+    "lumen_train_step": {
+      "native_function": true
+    },
+    "lumen_validate_step": {
+      "native_function": true
+    },
+    "optimizer_step": {
+      "native_function": true
+    },
+    "push_layer": {
+      "native_function": true
+    },
+    "runtime_ops": {
+      "native_function": true
+    },
+    "save": {
+      "native_function": true
+    },
+    "set_autocast": {
+      "native_function": true
+    },
+    "set_hardware": {
+      "native_function": true
+    },
+    "set_layer_io": {
+      "native_function": true
+    },
+    "total_params": {
+      "native_function": true
+    },
+    "train": {
+      "native_function": true
+    },
+    "vision_train_step": {
+      "native_function": true
+    },
+    "zero_grads": {
+      "native_function": true
+    }
+  },
+  "Serialization": {
+    "detect_format": {
+      "native_function": true
+    },
+    "load": {
+      "native_function": true
+    },
+    "save": {
+      "native_function": true
+    },
+    "save_enhanced_debug": {
+      "native_function": true
+    }
+  },
+  "Tokenizer": {
+    "add_token": {
+      "native_function": true
+    },
+    "analyze_text": {
+      "native_function": true
+    },
+    "batch_tokenize": {
+      "native_function": true
+    },
+    "bpe_merge_count": {
+      "native_function": true
+    },
+    "create": {
+      "native_function": true
+    },
+    "detokenize": {
+      "native_function": true
+    },
+    "ensure_vocab_from_text": {
+      "native_function": true
+    },
+    "extract_keywords": {
+      "native_function": true
+    },
+    "get_frequencies": {
+      "native_function": true
+    },
+    "get_max_vocab": {
+      "native_function": true
+    },
+    "get_token_by_id": {
+      "native_function": true
+    },
+    "learn_bpe": {
+      "native_function": true
+    },
+    "load": {
+      "native_function": true
+    },
+    "mag_id": {
+      "native_function": true
+    },
+    "mod_id": {
+      "native_function": true
+    },
+    "pad_id": {
+      "native_function": true
+    },
+    "pad_sequence": {
+      "native_function": true
+    },
+    "print_stats": {
+      "native_function": true
+    },
+    "save": {
+      "native_function": true
+    },
+    "seq_id": {
+      "native_function": true
+    },
+    "set_max_length": {
+      "native_function": true
+    },
+    "set_max_vocab": {
+      "native_function": true
+    },
+    "tokenize": {
+      "native_function": true
+    },
+    "tokenize_bpe": {
+      "native_function": true
+    },
+    "tokenize_ensure": {
+      "native_function": true
+    },
+    "unk_id": {
+      "native_function": true
+    },
+    "vocab_size": {
+      "native_function": true
+    }
+  },
+  "Viz": {
+    "add_image": {
+      "native_function": true
+    },
+    "add_loss_point": {
+      "native_function": true
+    },
+    "backend": {
+      "native_function": true
+    },
+    "clear": {
+      "native_function": true
+    },
+    "configure": {
+      "native_function": true
+    },
+    "create": {
+      "native_function": true
+    },
+    "initialize": {
+      "native_function": true
+    },
+    "is_open": {
+      "native_function": true
+    },
+    "poll_events": {
+      "native_function": true
+    },
+    "process_events": {
+      "native_function": true
+    },
+    "save_loss_history": {
+      "native_function": true
+    },
+    "set_detection_threshold": {
+      "native_function": true
+    },
+    "set_detections": {
+      "native_function": true
+    },
+    "set_enabled": {
+      "native_function": true
+    },
+    "set_validation": {
+      "native_function": true
+    },
+    "show_detections": {
+      "native_function": true
+    },
+    "update": {
+      "native_function": true
+    },
+    "update_metrics": {
+      "native_function": true
+    },
+    "validation_enabled": {
+      "native_function": true
+    }
+  },
+  "model": {
+    "allocate_params": {
+      "native_function": true
+    },
+    "backward": {
+      "native_function": true
+    },
+    "build": {
+      "native_function": true
+    },
+    "causal_lm_chat": {
+      "native_function": true
+    },
+    "causal_lm_generate": {
+      "native_function": true
+    },
+    "causal_lm_memory_size": {
+      "native_function": true
+    },
+    "causal_lm_prepare_corpus": {
+      "native_function": true
+    },
+    "causal_lm_reset_memory": {
+      "native_function": true
+    },
+    "causal_lm_train": {
+      "native_function": true
+    },
+    "clear_layers": {
+      "native_function": true
+    },
+    "conditioning_prompt": {
+      "native_function": true
+    },
+    "create": {
+      "native_function": true
+    },
+    "create_empty": {
+      "native_function": true
+    },
+    "create_from_config": {
+      "native_function": true
+    },
+    "dtype": {
+      "native_function": true
+    },
+    "forward": {
+      "native_function": true
+    },
+    "get_config": {
+      "native_function": true
+    },
+    "get_gradients": {
+      "native_function": true
+    },
+    "get_layers": {
+      "native_function": true
+    },
+    "hardware_caps": {
+      "native_function": true
+    },
+    "infer": {
+      "native_function": true
+    },
+    "init_weights": {
+      "native_function": true
+    },
+    "load": {
+      "native_function": true
+    },
+    "lumen_add_vae_calibration_image": {
+      "native_function": true
+    },
+    "lumen_begin_vae_calibration": {
+      "native_function": true
+    },
+    "lumen_finish_vae_calibration": {
+      "native_function": true
+    },
+    "lumen_text2img": {
+      "native_function": true
+    },
+    "lumen_train_step": {
+      "native_function": true
+    },
+    "lumen_validate_step": {
+      "native_function": true
+    },
+    "optimizer_step": {
+      "native_function": true
+    },
+    "push_layer": {
+      "native_function": true
+    },
+    "runtime_ops": {
+      "native_function": true
+    },
+    "save": {
+      "native_function": true
+    },
+    "set_autocast": {
+      "native_function": true
+    },
+    "set_hardware": {
+      "native_function": true
+    },
+    "set_layer_io": {
+      "native_function": true
+    },
+    "total_params": {
+      "native_function": true
+    },
+    "train": {
+      "native_function": true
+    },
+    "vision_train_step": {
+      "native_function": true
+    },
+    "zero_grads": {
+      "native_function": true
+    }
+  }
+}

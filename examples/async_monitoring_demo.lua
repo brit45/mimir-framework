@@ -14,7 +14,7 @@ Help.auto_exit_help()
 package.path = package.path .. ";./?.lua"
 
 -- Simulation: Charger l'API Mímir (dans un vrai script, bin/mimir charge automatiquement)
--- Pour l'autocomplétion IDE, le fichier mimir-api.lua fournit les définitions
+-- Pour l'autocomplétion IDE, le fichier ide/lua/mimir-api.lua fournit les définitions
 
 print("=== Mímir Framework v2.0 - Exemple Threading Asynchrone ===\n")
 

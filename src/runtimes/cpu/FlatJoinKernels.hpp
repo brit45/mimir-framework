@@ -1,5 +1,6 @@
 #pragma once
 #include <vector>
+#include <algorithm>
 #include <cstddef>
 
 namespace RuntimeFlatJoin {
@@ -15,6 +16,18 @@ inline bool forward(const std::vector<const std::vector<float>*>& inputs,
         if (input->size() > output.max_size() - total) return false;
         total += input->size();
     }
+    bool aliased=false;
+    for (const auto* input : inputs) aliased=aliased || input==&output;
+    if (!aliased) {
+        output.resize(total);
+        size_t offset=0;
+        for (const auto* input : inputs) {
+            if (!input->empty()) std::copy(input->begin(),input->end(),output.begin()+offset);
+            offset+=input->size();
+        }
+        return true;
+    }
+    // Aliasing is legal here: preserve source data until the join completes.
     std::vector<float> joined;
     joined.reserve(total);
     for (const auto* input : inputs)

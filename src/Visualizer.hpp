@@ -735,6 +735,16 @@ private:
     std::shared_ptr<mimir::viz::LatentSpaceControl> latent_space_control_ =
         std::make_shared<mimir::viz::LatentSpaceControl>();
     bool show_latent_space_ = false;
+    bool latent_space_organic_ = false, latent_space_displayed_organic_ = false;
+    bool latent_space_heatspots_ = false, latent_space_displayed_heatspots_ = false;
+    std::optional<vizgfx::FloatRect> last_latent_space_heatspots_rect_;
+    vizgfx::Texture latent_space_heatspot_texture_;
+    std::shared_ptr<const mimir::viz::LatentSpaceProjection> latent_space_heatspot_cached_projection_;
+    std::array<float,5> latent_space_heatspot_cache_key_{};
+    bool latent_space_heatspot_cached_organic_ = false;
+    double latent_space_organic_capture_time_ = 0.;
+    std::optional<vizgfx::FloatRect> last_latent_space_organic_rect_;
+    std::optional<vizgfx::FloatRect> last_latent_space_brain_rect_;
     bool dragging_latent_space_ = false;
     float latent_space_yaw_ = -0.55f;
     float latent_space_pitch_ = 0.25f;
@@ -869,6 +879,7 @@ public:
     bool consumeStopTrainingRequested() { return false; }
     void setTrainingPauseControl(std::shared_ptr<std::atomic<bool>>) {}
     void setMetricsHistory(const std::vector<MetricsRecord>&, size_t = 0) {}
+    void setModelMetrics(const std::map<std::string, double>&) {}
     void setGraphReportControl(std::shared_ptr<GraphReportControl>) {}
     void setLatentSpaceControl(std::shared_ptr<mimir::viz::LatentSpaceControl>) {}
     void setRuntimeConfiguration(std::shared_ptr<LiveModelConfig> config) {

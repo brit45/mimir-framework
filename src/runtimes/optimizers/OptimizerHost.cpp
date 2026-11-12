@@ -1,11 +1,29 @@
 #include "OptimizerDispatch.hpp"
 #include "Model.hpp"
 #include "runtimes/cpu/Parallel.hpp"
+#include "runtimes/cpu/SimdDispatch.hpp"
+#include "runtimes/LayerOps.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <climits>
 #include <stdexcept>
+
+// AVX2 may be the compiler's default ISA (for example amd64-v3 runners),
+// independently of the portable runtime dispatcher below.
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+#if !defined(__AVX2__) && defined(__x86_64__) && \
+    (defined(__GNUC__) || defined(__clang__)) && (!defined(MIMIR_SIMD_ENABLED) || MIMIR_SIMD_ENABLED)
+#include <immintrin.h>
+#define MIMIR_OPTIMIZER_PORTABLE_AVX2 1
+#if defined(__clang__)
+#define MIMIR_OPTIMIZER_TARGET __attribute__((target("avx2")))
+#else
+#define MIMIR_OPTIMIZER_TARGET __attribute__((target("avx2"),optimize("fp-contract=off")))
+#endif
+#endif
 namespace {
 template<class Function>
 void optimizerForEach(size_t count, int workers, const Function& update) {
@@ -47,6 +65,62 @@ size_t adamVectorStep(const RuntimeOptimizerRequest& r, int workers,
     return blocks*8;
 }
 #endif
+#ifdef MIMIR_OPTIMIZER_PORTABLE_AVX2
+// Compile this range separately, leaving the translation unit portable. Lanes
+// are independent parameters; use the scalar operation order, with no FMA or
+// approximate reciprocal/sqrt. ISA-specific types never cross this boundary.
+template<bool WeightDecay>
+MIMIR_OPTIMIZER_TARGET
+void adamPortableRange(const RuntimeOptimizerRequest& r,size_t first,size_t last,
+                       float beta1,float beta2,float correction1,float correction2) {
+    const __m256 b1=_mm256_set1_ps(beta1),b2=_mm256_set1_ps(beta2);
+    const __m256 one_b1=_mm256_set1_ps(1.f-beta1),one_b2=_mm256_set1_ps(1.f-beta2);
+    const __m256 c1=_mm256_set1_ps(correction1),c2=_mm256_set1_ps(correction2);
+    const __m256 epsilon=_mm256_set1_ps(r.optimizer->eps),lr=_mm256_set1_ps(r.learning_rate);
+    const __m256 decay=_mm256_set1_ps(r.optimizer->weight_decay);
+    for(size_t block=first;block<last;++block) {
+        const size_t i=block*8;
+        const __m256 g=_mm256_loadu_ps(r.gradients+i);
+        const __m256 m=_mm256_add_ps(_mm256_mul_ps(b1,_mm256_loadu_ps(r.first_moment+i)),
+                                    _mm256_mul_ps(one_b1,g));
+        const __m256 v=_mm256_add_ps(_mm256_mul_ps(b2,_mm256_loadu_ps(r.second_moment+i)),
+                                    _mm256_mul_ps(_mm256_mul_ps(one_b2,g),g));
+        _mm256_storeu_ps(r.first_moment+i,m);
+        _mm256_storeu_ps(r.second_moment+i,v);
+        const __m256 denominator=_mm256_add_ps(_mm256_sqrt_ps(_mm256_div_ps(v,c2)),epsilon);
+        const __m256 update=_mm256_mul_ps(lr,_mm256_div_ps(_mm256_div_ps(m,c1),denominator));
+        const __m256 current=_mm256_loadu_ps(r.weights+i);
+        __m256 next=_mm256_sub_ps(current,update);
+        if constexpr(WeightDecay)
+            next=_mm256_sub_ps(next,_mm256_mul_ps(lr,_mm256_mul_ps(decay,current)));
+        _mm256_storeu_ps(r.weights+i,next);
+    }
+}
+template<bool WeightDecay>
+size_t adamPortableStep(const RuntimeOptimizerRequest& r,int workers,
+                        float b1,float b2,float c1,float c2) {
+    const size_t blocks=r.count/8;
+    if(!blocks || !RuntimeLayerOps::hardwareAccelerationEnabled())return 0;
+    const auto isa=RuntimeSimd::selectedIsa();
+    if((isa!=RuntimeSimd::Isa::AVX2 && isa!=RuntimeSimd::Isa::AVX512) || !RuntimeSimd::features().avx2)return 0;
+    if(workers==1)adamPortableRange<WeightDecay>(r,0,blocks,b1,b2,c1,c2);
+    else {
+#ifdef _OPENMP
+        #pragma omp parallel num_threads(workers)
+        {
+            const size_t team=omp_get_num_threads(),id=omp_get_thread_num();
+            const size_t first=(blocks/team)*id+std::min(blocks%team,id);
+            const size_t last=first+blocks/team+(id<blocks%team);
+            adamPortableRange<WeightDecay>(r,first,last,b1,b2,c1,c2);
+        }
+#else
+        adamPortableRange<WeightDecay>(r,0,blocks,b1,b2,c1,c2);
+#endif
+    }
+    return blocks*8;
+}
+#endif
+
 }
 bool optimizerRequestValid(const RuntimeOptimizerRequest& r) {
     if(!r.optimizer || !r.weights || !r.gradients || !r.count)return false;
@@ -81,6 +155,8 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 size_t offset=0;
                 #ifdef __AVX2__
                 offset=adamVectorStep<false>(r,workers,b1,b2,bias_correction1,bias_correction2);
+                #elif defined(MIMIR_OPTIMIZER_PORTABLE_AVX2)
+                offset=adamPortableStep<false>(r,workers,b1,b2,bias_correction1,bias_correction2);
                 #endif
                 optimizerForEach(n-offset, offset ? 1 : workers, [&](size_t tail) {
                     const size_t i=offset+tail;
@@ -110,6 +186,8 @@ void optimizerHostStep(const RuntimeOptimizerRequest& r) {
                 size_t offset=0;
                 #ifdef __AVX2__
                 offset=adamVectorStep<true>(r,workers,b1,b2,bias_correction1,bias_correction2);
+                #elif defined(MIMIR_OPTIMIZER_PORTABLE_AVX2)
+                offset=adamPortableStep<true>(r,workers,b1,b2,bias_correction1,bias_correction2);
                 #endif
                 optimizerForEach(n-offset, offset ? 1 : workers, [&](size_t tail) {
                     const size_t i=offset+tail;

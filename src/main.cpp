@@ -702,7 +702,9 @@ int main(int argc, char **argv)
                 } else if (opt == "--rust") {
                     RustScripting rs;
                     rs.registerAPI();
-                    rs.setArgs(script_path, script_args);
+                    auto rust_args = script_args;
+                    if (!rust_args.empty() && rust_args.front() == "--") rust_args.erase(rust_args.begin());
+                    rs.setArgs(script_path, rust_args);
                     if (!rs.loadScript(script_path)) {
                         std::cerr << "❌ Échec exécution Rust: " << script_path << "\n";
                         return 1;
@@ -879,6 +881,48 @@ int main(int argc, char **argv)
                 return 0;
             } catch (const std::exception& e) {
                 std::cerr << "--conf JS: " << e.what() << "\n";
+                return 1;
+            }
+        }
+#endif
+#ifdef MIMIR_ENABLE_SCRIPTING_RUST
+        // Rust config-driven entry uses the same globals and script argument contract.
+        const json* rust_conf = nullptr;
+        if (task_conf->contains("rust") && (*task_conf)["rust"].is_object())
+            rust_conf = &(*task_conf)["rust"];
+        else if (task_conf->contains("run") && (*task_conf)["run"].is_object()
+                 && (*task_conf)["run"].contains("rust") && (*task_conf)["run"]["rust"].is_object())
+            rust_conf = &(*task_conf)["run"]["rust"];
+        if (rust_conf) {
+            std::vector<json> entries;
+            if (rust_conf->contains("scripts") && (*rust_conf)["scripts"].is_array())
+                for (const auto& entry : (*rust_conf)["scripts"]) entries.push_back(entry);
+            else if (rust_conf->contains("script")) entries.push_back((*rust_conf)["script"]);
+            if (entries.empty()) {
+                std::cerr << "--conf: expected rust.script or rust.scripts\n";
+                return 1;
+            }
+            try {
+                RustScripting rust;
+                for (const auto& entry : entries) {
+                    const std::string path = entry.is_string() ? entry.get<std::string>() : entry.value("script", "");
+                    std::vector<std::string> args;
+                    if (entry.is_object() && entry.contains("args")) {
+                        if (!entry.at("args").is_array())
+                            throw std::runtime_error("rust script args must be an array");
+                        for (const auto& arg : entry.at("args"))
+                            args.push_back(arg.is_string() ? arg.get<std::string>() : arg.dump());
+                    }
+                    rust.setArgs(path, args);
+                    rust.setSystemConfig(conf, fs::absolute(conf_path).string(),
+                                       fs::absolute(fs::path(conf_path)).parent_path().string());
+                    if (path.empty()) throw std::runtime_error("rust script path is empty");
+                    if (!rust.loadScript(path)) return 1;
+                }
+                RustContext::getInstance().resetRuntimeState();
+                return 0;
+            } catch (const std::exception& e) {
+                std::cerr << "--conf Rust: " << e.what() << "\n";
                 return 1;
             }
         }

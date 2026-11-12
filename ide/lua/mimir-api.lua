@@ -1,11 +1,11 @@
 ---@meta
----@version 3.5.0
+---@version 3.6.0
 ---@author <bri45> for "Mímir Framework"
----@date 1 octobre 2026 (dernière sync)
+---@date 11 novembre 2026 (dernière sync)
 ---@diagnostic disable: missing-return, unused-local, unused-vararg, duplicate-doc-field, redundant-parameter
 
 --=============================================================================
--- Mímir Framework v3.5 — IDE Stub (EmmyLua)
+-- Mímir Framework v3.6 — IDE Stub (EmmyLua)
 --=============================================================================
 -- Ce fichier est un "stub" destiné aux IDE (LuaLS / EmmyLua / IntelliJ, etc.).
 -- Il documente l'API globale exposée par le binaire `mimir` (bindings C/C++).
@@ -13,7 +13,7 @@
 -- ⚠️  IMPORTANT: Ce fichier est synchronisé avec
 --    src/scriptings/Lua/luaScripting/LuaScripting.cpp
 --    Toute modification de l'API C++ doit être reflétée ici.
---    Dernière synchronisation: 1 octobre 2026
+--    Dernière synchronisation: 11 novembre 2026
 --  • Alias `Mimir.model` (lowercase) + stub explicite `Mimir.model.dtype`
 --  • Operations multi-input complètes (Add, Multiply, Concat, MatMul, Split)
 --  • Configuration live du modèle dans Htop/Viz (`C`, édition avec `Entrée`)
@@ -2720,3 +2720,658 @@ Mimir.Viz = Mimir.Viz
 
 ---@type MimirSerializationAPI
 Mimir.Serialization = Mimir.Serialization
+
+---Native API: Mimir.Layers.Conv3d.
+---@param ... any
+---@return any
+function Mimir.Layers.Conv3d(...) end
+
+---Native API: Mimir.Layers.Conv4d.
+---@param ... any
+---@return any
+function Mimir.Layers.Conv4d(...) end
+
+---Native API: Mimir.Layers.PatchEmbed.
+---@param ... any
+---@return any
+function Mimir.Layers.PatchEmbed(...) end
+
+---Native API: Mimir.Layers.Reparameterize.
+---@param ... any
+---@return any
+function Mimir.Layers.Reparameterize(...) end
+
+---Native API: Mimir.Layers.abs.
+---@param ... any
+---@return any
+function Mimir.Layers.abs(...) end
+
+---Native API: Mimir.Layers.adaptiveavgpool2d.
+---@param ... any
+---@return any
+function Mimir.Layers.adaptiveavgpool2d(...) end
+
+---Native API: Mimir.Layers.add.
+---@param ... any
+---@return any
+function Mimir.Layers.add(...) end
+
+---Native API: Mimir.Layers.alphadropout.
+---@param ... any
+---@return any
+function Mimir.Layers.alphadropout(...) end
+
+---Native API: Mimir.Layers.avgpool1d.
+---@param ... any
+---@return any
+function Mimir.Layers.avgpool1d(...) end
+
+---Native API: Mimir.Layers.batchmatmul.
+---@param ... any
+---@return any
+function Mimir.Layers.batchmatmul(...) end
+
+---Native API: Mimir.Layers.batchnorm1d.
+---@param ... any
+---@return any
+function Mimir.Layers.batchnorm1d(...) end
+
+---Native API: Mimir.Layers.batchnorm2d.
+---@param ... any
+---@return any
+function Mimir.Layers.batchnorm2d(...) end
+
+---Native API: Mimir.Layers.bilinear.
+---@param ... any
+---@return any
+function Mimir.Layers.bilinear(...) end
+
+---Native API: Mimir.Layers.causaldepthwiseconv1d.
+---@param ... any
+---@return any
+function Mimir.Layers.causaldepthwiseconv1d(...) end
+
+---Native API: Mimir.Layers.chunk.
+---@param ... any
+---@return any
+function Mimir.Layers.chunk(...) end
+
+---Native API: Mimir.Layers.concat.
+---@param ... any
+---@return any
+function Mimir.Layers.concat(...) end
+
+---Native API: Mimir.Layers.constant.
+---@param ... any
+---@return any
+function Mimir.Layers.constant(...) end
+
+---Native API: Mimir.Layers.conv1d.
+---@param ... any
+---@return any
+function Mimir.Layers.conv1d(...) end
+
+---Native API: Mimir.Layers.convtranspose2d.
+---@param ... any
+---@return any
+function Mimir.Layers.convtranspose2d(...) end
+
+---Native API: Mimir.Layers.cos.
+---@param ... any
+---@return any
+function Mimir.Layers.cos(...) end
+
+---Native API: Mimir.Layers.crossattention.
+---@param ... any
+---@return any
+function Mimir.Layers.crossattention(...) end
+
+---Native API: Mimir.Layers.depthwiseconv2d.
+---@param ... any
+---@return any
+function Mimir.Layers.depthwiseconv2d(...) end
+
+---Native API: Mimir.Layers.divide.
+---@param ... any
+---@return any
+function Mimir.Layers.divide(...) end
+
+---Native API: Mimir.Layers.dropout.
+---@param ... any
+---@return any
+function Mimir.Layers.dropout(...) end
+
+---Native API: Mimir.Layers.dropout2d.
+---@param ... any
+---@return any
+function Mimir.Layers.dropout2d(...) end
+
+---Native API: Mimir.Layers.embedding.
+---@param ... any
+---@return any
+function Mimir.Layers.embedding(...) end
+
+---Native API: Mimir.Layers.embeddingbag.
+---@param ... any
+---@return any
+function Mimir.Layers.embeddingbag(...) end
+
+---Native API: Mimir.Layers.exp.
+---@param ... any
+---@return any
+function Mimir.Layers.exp(...) end
+
+---Native API: Mimir.Layers.flatten.
+---@param ... any
+---@return any
+function Mimir.Layers.flatten(...) end
+
+---Native API: Mimir.Layers.geglu.
+---@param ... any
+---@return any
+function Mimir.Layers.geglu(...) end
+
+---Native API: Mimir.Layers.gelu.
+---@param ... any
+---@return any
+function Mimir.Layers.gelu(...) end
+
+---Native API: Mimir.Layers.globalavgpool2d.
+---@param ... any
+---@return any
+function Mimir.Layers.globalavgpool2d(...) end
+
+---Native API: Mimir.Layers.groupnorm.
+---@param ... any
+---@return any
+function Mimir.Layers.groupnorm(...) end
+
+---Native API: Mimir.Layers.gru.
+---@param ... any
+---@return any
+function Mimir.Layers.gru(...) end
+
+---Native API: Mimir.Layers.hardsigmoid.
+---@param ... any
+---@return any
+function Mimir.Layers.hardsigmoid(...) end
+
+---Native API: Mimir.Layers.hardswish.
+---@param ... any
+---@return any
+function Mimir.Layers.hardswish(...) end
+
+---Native API: Mimir.Layers.identity.
+---@param ... any
+---@return any
+function Mimir.Layers.identity(...) end
+
+---Native API: Mimir.Layers.instancenorm2d.
+---@param ... any
+---@return any
+function Mimir.Layers.instancenorm2d(...) end
+
+---Native API: Mimir.Layers.lambda.
+---@param ... any
+---@return any
+function Mimir.Layers.lambda(...) end
+
+---Native API: Mimir.Layers.leakyrelu.
+---@param ... any
+---@return any
+function Mimir.Layers.leakyrelu(...) end
+
+---Native API: Mimir.Layers.logabs.
+---@param ... any
+---@return any
+function Mimir.Layers.logabs(...) end
+
+---Native API: Mimir.Layers.logsoftmax.
+---@param ... any
+---@return any
+function Mimir.Layers.logsoftmax(...) end
+
+---Native API: Mimir.Layers.lowertriangular.
+---@param ... any
+---@return any
+function Mimir.Layers.lowertriangular(...) end
+
+---Native API: Mimir.Layers.lstm.
+---@param ... any
+---@return any
+function Mimir.Layers.lstm(...) end
+
+---Native API: Mimir.Layers.matmul.
+---@param ... any
+---@return any
+function Mimir.Layers.matmul(...) end
+
+---Native API: Mimir.Layers.maximum.
+---@param ... any
+---@return any
+function Mimir.Layers.maximum(...) end
+
+---Native API: Mimir.Layers.maxpool1d.
+---@param ... any
+---@return any
+function Mimir.Layers.maxpool1d(...) end
+
+---Native API: Mimir.Layers.minimum.
+---@param ... any
+---@return any
+function Mimir.Layers.minimum(...) end
+
+---Native API: Mimir.Layers.mish.
+---@param ... any
+---@return any
+function Mimir.Layers.mish(...) end
+
+---Native API: Mimir.Layers.multiheadattention.
+---@param ... any
+---@return any
+function Mimir.Layers.multiheadattention(...) end
+
+---Native API: Mimir.Layers.multiply.
+---@param ... any
+---@return any
+function Mimir.Layers.multiply(...) end
+
+---Native API: Mimir.Layers.nms.
+---@param ... any
+---@return any
+function Mimir.Layers.nms(...) end
+
+---Native API: Mimir.Layers.patchembed.
+---@param ... any
+---@return any
+function Mimir.Layers.patchembed(...) end
+
+---Native API: Mimir.Layers.permute.
+---@param ... any
+---@return any
+function Mimir.Layers.permute(...) end
+
+---Native API: Mimir.Layers.pixelshuffle.
+---@param ... any
+---@return any
+function Mimir.Layers.pixelshuffle(...) end
+
+---Native API: Mimir.Layers.reciprocalnonan.
+---@param ... any
+---@return any
+function Mimir.Layers.reciprocalnonan(...) end
+
+---Native API: Mimir.Layers.reducemax.
+---@param ... any
+---@return any
+function Mimir.Layers.reducemax(...) end
+
+---Native API: Mimir.Layers.reducemean.
+---@param ... any
+---@return any
+function Mimir.Layers.reducemean(...) end
+
+---Native API: Mimir.Layers.reducemin.
+---@param ... any
+---@return any
+function Mimir.Layers.reducemin(...) end
+
+---Native API: Mimir.Layers.reduceprod.
+---@param ... any
+---@return any
+function Mimir.Layers.reduceprod(...) end
+
+---Native API: Mimir.Layers.reducesum.
+---@param ... any
+---@return any
+function Mimir.Layers.reducesum(...) end
+
+---Native API: Mimir.Layers.reflectionpad2d.
+---@param ... any
+---@return any
+function Mimir.Layers.reflectionpad2d(...) end
+
+---Native API: Mimir.Layers.relu.
+---@param ... any
+---@return any
+function Mimir.Layers.relu(...) end
+
+---Native API: Mimir.Layers.reparameterize.
+---@param ... any
+---@return any
+function Mimir.Layers.reparameterize(...) end
+
+---Native API: Mimir.Layers.replicationpad2d.
+---@param ... any
+---@return any
+function Mimir.Layers.replicationpad2d(...) end
+
+---Native API: Mimir.Layers.reshape.
+---@param ... any
+---@return any
+function Mimir.Layers.reshape(...) end
+
+---Native API: Mimir.Layers.rmsnorm.
+---@param ... any
+---@return any
+function Mimir.Layers.rmsnorm(...) end
+
+---Native API: Mimir.Layers.rnn.
+---@param ... any
+---@return any
+function Mimir.Layers.rnn(...) end
+
+---Native API: Mimir.Layers.selfattention.
+---@param ... any
+---@return any
+function Mimir.Layers.selfattention(...) end
+
+---Native API: Mimir.Layers.sigmoid.
+---@param ... any
+---@return any
+function Mimir.Layers.sigmoid(...) end
+
+---Native API: Mimir.Layers.sign.
+---@param ... any
+---@return any
+function Mimir.Layers.sign(...) end
+
+---Native API: Mimir.Layers.silu.
+---@param ... any
+---@return any
+function Mimir.Layers.silu(...) end
+
+---Native API: Mimir.Layers.sin.
+---@param ... any
+---@return any
+function Mimir.Layers.sin(...) end
+
+---Native API: Mimir.Layers.softmax.
+---@param ... any
+---@return any
+function Mimir.Layers.softmax(...) end
+
+---Native API: Mimir.Layers.softplus.
+---@param ... any
+---@return any
+function Mimir.Layers.softplus(...) end
+
+---Native API: Mimir.Layers.split.
+---@param ... any
+---@return any
+function Mimir.Layers.split(...) end
+
+---Native API: Mimir.Layers.sqrtabs.
+---@param ... any
+---@return any
+function Mimir.Layers.sqrtabs(...) end
+
+---Native API: Mimir.Layers.square.
+---@param ... any
+---@return any
+function Mimir.Layers.square(...) end
+
+---Native API: Mimir.Layers.squaredrelu.
+---@param ... any
+---@return any
+function Mimir.Layers.squaredrelu(...) end
+
+---Native API: Mimir.Layers.squeeze.
+---@param ... any
+---@return any
+function Mimir.Layers.squeeze(...) end
+
+---Native API: Mimir.Layers.stack.
+---@param ... any
+---@return any
+function Mimir.Layers.stack(...) end
+
+---Native API: Mimir.Layers.subtract.
+---@param ... any
+---@return any
+function Mimir.Layers.subtract(...) end
+
+---Native API: Mimir.Layers.swiglu.
+---@param ... any
+---@return any
+function Mimir.Layers.swiglu(...) end
+
+---Native API: Mimir.Layers.tanh.
+---@param ... any
+---@return any
+function Mimir.Layers.tanh(...) end
+
+---Native API: Mimir.Layers.tokenmeanpool.
+---@param ... any
+---@return any
+function Mimir.Layers.tokenmeanpool(...) end
+
+---Native API: Mimir.Layers.transpose.
+---@param ... any
+---@return any
+function Mimir.Layers.transpose(...) end
+
+---Native API: Mimir.Layers.unsqueeze.
+---@param ... any
+---@return any
+function Mimir.Layers.unsqueeze(...) end
+
+---Native API: Mimir.Layers.upsamplebicubic.
+---@param ... any
+---@return any
+function Mimir.Layers.upsamplebicubic(...) end
+
+---Native API: Mimir.Layers.upsamplebilinear.
+---@param ... any
+---@return any
+function Mimir.Layers.upsamplebilinear(...) end
+
+---Native API: Mimir.Layers.upsamplenearest.
+---@param ... any
+---@return any
+function Mimir.Layers.upsamplenearest(...) end
+
+---Native API: Mimir.Layers.view.
+---@param ... any
+---@return any
+function Mimir.Layers.view(...) end
+
+---Native API: Mimir.Layers.zeropad2d.
+---@param ... any
+---@return any
+function Mimir.Layers.zeropad2d(...) end
+
+---Native API: Mimir.model.allocate_params.
+---@param ... any
+---@return any
+function Mimir.model.allocate_params(...) end
+
+---Native API: Mimir.model.backward.
+---@param ... any
+---@return any
+function Mimir.model.backward(...) end
+
+---Native API: Mimir.model.build.
+---@param ... any
+---@return any
+function Mimir.model.build(...) end
+
+---Native API: Mimir.model.causal_lm_chat.
+---@param ... any
+---@return any
+function Mimir.model.causal_lm_chat(...) end
+
+---Native API: Mimir.model.causal_lm_generate.
+---@param ... any
+---@return any
+function Mimir.model.causal_lm_generate(...) end
+
+---Native API: Mimir.model.causal_lm_memory_size.
+---@param ... any
+---@return any
+function Mimir.model.causal_lm_memory_size(...) end
+
+---Native API: Mimir.model.causal_lm_prepare_corpus.
+---@param ... any
+---@return any
+function Mimir.model.causal_lm_prepare_corpus(...) end
+
+---Native API: Mimir.model.causal_lm_reset_memory.
+---@param ... any
+---@return any
+function Mimir.model.causal_lm_reset_memory(...) end
+
+---Native API: Mimir.model.causal_lm_train.
+---@param ... any
+---@return any
+function Mimir.model.causal_lm_train(...) end
+
+---Native API: Mimir.model.clear_layers.
+---@param ... any
+---@return any
+function Mimir.model.clear_layers(...) end
+
+---Native API: Mimir.model.conditioning_prompt.
+---@param ... any
+---@return any
+function Mimir.model.conditioning_prompt(...) end
+
+---Native API: Mimir.model.create.
+---@param ... any
+---@return any
+function Mimir.model.create(...) end
+
+---Native API: Mimir.model.create_empty.
+---@param ... any
+---@return any
+function Mimir.model.create_empty(...) end
+
+---Native API: Mimir.model.create_from_config.
+---@param ... any
+---@return any
+function Mimir.model.create_from_config(...) end
+
+---Native API: Mimir.model.forward.
+---@param ... any
+---@return any
+function Mimir.model.forward(...) end
+
+---Native API: Mimir.model.get_config.
+---@param ... any
+---@return any
+function Mimir.model.get_config(...) end
+
+---Native API: Mimir.model.get_gradients.
+---@param ... any
+---@return any
+function Mimir.model.get_gradients(...) end
+
+---Native API: Mimir.model.get_layers.
+---@param ... any
+---@return any
+function Mimir.model.get_layers(...) end
+
+---Native API: Mimir.model.hardware_caps.
+---@param ... any
+---@return any
+function Mimir.model.hardware_caps(...) end
+
+---Native API: Mimir.model.infer.
+---@param ... any
+---@return any
+function Mimir.model.infer(...) end
+
+---Native API: Mimir.model.init_weights.
+---@param ... any
+---@return any
+function Mimir.model.init_weights(...) end
+
+---Native API: Mimir.model.load.
+---@param ... any
+---@return any
+function Mimir.model.load(...) end
+
+---Native API: Mimir.model.lumen_add_vae_calibration_image.
+---@param ... any
+---@return any
+function Mimir.model.lumen_add_vae_calibration_image(...) end
+
+---Native API: Mimir.model.lumen_begin_vae_calibration.
+---@param ... any
+---@return any
+function Mimir.model.lumen_begin_vae_calibration(...) end
+
+---Native API: Mimir.model.lumen_finish_vae_calibration.
+---@param ... any
+---@return any
+function Mimir.model.lumen_finish_vae_calibration(...) end
+
+---Native API: Mimir.model.lumen_text2img.
+---@param ... any
+---@return any
+function Mimir.model.lumen_text2img(...) end
+
+---Native API: Mimir.model.lumen_train_step.
+---@param ... any
+---@return any
+function Mimir.model.lumen_train_step(...) end
+
+---Native API: Mimir.model.lumen_validate_step.
+---@param ... any
+---@return any
+function Mimir.model.lumen_validate_step(...) end
+
+---Native API: Mimir.model.optimizer_step.
+---@param ... any
+---@return any
+function Mimir.model.optimizer_step(...) end
+
+---Native API: Mimir.model.push_layer.
+---@param ... any
+---@return any
+function Mimir.model.push_layer(...) end
+
+---Native API: Mimir.model.runtime_ops.
+---@param ... any
+---@return any
+function Mimir.model.runtime_ops(...) end
+
+---Native API: Mimir.model.save.
+---@param ... any
+---@return any
+function Mimir.model.save(...) end
+
+---Native API: Mimir.model.set_autocast.
+---@param ... any
+---@return any
+function Mimir.model.set_autocast(...) end
+
+---Native API: Mimir.model.set_hardware.
+---@param ... any
+---@return any
+function Mimir.model.set_hardware(...) end
+
+---Native API: Mimir.model.set_layer_io.
+---@param ... any
+---@return any
+function Mimir.model.set_layer_io(...) end
+
+---Native API: Mimir.model.total_params.
+---@param ... any
+---@return any
+function Mimir.model.total_params(...) end
+
+---Native API: Mimir.model.train.
+---@param ... any
+---@return any
+function Mimir.model.train(...) end
+
+---Native API: Mimir.model.vision_train_step.
+---@param ... any
+---@return any
+function Mimir.model.vision_train_step(...) end
+
+---Native API: Mimir.model.zero_grads.
+---@param ... any
+---@return any
+function Mimir.model.zero_grads(...) end

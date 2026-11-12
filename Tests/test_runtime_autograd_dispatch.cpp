@@ -13,6 +13,17 @@ struct FailingDevice {
     bool binaryForward(const float*,const float*,float*,int,int,float=0.0f) { return false; }
 };
 
+struct HostMatrixDevice {
+    bool matmulForward(const float* a,const float* b,float* out,int m,int k,int n) {
+        for(int row=0;row<m;++row)for(int col=0;col<n;++col) {
+            float sum=0.f;for(int t=0;t<k;++t)sum+=a[row*k+t]*b[t*n+col];
+            out[row*n+col]=sum;
+        }
+        return true;
+    }
+    bool binaryForward(const float*,const float*,float*,int,int,float=0.f) {return false;}
+};
+
 int main() {
     CpuRuntime cpu;
     RuntimeConfig cfg;
@@ -41,6 +52,26 @@ int main() {
     TASSERT_TRUE(linear.grad_weights == std::vector<float>({10,14,14,20,4,6}));
     TASSERT_TRUE(router.dispatchBackwardLayer({&x},{&go},gi,linear,true));
     TASSERT_NEAR(linear.grad_weights[4],8,1e-6f);
+    // Shared native-backend packing: transposes and bias workspace must be
+    // reusable without changing committed gradients or aliasing live inputs.
+    {
+        HostMatrixDevice device;
+        Layer native("native_linear","Linear",6);
+        native.in_features=2;native.out_features=2;native.use_bias=true;
+        native.weights={1,0,0,1,0,0};
+        std::vector<std::vector<float>> result;
+        TASSERT_TRUE(NativeBackward::execute(device,{&x},{&go},result,native));
+        TASSERT_TRUE(result==std::vector<std::vector<float>>({go}));
+        TASSERT_TRUE(native.grad_weights==std::vector<float>({10,14,14,20,4,6}));
+        auto& guard=MemoryGuard::instance();guard.blockAllocations();
+        bool accepted=false;
+        try {accepted=NativeBackward::execute(device,{&x},{&go},result,native);}
+        catch(...) {guard.blockAllocations(false);throw;}
+        guard.blockAllocations(false);
+        TASSERT_TRUE(accepted);
+        TASSERT_TRUE(native.grad_weights==std::vector<float>({20,28,28,40,8,12}));
+        RuntimeScratch::Pool::local().clear();
+    }
     Layer dropout("dropout", "Dropout", 0);
     dropout.dropout_p=0.5f;
     std::vector<uint8_t> mask{1,0,1,0};

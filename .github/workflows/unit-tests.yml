@@ -36,7 +36,6 @@ jobs:
       - name: Install runtime bridge dependencies
         run: |
           set -euo pipefail
-          cargo install rust-script --locked
           dotnet tool install -g dotnet-script
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -108,11 +107,12 @@ jobs:
         run: |
           "$VCPKG_ROOT/vcpkg" install lua lz4 --triplet x64-mingw-dynamic
 
+      # The synchronous JS/Rust transport is POSIX-only; Lua/C# remain compiled.
       - name: Configure (CMake explicit cross build)
         run: |
           ./config.sh --gui NONE --non-interactive --build-dir build_win_cross_tests \
             --generator Ninja --enable MIMIR_ENABLE_TESTS \
-            --disable ENABLE_SCRIPTING_JS --enable ENABLE_SCRIPTING_RUST \
+            --disable ENABLE_SCRIPTING_JS --disable ENABLE_SCRIPTING_RUST \
             --enable ENABLE_SCRIPTING_CSHARP \
             --disable ENABLE_VULKAN --disable ENABLE_OPENCL --disable ENABLE_FFMPEG \
             --cmake-arg -DCMAKE_SYSTEM_NAME=Windows \

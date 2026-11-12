@@ -188,7 +188,7 @@ Notes scripts Lua (cross-plateforme):
 
 Les fichiers de `scripts/modules/` sont chargés avec `dofile`; ils ne sont pas
 injectés dans `Mimir` et ne sont pas des bindings C++. Le stub
-[`mimir-api.lua`](./mimir-api.lua) décrit à la fois l'API native et les contrats
+[`ide/lua/mimir-api.lua`](./ide/lua/mimir-api.lua) décrit à la fois l'API native et les contrats
 publics de ces helpers afin que LuaLS/EmmyLua puisse les compléter.
 
 | Module | État | Rôle et contrainte principale |
@@ -640,3 +640,6 @@ Primary docs entry points:
 ## Licence
 
 Voir [LICENSE](./LICENSE).
+
+Les helpers Lua, JavaScript et Rust sont centralisés dans [`ide/`](./ide/README.md).
+Le [bridge Rust](./docs/03-API-Reference/23-Rust-API.md) utilise les callbacks natifs synchrones, comme le [bridge JavaScript](./docs/03-API-Reference/21-JavaScript-API.md).

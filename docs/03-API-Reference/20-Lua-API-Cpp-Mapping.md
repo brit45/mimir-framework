@@ -5,7 +5,7 @@ Cette page reflète `LuaScripting::registerAPI()` dans
 réparties dans `LuaScriptingModelAndRegistry.cpp`,
 `LuaScriptingRuntimeAndViz.cpp` et `LuaScriptingTokenizerDataset.cpp`.
 
-Le stub IDE synchronisé est `mimir-api.lua`.
+Le stub IDE synchronisé est `ide/lua/mimir-api.lua`.
 
 ## Modules enregistrés
 
@@ -121,5 +121,5 @@ Il n'existe pas de global `Mimir.Args` : utilisez
 ## Étapes suivantes
 
 - [Vue d'ensemble de l'API](00-API-Overview.md)
-- [Stub EmmyLua](../../mimir-api.lua)
+- [Stub EmmyLua](../../ide/lua/mimir-api.lua)
 - [`Mimir.IO`](21-IO.md)

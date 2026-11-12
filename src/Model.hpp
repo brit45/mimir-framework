@@ -545,9 +545,10 @@ public:
     
     // TensorStore : stockage nommé des tensors pour routing
     std::unordered_map<std::string, std::vector<float>> tensor_store;
-    // Authoritative typed representation. The float store above is a
-    // compatibility compute view for kernels not migrated to TypedTensor yet.
-    std::unordered_map<std::string, Mimir::TypedTensor> typed_tensor_store;
+    // Materialized typed snapshots. getTypedTensor() creates an owned snapshot
+    // only when requested; dtype metadata is recorded at each store operation.
+    mutable std::unordered_map<std::string, Mimir::TypedTensor> typed_tensor_store;
+    std::unordered_map<std::string, Mimir::DType> tensor_storage_dtypes_;
     // Nouveau: TensorStore d'IDs (int) pour layers type Embedding
     std::unordered_map<std::string, std::vector<int>> tensor_store_int;
 

@@ -1,0 +1,85 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "ide/rust/Cargo.toml"
+  ],
+  "Lua.runtime.version": "Lua 5.3",
+  "Lua.runtime.path": [
+    "?.lua",
+    "?/init.lua"
+  ],
+  "Lua.workspace.library": [
+    "${workspaceFolder}/ide/lua"
+  ],
+  "Lua.workspace.checkThirdParty": false,
+  "Lua.diagnostics.enable": true,
+  "Lua.diagnostics.globals": [
+    "model",
+    "architectures",
+    "layers",
+    "tokenizer",
+    "dataset",
+    "memory",
+    "guard",
+    "MemoryGuard",
+    "allocator",
+    "htop",
+    "viz",
+    "log",
+    "read_json",
+    "write_json",
+    "Pipeline"
+  ],
+  "Lua.diagnostics.disable": [
+    "lowercase-global"
+  ],
+  "Lua.diagnostics.severity": {
+    "undefined-global": "Warning",
+    "unused-local": "Hint",
+    "unused-function": "Hint",
+    "trailing-space": "Hint"
+  },
+  "Lua.completion.enable": true,
+  "Lua.completion.callSnippet": "Both",
+  "Lua.completion.keywordSnippet": "Both",
+  "Lua.completion.displayContext": 5,
+  "Lua.completion.showWord": "Disable",
+  "Lua.completion.autoRequire": false,
+  "Lua.hint.enable": true,
+  "Lua.hint.paramName": "All",
+  "Lua.hint.setType": true,
+  "Lua.hint.paramType": true,
+  "Lua.hint.arrayIndex": "Enable",
+  "Lua.hover.enable": true,
+  "Lua.hover.viewString": true,
+  "Lua.hover.viewNumber": true,
+  "Lua.hover.viewStringMax": 1000,
+  "Lua.hover.previewFields": 50,
+  "Lua.hover.enumsLimit": 5,
+  "Lua.signatureHelp.enable": true,
+  "Lua.semantic.enable": true,
+  "Lua.semantic.variable": true,
+  "Lua.semantic.annotation": true,
+  "Lua.semantic.keyword": false,
+  "Lua.codeLens.enable": true,
+  "Lua.type.castNumberToInteger": false,
+  "Lua.type.weakUnionCheck": false,
+  "Lua.format.enable": true,
+  "files.associations": {
+    "*.lua": "lua",
+    "mimir-api.lua": "lua"
+  },
+  "[lua]": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true,
+    "editor.formatOnSave": false,
+    "editor.formatOnType": false,
+    "editor.quickSuggestions": {
+      "other": true,
+      "comments": true,
+      "strings": true
+    },
+    "editor.parameterHints.enabled": true,
+    "editor.suggest.snippetsPreventQuickSuggestions": false,
+    "editor.inlayHints.enabled": "on"
+  }
+}

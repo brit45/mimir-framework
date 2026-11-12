@@ -265,6 +265,12 @@ relit pas le modèle actif. Les valeurs des poids actifs restent celles de la
 capture exportée, même si l'entraînement continue. Aucun checkpoint complet
 ni historique futur n'est inclus.
 
+Le bouton **Organique [O]** active un style arrondi et des liaisons courbes,
+également disponible dans le HTML. `AsyncMonitor` écrit les projections publiées
+et les dernières métriques connues dans un fichier annexe JSONL à côté du CSV,
+avec un lecteur HTML chronologique hors ligne. Voir les
+[détails de relecture et de synchronisation des mesures](../02-User-Guide/18-Projection-3D.md#rendu-organique-et-relecture-métrologique).
+
 En C++, un `Visualizer` isolé ne branche pas automatiquement les poids : le
 contrôle d'`AsyncMonitor` doit être associé à `Model`. Les wrappers Lua font ce
 branchement à la création, au rechargement et aux points d'exécution communs.

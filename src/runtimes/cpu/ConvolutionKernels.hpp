@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <vector>
 #include "SIMD_Ops.hpp"
-#include "RuntimeAllocator.hpp"
+#include "ReusableScratch.hpp"
 #include "runtimes/LayerOps.hpp"
 
 namespace CpuConvolution {
@@ -66,8 +66,8 @@ inline void forward(const std::vector<float>& x,std::vector<float>& y,const floa
         }
         return;
     }
-    auto& guard=MemoryGuard::instance();RuntimeAllocator allocator(guard,guard.getLimit()/(1024*1024));
-    auto scratch=allocator.get_scratchpad_uninitialized((static_cast<size_t>(tile)*(size_t(k)+out_c)+16)*sizeof(float),"conv/forward");
+    RuntimeScratch::FloatBuffer scratch;
+    scratch.resizeUninitialized(static_cast<size_t>(tile)*(size_t(k)+out_c)+16);
     float* col=scratch.data();
     // Offset scratch regions by one cache line to avoid power-of-two aliases.
     float* rows=col+static_cast<size_t>(tile)*k+16;
@@ -155,8 +155,8 @@ inline void backward(const std::vector<float>& x,const std::vector<float>& go,st
     const int oh=(h+2*pad-dilation*(kernel-1)-1)/stride+1;
     const int ow=(w+2*pad-dilation*(kernel-1)-1)/stride+1;
     const int spatial=oh*ow,k=in_c*kernel*kernel,tile=tile_size(k,out_c,spatial);
-    auto& guard=MemoryGuard::instance();RuntimeAllocator allocator(guard,guard.getLimit()/(1024*1024));
-    auto scratch=allocator.get_scratchpad_uninitialized((static_cast<size_t>(tile)*(size_t(k)+2ULL*out_c)+32)*sizeof(float),"conv/backward");
+    RuntimeScratch::FloatBuffer scratch;
+    scratch.resizeUninitialized(static_cast<size_t>(tile)*(size_t(k)+2ULL*out_c)+32);
     float* col=scratch.data();
     float* dy=col+static_cast<size_t>(tile)*k+16;
     float* dy_t=dy+static_cast<size_t>(tile)*out_c+16;

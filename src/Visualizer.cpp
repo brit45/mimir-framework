@@ -3,6 +3,8 @@
 #include "viz/WorkbenchLayout.hpp"
 #include "viz/CommandCardLayout.hpp"
 #include "viz/LatentSpaceExport.hpp"
+#include "viz/OrganicNetwork.hpp"
+#include "viz/Heatspots.hpp"
 #include "Visualizer.hpp"
 #include "viz/DatasetBBoxBadge.hpp"
 #include "viz/FeatureProbe.hpp"
@@ -2615,6 +2617,19 @@ void Visualizer::processEvents() {
                     latent_space_yaw_ = -0.55f;
                     latent_space_pitch_ = 0.25f;
                     latent_space_zoom_ = 1.0f;
+                } else if (key->code == vizgfx::Keyboard::Key::B) {
+                    if (const auto control = std::atomic_load(&latent_space_control_)) {
+                        latent_space_organic_ = true;
+                        control->setLiveWeightsEnabled(true);
+                        control->setRealtimeEnabled(true);
+                    }
+                } else if (key->code == vizgfx::Keyboard::Key::H) {
+                    latent_space_heatspots_ = !latent_space_heatspots_;
+                    if(latent_space_heatspots_) if(const auto control=std::atomic_load(&latent_space_control_)) {
+                        control->setLiveWeightsEnabled(true);control->setRealtimeEnabled(true);
+                    }
+                } else if (key->code == vizgfx::Keyboard::Key::O) {
+                    latent_space_organic_ = !latent_space_organic_;
                 } else if (key->code == vizgfx::Keyboard::Key::X) {
                     dragging_latent_space_ = false;
                     saveLatentSpaceExport();
@@ -2622,7 +2637,20 @@ void Visualizer::processEvents() {
             } else if (const auto* click = event.getIf<vizgfx::Event::MouseButtonPressed>()) {
                 if (click->button == vizgfx::Mouse::Button::Left) {
                     const auto point = window->mapPixelToCoords(click->position);
-                    if (last_latent_space_close_rect_ && last_latent_space_close_rect_->contains(point)) {
+                    if (last_latent_space_brain_rect_ && last_latent_space_brain_rect_->contains(point)) {
+                        if (const auto control = std::atomic_load(&latent_space_control_)) {
+                            latent_space_organic_ = true;
+                            control->setLiveWeightsEnabled(true);
+                            control->setRealtimeEnabled(true);
+                        }
+                    } else if(last_latent_space_heatspots_rect_ && last_latent_space_heatspots_rect_->contains(point)) {
+                        latent_space_heatspots_=!latent_space_heatspots_;
+                        if(latent_space_heatspots_) if(const auto control=std::atomic_load(&latent_space_control_)) {
+                            control->setLiveWeightsEnabled(true);control->setRealtimeEnabled(true);
+                        }
+                    } else if (last_latent_space_organic_rect_ && last_latent_space_organic_rect_->contains(point)) {
+                        latent_space_organic_ = !latent_space_organic_;
+                    } else if (last_latent_space_close_rect_ && last_latent_space_close_rect_->contains(point)) {
                         setLatentSpaceVisible(false);
                     } else if (last_latent_space_export_rect_ && last_latent_space_export_rect_->contains(point)) {
                         dragging_latent_space_ = false;
@@ -7001,6 +7029,8 @@ bool Visualizer::saveLatentSpaceExport() {
     std::filesystem::path pending;
     try {
         mimir::viz::LatentSpaceExportView view;
+        view.organic = latent_space_displayed_organic_;
+        view.heatspots = latent_space_displayed_heatspots_;
         view.yaw = latent_space_displayed_yaw_; view.pitch = latent_space_displayed_pitch_;
         view.zoom = latent_space_displayed_zoom_; view.correlation_threshold = latent_space_displayed_threshold_;
         view.correlation_show_all_candidates = latent_space_displayed_correlation_all_candidates_;
@@ -7365,6 +7395,28 @@ void Visualizer::renderLatentSpaceOverlay() {
     draw_control_button(*last_latent_space_correlation_plus_rect_, "+", !show_all_candidates);
     draw_control_button(*last_latent_space_correlation_clear_rect_, "Effacer");
 
+    const bool organic = latent_space_export_rendering_ ? latent_space_displayed_organic_ : latent_space_organic_;
+    last_latent_space_organic_rect_ = control_rect(160.f);
+    vizgfx::RectangleShape organic_button(last_latent_space_organic_rect_->size);
+    organic_button.setPosition(last_latent_space_organic_rect_->position);
+    organic_button.setFillColor(organic ? vizgfx::Color(55,100,83) : vizgfx::Color(31,38,50));
+    window->draw(organic_button);
+    draw_text(std::string(organic ? "✓ " : "") + "Organique [O]", last_latent_space_organic_rect_->position.x + 6.f,
+        last_latent_space_organic_rect_->position.y + 3.f, 12, vizgfx::Color(223,233,244));
+    last_latent_space_brain_rect_ = control_rect(156.f);
+    vizgfx::RectangleShape brain_button(last_latent_space_brain_rect_->size);
+    brain_button.setPosition(last_latent_space_brain_rect_->position);
+    brain_button.setFillColor(organic && live_weights ? vizgfx::Color(55,100,83) : vizgfx::Color(31,38,50));
+    window->draw(brain_button);
+    draw_text("Réseau vivant [B]", last_latent_space_brain_rect_->position.x + 6.f,
+        last_latent_space_brain_rect_->position.y + 3.f, 12, vizgfx::Color(223,233,244));
+    const bool heatspots=latent_space_export_rendering_ ? latent_space_displayed_heatspots_ : latent_space_heatspots_;
+    last_latent_space_heatspots_rect_=control_rect(156.f);
+    vizgfx::RectangleShape heatspot_button(last_latent_space_heatspots_rect_->size);
+    heatspot_button.setPosition(last_latent_space_heatspots_rect_->position);
+    heatspot_button.setFillColor(heatspots?vizgfx::Color(125,64,40):vizgfx::Color(31,38,50));window->draw(heatspot_button);
+    draw_text(std::string(heatspots?"✓ ":"")+"Heatspots [H]",last_latent_space_heatspots_rect_->position.x+6.f,
+        last_latent_space_heatspots_rect_->position.y+3.f,12,vizgfx::Color(223,233,244));
     last_latent_space_export_rect_ = control_rect(132.f);
     const bool export_available = projection && !projection->points.empty() &&
         (!projection->correlation_mode || projection->correlation_ready);
@@ -7472,6 +7524,8 @@ void Visualizer::renderLatentSpaceOverlay() {
               << " · couches indisponibles " << (projection ? projection->live_weight_skipped_layers : 0)
               << " · couches partageant des poids " << (projection ? projection->live_weight_shared_layers : 0);
         live_weight_footer.push_back(signs.str());
+        if (heatspots) live_weight_footer.push_back("Heatspots : bleu/vert → jaune → rouge · densité projetée des variations |Δw| relatives. Aucun point chaud sans variation mesurée.");
+        if (organic) live_weight_footer.push_back("Volumes corticaux symboliques · ramifications décoratives · halos : variations mesurées des poids, pas des décharges biologiques.");
         live_weight_footer.push_back("Cyan : w > 0 · orange : w < 0 · gris : w = 0 · épaisseur et lumière : |w| · halo jaune : variation mesurée Δw ≠ 0.");
         live_weight_footer.push_back(std::string(realtime ? "Actualisation active, captures espacées d’au moins 250 ms. "
             : "Vue figée ; activez Temps réel ou actualisez depuis Pilotage. ") +
@@ -7569,7 +7623,45 @@ void Visualizer::renderLatentSpaceOverlay() {
         draw_axis({{0.f, 2.8f, 0.f}}, vizgfx::Color(105, 215, 135), topology ? "Unités Y" : "PC2");
         draw_axis({{0.f, 0.f, 2.8f}}, vizgfx::Color(105, 160, 235), topology ? "Unités Z" : "PC3");
 
-        for (const auto& point : projection->points) screen_points.push_back(transform(point.position));
+        const double organic_now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if(!latent_space_export_rendering_ && projection!=latent_space_displayed_projection_)
+            latent_space_organic_capture_time_=organic_now;
+        const float organic_age=static_cast<float>(organic_now-latent_space_organic_capture_time_);
+        const bool animate_plasticity=organic && live_weights && realtime &&
+            !latent_space_export_rendering_ && organic_age>=0.f && organic_age<1.f;
+        size_t organic_pulses=0;
+        const auto organic_scene = (organic || heatspots) ? mimir::viz::buildOrganicNetworkScene(*projection)
+                                            : mimir::viz::OrganicNetworkScene{};
+        for (size_t i=0;i<projection->points.size();++i)
+            screen_points.push_back(transform(organic ? organic_scene.positions[i] : projection->points[i].position));
+        if(heatspots && live_weights) {
+            const std::array<float,5> key{{latent_space_yaw_,latent_space_pitch_,latent_space_zoom_,clip_rect.size.x,clip_rect.size.y}};
+            bool ready=true;
+            if(projection!=latent_space_heatspot_cached_projection_ || key!=latent_space_heatspot_cache_key_ ||
+               organic!=latent_space_heatspot_cached_organic_) {
+                std::vector<mimir::viz::HeatspotSample> samples;samples.reserve(screen_points.size());
+                for(size_t i=0;i<screen_points.size();++i)if(organic_scene.plasticity[i]>0.f)
+                    samples.push_back({(screen_points[i].x-clip_rect.position.x)/clip_rect.size.x,
+                        (screen_points[i].y-clip_rect.position.y)/clip_rect.size.y,organic_scene.plasticity[i]});
+                const auto map=mimir::viz::buildHeatspots(samples);
+                vizgfx::Image image({map.width,map.height},vizgfx::Color(0,0,0,0));
+                for(unsigned y=0;y<map.height;++y)for(unsigned x=0;x<map.width;++x) {
+                    const auto c=mimir::viz::heatspotColor(map.values[y*map.width+x]);
+                    image.setPixel({x,y},vizgfx::Color(c[0],c[1],c[2],c[3]));
+                }
+                ready=latent_space_heatspot_texture_.loadFromImage(image);
+                if(ready) {
+                    latent_space_heatspot_texture_.setSmooth(true);
+                    latent_space_heatspot_cached_projection_=projection;latent_space_heatspot_cache_key_=key;
+                    latent_space_heatspot_cached_organic_=organic;
+                }
+            }
+            if(ready) {
+                vizgfx::Sprite sprite(latent_space_heatspot_texture_);sprite.setPosition(clip_rect.position);
+                sprite.setScale({clip_rect.size.x/mimir::viz::HeatspotMap::width,clip_rect.size.y/mimir::viz::HeatspotMap::height});
+                window->draw(sprite);
+            }
+        }
         float closest_edge_distance = 25.f;
         std::vector<vizgfx::Vertex> network_strokes;
         auto append_stroke_vertex = [&](vizgfx::Vector2f position, vizgfx::Color color) {
@@ -7628,27 +7720,46 @@ void Visualizer::renderLatentSpaceOverlay() {
                         append_stroke_vertex(stroke_start, vizgfx::Color(0,0,0,0));
                     }
                     append_stroke_vertex(stroke_start, stroke_color);
+                    if (organic) {
+                        const float bend = std::min(24.f, length * .14f);
+                        for (int part = 1; part < 12; ++part) {
+                            const float t = float(part) / 12.f;
+                            append_stroke_vertex({stroke_start.x + (stroke_end.x-stroke_start.x)*t + nx*bend*(4.f*t*(1.f-t)),
+                                stroke_start.y + (stroke_end.y-stroke_start.y)*t + ny*bend*(4.f*t*(1.f-t))}, stroke_color);
+                        }
+                    }
                     append_stroke_vertex(stroke_end, stroke_color);
                 }
             };
             if (glow > 0.f) stroke(vizgfx::Color(255,224,111,
                 static_cast<uint8_t>(70.f + 90.f * std::clamp(glow, 0.f, 1.f))), thickness + 2.f);
             stroke(color, thickness);
-            hits.push_back({start, end, index});
-            if (clip_rect.contains(picker_mouse_)) {
-                const float sx = end.x - start.x, sy = end.y - start.y;
-                const float length = sx * sx + sy * sy;
-                const float along = length > 1e-8f ? std::clamp(
-                    ((picker_mouse_.x - start.x) * sx + (picker_mouse_.y - start.y) * sy) / length, 0.f, 1.f) : 0.f;
-                const float hx = picker_mouse_.x - start.x - along * sx;
-                const float hy = picker_mouse_.y - start.y - along * sy;
-                const float distance = hx * hx + hy * hy;
-                if (distance <= closest_edge_distance) {
-                    closest_edge_distance = distance;
-                    hovered_edge_index = index;
-                    hovered_edge_kind = &hits == &last_latent_space_live_weight_edge_hits_ ? 3
-                        : &hits == &last_latent_space_neuron_edge_hits_ ? 2 : 1;
+            const auto original_start = start;
+            const float edge_dx=end.x-start.x, edge_dy=end.y-start.y;
+            const float edge_length=std::hypot(edge_dx,edge_dy);
+            const float bend=organic ? std::min(24.f,edge_length*.14f) : 0.f;
+            const int parts=organic ? 12 : 1;
+            for(int part=1;part<=parts;++part) {
+                const float t=float(part)/float(parts), curve=4.f*t*(1.f-t)*bend;
+                end={original_start.x+edge_dx*t-(edge_length>0.f?edge_dy/edge_length:0.f)*curve,
+                     original_start.y+edge_dy*t+(edge_length>0.f?edge_dx/edge_length:0.f)*curve};
+                hits.push_back({start, end, index});
+                if (clip_rect.contains(picker_mouse_)) {
+                    const float sx = end.x - start.x, sy = end.y - start.y;
+                    const float length = sx * sx + sy * sy;
+                    const float along = length > 1e-8f ? std::clamp(
+                        ((picker_mouse_.x - start.x) * sx + (picker_mouse_.y - start.y) * sy) / length, 0.f, 1.f) : 0.f;
+                    const float hx = picker_mouse_.x - start.x - along * sx;
+                    const float hy = picker_mouse_.y - start.y - along * sy;
+                    const float distance = hx * hx + hy * hy;
+                    if (distance <= closest_edge_distance) {
+                        closest_edge_distance = distance;
+                        hovered_edge_index = index;
+                        hovered_edge_kind = &hits == &last_latent_space_live_weight_edge_hits_ ? 3
+                            : &hits == &last_latent_space_neuron_edge_hits_ ? 2 : 1;
+                    }
                 }
+                start=end;
             }
         };
         if (correlations) {
@@ -7680,6 +7791,41 @@ void Visualizer::renderLatentSpaceOverlay() {
                     ? static_cast<float>(std::sqrt(std::abs(coefficient.delta) / live_max_delta)) : 0.f;
                 draw_link(index, edge.source, edge.target, live_weight_color(coefficient.value),
                     last_latent_space_live_weight_edge_hits_, 1.f + 3.f * static_cast<float>(amplitude), change);
+                if(animate_plasticity && change>0.f && organic_pulses<512 &&
+                   edge.source<screen_points.size() && edge.target<screen_points.size()) {
+                    const auto& a=screen_points[edge.source];const auto& b=screen_points[edge.target];
+                    const float dx=b.x-a.x,dy=b.y-a.y,length=std::hypot(dx,dy);
+                    const float t=organic_age, bend=std::min(24.f,length*.14f),curve=4.f*t*(1.f-t)*bend;
+                    const float x=a.x+dx*t-(length>0.f?dy/length:0.f)*curve;
+                    const float y=a.y+dy*t+(length>0.f?dx/length:0.f)*curve;
+                    vizgfx::Vector2f start{x-2.f,y},end{x+2.f,y};
+                    if(clip_link_segment(start,end)) {
+                        if(!network_strokes.empty())append_stroke_vertex(network_strokes.back().position,vizgfx::Color(0,0,0,0));
+                        append_stroke_vertex(start,vizgfx::Color(0,0,0,0));
+                        const auto color=vizgfx::Color(255,240,185,static_cast<uint8_t>(100.f+155.f*change));
+                        append_stroke_vertex(start,color);append_stroke_vertex(end,color);
+                        append_stroke_vertex(end,vizgfx::Color(0,0,0,0));++organic_pulses;
+                    }
+                }
+            }
+        }
+        if (organic && topology) {
+            // Bounded decorative geometry, batched with the existing link strokes.
+            const size_t stride=std::max<size_t>(1,(projection->points.size()+1023)/1024);
+            for(size_t i=0;i<projection->points.size();i+=stride) {
+                const auto& point=projection->points[i];
+                if(point.neuron_is_operation || point.live_weight_coefficient!=std::numeric_limits<size_t>::max())continue;
+                const auto center=screen_points[i];
+                for(unsigned branch=0;branch<4;++branch) {
+                    const auto tip=transform(mimir::viz::organicDendriteTip(point,organic_scene.positions[i],branch));
+                    vizgfx::Vector2f a{center.x,center.y},b{tip.x,tip.y};
+                    if(!clip_link_segment(a,b))continue;
+                    if(!network_strokes.empty())append_stroke_vertex(network_strokes.back().position,vizgfx::Color(0,0,0,0));
+                    append_stroke_vertex(a,vizgfx::Color(0,0,0,0));
+                    append_stroke_vertex(a,vizgfx::Color(128,190,220,105));
+                    append_stroke_vertex(b,vizgfx::Color(128,190,220,35));
+                    append_stroke_vertex(b,vizgfx::Color(0,0,0,0));
+                }
             }
         }
         if (!network_strokes.empty()) {
@@ -7704,11 +7850,23 @@ void Visualizer::renderLatentSpaceOverlay() {
                 return projection->points[a].sequence_position < projection->points[b].sequence_position;
             });
             if (sequence_order.size() < 2) continue;
-            vizgfx::VertexArray path(vizgfx::PrimitiveType::LineStrip, sequence_order.size());
-            for (size_t index = 0; index < sequence_order.size(); ++index) {
-                const auto& point = screen_points[sequence_order[index]];
-                path[index].position = {point.x, point.y};
-                path[index].color = vizgfx::Color(93, 183, 122, 175);
+            const size_t subdivisions = organic ? 12 : 1;
+            vizgfx::VertexArray path(vizgfx::PrimitiveType::LineStrip, (sequence_order.size()-1)*subdivisions+1);
+            size_t vertex = 0;
+            const auto& first = screen_points[sequence_order.front()];
+            path[vertex].position = {first.x, first.y};
+            path[vertex++].color = vizgfx::Color(93,183,122,175);
+            for (size_t index = 1; index < sequence_order.size(); ++index) {
+                const auto& a = screen_points[sequence_order[index-1]];
+                const auto& b = screen_points[sequence_order[index]];
+                const float dx=b.x-a.x, dy=b.y-a.y, length=std::hypot(dx,dy);
+                const float bend=organic ? std::min(24.f,length*.14f) : 0.f;
+                for(size_t part=1;part<=subdivisions;++part) {
+                    const float t=float(part)/float(subdivisions), curve=4.f*t*(1.f-t)*bend;
+                    path[vertex].position={a.x+dx*t-(length>0.f?dy/length:0.f)*curve,
+                                           a.y+dy*t+(length>0.f?dx/length:0.f)*curve};
+                    path[vertex++].color=vizgfx::Color(93,183,122,175);
+                }
             }
             window->draw(path);
         }
@@ -7743,7 +7901,30 @@ void Visualizer::renderLatentSpaceOverlay() {
                     marker.setOutlineThickness(1.f);
                 }
             } else marker.setFillColor(group_color(point.group));
-            window->draw(marker);
+            if (organic) {
+                auto disc = [&](float radius, vizgfx::Color color) {
+                    const int rows = int(std::floor(radius));
+                    vizgfx::VertexArray stripes(vizgfx::PrimitiveType::LineStrip, size_t(2*rows+1)*4);
+                    for (int row = -rows; row <= rows; ++row) {
+                        const float half = std::sqrt(std::max(0.f, radius*radius-float(row*row)));
+                        const size_t offset = size_t(row+rows)*4;
+                        stripes[offset].position = stripes[offset+1].position = {screen_point.x-half, screen_point.y+float(row)};
+                        stripes[offset+2].position = stripes[offset+3].position = {screen_point.x+half, screen_point.y+float(row)};
+                        stripes[offset].color = stripes[offset+3].color = vizgfx::Color(0,0,0,0);
+                        stripes[offset+1].color = stripes[offset+2].color = color;
+                    }
+                    window->draw(stripes);
+                };
+                const float plasticity=organic_scene.plasticity[index];
+                if(plasticity>0.f) {
+                    disc(marker_size*(1.1f+.5f*plasticity),vizgfx::Color(255,210,95,static_cast<uint8_t>(25.f+50.f*plasticity)));
+                    disc(marker_size*.85f,vizgfx::Color(255,225,140,static_cast<uint8_t>(45.f+80.f*plasticity)));
+                }
+                if (marker.getOutlineThickness() > 0.f)
+                    disc(marker_size*.65f+marker.getOutlineThickness(), marker.getOutlineColor());
+                disc(marker_size*.65f, marker.getFillColor());
+                disc(marker_size*.20f, vizgfx::Color(235,245,255,190));
+            } else window->draw(marker);
             const float hit_left=std::max(clip_rect.position.x,screen_point.x-7.f);
             const float hit_top=std::max(clip_rect.position.y,screen_point.y-7.f);
             const float hit_right=std::min(clip_rect.position.x+clip_rect.size.x,screen_point.x+7.f);
@@ -7965,6 +8146,8 @@ void Visualizer::renderLatentSpaceOverlay() {
               last_latent_space_close_rect_->position.y + 3.f, 18, vizgfx::Color(240, 222, 230), true);
     if (!latent_space_export_rendering_) {
         latent_space_displayed_projection_ = export_available ? projection : nullptr;
+        latent_space_displayed_organic_ = organic;
+        latent_space_displayed_heatspots_ = heatspots;
         latent_space_displayed_yaw_ = latent_space_yaw_;
         latent_space_displayed_pitch_ = latent_space_pitch_;
         latent_space_displayed_zoom_ = latent_space_zoom_;

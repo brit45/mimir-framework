@@ -1,6 +1,7 @@
 #ifndef __ASYNC_MONITOR_HPP__
 #define __ASYNC_MONITOR_HPP__
 
+#include "viz/TrainingCapture.hpp"
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -1375,6 +1376,27 @@ private:
 
     void latentSpaceWorkerLoop() {
         const auto control = std::atomic_load(&latent_space_control_);
+        mimir::viz::TrainingCapture capture;
+        auto record_projection = [&](const std::shared_ptr<const mimir::viz::LatentSpaceProjection>& projection) {
+            if (!projection) return;
+            std::string csv;
+            nlohmann::json metrics;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!metrics_csv_enabled_) return;
+                csv = metrics_csv_file_;
+                metrics = {{"optimizer_step",metrics_.opt_step},{"epoch",metrics_.epoch},{"batch",metrics_.batch},
+                    {"loss",metrics_.loss},{"average_loss",metrics_.avg_loss},{"learning_rate",metrics_.lr},
+                    {"gradient_norm",metrics_.grad_norm},{"batch_time_ms",metrics_.batch_time_ms},
+                    {"memory_mb",metrics_.memory_mb},{"allocator_memory_mb",metrics_.allocator_memory_mb},
+                    {"model_metrics",metrics_.model_metrics},{"mse",metrics_.mse},{"kl",metrics_.kl},
+                    {"kl_beta_effective",metrics_.kl_beta_effective},{"gradient_max",metrics_.grad_max}};
+            }
+            try { capture.append(*projection, csv, metrics); }
+            catch (const std::exception& error) {
+                std::cerr << "[Viz] Capture métrologique : " << error.what() << std::endl;
+            }
+        };
         mimir::viz::LatentCorrelationWindow correlation_window;
         mimir::viz::LatentCorrelationObservation latest_observation;
         std::optional<mimir::viz::LatentCorrelationAnalysis> correlation_analysis;
@@ -1440,7 +1462,8 @@ private:
                             correlation_window.revision(), correlation_analysis->ready, revision)) continue;
                     auto projection = mimir::viz::projectLatentCorrelations3D(
                         *correlation_analysis, latest_observation, revision);
-                    control->publishProjection(std::move(projection));
+                    std::shared_ptr<const mimir::viz::LatentSpaceProjection> published;
+                    if (control->publishProjection(std::move(projection), &published)) record_projection(published);
                 } catch (const std::exception& error) {
                     control->fail("Échec des corrélations : " + std::string(error.what()),
                                   current_generation, revision, current_epoch);
@@ -1464,8 +1487,11 @@ private:
                         : snapshot->neuron_mode
                         ? "aucune couche disponible pour la répartition des neurones"
                         : "aucun vecteur fini à projeter");
-                if (control->publishProjection(std::move(projection)) && snapshot->live_weight_mode)
-                    previous_live_weights = snapshot;
+                std::shared_ptr<const mimir::viz::LatentSpaceProjection> published;
+                if (control->publishProjection(std::move(projection), &published)) {
+                    record_projection(published);
+                    if (snapshot->live_weight_mode) previous_live_weights = snapshot;
+                }
             } catch (const std::exception& error) {
                 control->fail("Échec de projection 3D : " + std::string(error.what()), snapshot->generation, snapshot->revision);
             }
@@ -1633,17 +1659,23 @@ private:
     }
 
     void csvLoop() {
+        std::vector<std::pair<std::string,MetricsRecord>> pending;
         std::unique_lock<std::mutex> lock(mutex_);
         while (csv_running_ || !csv_queue_.empty()) {
             csv_cv_.wait(lock, [&] { return !csv_running_ || !csv_queue_.empty(); });
             if (csv_queue_.empty()) continue;
-            auto pending = std::move(csv_queue_);
-            csv_queue_.clear(); csv_writing_ = true;
+            pending.swap(csv_queue_);
+            csv_writing_ = true;
             lock.unlock();
-            for (const auto& item : pending) {
-                if (!MetricsCsv::append(item.first, item.second))
-                    std::cerr << "[monitor] Cannot append metrics CSV: " << item.first << std::endl;
+            for(size_t first=0;first<pending.size();) {
+                size_t last=first+1;
+                while(last<pending.size() && pending[last].first==pending[first].first)++last;
+                if(!MetricsCsv::appendRange(pending[first].first,pending.begin()+first,pending.begin()+last,
+                        [](const auto& item)->const MetricsRecord&{return item.second;}))
+                    std::cerr << "[monitor] Cannot append metrics CSV: " << pending[first].first << std::endl;
+                first=last;
             }
+            pending.clear(); // Destroy completed records outside the producer lock.
             lock.lock(); csv_writing_ = false; csv_flushed_cv_.notify_all();
         }
         csv_flushed_cv_.notify_all();

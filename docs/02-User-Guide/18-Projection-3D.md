@@ -426,3 +426,93 @@ validés avec leur propre compilation.
 - [API Viz et Htop](../03-API-Reference/15-Viz-Htop.md#projection-3d-du-modèle-courant)
 - [Choisir un backend Viz](17-Viz-Backends.md)
 - [Architecture du monitoring](../04-Architecture-Internals/04-Monitoring-Htop-Visualizer.md)
+
+### Rendu organique et relecture métrologique
+
+Dans la fenêtre 3D, le bouton **Organique [O]** ou la touche `O` active des corps
+arrondis avec un noyau et des liaisons courbes. Les couleurs, valeurs et identités
+restent celles de la capture. En topologie, les positions de présentation utilisent
+des volumes repliés ; les coordonnées originales restent conservées. Ce style fonctionne dans les quatre
+modes et dans l'export HTML ; il ne simule pas d'activité biologique. Le mode
+**Neurones** reste une topologie, sans inventer d'activations. Utiliser les modes
+activations/corrélations ou poids actifs pour inspecter les mesures disponibles.
+
+Lorsque la journalisation CSV d'`AsyncMonitor` est active, chaque projection 3D
+publiée est aussi enregistrée automatiquement à côté du CSV, dans
+`<nom_csv>.viz3d_<session>.jsonl`. Un lecteur autonome
+`<nom_csv>.viz3d_<session>.jsonl.html` est créé au même endroit. Ouvrir ce HTML
+puis sélectionner le JSONL : le curseur parcourt les captures, **Lecture / pause**
+les rejoue selon leurs intervalles de temps monotones, avec un choix de vitesse.
+Chaque capture reste manipulable en rotation, zoom et survol ; la caméra est
+réinitialisée au passage à la capture suivante. Aucun serveur n'est nécessaire.
+
+Chaque ligne JSONL contient une version de format, l'heure UTC en microsecondes
+Unix, le temps écoulé monotone, la projection complète échantillonnée (points,
+liens, poids/deltas, statistiques d'activation, règles et limites d'échantillonnage),
+les identifiants du modèle et le pas d'optimisation. Les dernières métriques
+connues du moniteur sont annexées : loss, moyenne, learning rate, gradients,
+mémoire, durée de batch et métriques spécifiques au modèle. Leur pas est conservé
+séparément : ce sont les dernières mesures observées au moment de l'écriture,
+et elles ne sont pas garanties synchrones avec le pas de la projection. Le CSV
+reste la série de référence de l'entraînement. Les nombres non finis sont `null`.
+
+L'écriture et la sérialisation se font dans le travailleur de projection, hors
+du verrou d'entraînement ; chaque ligne est vidée vers le système de fichiers.
+Les sessions ne remplacent pas les fichiers précédents. Le lecteur ignore les
+lignes invalides, dont une dernière ligne interrompue, et en signale le nombre.
+L'historique couvre les projections effectivement capturées, selon les modes,
+la cadence et les limites de la Viz ; activer **Temps réel** pour une série.
+Il ne contient ni tous les tenseurs ni tous les pas et ne remplace pas un
+checkpoint permettant de reprendre le calcul. L'espace disque croît avec les
+captures. Une erreur d'écriture est signalée dans les logs `[Viz]`.
+
+## Réseau vivant : rendu organique des neurones et des liaisons
+
+Dans la fenêtre 3D, cliquer sur **Réseau vivant [B]** ou appuyer sur **B**.
+Cette commande active **Poids actifs (DL)**, **Temps réel** et **Organique**.
+La capture suivante est publiée à un point sûr du moteur ; la première capture
+sert de référence, et les suivantes permettent de visualiser les variations.
+
+Les unités connues occupent deux volumes repliés d'aspect cortical. Leur identité
+reste stable entre captures et la profondeur du graphe est conservée sur X.
+Les corps arrondis et ramifications courtes donnent une lecture organique des
+couches ; les ramifications sont décoratives et n'ajoutent aucune connexion au
+modèle. Les couches dont la géométrie est inconnue restent des nœuds d'opération.
+
+- **Liens cyan/orange** : coefficients positifs/négatifs dont la correspondance
+  entre unités est vérifiée. L'épaisseur représente leur amplitude.
+- **Halos dorés** : amplitude relative des variations de poids mesurées autour
+  des unités concernées. Une impulsion visuelle brève accompagne chaque nouvelle
+  capture contenant une variation ; elle cesse en l'absence de nouvelle capture.
+- **Liens gris** : routage agrégé entre couches, distinct des poids individuels.
+- **Biais et paramètres non mappés** : glyphes identifiés, sans synapse inventée.
+
+Ce rendu est une représentation symbolique du réseau artificiel. Les changements
+observés sont ceux des paramètres appris ; ils ne représentent pas des décharges
+biologiques. L'entraînement modifie les poids d'une topologie donnée : la vue ne
+prétend pas montrer la création de nouvelles connexions lorsqu'elle n'a pas lieu.
+Le rendu organique ne déforme pas les coordonnées des vues ACP/corrélations.
+
+Le bouton **Organique [O]** permet de revenir au style classique sans modifier
+le modèle. Les exports 3D et les captures JSONL conservent les coordonnées
+originales, les positions organiques et la plasticité affichée ; le HTML autonome
+reproduit la disposition et les halos. Les impulsions temporelles sont réservées
+à la vue native en direct ; l'export reste une capture figée. Les ramifications
+sont limitées à 1024 corps et les impulsions à 512 liens par image pour borner
+le coût graphique, sans retirer les points ou liens du graphe capturé.
+
+### Points chauds / Heatspots [H]
+
+Dans la vue 3D, **Heatspots [H]** affiche une carte thermique sous le réseau.
+L'activation sélectionne les poids actifs et leur actualisation en temps réel.
+Elle fonctionne avec les styles classique et organique. Les couleurs vont du
+bleu/vert au jaune puis au rouge pour les zones de plus forte variation relative
+des poids ; les contributions proches se cumulent dans la projection à l'écran.
+Il s'agit d'une densité projetée de |Δw|, pas d'une mesure de température ou de
+fréquence de décharge. Une référence absente ou des poids inchangés ne produisent
+aucun point chaud. Le signe des poids reste visible sur les liaisons.
+
+La carte est calculée sur une grille bornée de 64×48, conservée en cache tant que
+la capture, le style et la caméra restent identiques. Le modèle n'est pas relu
+par le rendu. Le réglage affiché est conservé dans les exports PNG/JSON/HTML ;
+le HTML possède également une case Heatspots pour activer la superposition.

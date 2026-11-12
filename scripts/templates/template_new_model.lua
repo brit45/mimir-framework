@@ -545,7 +545,7 @@ log("  3. Tester avec forward/backward sur données synthétiques")
 log("  4. Sauvegarder les checkpoints (étape 9)")
 
 log("\n📚 Documentation:")
-log("  • mimir-api.lua - Référence API complète (16 modules)")
+log("  • ide/lua/mimir-api.lua - Référence API complète (16 modules)")
 log("  • docs/00-INDEX.md - Index principal (point d'entrée)")
 log("  • docs/02-User-Guide/ - Guides utilisateur")
 log("  • docs/03-API-Reference/10-Model.md - Multi-input (forward map) + patterns")

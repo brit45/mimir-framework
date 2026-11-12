@@ -11,6 +11,7 @@ static void require_at(bool value, int line) {
 static void near(float a,float b) { require(std::abs(a-b)<3e-5f*std::max(1.0f,std::abs(b))); }
 static void check(int h,int width,int in,int out,int kernel,int stride,int pad,int dilation,bool bias) {
     auto& guard=MemoryGuard::instance();
+    RuntimeScratch::Pool::local().clear();
     require(guard.getCurrentBytes()==0);guard.reset();
     const int oh=(h+2*pad-dilation*(kernel-1)-1)/stride+1;
     const int ow=(width+2*pad-dilation*(kernel-1)-1)/stride+1;
@@ -49,10 +50,15 @@ static void check(int h,int width,int in,int out,int kernel,int stride,int pad,i
         for(size_t i=0;i<dx.size();++i)near(dx[i],dx_ref[i]);
         for(size_t i=0;i<dw_ref.size();++i)near(layer.grad_weights[i],.125f+repeat*dw_ref[i]);
         for(size_t i=0;i<db_ref.size();++i){near(layer.grad_weights[size_t(out)*k+i],.125f+repeat*db_ref[i]);near(layer.grad_bias[i],.25f+repeat*db_ref[i]);}
-        require(guard.getCurrentBytes()==0);
+        require(guard.getCurrentBytes()==RuntimeScratch::Pool::local().cachedBytes());
     }
     const int tile=CpuConvolution::tile_size(k,out,spatial);
     require(guard.getPeakBytes()<=(size_t(tile)*(k+2*out)+32)*sizeof(float));
+    const auto allocations=guard.getAllocationsCount();
+    CpuConvolution::backward(x,g,dx,layer,h,width,in,out,kernel,stride,pad,dilation);
+    require(guard.getAllocationsCount()==allocations);
+    RuntimeScratch::Pool::local().clear();
+    require(guard.getCurrentBytes()==0);
 }
 int main() {
     {

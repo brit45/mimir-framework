@@ -118,6 +118,8 @@ cmake --build build --parallel 2
 - [Sérialisation](03-API-Reference/02-Serialization.md)
 - [Variables d'environnement](03-API-Reference/22-Environment-Variables.md)
 - [Bridge JavaScript](03-API-Reference/21-JavaScript-API.md)
+- [Bridge Rust](03-API-Reference/23-Rust-API.md)
+- [Helpers IDE centralisés](../ide/README.md)
 - [Correspondance Lua vers C++](03-API-Reference/20-Lua-API-Cpp-Mapping.md)
 
 ## Runtimes et matériel

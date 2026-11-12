@@ -459,16 +459,16 @@ static int testRustBridge() {
     std::cerr << "[SKIP] BridgeTest.Rust: bridge Rust désactivé à la compilation\n";
     return 0;
 #else
-    if (!commandAvailable("rust-script")) {
-        std::cerr << "[SKIP] BridgeTest.Rust: rust-script absent du PATH\n";
+    if (!commandAvailable("rustc")) {
+        std::cerr << "[SKIP] BridgeTest.Rust: rustc absent du PATH\n";
         return 0;
     }
 
     const auto script = writeTempScript("rs",
-        "Model::create(\"basic_mlp\", \"\");\n"
-        "Model::allocate_params();\n"
-        "Model::init_weights(\"he\", 0);\n"
-        "let _p = Model::total_params();\n"
+        "Model::create(&[\"basic_mlp\".into()])?;\n"
+        "Model::allocate_params(&[])?;\n"
+        "Model::init_weights(&[\"he\".into(), 0.into()])?;\n"
+        "let _p = Model::total_params(&[])?;\n"
     );
 
     RustContext& ctx = RustContext::getInstance();

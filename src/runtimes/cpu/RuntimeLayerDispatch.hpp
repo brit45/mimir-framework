@@ -25,6 +25,14 @@
 #include "CausalSequenceKernels.hpp"
 #include "PrimerKernels.hpp"
 
+#if defined(_MSC_VER)
+#define MIMIR_CPU_SCRATCH_RESTRICT __restrict
+#elif defined(__GNUC__) || defined(__clang__)
+#define MIMIR_CPU_SCRATCH_RESTRICT __restrict__
+#else
+#define MIMIR_CPU_SCRATCH_RESTRICT
+#endif
+
 namespace RuntimeLayerDispatch {
 
 inline bool cpu_supports_forward_layer_type(LayerType type) {
@@ -931,10 +939,10 @@ inline bool cpu_forward_layer(
                 const bool has_full_bias = (actual_size >= expected_with_bias);
                 const bool has_out_bias_only = (!has_full_bias && actual_size >= expected_out_bias_only);
 
-                std::vector<float> qkv_weight(weights, weights + qkv_size);
-                std::vector<float> out_weight(weights + qkv_size, weights + qkv_size + out_size);
-                std::vector<float> qkv_bias;
-                std::vector<float> out_bias;
+                RuntimeScratch::ConstFloatView qkv_weight(weights, weights + qkv_size);
+                RuntimeScratch::ConstFloatView out_weight(weights + qkv_size, weights + qkv_size + out_size);
+                RuntimeScratch::ConstFloatView qkv_bias;
+                RuntimeScratch::ConstFloatView out_bias;
                 if (has_full_bias) {
                     const float* bias_ptr = weights + qkv_size + out_size;
                     qkv_bias.assign(bias_ptr, bias_ptr + qkv_bias_size);
@@ -981,10 +989,10 @@ inline bool cpu_forward_layer(
                 const int out_size = embed_dim * embed_dim;
                 const int out_bias_size = embed_dim;
 
-                std::vector<float> q_weight(weights, weights + q_size);
-                std::vector<float> kv_weight(weights + q_size, weights + q_size + kv_size);
-                std::vector<float> out_weight(weights + q_size + kv_size, weights + q_size + kv_size + out_size);
-                std::vector<float> out_bias;
+                RuntimeScratch::ConstFloatView q_weight(weights, weights + q_size);
+                RuntimeScratch::ConstFloatView kv_weight(weights + q_size, weights + q_size + kv_size);
+                RuntimeScratch::ConstFloatView out_weight(weights + q_size + kv_size, weights + q_size + kv_size + out_size);
+                RuntimeScratch::ConstFloatView out_bias;
                 const size_t expected_with_bias = static_cast<size_t>(q_size + kv_size + out_size + out_bias_size);
                 if (layer.getWeightsSize() >= expected_with_bias) {
                     const float* bias_ptr = weights + q_size + kv_size + out_size;
@@ -1112,7 +1120,10 @@ inline bool cpu_forward_layer(
                     const float* bih = use_bias ? (Whh + Whh_sz) : nullptr;
                     const float* bhh = use_bias ? (bih + bih_sz) : nullptr;
 
-                    std::vector<float> h_prev(static_cast<size_t>(H), 0.0f);
+                    RuntimeScratch::FloatArena workspace({
+                    static_cast<size_t>(H)});
+                    auto h_prev=workspace.take(static_cast<size_t>(H));
+                    h_prev.fill(0.0f);
                     outputs.resize(1);
                     outputs[0].assign(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
                     for (int t = 0; t < T; ++t) {
@@ -1147,10 +1158,19 @@ inline bool cpu_forward_layer(
                     const float* bih = use_bias ? (Whh + Whh_sz) : nullptr;
                     const float* bhh = use_bias ? (bih + bih_sz) : nullptr;
 
-                    std::vector<float> h_prev(static_cast<size_t>(H), 0.0f);
-                    std::vector<float> r(static_cast<size_t>(H), 0.0f);
-                    std::vector<float> z(static_cast<size_t>(H), 0.0f);
-                    std::vector<float> n(static_cast<size_t>(H), 0.0f);
+                    RuntimeScratch::FloatArena workspace({
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H)});
+                    auto h_prev=workspace.take(static_cast<size_t>(H));
+                    auto r=workspace.take(static_cast<size_t>(H));
+                    auto z=workspace.take(static_cast<size_t>(H));
+                    auto n=workspace.take(static_cast<size_t>(H));
+                    h_prev.fill(0.0f);
+                    r.fill(0.0f);
+                    z.fill(0.0f);
+                    n.fill(0.0f);
 
                     outputs.resize(1);
                     outputs[0].assign(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
@@ -3875,8 +3895,42 @@ inline bool cpu_backward_layer(
                 const int head_dim = embed_dim / num_heads;
                 const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-                std::vector<float> Q(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
-                std::vector<float> KV(static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim), 0.0f);
+                RuntimeScratch::FloatArena workspace({
+                    static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
+                    static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim),
+                    static_cast<size_t>(num_heads) * static_cast<size_t>(query_len) * static_cast<size_t>(kv_len),
+                    static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
+                    static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
+                    static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim),
+                    static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim),
+                    static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim),
+                    static_cast<size_t>(query_len) * static_cast<size_t>(kv_len),
+                    static_cast<size_t>(query_len) * static_cast<size_t>(kv_len),
+                    static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim)});
+                auto Q_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT Q=Q_slice.data();
+                auto KV_slice=workspace.take(static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT KV=KV_slice.data();
+                auto P_slice=workspace.take(static_cast<size_t>(num_heads) * static_cast<size_t>(query_len) * static_cast<size_t>(kv_len));
+                float* MIMIR_CPU_SCRATCH_RESTRICT P=P_slice.data();
+                auto attended_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT attended=attended_slice.data();
+                auto dAtt_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT dAtt=dAtt_slice.data();
+                auto dQ_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT dQ=dQ_slice.data();
+                auto dK_slice=workspace.take(static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT dK=dK_slice.data();
+                auto dV_slice=workspace.take(static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT dV=dV_slice.data();
+                auto dP_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(kv_len));
+                float* MIMIR_CPU_SCRATCH_RESTRICT dP=dP_slice.data();
+                auto dS_slice=workspace.take(static_cast<size_t>(query_len) * static_cast<size_t>(kv_len));
+                float* MIMIR_CPU_SCRATCH_RESTRICT dS=dS_slice.data();
+                auto dKV_slice=workspace.take(static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim));
+                float* MIMIR_CPU_SCRATCH_RESTRICT dKV=dKV_slice.data();
+                std::fill_n(Q,Q_slice.size(),0.0f);
+                std::fill_n(KV,KV_slice.size(),0.0f);
                 for (int i = 0; i < query_len; ++i) {
                     const float* xrow = &q_in[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
                     float* yrow = &Q[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
@@ -3900,8 +3954,8 @@ inline bool cpu_backward_layer(
                 auto k_at = [&](int t, int d) -> float { return KV[static_cast<size_t>(t) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(d)]; };
                 auto v_at = [&](int t, int d) -> float { return KV[static_cast<size_t>(t) * static_cast<size_t>(2 * embed_dim) + static_cast<size_t>(embed_dim + d)]; };
 
-                std::vector<float> P(static_cast<size_t>(num_heads) * static_cast<size_t>(query_len) * static_cast<size_t>(kv_len), 0.0f);
-                std::vector<float> attended(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
+                std::fill_n(P,P_slice.size(),0.0f);
+                std::fill_n(attended,attended_slice.size(),0.0f);
                 for (int h = 0; h < num_heads; ++h) {
                     const int hoff = h * head_dim;
                     for (int i = 0; i < query_len; ++i) {
@@ -3940,7 +3994,7 @@ inline bool cpu_backward_layer(
                     }
                 }
 
-                std::vector<float> dAtt(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
+                std::fill_n(dAtt,dAtt_slice.size(),0.0f);
                 for (int i = 0; i < query_len; ++i) {
                     const float* dy = &grad_out[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
                     float* da = &dAtt[static_cast<size_t>(i) * static_cast<size_t>(embed_dim)];
@@ -3962,9 +4016,9 @@ inline bool cpu_backward_layer(
                     }
                 }
 
-                std::vector<float> dQ(static_cast<size_t>(query_len) * static_cast<size_t>(embed_dim), 0.0f);
-                std::vector<float> dK(static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim), 0.0f);
-                std::vector<float> dV(static_cast<size_t>(kv_len) * static_cast<size_t>(embed_dim), 0.0f);
+                std::fill_n(dQ,dQ_slice.size(),0.0f);
+                std::fill_n(dK,dK_slice.size(),0.0f);
+                std::fill_n(dV,dV_slice.size(),0.0f);
 
                 for (int h = 0; h < num_heads; ++h) {
                     const int hoff = h * head_dim;
@@ -3979,7 +4033,7 @@ inline bool cpu_backward_layer(
                         }
                     }
 
-                    std::vector<float> dP(static_cast<size_t>(query_len) * static_cast<size_t>(kv_len), 0.0f);
+                    std::fill_n(dP,dP_slice.size(),0.0f);
                     for (int i = 0; i < query_len; ++i) {
                         for (int j = 0; j < kv_len; ++j) {
                             float sum = 0.0f;
@@ -3990,7 +4044,7 @@ inline bool cpu_backward_layer(
                         }
                     }
 
-                    std::vector<float> dS(static_cast<size_t>(query_len) * static_cast<size_t>(kv_len), 0.0f);
+                    std::fill_n(dS,dS_slice.size(),0.0f);
                     for (int i = 0; i < query_len; ++i) {
                         const float* p_row = &P[(static_cast<size_t>(h) * static_cast<size_t>(query_len) + static_cast<size_t>(i)) * static_cast<size_t>(kv_len)];
                         const float* dp_row = &dP[static_cast<size_t>(i) * static_cast<size_t>(kv_len)];
@@ -4032,7 +4086,7 @@ inline bool cpu_backward_layer(
                     }
                 }
 
-                std::vector<float> dKV(static_cast<size_t>(kv_len) * static_cast<size_t>(2 * embed_dim), 0.0f);
+                std::fill_n(dKV,dKV_slice.size(),0.0f);
                 for (int i = 0; i < kv_len; ++i) {
                     float* row = &dKV[static_cast<size_t>(i) * static_cast<size_t>(2 * embed_dim)];
                     for (int d = 0; d < embed_dim; ++d) {
@@ -4106,15 +4160,40 @@ inline bool cpu_backward_layer(
                 const float* bih = use_bias ? (Whh + Whh_sz) : nullptr;
                 const float* bhh = use_bias ? (bih + bih_sz) : nullptr;
 
-                std::vector<float> i_gate(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> f_gate(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> g_gate(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> o_gate(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> c_state(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> h_state(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
+                RuntimeScratch::FloatArena workspace({
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H)});
+                auto i_gate=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto f_gate=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto g_gate=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto o_gate=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto c_state=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto h_state=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto h_prev=workspace.take(static_cast<size_t>(H));
+                auto c_prev=workspace.take(static_cast<size_t>(H));
+                auto dh_next=workspace.take(static_cast<size_t>(H));
+                auto dc_next=workspace.take(static_cast<size_t>(H));
+                auto dh_prev=workspace.take(static_cast<size_t>(H));
+                auto dc_prev=workspace.take(static_cast<size_t>(H));
+                i_gate.fill(0.0f);
+                f_gate.fill(0.0f);
+                g_gate.fill(0.0f);
+                o_gate.fill(0.0f);
+                c_state.fill(0.0f);
+                h_state.fill(0.0f);
 
-                std::vector<float> h_prev(static_cast<size_t>(H), 0.0f);
-                std::vector<float> c_prev(static_cast<size_t>(H), 0.0f);
+                h_prev.fill(0.0f);
+                c_prev.fill(0.0f);
                 for (int t = 0; t < T; ++t) {
                     const float* xt = &x[static_cast<size_t>(t) * static_cast<size_t>(I)];
                     for (int h = 0; h < H; ++h) {
@@ -4178,16 +4257,16 @@ inline bool cpu_backward_layer(
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
 
-                std::vector<float> dh_next(static_cast<size_t>(H), 0.0f);
-                std::vector<float> dc_next(static_cast<size_t>(H), 0.0f);
+                dh_next.fill(0.0f);
+                dc_next.fill(0.0f);
 
                 for (int t = T - 1; t >= 0; --t) {
                     const float* xt = &x[static_cast<size_t>(t) * static_cast<size_t>(I)];
                     const float* hprev = (t > 0) ? &h_state[static_cast<size_t>(t - 1) * static_cast<size_t>(H)] : nullptr;
                     const float* cprev = (t > 0) ? &c_state[static_cast<size_t>(t - 1) * static_cast<size_t>(H)] : nullptr;
 
-                    std::vector<float> dh_prev(static_cast<size_t>(H), 0.0f);
-                    std::vector<float> dc_prev(static_cast<size_t>(H), 0.0f);
+                    dh_prev.fill(0.0f);
+                    dc_prev.fill(0.0f);
 
                     for (int h = 0; h < H; ++h) {
                         const size_t th = static_cast<size_t>(t) * static_cast<size_t>(H) + static_cast<size_t>(h);
@@ -4289,12 +4368,35 @@ inline bool cpu_backward_layer(
                 const float* bih = use_bias ? (Whh + Whh_sz) : nullptr;
                 const float* bhh = use_bias ? (bih + bih_sz) : nullptr;
 
-                std::vector<float> h_state(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> r_state(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> z_state(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> n_state(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
+                RuntimeScratch::FloatArena workspace({
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H)});
+                auto h_state=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto r_state=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto z_state=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto n_state=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto h_prev=workspace.take(static_cast<size_t>(H));
+                auto dh_next=workspace.take(static_cast<size_t>(H));
+                auto dh_prev=workspace.take(static_cast<size_t>(H));
+                auto da_r=workspace.take(static_cast<size_t>(H));
+                auto da_z=workspace.take(static_cast<size_t>(H));
+                auto da_n=workspace.take(static_cast<size_t>(H));
+                auto drh=workspace.take(static_cast<size_t>(H));
+                h_state.fill(0.0f);
+                r_state.fill(0.0f);
+                z_state.fill(0.0f);
+                n_state.fill(0.0f);
 
-                std::vector<float> h_prev(static_cast<size_t>(H), 0.0f);
+                h_prev.fill(0.0f);
                 for (int t = 0; t < T; ++t) {
                     const float* xt = &x[static_cast<size_t>(t) * static_cast<size_t>(I)];
                     for (int h = 0; h < H; ++h) {
@@ -4344,15 +4446,15 @@ inline bool cpu_backward_layer(
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
 
-                std::vector<float> dh_next(static_cast<size_t>(H), 0.0f);
+                dh_next.fill(0.0f);
                 for (int t = T - 1; t >= 0; --t) {
                     const float* xt = &x[static_cast<size_t>(t) * static_cast<size_t>(I)];
                     const float* hprev = (t > 0) ? &h_state[static_cast<size_t>(t - 1) * static_cast<size_t>(H)] : nullptr;
-                    std::vector<float> dh_prev(static_cast<size_t>(H), 0.0f);
+                    dh_prev.fill(0.0f);
 
-                    std::vector<float> da_r(static_cast<size_t>(H), 0.0f);
-                    std::vector<float> da_z(static_cast<size_t>(H), 0.0f);
-                    std::vector<float> da_n(static_cast<size_t>(H), 0.0f);
+                    da_r.fill(0.0f);
+                    da_z.fill(0.0f);
+                    da_n.fill(0.0f);
 
                     for (int h = 0; h < H; ++h) {
                         const size_t th = static_cast<size_t>(t) * static_cast<size_t>(H) + static_cast<size_t>(h);
@@ -4369,7 +4471,7 @@ inline bool cpu_backward_layer(
                         (void)r;
                     }
 
-                    std::vector<float> drh(static_cast<size_t>(H), 0.0f);
+                    drh.fill(0.0f);
                     for (int h = 0; h < H; ++h) {
                         const size_t row_n = static_cast<size_t>(2 * H + h);
                         for (int i = 0; i < I; ++i) {
@@ -4460,8 +4562,17 @@ inline bool cpu_backward_layer(
                 const float* bih = use_bias ? (Whh + Whh_sz) : nullptr;
                 const float* bhh = use_bias ? (bih + bih_sz) : nullptr;
 
-                std::vector<float> h_state(static_cast<size_t>(T) * static_cast<size_t>(H), 0.0f);
-                std::vector<float> h_prev(static_cast<size_t>(H), 0.0f);
+                RuntimeScratch::FloatArena workspace({
+                    static_cast<size_t>(T) * static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H),
+                    static_cast<size_t>(H)});
+                auto h_state=workspace.take(static_cast<size_t>(T) * static_cast<size_t>(H));
+                auto h_prev=workspace.take(static_cast<size_t>(H));
+                auto dh_next=workspace.take(static_cast<size_t>(H));
+                auto dh_prev=workspace.take(static_cast<size_t>(H));
+                h_state.fill(0.0f);
+                h_prev.fill(0.0f);
                 for (int t = 0; t < T; ++t) {
                     const float* xt = &x[static_cast<size_t>(t) * static_cast<size_t>(I)];
                     float* ht = &h_state[static_cast<size_t>(t) * static_cast<size_t>(H)];
@@ -4484,12 +4595,12 @@ inline bool cpu_backward_layer(
 
                 grad_inputs.resize(1);
                 grad_inputs[0].assign(x.size(), 0.0f);
-                std::vector<float> dh_next(static_cast<size_t>(H), 0.0f);
+                dh_next.fill(0.0f);
 
                 for (int t = T - 1; t >= 0; --t) {
                     const float* xt = &x[static_cast<size_t>(t) * static_cast<size_t>(I)];
                     const float* hprev = (t > 0) ? &h_state[static_cast<size_t>(t - 1) * static_cast<size_t>(H)] : nullptr;
-                    std::vector<float> dh_prev(static_cast<size_t>(H), 0.0f);
+                    dh_prev.fill(0.0f);
                     for (int h = 0; h < H; ++h) {
                         const float h_t = h_state[static_cast<size_t>(t) * static_cast<size_t>(H) + static_cast<size_t>(h)];
                         const float dht = go[static_cast<size_t>(t) * static_cast<size_t>(H) + static_cast<size_t>(h)] + dh_next[static_cast<size_t>(h)];
@@ -4529,3 +4640,5 @@ inline bool cpu_backward_layer(
 }
 
 } // namespace RuntimeLayerDispatch
+
+#undef MIMIR_CPU_SCRATCH_RESTRICT

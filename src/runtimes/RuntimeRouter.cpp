@@ -538,7 +538,7 @@ bool RuntimeRouter::dispatchBackwardLayer(
             runtimeCapabilityIsNative(rt->queryBackwardCapability(layer.type_enum)))
             route[count++] = rt;
 
-    auto ranking=Mimir::Planning::Calibration::rank(std::vector<AbstractRuntime*>(route,route+count),layer,inputs,grad_outputs,true,training,optimizer_routing_generation_,
+    auto ranking=Mimir::Planning::Calibration::rank(Mimir::Planning::Calibration::RuntimeRoute(route,route+count),layer,inputs,grad_outputs,true,training,optimizer_routing_generation_,
         [&](AbstractRuntime& rt,Layer& disposable,std::vector<std::vector<float>>& outputs){return rt.backwardLayerWithContext(inputs,grad_outputs,outputs,disposable,training,context);});
     Mimir::Planning::ExecutionPolicy::CpuScope cpu_scope(ranking.cpu_workers,ranking.cpu_algorithm);
     for (size_t i = 0; i < ranking.route.size(); ++i) {

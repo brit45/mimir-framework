@@ -103,7 +103,7 @@ formes ou la précision non prises en charge.
 | --- | --- |
 | Quelles architectures existent ? | `src/Models/Registry/ModelArchitectures.cpp` |
 | Qui définit le graphe ? | La classe dérivée sous `src/Models/` |
-| Quelle API de script est disponible ? | `src/scriptings/Lua/luaScripting/` et `mimir-api.lua` |
+| Quelle API de script est disponible ? | `src/scriptings/Lua/luaScripting/` et `ide/lua/mimir-api.lua` |
 | Comment sont lus les arguments ? | `scripts/modules/args.lua` et global standard `arg` |
 | Quel runtime exécute une couche ? | `src/runtimes/RuntimeRouter.cpp` et les traces du run |
 | Où sont les calculs CPU ? | `src/runtimes/cpu/RuntimeLayerDispatch.hpp` et ses kernels |

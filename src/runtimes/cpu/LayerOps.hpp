@@ -13,6 +13,7 @@
 #include "RngContext.hpp"
 #include "NormalizationKernels.hpp"
 #include "PoolingKernels.hpp"
+#include "ReusableScratch.hpp"
 
 // ============================================================================
 // LAYER OPERATIONS - Forward pass pour tous les types de layers
@@ -829,8 +830,8 @@ inline std::vector<float> transpose_forward(
 // MATMUL (Matrix Multiplication)
 // ============================================================================
 
-inline void matmul_into(const std::vector<float>& a,const std::vector<float>& b,
-                        std::vector<float>& c,int m,int k,int n) {
+template<class A, class B, class C>
+inline void matmul_into(const A& a,const B& b, C& c,int m,int k,int n) {
     if(m<0 || k<0 || n<0 || a.size()!=size_t(m)*size_t(k) || b.size()!=size_t(k)*size_t(n))
         throw std::runtime_error("MatMul: dimension mismatch");
     c.resize(size_t(m)*size_t(n));
@@ -1111,18 +1112,18 @@ inline void softmax_inplace(std::vector<float>& x, int seq_len, int dim) {
 }
 
 // Matmul helper (M x K) @ (K x N) = (M x N)
-inline void matmul(const std::vector<float>& a,const std::vector<float>& b,
-                   std::vector<float>& c,int m,int k,int n) {
+template<class A, class B, class C>
+inline void matmul(const A& a,const B& b,C& c,int m,int k,int n) {
     matmul_into(a,b,c,m,k,n);
 }
 
 // Self-Attention (simplifié - single head)
 inline std::vector<float> self_attention_forward(
     const std::vector<float>& input,
-    const std::vector<float>& qkv_weight,  // Combined Q,K,V weights [3*embed_dim, embed_dim]
-    const std::vector<float>& out_weight,
-    const std::vector<float>& qkv_bias,
-    const std::vector<float>& out_bias,
+    RuntimeScratch::ConstFloatView qkv_weight,  // Combined Q,K,V weights [3*embed_dim, embed_dim]
+    RuntimeScratch::ConstFloatView out_weight,
+    RuntimeScratch::ConstFloatView qkv_bias,
+    RuntimeScratch::ConstFloatView out_bias,
     int seq_len,
     int embed_dim,
     int num_heads = 1,
@@ -1148,7 +1149,12 @@ inline std::vector<float> self_attention_forward(
 
     // 1. Linear projection to Q, K, V.
     // Layout attendu pour qkv_weight: [3*embed_dim, embed_dim] (Q, K, V empilés verticalement).
-    std::vector<float> qkv(seq_len * qkv_dim);
+    constexpr int query_tile = 128;
+    const int tile_rows = std::min(query_tile, seq_len);
+    RuntimeScratch::FloatArena workspace({size_t(seq_len)*qkv_dim,size_t(seq_len)*embed_dim,
+        size_t(seq_len)*head_dim,size_t(seq_len)*head_dim,size_t(head_dim)*seq_len,
+        size_t(tile_rows)*seq_len,size_t(tile_rows)*head_dim});
+    auto qkv=workspace.take(size_t(seq_len)*qkv_dim);
     RuntimeParallel::forEach(seq_len, RuntimeParallel::workers(static_cast<long long>(seq_len) * qkv_dim * embed_dim), [&](int m) {
         const float* xrow = &input[static_cast<size_t>(m) * static_cast<size_t>(embed_dim)];
         float* qkv_row = &qkv[static_cast<size_t>(m) * static_cast<size_t>(qkv_dim)];
@@ -1165,22 +1171,14 @@ inline std::vector<float> self_attention_forward(
     // Read head slices directly from the combined projection below.
     // 3-5. Multi-head attention (GEMM-based):
     // scores = Q_h @ K_h^T, softmax(scores), context = scores @ V_h
-    std::vector<float> attended(seq_len * embed_dim, 0.0f);
+    auto attended=workspace.take(size_t(seq_len)*embed_dim);
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-    std::vector<float> Qh;
-    std::vector<float> Vh;
-    std::vector<float> KhT;
-    std::vector<float> scores;
-    std::vector<float> context;
-
-    Qh.resize(static_cast<size_t>(seq_len) * static_cast<size_t>(head_dim));
-    Vh.resize(static_cast<size_t>(seq_len) * static_cast<size_t>(head_dim));
-    KhT.resize(static_cast<size_t>(head_dim) * static_cast<size_t>(seq_len));
-    constexpr int query_tile = 128;
-    const int tile_rows = std::min(query_tile, seq_len);
-    scores.resize(static_cast<size_t>(tile_rows) * static_cast<size_t>(seq_len));
-    context.resize(static_cast<size_t>(tile_rows) * static_cast<size_t>(head_dim));
+    auto Qh=workspace.take(size_t(seq_len)*head_dim);
+    auto Vh=workspace.take(size_t(seq_len)*head_dim);
+    auto KhT=workspace.take(size_t(head_dim)*seq_len);
+    auto scores=workspace.take(size_t(tile_rows)*seq_len);
+    auto context=workspace.take(size_t(tile_rows)*head_dim);
 
     for (int h = 0; h < num_heads; ++h) {
         const int head_off = h * head_dim;
@@ -1284,10 +1282,10 @@ inline std::vector<float> self_attention_forward(
 // Multi-Head Attention (uses multiple heads)
 inline std::vector<float> multihead_attention_forward(
     const std::vector<float>& input,
-    const std::vector<float>& qkv_weight,
-    const std::vector<float>& out_weight,
-    const std::vector<float>& qkv_bias,
-    const std::vector<float>& out_bias,
+    RuntimeScratch::ConstFloatView qkv_weight,
+    RuntimeScratch::ConstFloatView out_weight,
+    RuntimeScratch::ConstFloatView qkv_bias,
+    RuntimeScratch::ConstFloatView out_bias,
     int seq_len,
     int embed_dim,
     int num_heads,
@@ -1304,10 +1302,10 @@ inline std::vector<float> multihead_attention_forward(
 inline std::vector<float> cross_attention_forward(
     const std::vector<float>& query_input,
     const std::vector<float>& kv_input,
-    const std::vector<float>& q_weight,
-    const std::vector<float>& kv_weight,
-    const std::vector<float>& out_weight,
-    const std::vector<float>& out_bias,
+    RuntimeScratch::ConstFloatView q_weight,
+    RuntimeScratch::ConstFloatView kv_weight,
+    RuntimeScratch::ConstFloatView out_weight,
+    RuntimeScratch::ConstFloatView out_bias,
     int query_len,
     int kv_len,
     int embed_dim,
@@ -1343,30 +1341,27 @@ inline std::vector<float> cross_attention_forward(
     }
 
     // 1) Projections: Q = query @ Wq, KV = kv @ Wkv (produces K||V)
-    std::vector<float> Q(query_len * embed_dim);
+    constexpr int query_tile = 128;
+    const int tile_rows = std::min(query_tile, query_len);
+    RuntimeScratch::FloatArena workspace({size_t(query_len)*embed_dim,size_t(kv_len)*(2*embed_dim),
+        size_t(query_len)*embed_dim,size_t(query_len)*head_dim,size_t(kv_len)*head_dim,
+        size_t(head_dim)*kv_len,size_t(tile_rows)*kv_len,size_t(tile_rows)*head_dim});
+    auto Q=workspace.take(size_t(query_len)*embed_dim);
     matmul(query_input, q_weight, Q, query_len, embed_dim, embed_dim);
 
-    std::vector<float> KV(kv_len * (2 * embed_dim));
+    auto KV=workspace.take(size_t(kv_len)*(2*embed_dim));
     matmul(kv_input, kv_weight, KV, kv_len, kv_embed_dim, 2 * embed_dim);
 
     // 2) Multi-head attention (GEMM-based):
     // scores = Q_h @ K_h^T, softmax(scores), context = scores @ V_h
-    std::vector<float> attended(query_len * embed_dim, 0.0f);
+    auto attended=workspace.take(size_t(query_len)*embed_dim);
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-    std::vector<float> Qh;
-    std::vector<float> Vh;
-    std::vector<float> KhT;
-    std::vector<float> scores;
-    std::vector<float> context;
-
-    Qh.resize(static_cast<size_t>(query_len) * static_cast<size_t>(head_dim));
-    Vh.resize(static_cast<size_t>(kv_len) * static_cast<size_t>(head_dim));
-    KhT.resize(static_cast<size_t>(head_dim) * static_cast<size_t>(kv_len));
-    constexpr int query_tile = 128;
-    const int tile_rows = std::min(query_tile, query_len);
-    scores.resize(static_cast<size_t>(tile_rows) * static_cast<size_t>(kv_len));
-    context.resize(static_cast<size_t>(tile_rows) * static_cast<size_t>(head_dim));
+    auto Qh=workspace.take(size_t(query_len)*head_dim);
+    auto Vh=workspace.take(size_t(kv_len)*head_dim);
+    auto KhT=workspace.take(size_t(head_dim)*kv_len);
+    auto scores=workspace.take(size_t(tile_rows)*kv_len);
+    auto context=workspace.take(size_t(tile_rows)*head_dim);
 
     for (int h = 0; h < num_heads; ++h) {
         const int head_off = h * head_dim;

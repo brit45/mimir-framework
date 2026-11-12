@@ -5,9 +5,9 @@ les runtimes ou les bridges de scripting. Elle décrit les contrats à préserve
 et relie chaque mécanisme à ses sources de vérité.
 
 > **Limitation**
-> Lua est le bridge de référence pour le scripting métier. Les bridges
-> JavaScript, C# et Rust restent partiels tant que leur parité avec Lua n'est
-> pas explicitement validée.
+> Lua est le bridge de référence pour le scripting métier. JS et Rust réutilisent
+> ses callbacks natifs synchrones. Le bridge C# reste partiel tant que sa parité
+> n'est pas explicitement validée.
 
 ## Parcours recommandé
 

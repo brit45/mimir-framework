@@ -1,17 +1,13 @@
-// available_count() et dtypes_count() depuis env vars (pas de JSON parse).
-let ac = Architectures::available_count();
-println!("[bridge-rs] available count: {}", ac);
-
-let dc = Architectures::dtypes_count();
-println!("[bridge-rs] dtypes count: {}", dc);
-
-// dtypes() retourne JSON normalise: aliases est un array, pas une string CSV.
-let dtypes_json = Architectures::dtypes();
-println!("[bridge-rs] dtypes json has aliases array: {}", dtypes_json.contains("[\"float\"") || dtypes_json.contains("[\\\"float\\\""));
-
-Model::create("basic_mlp", "");
-Model::allocate_params();
-Model::init_weights("he", 42);
-let p = Model::total_params();
-println!("[bridge-rs] total_params (cached): {}", p);
+// Statement scripts are wrapped in fn main() -> mimir::Result<()>.
+// Full Rust files with their own fn main() are also accepted.
+let available = Architectures::available(&[])?;
+println!("[bridge-rs] architectures: {:?}", available);
+let cfg = Architectures::default_config(&["basic_mlp".into()])?;
+Model::create(&["basic_mlp".into(), cfg])?;
+Model::allocate_params(&[])?;
+Model::init_weights(&["he".into(), 42.into()])?;
+let p = Model::total_params(&[])?;
+assert!(p.as_u64().unwrap() > 0);
+println!("[bridge-rs] actual native parameters: {:?}", p);
+assert!(Architectures::default_config(&["__missing__".into()]).is_err());
 println!("[bridge-rs] ok");

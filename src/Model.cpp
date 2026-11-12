@@ -892,17 +892,33 @@ bool Model::hasTensor(const std::string &name) const
     return tensor_store.find(name) != tensor_store.end();
 }
 
+namespace {
+std::mutex& typedSnapshotMutex(const Model* model) {
+    // Read-only callers may request snapshots concurrently. Striped locks avoid
+    // a heap allocation and a noncopyable mutex in each Model instance.
+    static std::array<std::mutex,64> locks;
+    return locks[(reinterpret_cast<uintptr_t>(model)>>4)%locks.size()];
+}
+}
+
 const Mimir::TypedTensor &Model::getTypedTensor(const std::string &name) const
 {
+    std::lock_guard<std::mutex> lock(typedSnapshotMutex(this));
     auto it = typed_tensor_store.find(name);
-    if (it == typed_tensor_store.end())
+    if (it != typed_tensor_store.end()) return it->second;
+    const auto dtype=tensor_storage_dtypes_.find(name);
+    const auto values=tensor_store.find(name);
+    if(dtype==tensor_storage_dtypes_.end() || values==tensor_store.end())
         throw std::runtime_error("Typed tensor not found: " + name);
-    return it->second;
+    return typed_tensor_store.emplace(name,Mimir::TypedTensor::fromFloat32(
+        values->second,{static_cast<int>(values->second.size())},dtype->second)).first->second;
 }
 
 bool Model::hasTypedTensor(const std::string &name) const
 {
-    return typed_tensor_store.find(name) != typed_tensor_store.end();
+    if(tensor_storage_dtypes_.find(name)!=tensor_storage_dtypes_.end())return true;
+    std::lock_guard<std::mutex> lock(typedSnapshotMutex(this));
+    return typed_tensor_store.find(name)!=typed_tensor_store.end();
 }
 
 const std::vector<int> &Model::getTensorInt(const std::string &name) const
@@ -958,6 +974,10 @@ std::vector<float> &Model::getTensorMutable(const std::string &name)
         std::cerr << std::endl;
         throw std::runtime_error("Tensor not found: " + name);
     }
+    // Preserve the previous typed-snapshot semantics before exposing mutable
+    // float storage, even when that snapshot has not yet been requested.
+    if(tensor_storage_dtypes_.find(name)!=tensor_storage_dtypes_.end())
+        (void)getTypedTensor(name);
     return it->second;
 }
 
@@ -965,8 +985,16 @@ void Model::storeTensor(const std::string &name, const std::vector<float> &data)
 {
     tensor_store[name] = data;
     const auto dtype = Mimir::parse_dtype(default_dtype_);
-    typed_tensor_store.insert_or_assign(
-        name, Mimir::TypedTensor::fromFloat32(data, {static_cast<int>(data.size())}, dtype));
+    if(!Mimir::dtype_is_floating(dtype)) {
+        // Integer conversion validates finiteness and observes the rounding
+        // mode at store time, as before. Do not defer these semantics.
+        auto typed=Mimir::TypedTensor::fromFloat32(data,{static_cast<int>(data.size())},dtype);
+        tensor_storage_dtypes_.insert_or_assign(name,dtype);
+        typed_tensor_store.insert_or_assign(name,std::move(typed));
+    }else {
+        tensor_storage_dtypes_.insert_or_assign(name,dtype);
+        typed_tensor_store.erase(name);
+    }
 }
 
 void Model::storeTensorInt(const std::string &name, const std::vector<int> &data)
@@ -977,8 +1005,16 @@ void Model::storeTensorInt(const std::string &name, const std::vector<int> &data
 void Model::storeTensor(const std::string &name, std::vector<float> &&data)
 {
     const auto dtype = Mimir::parse_dtype(default_dtype_);
-    typed_tensor_store.insert_or_assign(
-        name, Mimir::TypedTensor::fromFloat32(data, {static_cast<int>(data.size())}, dtype));
+    if(!Mimir::dtype_is_floating(dtype)) {
+        // Integer conversion validates finiteness and observes the rounding
+        // mode at store time, as before. Do not defer these semantics.
+        auto typed=Mimir::TypedTensor::fromFloat32(data,{static_cast<int>(data.size())},dtype);
+        tensor_storage_dtypes_.insert_or_assign(name,dtype);
+        typed_tensor_store.insert_or_assign(name,std::move(typed));
+    }else {
+        tensor_storage_dtypes_.insert_or_assign(name,dtype);
+        typed_tensor_store.erase(name);
+    }
     tensor_store[name] = std::move(data);
 }
 
@@ -1013,6 +1049,7 @@ void Model::clearTensorStore()
 {
     tensor_store.clear();
     typed_tensor_store.clear();
+    tensor_storage_dtypes_.clear();
 }
 
 void Model::clearTensorStoreInt()
@@ -6289,6 +6326,7 @@ const std::vector<float> &Model::forwardPassView(const std::vector<float> &input
                 std::vector<float> released = std::move(live->second);
                 tensor_store.erase(live);
                 typed_tensor_store.erase(planned_tensor.name);
+                tensor_storage_dtypes_.erase(planned_tensor.name);
                 if (poison_reused_buffers)
                 {
                     std::fill(released.begin(), released.end(), std::numeric_limits<float>::quiet_NaN());
@@ -6318,9 +6356,9 @@ const std::vector<float> &Model::forwardPassView(const std::vector<float> &input
 
         const auto &layer_out_view = getTensor(output_name);
 
-        const size_t layer_out_bytes = hasTypedTensor(output_name)
-                                           ? getTypedTensor(output_name).size_bytes()
-                                           : layer_out_view.size() * sizeof(float);
+        // Accounting needs the representation size, not a materialized copy.
+        const size_t layer_out_bytes = layer_out_view.size() *
+            Mimir::dtype_size_bytes(Mimir::parse_dtype(default_dtype_));
         if (executed_backend.find("VULKAN") != std::string::npos)
         {
             backend_mem_attrib.vulkan_bytes += layer_out_bytes;

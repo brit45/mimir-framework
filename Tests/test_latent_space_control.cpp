@@ -181,7 +181,11 @@ void waitFor(Predicate predicate,const char* failure) {
     check(predicate(),failure);
 }
 void monitorPublicationCase() {
+    const auto directory=std::filesystem::temp_directory_path() / ("mimir-capture-worker-"+
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{directory};
     AsyncMonitor monitor;
+    monitor.configureMetricsCsv((directory/"training.csv").string());
     for(const char* architecture:{"basic_mlp","vae","vae_conv","transformer","causal_lm","unregistered_custom"}) {
         monitor.configureLatentSpace(json{{"type",architecture}});
         check(monitor.latentSpaceControl()->available.load(),"3D control still gated to one architecture");
@@ -215,6 +219,20 @@ void monitorPublicationCase() {
     projection=control->projectionSnapshot();
     check(projection->model_name=="Current VAE" && projection->architecture=="vae","old model replaced fresh projection");
     monitor.stop();
+    size_t count=0;
+    for (const auto& entry:std::filesystem::directory_iterator(directory)) {
+        if(entry.path().extension()!=".jsonl") continue;
+        std::ifstream input(entry.path()); std::string line;
+        while(std::getline(input,line)) {
+            const auto record=json::parse(line);
+            check(record.at("format")=="mimir.training-capture", "worker capture format missing");
+            check(record.contains("metrics") && record.at("graph").at("points").size()>0,
+                  "worker capture lost metrics or projection");
+            ++count;
+        }
+        check(std::filesystem::exists(entry.path().string()+".html"), "worker replay viewer missing");
+    }
+    check(count>=2,"worker did not persist successive model projections");
 }
 
 void realtimeOptimizerPublicationCase() {

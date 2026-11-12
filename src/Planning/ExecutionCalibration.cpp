@@ -111,7 +111,7 @@ size_t signature(const Layer& l,bool backward,bool training,uint64_t generation,
 void invalidate(size_t key){cache.erase(key);}
 // Execute callbacks receive a disposable layer for every probe. The authoritative
 // model and its accumulated gradients are only used by the final dispatch.
-Ranking rank(const std::vector<AbstractRuntime*>& candidates,const Layer& layer,
+Ranking rank(const RuntimeRoute& candidates,const Layer& layer,
     const std::vector<const std::vector<float>*>& inputs,const std::vector<const std::vector<float>*>& gradients,
     bool backward,bool training,uint64_t generation,const Probe& execute){
     Ranking result;result.route=candidates;
@@ -122,7 +122,7 @@ Ranking rank(const std::vector<AbstractRuntime*>& candidates,const Layer& layer,
         }
     };
     if(!enabled() || !replayable(layer.type_enum)){profiles.erase(&layer);return result;}
-    std::vector<AbstractRuntime*> eligible;
+    RuntimeRoute eligible;
     for(auto* rt:candidates)if(rt && rt->isInitialized() && runtimeCapabilityIsNative(backward?
         rt->queryBackwardOperationCapability(layer,inputs,gradients,training):rt->queryForwardOperationCapability(layer,inputs,training)))eligible.push_back(rt);
     if(eligible.empty())return result;

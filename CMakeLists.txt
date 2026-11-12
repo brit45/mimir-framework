@@ -29,12 +29,17 @@ set(MIMIR_VIZ_BACKEND "SFML" CACHE STRING
     "Viz interface selected at compile time: SFML, QT, GTK, WEB, or NONE")
 set_property(CACHE MIMIR_VIZ_BACKEND PROPERTY STRINGS SFML QT GTK WEB NONE)
 option(ENABLE_SCRIPTING_REST "Enable REST scripting bridge" OFF)
-option(ENABLE_SCRIPTING_RUST "Enable Rust scripting bridge" ON)
-# The live Node bridge uses socketpair/posix_spawn, unavailable on Windows.
+# Live Node/Rust bridges use socketpair/posix_spawn, unavailable on Windows.
 if(WIN32)
     set(MIMIR_SCRIPTING_JS_DEFAULT OFF)
+    set(MIMIR_SCRIPTING_RUST_DEFAULT OFF)
 else()
     set(MIMIR_SCRIPTING_JS_DEFAULT ON)
+    set(MIMIR_SCRIPTING_RUST_DEFAULT ON)
+endif()
+option(ENABLE_SCRIPTING_RUST "Enable Rust scripting bridge (POSIX)" ${MIMIR_SCRIPTING_RUST_DEFAULT})
+if(WIN32 AND ENABLE_SCRIPTING_RUST)
+    message(FATAL_ERROR "The Rust bridge requires POSIX. Configure Windows with ENABLE_SCRIPTING_RUST=OFF.")
 endif()
 option(ENABLE_SCRIPTING_JS "Enable JavaScript scripting bridge (POSIX)" ${MIMIR_SCRIPTING_JS_DEFAULT})
 if(WIN32 AND ENABLE_SCRIPTING_JS)
@@ -554,6 +559,7 @@ set(MIMIR_HEADERS
     src/Sha256.hpp
     src/scriptings/ScriptingRuntime.hpp
     src/scriptings/ScriptingContext.hpp
+    src/scriptings/NativeBridge.hpp
     src/scriptings/ScriptingBridgeCommon.hpp
     src/scriptings/Lua/luaScripting/LuaScripting.hpp
     src/Helpers.hpp
@@ -618,7 +624,17 @@ set(MIMIR_HEADERS
     src/stb_image.h
 )
 
+if(ENABLE_SCRIPTING_JS OR ENABLE_SCRIPTING_RUST)
+    list(APPEND MIMIR_SOURCES src/scriptings/NativeBridge.cpp)
+endif()
+
 if(ENABLE_SCRIPTING_RUST)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/ide/rust/src/lib.rs" MIMIR_RUST_CLIENT)
+    string(REPLACE "include!(\"api.rs\");" "" MIMIR_RUST_CLIENT "${MIMIR_RUST_CLIENT}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ide/rust/src/lib.rs")
+    configure_file(src/scriptings/Rust/rustScripting/RustBootstrap.hpp.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/generated/RustBootstrap.hpp" @ONLY)
+
     list(APPEND MIMIR_SOURCES src/scriptings/Rust/rustScripting/RustScripting.cpp)
     list(APPEND MIMIR_HEADERS src/scriptings/Rust/rustScripting/RustScripting.hpp)
 endif()
@@ -1181,3 +1197,10 @@ set_source_files_properties(src/runtimes/tpu/TpuRuntime.cpp PROPERTIES
     COMPILE_DEFINITIONS "MIMIR_TPU_WORKER=\"${CMAKE_CURRENT_SOURCE_DIR}/src/runtimes/tpu/worker.py\"")
 
 install(FILES src/runtimes/tpu/worker.py DESTINATION share/mimir/tpu COMPONENT Runtime)
+
+if(ENABLE_SCRIPTING_RUST)
+    target_include_directories(mimir_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    if(TARGET mimir_core_static)
+        target_include_directories(mimir_core_static PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    endif()
+endif()

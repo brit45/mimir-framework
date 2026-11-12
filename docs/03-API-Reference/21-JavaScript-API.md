@@ -19,7 +19,7 @@ ni traitement différé après la fin du script. Le contexte JS conserve modèle
 tokenizer, dataset et moniteur entre exécutions. Le contexte Lua préexistant est
 restauré après l'exécution. Chaque exécution lance une nouvelle VM Node.js : les
 variables JS et le cache des modules ne persistent pas entre exécutions.
-Les exécutions JS sont sérialisées ; l'utilisation
+Les exécutions JS et Rust sont sérialisées par un transport natif commun ; l'utilisation
 concurrente des singletons Lua/JS depuis plusieurs threads n'est pas supportée.
 
 ## Conventions
@@ -83,6 +83,8 @@ courant, comme pour Lua.
 Node.js communique avec le processus C++ via un canal POSIX dédié, distinct de
 stdin/stdout/stderr. Les arguments ne passent ni par un shell ni par des variables
 d'environnement globales. L'implémentation actuelle cible les plateformes POSIX.
+
+Les helpers IDE sont centralisés dans [ide/javascript](../../ide/javascript/mimir.d.ts) ; voir [la configuration des éditeurs](../../ide/README.md).
 
 Le transport représente les valeurs JSON et les fonctions natives retournées.
 Les tables natives vides deviennent `{}` (Lua ne distingue pas tableau vide et

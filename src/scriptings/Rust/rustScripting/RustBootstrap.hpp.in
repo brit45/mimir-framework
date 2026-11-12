@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr const char* kMimirRustClient = R"MIMIR_RUST(@MIMIR_RUST_CLIENT@)MIMIR_RUST";

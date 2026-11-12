@@ -1,60 +1,45 @@
 {
   "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
-  "runtime": {
-    "version": "Lua 5.3",
-    "path": [
-      "?.lua",
-      "?/init.lua"
-    ]
-  },
-  "workspace": {
-    "library": [
-      "${workspaceFolder}/mimir-api.lua"
-    ],
-    "checkThirdParty": false
-  },
-  "diagnostics": {
-    "globals": [
-      "model",
-      "architectures",
-      "flux",
-      "FluxModel",
-      "layers",
-      "tokenizer",
-      "dataset",
-      "memory",
-      "guard",
-      "MemoryGuard",
-      "allocator",
-      "htop",
-      "viz",
-      "log",
-      "read_json",
-      "write_json",
-      "Pipeline"
-    ],
-    "disable": [
-      "lowercase-global"
-    ]
-  },
-  "completion": {
-    "enable": true,
-    "callSnippet": "Both",
-    "keywordSnippet": "Both"
-  },
-  "hint": {
-    "enable": true,
-    "paramName": "All",
-    "setType": true
-  },
-  "format": {
-    "enable": true,
-    "defaultConfig": {
-      "indent_style": "tab",
-      "indent_size": "4"
-    }
-  },
-  "telemetry": {
-    "enable": false
+  "runtime.version": "Lua 5.3",
+  "runtime.path": [
+    "?.lua",
+    "?/init.lua"
+  ],
+  "workspace.library": [
+    "ide/lua"
+  ],
+  "workspace.checkThirdParty": false,
+  "diagnostics.globals": [
+    "model",
+    "architectures",
+    "flux",
+    "FluxModel",
+    "layers",
+    "tokenizer",
+    "dataset",
+    "memory",
+    "guard",
+    "MemoryGuard",
+    "allocator",
+    "htop",
+    "viz",
+    "log",
+    "read_json",
+    "write_json",
+    "Pipeline"
+  ],
+  "diagnostics.disable": [
+    "lowercase-global"
+  ],
+  "completion.enable": true,
+  "completion.callSnippet": "Both",
+  "completion.keywordSnippet": "Both",
+  "hint.enable": true,
+  "hint.paramName": "All",
+  "hint.setType": true,
+  "format.enable": true,
+  "format.defaultConfig": {
+    "indent_style": "tab",
+    "indent_size": "4"
   }
 }

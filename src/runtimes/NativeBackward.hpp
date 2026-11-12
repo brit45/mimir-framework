@@ -2,6 +2,7 @@
 
 #include "Layers.hpp"
 #include "runtimes/GradientCommit.hpp"
+#include "runtimes/cpu/ReusableScratch.hpp"
 #include <climits>
 #include <cmath>
 #include <vector>
@@ -37,6 +38,11 @@ inline std::vector<float> transpose(const float* x, int rows, int columns) {
             out[static_cast<size_t>(c)*rows+r] = x[static_cast<size_t>(r)*columns+c];
     return out;
 }
+inline void transposeInto(const float* x, int rows, int columns, RuntimeScratch::FloatBuffer& out) {
+    out.resizeUninitialized(static_cast<size_t>(rows)*columns);
+    for (int r=0;r<rows;++r) for (int c=0;c<columns;++c)
+        out[static_cast<size_t>(c)*rows+r]=x[static_cast<size_t>(r)*columns+c];
+}
 inline bool finite(const std::vector<float>& x) {
     for (float value : x) if (!std::isfinite(value)) return false;
     return true;
@@ -69,11 +75,11 @@ bool execute(Engine& engine, const std::vector<const std::vector<float>*>& input
             layer.getWeightsSize()<nw+(layer.use_bias ? out : 0)) return false;
         result.resize(1); result[0].resize(x.size());
         dw.resize(nw);
-        auto gt = transpose(go.data(),batch,out);
+        RuntimeScratch::FloatBuffer gt; transposeInto(go.data(),batch,out,gt);
         if (!engine.matmulForward(go.data(),layer.getWeights(),result[0].data(),batch,out,in) ||
             !engine.matmulForward(gt.data(),x.data(),dw.data(),out,batch,in)) return false;
         if (layer.use_bias) {
-            std::vector<float> ones(batch,1.0f);
+            RuntimeScratch::FloatBuffer ones(batch,1.0f);
             db.resize(out);
             if (!engine.matmulForward(ones.data(),go.data(),db.data(),1,batch,out)) return false;
         }
@@ -88,7 +94,7 @@ bool execute(Engine& engine, const std::vector<const std::vector<float>*>& input
         result={std::vector<float>(x.size()),std::vector<float>(b.size())};
         for (int batch=0;batch<batches;++batch) {
             const float* a=x.data()+batch*as; const float* bv=b.data()+batch*bs; const float* g=go.data()+batch*gs;
-            auto at=transpose(a,m,k), bt=transpose(bv,k,n);
+            RuntimeScratch::FloatBuffer at,bt; transposeInto(a,m,k,at); transposeInto(bv,k,n,bt);
             if (!engine.matmulForward(g,bt.data(),result[0].data()+batch*as,m,n,k) ||
                 !engine.matmulForward(at.data(),g,result[1].data()+batch*bs,k,m,n)) return false;
         }
@@ -99,7 +105,7 @@ bool execute(Engine& engine, const std::vector<const std::vector<float>*>& input
         result={std::vector<float>(x.size()),std::vector<float>(x.size())};
         if (!count) { grad_inputs=std::move(result); return true; }
         if (type==LayerType::Add || type==LayerType::Subtract) {
-            std::vector<float> factor(x.size(),1.0f);
+            RuntimeScratch::FloatBuffer factor(x.size(),1.0f);
             if (!engine.binaryForward(go.data(),factor.data(),result[0].data(),count,2)) return false;
             if (type==LayerType::Subtract) std::fill(factor.begin(),factor.end(),-1.0f);
             if (!engine.binaryForward(go.data(),factor.data(),result[1].data(),count,2)) return false;
@@ -107,7 +113,7 @@ bool execute(Engine& engine, const std::vector<const std::vector<float>*>& input
             if (!engine.binaryForward(go.data(),b.data(),result[0].data(),count,2) ||
                 !engine.binaryForward(go.data(),x.data(),result[1].data(),count,2)) return false;
         } else if (type==LayerType::Divide) {
-            std::vector<float> product(x.size());
+            RuntimeScratch::FloatBuffer product(x.size());
             if (!engine.binaryForward(go.data(),b.data(),result[0].data(),count,3) ||
                 !engine.binaryForward(go.data(),x.data(),product.data(),count,2) ||
                 !engine.binaryForward(product.data(),b.data(),result[1].data(),count,4)) return false;

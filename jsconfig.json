@@ -1,0 +1,3 @@
+{
+  "extends": "./ide/javascript/jsconfig.json"
+}
