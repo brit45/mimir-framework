@@ -1,5 +1,6 @@
 #pragma once
 #include "runtimes/ops_loss_and_grad.hpp"
+#include "runtimes/portable/PortableDevice.hpp"
 #include <climits>
 namespace RuntimeLossGrad {
 // Internal only: the public reconstruction loss API remains unchanged.
@@ -30,5 +31,5 @@ std::vector<float> pack(const Request&);
 std::vector<int> parameters(const Request&);
 bool unpack(const Request&,const std::vector<float>&,LossWithGrad&);
 std::vector<int> passes(const std::vector<int>&);
-bool portable(const Request&,LossWithGrad&,const char*,int);
+bool portable(const Request&,LossWithGrad&,const char*,int,PortableStaging::DeviceCache&);
 }

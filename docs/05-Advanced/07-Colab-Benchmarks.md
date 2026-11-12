@@ -114,6 +114,44 @@ sa géométrie en cas d'échec ; le notebook active `MIMIR_ACCEL_VERBOSE=1` pour
 validation portable. Les échecs numériques ou de forward restent bloquants ;
 seule une indisponibilité explicite du runtime peut donner le code `77`.
 
+### Blocage après la dernière ligne CrossAttention
+
+`GPU_NATIVE_PARITY_OK CrossAttention` ne marque pas la fin du processus. Le
+test vérifie ensuite l'attention avec des dimensions K/V différentes, le
+filtrage NMS des valeurs non finies, la reconfiguration et la fermeture du
+runtime. Les nouveaux repères `GPU_NATIVE_STAGE` sont vidés immédiatement
+vers le journal avant chacune de ces étapes. `GPU_NATIVE_PARITY_COMPLETE`
+n'est écrit qu'après la fermeture et le contrôle de libération du staging.
+
+Le cache de staging ne détient plus le périphérique jusqu'à la destruction
+du stockage local au thread : les runtimes et calculs actifs gèrent sa durée
+de vie. Cette correction évite d'appeler le pilote depuis une destruction
+de cache trop tardive. Elle est validée localement sur AMD ; la résolution
+du blocage observé sur NVIDIA doit être confirmée dans la session concernée.
+
+Interrompre la cellule bloquée, charger le notebook mis à jour, puis reprendre
+l'extraction des sources, la compilation et la validation. Une session dont
+`REPO` pointe encore sur `mimir-source-a2e029f80298b42a` conserve l'ancien moteur.
+La seule relance de sa cellule de validation n'applique pas la correction.
+Les instantanés sont régénérés sans les exécutables des tests ou les produits
+CMake et sans effacer les sorties locales des notebooks.
+
+Après compilation des nouvelles sources, le contrôle final peut être isolé :
+
+```python
+probe_env = dict(REFERENCE_ENV, MIMIR_DISABLE_VULKAN='0', MIMIR_ACCEL_VERBOSE='1')
+run([BUILD/'Tests/PortableNativeOps', 'VULKAN', '--final-checks'],
+    cwd=REPO, env=probe_env, timeout=180)
+```
+
+Le lanceur du benchmark affiche un état après 15 secondes sans sortie.
+La parité portable a un délai maximal de 180 secondes ; un dépassement
+interrompt le processus et rapporte la dernière étape, sans classer le runtime
+comme simplement indisponible ni autoriser les mesures GPU.
+L'attente après `SIGKILL` est elle aussi bornée à cinq secondes, y compris lors
+d'une interruption manuelle. Si le pilote retient encore le processus, le
+lanceur signale qu'il faut redémarrer l'environnement avant de reprendre.
+
 ### Reprendre après une alerte de provenance de la matrice
 
 Une ancienne cellule enregistrait `colab_config_matrix.py` dans
@@ -164,6 +202,13 @@ La compilation du seul client `PortableNativeOps` régénère bien un shader
 périmé. Les dix tests Python ciblés de disponibilité GPU, d'environnement et de
 configuration Vulkan NVIDIA passent ; ces derniers simulent la configuration
 du pilote et ne constituent pas une exécution sur GPU NVIDIA.
+
+Le 13 novembre 2026, la correction de fermeture passe quatorze CTest ciblés sur AMD :
+parité native, produits matriciels et fusion pointwise Vulkan/OpenCL,
+packing, budget de staging, optimiseurs et pertes CPU/Vulkan/OpenCL.
+Les contrôles finaux atteignent la fermeture du
+runtime et le marqueur de fin ; cette preuve locale ne vaut pas validation
+de la fermeture sur le pilote NVIDIA de Colab.
 
 ## Vérifier les helpers sans accélérateur
 

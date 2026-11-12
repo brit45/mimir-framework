@@ -7,6 +7,17 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+### Fermeture des runtimes portables
+
+- Cache de périphériques Vulkan/OpenCL à références faibles, avec conservation
+  des buffers et pipelines par les runtimes et calculs actifs ; libération à
+  leur fermeture avant la destruction du stockage local au thread.
+- Étapes finales des tests natifs tracées, mode `--final-checks` et marqueur
+  de fin après le contrôle de libération du staging.
+- Instantanés Colab actualisés, exclusion des produits de build et conservation
+  des sorties locales. État des commandes silencieuses et diagnostic d'étape
+  lors d'un dépassement du délai de validation portable.
+
 ### Ressources Vulkan des clients natifs
 
 - Génération des shaders externes lors de la compilation de `mimir_core` et de

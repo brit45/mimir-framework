@@ -152,5 +152,6 @@ int main(int argc,char** argv){try {
             require(result.loss==7 && result.grad==std::vector<float>{8},"failed route overwrote output");
         }
     }
-    std::cout<<"RECONSTRUCTION_RUNTIME_OK "<<mode<<" cases="<<cases<<" loss_and_grad=validated\n";return 0;
+    rt.reset();
+    std::cout<<"RECONSTRUCTION_RUNTIME_OK "<<mode<<" cases="<<cases<<" loss_and_grad=validated"<<std::endl;return 0;
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

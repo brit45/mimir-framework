@@ -12,7 +12,10 @@
 #include <stdexcept>
 namespace PortableStaging {
 struct Context {
-    std::unique_ptr<Device> device;
+    // The cache must not own a GPU device until thread-local destruction:
+    // driver TLS may already have been destroyed by then. Runtimes and active
+    // scopes keep it alive while its reusable buffers are needed.
+    std::weak_ptr<Device> device;
     std::map<uintptr_t,size_t> allocations;
     std::map<uintptr_t,int> offsets;
     bool failed=false;
@@ -26,7 +29,8 @@ inline std::vector<int> kernelWriteArguments(int id);
 // stable arena offsets even when a wrapper allocates more scratch between kernels.
 inline bool flush(Context& context){
     if(context.pending.empty()){context.offsets.clear();context.elements=1;return !context.failed;}
-    bool ok=!context.failed && bool(context.device);
+    auto device=context.device.lock();
+    bool ok=!context.failed && bool(device);
     try{
         if(ok){
             for(const auto& a:context.allocations)if(!context.offsets.count(a.first)){
@@ -49,7 +53,7 @@ inline bool flush(Context& context){
             }
             std::vector<MemoryRange> downloads;
             for(const auto& entry:written)downloads.push_back(entry.second);
-            ok=context.device->runBatch(arena,context.pending,downloads);
+            ok=device->runBatch(arena,context.pending,downloads);
             if(ok)for(const auto& entry:written)std::memcpy(reinterpret_cast<void*>(entry.first),arena.data()+entry.second.offset,entry.second.count*sizeof(float));
         }
     }catch(...){ok=false;}
@@ -72,24 +76,26 @@ inline bool scheduledPointer(const void* pointer){
 }
 struct DeviceScope {
     Context* previous;
+    std::shared_ptr<Device> device;
     DeviceScope(const char* backend,int index=0):previous(current) {
         if(current)flush(*current);
         current=&contexts[std::string(backend)+":"+std::to_string(index)];
-        if(!current->device)current->device=createDevice(backend,index);
-        current->failed=(current==previous && current->failed) || !current->device;
+        device=current->device.lock();
+        if(!device){device=createDevice(backend,index);current->device=device;}
+        current->failed=(current==previous && current->failed) || !device;
     }
     ~DeviceScope(){if(current)flush(*current);current=previous;}
 };
 constexpr int cudaSuccess=0,cudaMemcpyHostToDevice=0,cudaMemcpyDeviceToHost=1,cudaMemcpyDeviceToDevice=2;
 constexpr int CUBLAS_STATUS_SUCCESS=0,CUBLAS_OP_N=0,CUBLAS_OP_T=1;
 using cublasHandle_t=void*;
-inline int cudaGetDeviceCount(int* n){*n=current && current->device?1:0;return *n?0:1;}
-inline int cudaSetDevice(int){return current && current->device?0:1;}
-inline int cublasCreate(void** p){*p=current;return current && current->device?0:1;}
+inline int cudaGetDeviceCount(int* n){*n=current && !current->device.expired()?1:0;return *n?0:1;}
+inline int cudaSetDevice(int){return current && !current->device.expired()?0:1;}
+inline int cublasCreate(void** p){*p=current;return current && !current->device.expired()?0:1;}
 inline int cublasDestroy(void*){return 0;}
 inline int cublasSetStream(void*,void*){return 0;}
 template<class T> int cudaMalloc(T** p,size_t bytes){
-    if(!current || !current->device || !bytes || bytes%4 || bytes/4>INT_MAX)return 1;
+    if(!current || current->device.expired() || !bytes || bytes%4 || bytes/4>INT_MAX)return 1;
     *p=static_cast<T*>(std::calloc(1,bytes));if(!*p)return 1;
     current->allocations[reinterpret_cast<uintptr_t>(*p)]=bytes;return 0;
 }
@@ -130,7 +136,7 @@ template<class T> void pack(std::vector<int>& p,T* ptr){
 }
 #include "PortableKernelArguments.hpp"
 template<class... Args> void launch(const char* kernel,int blocks,int threads,const Args&... args){
-    if(!current || !current->device || current->failed)return;
+    if(!current || current->device.expired() || current->failed)return;
     try {
         if(blocks<=0 || threads<=0 || 1LL*blocks*threads>INT_MAX)throw std::runtime_error("Invalid GPU grid");
         for(const auto& a:current->allocations)if(!current->offsets.count(a.first)){

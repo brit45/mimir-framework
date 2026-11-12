@@ -78,6 +78,55 @@ static void parity_inputs(AbstractRuntime& runtime, Layer& layer, const std::vec
     std::cout<<"GPU_NATIVE_PARITY_OK "<<type_name(layer.type_enum)<<'\n';
 }
 static void parity(AbstractRuntime& runtime,Layer& layer,const std::vector<float>& x){parity_inputs(runtime,layer,{&x});}
+static void stage(const char* name) {
+    std::cerr << "GPU_NATIVE_STAGE " << name << std::endl;
+}
+static void final_checks(AbstractRuntime& runtime, RuntimeConfig cfg) {
+    {
+        Layer l;l.type_enum=LayerType::CrossAttention;l.embed_dim=l.in_features=8;l.seq_len=3;l.num_heads=2;l.causal=false;l.weights.resize(256);
+        for(size_t i=0;i<l.weights.size();++i)l.weights[i]=std::sin(i*.17f)*.2f;
+        stage("cross-attention-long-kv");
+        std::vector<float>q(24),kv(513*8);for(size_t i=0;i<q.size();++i)q[i]=std::cos(i*.31f);for(size_t i=0;i<kv.size();++i)kv[i]=std::sin(i*.21f);parity_inputs(runtime,l,{&q,&kv});
+        l.in_features=5;l.weights.resize(208);kv.resize(5*5);
+        std::vector<std::vector<float>>a,b;std::vector<const std::vector<float>*>in{&q,&kv};
+        stage("cross-attention-distinct-kv-gpu");
+        require(runtime.forwardLayer(in,a,l,false),"GPU attention with distinct KV dimensions");
+        stage("cross-attention-distinct-kv-cpu");
+        require(RuntimeLayerDispatch::cpu_forward_layer(in,b,l,false),"CPU distinct KV reference");compare(a[0],b[0]);
+        stage("cross-attention-distinct-kv-passed");
+        std::vector<float>dy(q.size());require(!runtimeCapabilityIsNative(runtime.queryBackwardOperationCapability(l,in,{&dy},true)),"respect CPU backward KV dimension limitation");
+    }
+    {
+        Layer l;l.type_enum=LayerType::NMS;l.nms_iou_threshold=.3f;l.nms_score_threshold=.1f;l.nms_max_detections=0;l.nms_class_agnostic=false;
+        const float nan=std::numeric_limits<float>::quiet_NaN();
+        std::vector<float>boxes{0,0,2,2,0,0,2,2,nan,0,3,3,8,8,7,7,8,8,9,9},scores{.9f,nan,.8f,.7f,.6f},classes{0,1,0,0,nan};
+        std::vector<std::vector<float>>a,b;std::vector<const std::vector<float>*>in{&boxes,&scores,&classes};
+        stage("nms-nonfinite-gpu");
+        require(runtime.forwardLayer(in,a,l,false),"GPU NMS filtering");
+        stage("nms-nonfinite-cpu");
+        require(RuntimeLayerDispatch::cpu_forward_layer(in,b,l,false),"CPU NMS filtering");compare(a[0],b[0]);
+        stage("nms-nonfinite-passed");
+        l.nms_iou_threshold=1.1f;require(!runtimeCapabilityIsNative(runtime.queryForwardOperationCapability(l,in,false)),"reject invalid NMS threshold");
+    }
+    stage("runtime-reconfigure");
+    cfg.norm_enabled=false; require(runtime.initialize(cfg),"reconfigure runtime");
+    Layer disabled; disabled.type_enum=LayerType::GroupNorm; disabled.in_channels=2;
+    disabled.input_height=1; disabled.input_width=2; disabled.num_groups=1; disabled.affine=false;
+    std::vector<float> x(4,1.f); std::vector<const std::vector<float>*> inputs{&x};
+    require(!runtimeCapabilityIsNative(runtime.queryForwardOperationCapability(disabled,inputs,true)),"respect norm disable flag");
+    stage("final-checks-passed");
+}
+static void finish(std::unique_ptr<AbstractRuntime>& selected, const std::string& backend) {
+    stage("runtime-shutdown");
+    selected.reset();
+    stage("runtime-shutdown-passed");
+    for (const auto& entry : PortableStaging::contexts) {
+        require(entry.second.allocations.empty(), "staging allocations survive runtime shutdown");
+        require(entry.second.pending.empty(), "GPU commands survive runtime shutdown");
+        require(entry.second.device.expired(), "staging device survives runtime shutdown");
+    }
+    std::cout << "GPU_NATIVE_PARITY_COMPLETE backend=" << backend << std::endl;
+}
 int main(int argc,char** argv) {
     try {
         // Coverage must force native GPU routing; measured placement has its own test.
@@ -120,6 +169,12 @@ int main(int argc,char** argv) {
         std::cout<<"GPU native types: forward="<<forward<<'/'<<total<<" backward="<<backward<<'/'<<cpu_backward<<'\n';
         require(forward==total && backward==cpu_backward,"GPU/CPU type coverage must match CPU");
         if(!runtime.initialize(cfg)) { std::cout<<"SKIP: "<<backend<<" device unavailable\n";return 77; }
+        if(argc>2) {
+            require(std::string(argv[2])=="--final-checks", "expected --final-checks");
+            final_checks(runtime,cfg);
+            finish(selected,backend);
+            return 0;
+        }
         for(auto type:{LayerType::Conv3d,LayerType::Conv4d}) {
             Layer l;l.type_enum=type;l.in_channels=4;l.out_channels=6;l.groups=2;
             const bool four=type==LayerType::Conv4d;
@@ -167,9 +222,9 @@ int main(int argc,char** argv) {
             l.weights.assign(129,.1f); l.grad_weights.assign(129,.125f); l.grad_bias.assign(1,.25f);
             std::vector<float> x(254*128,.2f), dy(254,.3f);
             std::vector<std::vector<float>> gradients;
-            auto& device=PortableStaging::contexts[backend+":0"].device;
             // The runtime creates its staging device lazily on first dispatch.
             require(runtime.backwardLayer({&x},{&dy},gradients,l,true),"parallel Linear backward accepts larger staging");
+            const auto device=PortableStaging::contexts[backend+":0"].device.lock();
             require(bool(device),"staging device exists");
             auto before=device->batchStatistics();
             Layer probe=l;std::vector<std::vector<float>> scratch;
@@ -543,28 +598,8 @@ int main(int argc,char** argv) {
             Layer l;l.type_enum=LayerType::BatchNorm2d;l.in_channels=3;l.input_height=2;l.input_width=257;l.affine=true;l.use_bias=true;l.eps=1e-5f;l.weights={.3f,.7f,1.1f,.1f,.2f,-.2f};
             std::vector<float>x(3084);for(size_t i=0;i<x.size();++i)x[i]=std::sin(i*.37f);parity(runtime,l,x);
         }
-        {
-            Layer l;l.type_enum=LayerType::CrossAttention;l.embed_dim=l.in_features=8;l.seq_len=3;l.num_heads=2;l.causal=false;l.weights.resize(256);
-            for(size_t i=0;i<l.weights.size();++i)l.weights[i]=std::sin(i*.17f)*.2f;
-            std::vector<float>q(24),kv(513*8);for(size_t i=0;i<q.size();++i)q[i]=std::cos(i*.31f);for(size_t i=0;i<kv.size();++i)kv[i]=std::sin(i*.21f);parity_inputs(runtime,l,{&q,&kv});
-            l.in_features=5;l.weights.resize(208);kv.resize(5*5);
-            std::vector<std::vector<float>>a,b;std::vector<const std::vector<float>*>in{&q,&kv};
-            require(runtime.forwardLayer(in,a,l,false),"GPU attention with distinct KV dimensions");require(RuntimeLayerDispatch::cpu_forward_layer(in,b,l,false),"CPU distinct KV reference");compare(a[0],b[0]);
-            std::vector<float>dy(q.size());require(!runtimeCapabilityIsNative(runtime.queryBackwardOperationCapability(l,in,{&dy},true)),"respect CPU backward KV dimension limitation");
-        }
-        {
-            Layer l;l.type_enum=LayerType::NMS;l.nms_iou_threshold=.3f;l.nms_score_threshold=.1f;l.nms_max_detections=0;l.nms_class_agnostic=false;
-            const float nan=std::numeric_limits<float>::quiet_NaN();
-            std::vector<float>boxes{0,0,2,2,0,0,2,2,nan,0,3,3,8,8,7,7,8,8,9,9},scores{.9f,nan,.8f,.7f,.6f},classes{0,1,0,0,nan};
-            std::vector<std::vector<float>>a,b;std::vector<const std::vector<float>*>in{&boxes,&scores,&classes};
-            require(runtime.forwardLayer(in,a,l,false),"GPU NMS filtering");require(RuntimeLayerDispatch::cpu_forward_layer(in,b,l,false),"CPU NMS filtering");compare(a[0],b[0]);
-            l.nms_iou_threshold=1.1f;require(!runtimeCapabilityIsNative(runtime.queryForwardOperationCapability(l,in,false)),"reject invalid NMS threshold");
-        }
-        cfg.norm_enabled=false; require(runtime.initialize(cfg),"reconfigure runtime");
-        Layer disabled; disabled.type_enum=LayerType::GroupNorm; disabled.in_channels=2;
-        disabled.input_height=1; disabled.input_width=2; disabled.num_groups=1; disabled.affine=false;
-        std::vector<float> x(4,1.f); std::vector<const std::vector<float>*> inputs{&x};
-        require(!runtimeCapabilityIsNative(runtime.queryForwardOperationCapability(disabled,inputs,true)),"respect norm disable flag");
+        final_checks(runtime,cfg);
+        finish(selected,backend);
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

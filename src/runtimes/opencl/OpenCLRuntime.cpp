@@ -14,9 +14,12 @@
 #include <cstddef>
 #include <cmath>
 #include <new>
+#include <mutex>
 #include <vector>
 
 struct OpenCLRuntime::Impl {
+    PortableStaging::DeviceCache optimizer_devices, loss_devices;
+    std::mutex optimizer_mutex, loss_mutex;
     Mimir::GpuFusion::PortableExecutor fusion;
     PortableRuntime reference{"OPENCL"};
 #ifdef ENABLE_OPENCL
@@ -341,12 +344,16 @@ bool OpenCLRuntime::forwardLayerWithContext(
 }
 
 bool OpenCLRuntime::optimizerStep(const RuntimeOptimizerRequest& request) {
-    return supportsOptimizer() && portableOptimizer(request,name(),config_.device_index);
+    if(!supportsOptimizer())return false;
+    std::lock_guard<std::mutex> lock(impl_->optimizer_mutex);
+    return portableOptimizer(request,name(),config_.device_index,impl_->optimizer_devices);
 }
 
 #include "runtimes/losses/LossDispatch.hpp"
 bool OpenCLRuntime::reconstructionLoss(const RuntimeLossGrad::Request& r,RuntimeLossGrad::LossWithGrad& out) {
-    return supportsReconstructionLoss() && RuntimeLossGrad::portable(r,out,name(),config_.device_index);
+    if(!supportsReconstructionLoss())return false;
+    std::lock_guard<std::mutex> lock(impl_->loss_mutex);
+    return RuntimeLossGrad::portable(r,out,name(),config_.device_index,impl_->loss_devices);
 }
 
 RuntimeCapabilityLevel OpenCLRuntime::queryPointwiseFusionCapability(

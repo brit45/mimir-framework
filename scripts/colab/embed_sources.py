@@ -22,18 +22,30 @@ END = '# END MIMIR EMBEDDED SOURCES'
 
 
 def source_files():
-    files = [ROOT / 'CMakeLists.txt', ROOT / 'VERSION', ROOT / 'run_mimir.sh']
-    for directory in ('src', 'Tests', 'scripts', 'configs', 'shaders', 'fpga'):
-        for path in (ROOT / directory).rglob('*'):
-            if any(part in {'__pycache__', '.git', 'node_modules', 'build', '.pytest_cache'}
-                   for part in path.relative_to(ROOT).parts):
-                continue
-            if path.suffix in {'.pyc', '.o', '.a', '.so', '.vvp', '.bin', '.log'}:
-                continue
-            if path.is_symlink():
-                raise RuntimeError(f'Source symlink requires explicit handling: {path}')
-            if path.is_file():
-                files.append(path)
+    # Respect build-directory ignores even after an in-source CMake build.
+    # Keep new, untracked source inputs, but never package native test binaries.
+    roots = ('CMakeLists.txt', 'VERSION', 'run_mimir.sh', 'src', 'Tests',
+             'scripts', 'configs', 'shaders', 'fpga', 'ide')
+    names = subprocess.check_output(
+        ['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', *roots],
+        cwd=ROOT).decode().split('\0')
+    files = []
+    for name in filter(None, names):
+        path = ROOT / name
+        if any(part in {'__pycache__', '.git', 'node_modules', 'build', '.pytest_cache', 'CMakeFiles'}
+               for part in Path(name).parts):
+            continue
+        if path.name in {'CMakeCache.txt', 'CTestTestfile.cmake', 'cmake_install.cmake', 'Makefile'}:
+            continue
+        if path.suffix in {'.pyc', '.o', '.obj', '.a', '.so', '.dll', '.exe', '.vvp', '.bin', '.log', '.spv'}:
+            continue
+        if path.is_symlink():
+            raise RuntimeError(f'Source symlink requires explicit handling: {path}')
+        if path.is_file():
+            with path.open('rb') as stream:
+                if stream.read(4).startswith((b'\x7fELF', b'MZ')):
+                    continue
+            files.append(path)
     return sorted(set(files))
 
 
@@ -123,10 +135,10 @@ def vulkan_helper_code():
             + '    # END MIMIR VULKAN HELPER')
 
 
-def main():
+def main(notebooks=NOTEBOOKS):
     packed, digest, count = snapshot()
     replacement = restore_code(packed, digest)
-    for name in NOTEBOOKS:
+    for name in notebooks:
         path = ROOT / name
         notebook = json.loads(path.read_text())
         updated = 0
@@ -151,8 +163,6 @@ def main():
                 source = source.replace('Synchroniser les changements actuels de Mímir avant de compiler : ',
                                         'Sources incomplètes ; en mode checkout, utiliser embedded ou synchroniser la branche : ')
                 cell['source'] = source.splitlines(True)
-                cell['outputs'] = []
-                cell['execution_count'] = None
                 updated += 1
             elif cell['cell_type'] == 'code' and 'MICRO_SUITE_SOURCE = ' in source:
                 node = next(n for n in ast.parse(source).body if isinstance(n, ast.Assign)
@@ -161,8 +171,6 @@ def main():
                 helper = (ROOT / 'scripts/benchmarks/colab_micro_suite.py').read_text()
                 lines[node.lineno - 1:node.end_lineno] = ['MICRO_SUITE_SOURCE = ' + repr(helper) + '\n']
                 cell['source'] = ''.join(lines).splitlines(True)
-                cell['outputs'] = []
-                cell['execution_count'] = None
             elif cell['cell_type'] == 'markdown':
                 source = source.replace('Un checkout existant est conservé. La branche distante doit contenir les changements runtime à tester.',
                     'Par défaut, les sources actuelles sont embarquées dans ce notebook et vérifiées par SHA256. Elles sont extraites dans un dossier dédié ; un checkout existant est conservé. `SOURCE_MODE="checkout"` permet de choisir explicitement la branche distante.')

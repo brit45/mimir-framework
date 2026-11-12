@@ -308,6 +308,26 @@ au CPU. Le staging des tenseurs et l'accumulation des
 gradients de paramètres retournés restent sur l'hôte. Les calculs forward et
 backward ne sont pas remplacés par un appel arithmétique CPU caché.
 
+### Durée de vie du cache de staging
+
+La table locale au thread conserve une référence faible au périphérique.
+`PortableRuntime` et les scopes de calcul actifs en gardent les références
+fortes ; le chemin matriciel spécialisé Vulkan conserve aussi sa référence
+tant que son `ComputeEngine` existe. Les buffers et pipelines restent donc
+réutilisés entre les appels d'un runtime vivant. Le dernier propriétaire
+libère le périphérique pendant sa fermeture, avant la destruction du stockage
+local au thread et des ressources internes du pilote.
+
+Les périphériques portables d'optimiseurs et de pertes appartiennent également
+au runtime. Leurs caches par backend/device sont protégés séparément pendant
+les calculs et sont libérés avec lui, sans cache GPU propriétaire dans le
+stockage local au thread.
+
+`PortableWorkBudget` vérifie que le cache seul ne prolonge pas cette durée de
+vie. Les tests de parité ferment explicitement le runtime et vérifient qu'il
+ne reste ni allocation de staging, ni commande en attente, ni périphérique
+détenu par le cache avant d'imprimer `GPU_NATIVE_PARITY_COMPLETE`.
+
 ### Sources et génération
 
 - `src/runtimes/portable/PortableRuntime.cpp` valide et orchestre les opérations.

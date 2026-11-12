@@ -4,9 +4,9 @@
 #include <map>
 #include <memory>
 #include <string>
-inline bool portableOptimizer(const RuntimeOptimizerRequest& request,const char* backend,int index) {
+inline bool portableOptimizer(const RuntimeOptimizerRequest& request,const char* backend,int index,
+                              PortableStaging::DeviceCache& contexts) {
     if((!optimizerDeviceSizeFits(request) || !optimizerRequestValid(request)))return false;
-    static thread_local std::map<std::pair<std::string,int>,std::unique_ptr<PortableStaging::Device>> contexts;
     auto& device=contexts[{backend,index}];
     if(!device)device=PortableStaging::createOptimizerDevice(backend,index);
     if(!device)return false;

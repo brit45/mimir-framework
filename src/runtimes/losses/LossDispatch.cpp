@@ -150,9 +150,9 @@ bool unpack(const Request& r,const std::vector<float>& m,LossWithGrad& out) {
     if(!std::isfinite(candidate.loss) || !std::all_of(candidate.grad.begin(),candidate.grad.end(),[](float x){return std::isfinite(x);}))return false;
     out=std::move(candidate);return true;
 }
-bool portable(const Request& r,LossWithGrad& out,const char* backend,int index) {
+bool portable(const Request& r,LossWithGrad& out,const char* backend,int index,
+              PortableStaging::DeviceCache& devices) {
     if(!deviceSizeFits(r))return false;
-    static thread_local std::map<std::pair<std::string,int>,std::unique_ptr<PortableStaging::Device>> devices;
     auto& device=devices[{backend,index}];if(!device)device=PortableStaging::createLossDevice(backend,index);
     if(!device)return false;
     auto m=pack(r);if(!device->run(m,parameters(r))){device.reset();return false;}

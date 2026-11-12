@@ -31,6 +31,7 @@
 using namespace PortableStaging;
 
 struct PortableRuntime::Impl {
+    std::shared_ptr<PortableStaging::Device> device;
     cublasHandle_t handle = nullptr;
 
     struct DeviceBuf {
@@ -292,7 +293,10 @@ bool PortableRuntime::initialize(const RuntimeConfig& cfg) {
     DeviceScope device_scope(backend_,cfg.device_index);
     config_ = cfg;
 
-    if (impl_ && impl_->initialized) return true;
+    if (impl_ && impl_->initialized) {
+        impl_->device = device_scope.device;
+        return true;
+    }
 
     if (config_.disabled) {
         shutdown();
@@ -327,6 +331,7 @@ bool PortableRuntime::initialize(const RuntimeConfig& cfg) {
 
     (void)cublasSetStream(impl_->handle, nullptr);
 
+    impl_->device = device_scope.device;
     impl_->initialized = true;
     return true;
 }

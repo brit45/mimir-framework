@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <map>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -19,6 +20,7 @@ public:
         return true;
     }
 };
+using DeviceCache = std::map<std::pair<std::string,int>,std::unique_ptr<Device>>;
 std::unique_ptr<Device> createLossDevice(const std::string& backend, int index);
 std::unique_ptr<Device> createOptimizerDevice(const std::string& backend, int index);
 std::unique_ptr<Device> createDevice(const std::string& backend, int index);

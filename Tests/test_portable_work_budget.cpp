@@ -50,9 +50,9 @@ int main() {
     require(referenceInputsFit(16, {&small}));
     require(!referenceInputsFit(0, {&image}));
     require(!referenceInputsFit(referenceMaxElements, {&small}));
-    Context& context = contexts["TEST"];
-    auto device = std::make_unique<CountingDevice>();
-    auto* counter = device.get(); context.device = std::move(device);
+    Context& context = contexts["TEST:0"];
+    auto device = std::make_shared<CountingDevice>();
+    auto* counter = device.get(); context.device = device;
     current = &context;
     float* buffer = nullptr;
     require(cudaMalloc(&buffer, 128 * sizeof(float)) == cudaSuccess);
@@ -81,6 +81,15 @@ int main() {
     require(counter->calls == 3 && cudaGetLastError() == cudaSuccess);
     require(cudaDeviceSynchronize()==cudaSuccess && counter->calls==4);
     cudaFree(buffer); current = nullptr;
+    // Shared callers keep the same staging device; the cache itself cannot
+    // defer its destruction to TLS teardown after the GPU driver's own TLS.
+    {
+        DeviceScope scope("TEST");
+        require(scope.device == device);
+        device.reset();
+        require(!context.device.expired());
+    }
+    require(context.device.expired());
     for (const char* backend : {"VULKAN", "OPENCL"}) {
         PortableRuntime runtime(backend);
         Layer layer; layer.type_enum = LayerType::Identity;

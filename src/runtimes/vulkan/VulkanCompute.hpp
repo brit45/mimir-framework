@@ -207,6 +207,7 @@ private:
     ReusableBuffer conv_output_buffer_;
 
     std::recursive_mutex linear_mutex_;
+    std::shared_ptr<PortableStaging::Device> portable_device_;
     
 public:
     ComputeEngine() : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE),
@@ -308,6 +309,7 @@ public:
     }
     
     void cleanup() {
+        portable_device_.reset();
         releaseReusableBuffer(conv_input_buffer_);
         releaseReusableBuffer(conv_weights_buffer_);
         releaseReusableBuffer(conv_bias_buffer_);
@@ -536,6 +538,7 @@ public:
         if (!initialized || !a || !b || !c || B <= 0 || M <= 0 || K <= 0 || N <= 0) return false;
         using namespace PortableStaging;
         DeviceScope scope("VULKAN");
+        portable_device_ = scope.device;
         struct StagedBuffer {
             float* data = nullptr;
             ~StagedBuffer() { if (data) cudaFree(data); }
