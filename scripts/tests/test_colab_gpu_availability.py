@@ -14,6 +14,7 @@ class Availability(unittest.TestCase):
         source=source[:source.index('assert CPU_HASHES==')]
         if legacy_cell:
             source=source.replace("GPU_REQUIRE_ALL = globals().get('GPU_REQUIRE_ALL', False)", '')
+        shader_steps=[]
         def run(command,**kwargs):
             if backend=='cpu' and ('PortableNativeOps' in str(command[0]) or
                     'CudaNativeOps' in str(command[0]) or command[-1] in ('CUDA','VULKAN','OPENCL','TPU')):
@@ -24,8 +25,20 @@ class Availability(unittest.TestCase):
                     self.assertEqual(kwargs['env']['MIMIR_DISABLE_'+runtime],'1')
             if command[0]=='cmake' and '-B' in command:
                 for runtime in ('CUDA','VULKAN','OPENCL'):self.assertIn('-DENABLE_'+runtime+'=OFF',command)
+            if command[0]=='cmake' and 'mimir_shaders' in command:
+                self.assertIn('vulkan',runtimes)
+                shader_steps.append('build')
+            if command[:3]==['cmake','-E','copy_directory']:
+                self.assertEqual(command[3],Path('/tmp/build/shaders'))
+                self.assertEqual(command[4],ROOT/'bin/shaders')
+                self.assertEqual(shader_steps,['build'])
+                shader_steps.append('copy')
             if 'PortableNativeOps' in str(command[0]):
                 target=command[1]
+                if filename=='Colab-bench-multi-framework.ipynb' and target=='VULKAN':
+                    self.assertEqual(shader_steps,['build','copy'])
+                    self.assertEqual(kwargs['env']['MIMIR_VULKAN_SHADER_DIR'],'/tmp/build/shaders')
+                    self.assertEqual(kwargs['env']['MIMIR_ACCEL_VERBOSE'],'1')
                 for runtime in ('CUDA','VULKAN','OPENCL'):
                     self.assertEqual(kwargs['env']['MIMIR_DISABLE_'+runtime],'0' if runtime==target else '1')
                 self.assertEqual(kwargs['allowed_returncodes'],(77,))
@@ -45,6 +58,7 @@ class Availability(unittest.TestCase):
         if not cmake_gpu:scope['CMAKE_ARGS']=[a.replace('=ON','=OFF') for a in scope['CMAKE_ARGS']]
         if strict is None:scope.pop('GPU_REQUIRE_ALL')
         exec(source,scope)
+        if backend=='cpu':self.assertEqual(shader_steps,[])
         return scope
 
     def test_cpu_transition_does_not_run_gpu_validation(self):

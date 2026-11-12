@@ -207,12 +207,18 @@ Shaders associés (compilés au build):
 
 Pipeline technique:
 
-1. CMake compile les `.comp` en `.spv` via `glslangValidator`.
-2. Les `.spv` sont produits dans le dossier `shaders` du build ; le runtime cherche aussi les emplacements compatibles tels que `bin/shaders`.
+1. CMake compile les `.comp` en `.spv` via `glslangValidator`. `mimir_core` dépend de la cible `mimir_shaders`, y compris lorsqu'un client SDK ou un test est compilé sans l'exécutable `mimir`.
+2. Les `.spv` sont produits dans le dossier `shaders` du build. `MIMIR_VULKAN_SHADER_DIR` permet un dossier explicite ; sous Linux, le runtime cherche ensuite près de l'exécutable et de son parent avant les anciens chemins relatifs au répertoire courant. `MIMIR_VULKAN_LINEAR_SPV` garde la priorité pour Linear.
 3. `VulkanCompute.hpp` charge les SPIR-V, crée pipeline/layout/descriptor pool.
 4. `VulkanRuntime::forwardLayer` route les layers compatibles vers ces kernels.
 5. Les autres opérations et le backward passent par `PortableRuntime`, décrit ci-dessous.
 6. En cas d'indisponibilité shader/device, le runtime retourne `false` et le routeur propose l'opération au backend suivant.
+
+`RuntimeTest.VulkanShaderPaths` vérifie les onze fichiers, les remplacements
+explicites et les anciens chemins. Sous Linux, `RuntimeTest.VULKANNativeOps`
+s'exécute depuis un dossier vide : une validation ne doit pas dépendre du
+répertoire du dépôt. Ce test exige la parité GPU native et échoue si un shader
+manque ; l'initialisation du device seule ne suffit pas.
 
 ---
 

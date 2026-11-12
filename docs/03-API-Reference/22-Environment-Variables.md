@@ -166,18 +166,24 @@ d'exécution matérielle. `Model.hardware_caps()` expose les états des sessions
 | `MIMIR_VULKAN_LINEAR_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour Vulkan `Linear`/MatMul. |
 | `MIMIR_VULKAN_CONV` | bool | `1` | Active offload `Conv2d` et `ConvTranspose2d` vers Vulkan. |
 | `MIMIR_VULKAN_CONV_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour Vulkan `Conv2d`/`ConvTranspose2d`. |
+| `MIMIR_VULKAN_SHADER_DIR` | path | auto | Dossier prioritaire des shaders SPIR-V externes de `VulkanCompute`. |
 | `MIMIR_VULKAN_LINEAR_SPV` | path | auto | Chemin explicite du shader SPIR-V `linear_forward.comp.spv` (Linear). |
 | `MIMIR_OPENCL_LINEAR` | bool | `1` | Active offload `Linear` (et gating MatMul/BatchMatMul du runtime) vers OpenCL. |
 | `MIMIR_OPENCL_LINEAR_MIN_OPS` | int | `0` | Seuil minimal d'opérations pour OpenCL `Linear`/MatMul. |
 
 Notes Vulkan SPIR-V:
 
-- Le build compile les shaders listés par CMake, notamment les opérations
-  pointwise, convolutions 2D/ND et primitives Primer. Cette liste dépasse les
-  seuls kernels Linear/Conv2d.
-- Les shaders sont recherchés dans les emplacements du build et de l'installation,
-  dont `bin/shaders` et `build/shaders`. Le réglage `MIMIR_VULKAN_LINEAR_SPV`
-  remplace spécifiquement le chemin du shader Linear, pas tous les kernels.
+- La cible `mimir_shaders` compile les onze shaders externes listés par CMake :
+  Linear, opérations pointwise et convolutions 2D. `mimir_core` dépend de cette
+  cible : compiler un client SDK ou un test natif produit aussi ces fichiers.
+  Les kernels de référence ND/Primer de `PortableRuntime` sont embarqués dans
+  le binaire et ne dépendent pas de ce dossier.
+- Après `MIMIR_VULKAN_SHADER_DIR`, la recherche sous Linux consulte les dossiers
+  `shaders` près de l'exécutable et de son parent, puis `share/mimir/shaders`
+  sous son parent. Les anciens chemins relatifs au répertoire courant restent
+  disponibles, dont `bin/shaders` et `build/shaders`.
+- `MIMIR_VULKAN_LINEAR_SPV` garde la priorité pour le seul shader Linear.
+  Définir ces chemins avant le premier calcul, les pipelines étant mis en cache.
 
 ## Préchargement des datasets
 

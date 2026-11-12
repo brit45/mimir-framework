@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <optional>
@@ -28,185 +29,81 @@ static inline std::vector<uint32_t> read_spirv_u32(const std::string& path) {
     return out;
 }
 
-static inline std::optional<std::string> find_shader_path_linear() {
-    if (const char* env = std::getenv("MIMIR_VULKAN_LINEAR_SPV")) {
-        if (env[0] != '\0' && fs::exists(env)) return std::string(env);
+// Resolve assets from the executable's own build before legacy cwd paths.
+// SDK clients can point to an explicitly packaged shader directory.
+static inline std::optional<std::string> find_shader_path(const char* filename) {
+    std::vector<fs::path> directories;
+    if (const char* directory = std::getenv("MIMIR_VULKAN_SHADER_DIR")) {
+        if (*directory) directories.emplace_back(directory);
     }
-
-    // Candidats relatifs au cwd (souvent la racine du repo)
-    const char* candidates[] = {
-        "./bin/shaders/linear_forward.comp.spv",
-        "./shaders/linear_forward.comp.spv",
-        "../bin/shaders/linear_forward.comp.spv",
-        "../shaders/linear_forward.comp.spv",
-        "./build/shaders/linear_forward.comp.spv",
-        "./build_static/shaders/linear_forward.comp.spv",
-        "./build_sfml/shaders/linear_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
+#if defined(__linux__)
+    std::error_code error;
+    const fs::path executable = fs::read_symlink("/proc/self/exe", error);
+    if (!error) {
+        const fs::path directory = executable.parent_path();
+        directories.push_back(directory / "shaders");
+        directories.push_back(directory.parent_path() / "shaders");
+        directories.push_back(directory.parent_path() / "share/mimir/shaders");
+    }
+#endif
+    for (const char* directory : {"./bin/shaders", "./shaders", "../bin/shaders", "../shaders",
+                                 "./build/shaders", "./build_static/shaders", "./build_sfml/shaders"}) {
+        directories.emplace_back(directory);
+    }
+    for (const auto& directory : directories) {
+        const fs::path candidate = directory / filename;
+        std::error_code error;
+        if (fs::is_regular_file(candidate, error)) return candidate.string();
     }
     return std::nullopt;
+}
+
+static inline std::optional<std::string> find_shader_path_linear() {
+    if (const char* path = std::getenv("MIMIR_VULKAN_LINEAR_SPV")) {
+        std::error_code error;
+        if (*path && fs::is_regular_file(path, error)) return std::string(path);
+    }
+    return find_shader_path("linear_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_add() {
-    const char* candidates[] = {
-        "./bin/shaders/add_forward.comp.spv",
-        "./shaders/add_forward.comp.spv",
-        "../bin/shaders/add_forward.comp.spv",
-        "../shaders/add_forward.comp.spv",
-        "./build/shaders/add_forward.comp.spv",
-        "./build_static/shaders/add_forward.comp.spv",
-        "./build_sfml/shaders/add_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("add_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_elementwise() {
-    const char* candidates[] = {
-        "./bin/shaders/elementwise.comp.spv",
-        "./shaders/elementwise.comp.spv",
-        "../bin/shaders/elementwise.comp.spv",
-        "../shaders/elementwise.comp.spv",
-        "./build/shaders/elementwise.comp.spv",
-        "./build_static/shaders/elementwise.comp.spv",
-        "./build_sfml/shaders/elementwise.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("elementwise.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_mul() {
-    const char* candidates[] = {
-        "./bin/shaders/mul_forward.comp.spv",
-        "./shaders/mul_forward.comp.spv",
-        "../bin/shaders/mul_forward.comp.spv",
-        "../shaders/mul_forward.comp.spv",
-        "./build/shaders/mul_forward.comp.spv",
-        "./build_static/shaders/mul_forward.comp.spv",
-        "./build_sfml/shaders/mul_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("mul_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_relu() {
-    const char* candidates[] = {
-        "./bin/shaders/relu_forward.comp.spv",
-        "./shaders/relu_forward.comp.spv",
-        "../bin/shaders/relu_forward.comp.spv",
-        "../shaders/relu_forward.comp.spv",
-        "./build/shaders/relu_forward.comp.spv",
-        "./build_static/shaders/relu_forward.comp.spv",
-        "./build_sfml/shaders/relu_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("relu_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_silu() {
-    const char* candidates[] = {
-        "./bin/shaders/silu_forward.comp.spv",
-        "./shaders/silu_forward.comp.spv",
-        "../bin/shaders/silu_forward.comp.spv",
-        "../shaders/silu_forward.comp.spv",
-        "./build/shaders/silu_forward.comp.spv",
-        "./build_static/shaders/silu_forward.comp.spv",
-        "./build_sfml/shaders/silu_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("silu_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_gelu() {
-    const char* candidates[] = {
-        "./bin/shaders/gelu_forward.comp.spv",
-        "./shaders/gelu_forward.comp.spv",
-        "../bin/shaders/gelu_forward.comp.spv",
-        "../shaders/gelu_forward.comp.spv",
-        "./build/shaders/gelu_forward.comp.spv",
-        "./build_static/shaders/gelu_forward.comp.spv",
-        "./build_sfml/shaders/gelu_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("gelu_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_sigmoid() {
-    const char* candidates[] = {
-        "./bin/shaders/sigmoid_forward.comp.spv",
-        "./shaders/sigmoid_forward.comp.spv",
-        "../bin/shaders/sigmoid_forward.comp.spv",
-        "../shaders/sigmoid_forward.comp.spv",
-        "./build/shaders/sigmoid_forward.comp.spv",
-        "./build_static/shaders/sigmoid_forward.comp.spv",
-        "./build_sfml/shaders/sigmoid_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("sigmoid_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_tanh() {
-    const char* candidates[] = {
-        "./bin/shaders/tanh_forward.comp.spv",
-        "./shaders/tanh_forward.comp.spv",
-        "../bin/shaders/tanh_forward.comp.spv",
-        "../shaders/tanh_forward.comp.spv",
-        "./build/shaders/tanh_forward.comp.spv",
-        "./build_static/shaders/tanh_forward.comp.spv",
-        "./build_sfml/shaders/tanh_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("tanh_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_conv2d() {
-    const char* candidates[] = {
-        "./bin/shaders/conv2d_forward.comp.spv",
-        "./shaders/conv2d_forward.comp.spv",
-        "../bin/shaders/conv2d_forward.comp.spv",
-        "../shaders/conv2d_forward.comp.spv",
-        "./build/shaders/conv2d_forward.comp.spv",
-        "./build_static/shaders/conv2d_forward.comp.spv",
-        "./build_sfml/shaders/conv2d_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("conv2d_forward.comp.spv");
 }
 
 static inline std::optional<std::string> find_shader_path_conv_transpose2d() {
-    const char* candidates[] = {
-        "./bin/shaders/conv_transpose2d_forward.comp.spv",
-        "./shaders/conv_transpose2d_forward.comp.spv",
-        "../bin/shaders/conv_transpose2d_forward.comp.spv",
-        "../shaders/conv_transpose2d_forward.comp.spv",
-        "./build/shaders/conv_transpose2d_forward.comp.spv",
-        "./build_static/shaders/conv_transpose2d_forward.comp.spv",
-        "./build_sfml/shaders/conv_transpose2d_forward.comp.spv",
-    };
-    for (const char* c : candidates) {
-        if (fs::exists(c)) return std::string(c);
-    }
-    return std::nullopt;
+    return find_shader_path("conv_transpose2d_forward.comp.spv");
 }
 
 static inline uint32_t findMemoryType(VkPhysicalDevice phys, uint32_t typeFilter, VkMemoryPropertyFlags properties) {

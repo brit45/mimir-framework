@@ -7,6 +7,16 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+### Ressources Vulkan des clients natifs
+
+- Génération des shaders externes lors de la compilation de `mimir_core` et de
+  ses clients, puis recherche depuis l'exécutable sous Linux ou le dossier
+  explicite `MIMIR_VULKAN_SHADER_DIR`.
+- Préparation des shaders dans le benchmark Colab, compatible avec les anciens
+  instantanés embarqués ; correction de l'échec Conv2d après les tests de pooling.
+- Contrôle des chemins et parité native depuis un dossier vide ; diagnostic
+  de la couche et de sa géométrie lors d'un échec de forward.
+
 ### Préparation anticipée des datasets
 
 - File native bornée pour lire, décoder, redimensionner et préconvertir les

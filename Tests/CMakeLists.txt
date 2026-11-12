@@ -369,6 +369,22 @@ if(ENABLE_OPENCL OR ENABLE_VULKAN)
     endforeach()
 endif()
 
+if(ENABLE_VULKAN)
+    mimir_add_test(RuntimeTest.VulkanShaderPaths test_vulkan_shader_paths.cpp)
+    if(TARGET mimir_shaders)
+        target_compile_definitions(RuntimeTest.VulkanShaderPaths PRIVATE
+            MIMIR_TEST_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vulkan-clean-cwd")
+        set_tests_properties(RuntimeTest.VULKANNativeOps PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vulkan-clean-cwd")
+    else()
+        set_tests_properties(RuntimeTest.VULKANNativeOps PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+    endif()
+endif()
+
 mimir_add_test(ModelTest.GanStyle test_gan_style_model.cpp)
 set_tests_properties(ModelTest.GanStyle PROPERTIES TIMEOUT 60 ENVIRONMENT "OMP_NUM_THREADS=1")
 

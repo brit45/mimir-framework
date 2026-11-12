@@ -90,6 +90,30 @@ dans REPO. Elle fonctionne même avec un ancien checkout. Cela ne met pas à jou
 le binaire : après changement des sources ou du pilote, reprendre l’extraction,
 la compilation, puis la validation.
 
+### Shader Vulkan manquant après les tests de pooling
+
+Un échec `GPU forward failed` immédiatement après `GlobalAvgPool2d` correspond
+au premier cas `Conv2d`. Les anciens instantanés embarqués construisaient les
+clients du benchmark sans leur cible `mimir_shaders` ; le chemin historique ne
+cherchait pas non plus dans `build-colab-cuda/shaders`. Les opérations précédentes
+utilisent les shaders embarqués de `PortableRuntime` et pouvaient donc passer.
+
+La cellule de validation prépare maintenant les shaders externes et les copie
+dans `REPO/bin/shaders` pour les binaires issus de ces anciens instantanés. Pour
+réparer une session déjà compilée, exécuter avant de reprendre cette cellule :
+
+```python
+run(['cmake','--build',BUILD,'-j',JOBS,'--target','mimir_shaders'],timeout=600)
+run(['cmake','-E','copy_directory',BUILD/'shaders',REPO/'bin/shaders'])
+RUNTIME_ENV['MIMIR_VULKAN_SHADER_DIR']=str(BUILD/'shaders')
+```
+
+Le moteur actuel génère ces fichiers avec les clients natifs et les retrouve
+depuis l'exécutable sous Linux. Les nouveaux tests indiquent aussi la couche et
+sa géométrie en cas d'échec ; le notebook active `MIMIR_ACCEL_VERBOSE=1` pour la
+validation portable. Les échecs numériques ou de forward restent bloquants ;
+seule une indisponibilité explicite du runtime peut donner le code `77`.
+
 ### Reprendre après une alerte de provenance de la matrice
 
 Une ancienne cellule enregistrait `colab_config_matrix.py` dans
@@ -132,6 +156,14 @@ Colab passent, dont le chargement du helper sans checkout récent.
 Ces essais courts valident le fonctionnement et la précision, pas un classement
 publiable. Ils ne prouvent pas l’exécution sur le GPU NVIDIA d’une session Colab,
 ni sur TPU. Les traces et tests matériels de la session cible restent nécessaires.
+
+Le 12 novembre 2026, la correction des ressources Vulkan passe les quatre CTest
+ciblés (`PortableWorkBudget`, `OPENCLNativeOps`, `VULKANNativeOps`,
+`VulkanShaderPaths`), avec 207 cas de parité par backend sur le GPU AMD local.
+La compilation du seul client `PortableNativeOps` régénère bien un shader
+périmé. Les dix tests Python ciblés de disponibilité GPU, d'environnement et de
+configuration Vulkan NVIDIA passent ; ces derniers simulent la configuration
+du pilote et ne constituent pas une exécution sur GPU NVIDIA.
 
 ## Vérifier les helpers sans accélérateur
 

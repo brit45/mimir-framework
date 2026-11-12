@@ -825,6 +825,11 @@ endif()
 if(ENABLE_VULKAN AND Vulkan_FOUND)
     target_compile_definitions(mimir_core PUBLIC ENABLE_VULKAN)
     target_link_libraries(mimir_core PUBLIC Vulkan::Vulkan)
+    # Native tests and custom SDK/Colab executables link the core directly.
+    # Building those targets must also produce the fast-path shader assets.
+    if(TARGET mimir_shaders)
+        add_dependencies(mimir_core mimir_shaders)
+    endif()
 endif()
 
 if(ENABLE_OPENCL AND OPENCL_LIBRARY)

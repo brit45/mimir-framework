@@ -38,7 +38,12 @@ static void parity_inputs(AbstractRuntime& runtime, Layer& layer, const std::vec
     std::vector<std::vector<float>> gpu,cpu;
     require(runtimeCapabilityIsNative(runtime.queryForwardOperationCapability(layer,inputs,true)),"forward must be native");
     MimirRng::setSeed(4242);
-    require(runtime.forwardLayer(inputs,gpu,layer,true),"GPU forward failed");
+    if(!runtime.forwardLayer(inputs,gpu,layer,true)) {
+        throw std::runtime_error("GPU forward failed: "+type_name(layer.type_enum)+
+            " input_elements="+std::to_string(inputs.empty() || !inputs[0]?0:inputs[0]->size())+
+            " channels="+std::to_string(layer.in_channels)+"->"+std::to_string(layer.out_channels)+
+            " input_hw="+std::to_string(layer.input_height)+"x"+std::to_string(layer.input_width));
+    }
     MimirRng::setSeed(4242);
     require(RuntimeLayerDispatch::cpu_forward_layer(inputs,cpu,layer,true),"CPU reference forward failed");
     require(gpu.size()==cpu.size(),"output count");
