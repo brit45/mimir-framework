@@ -130,8 +130,7 @@ static void finish(std::unique_ptr<AbstractRuntime>& selected, const std::string
 int main(int argc,char** argv) {
     try {
         // Coverage must force native GPU routing; measured placement has its own test.
-        setTestEnvironment("MIMIR_PLANNER_MODE","static");
-        setTestEnvironment("MIMIR_RUNTIME_AUTOTUNE","0");
+        configureNativeRuntimeTest();
         const std::string backend=argc>1?argv[1]:"VULKAN";
         std::unique_ptr<AbstractRuntime> selected;
         if(backend=="OPENCL") {

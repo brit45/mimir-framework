@@ -7,6 +7,15 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+### Routage des tests natifs CUDA
+
+- Préparation commune des tests de parité CUDA/Vulkan/OpenCL, avec calibration
+  runtime désactivée pendant la vérification du backend natif demandé.
+- Correction de l'assertion `NMS backward must select GPU` lorsque la politique
+  mesurée préfère le CPU ; calculs et contrôles de parité conservés.
+- Environnement de validation CUDA des notebooks corrigé pour les binaires
+  existants, sans modifier les réglages des benchmarks.
+
 ### Fermeture des runtimes portables
 
 - Cache de périphériques Vulkan/OpenCL à références faibles, avec conservation

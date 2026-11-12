@@ -114,6 +114,34 @@ sa géométrie en cas d'échec ; le notebook active `MIMIR_ACCEL_VERBOSE=1` pour
 validation portable. Les échecs numériques ou de forward restent bloquants ;
 seule une indisponibilité explicite du runtime peut donner le code `77`.
 
+### Assertion NMS backward must select GPU sous CUDA
+
+Si les calculs CUDA passent puis que le test échoue sur
+`NMS backward must select GPU`, vérifier la politique de placement du test.
+La calibration automatique peut retenir le CPU pour ce stop-gradient très
+court, alors que le test de parité exige explicitement le backend CUDA.
+Le mode `MIMIR_PLANNER_MODE=static` seul ne désactive pas cette calibration.
+
+Les tests natifs CUDA, Vulkan et OpenCL utilisent maintenant la même
+préparation avec `MIMIR_RUNTIME_AUTOTUNE=0`. Le notebook applique aussi ce
+réglage dans le seul environnement de validation CUDA, pour les binaires déjà
+compilés. Les calculs, tolérances et assertions de sélection GPU sont conservés ;
+l'environnement des mesures garde ses réglages de calibration.
+
+Dans une session existante, remplacer la construction de l'environnement
+dans la cellule de validation puis relancer cette cellule :
+
+```python
+cuda_validation_env = dict(
+    REFERENCE_ENV, MIMIR_DISABLE_CUDA='0',
+    MIMIR_RUNTIME_AUTOTUNE='0', MIMIR_PLANNER_MODE='static')
+```
+
+Le test de routage utilise des runtimes simulés pour reproduire le choix du CPU
+avec calibration, puis le choix CUDA forcé avec le même résultat stop-gradient. Une exécution CUDA
+sur le GPU NVIDIA de la session reste nécessaire pour confirmer le passage
+complet du validateur matériel.
+
 ### Blocage après la dernière ligne CrossAttention
 
 `GPU_NATIVE_PARITY_OK CrossAttention` ne marque pas la fin du processus. Le

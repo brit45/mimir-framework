@@ -1,3 +1,4 @@
+#include "test_utils.hpp"
 #include "Model.hpp"
 #include "runtimes/cpu/CpuRuntime.hpp"
 #include "runtimes/RuntimeRouter.hpp"
@@ -67,6 +68,7 @@ static void parity_inputs(CudaRuntime& runtime, Layer& layer, const std::vector<
 static void parity(CudaRuntime& runtime,Layer& layer,const std::vector<float>& x){parity_inputs(runtime,layer,{&x});}
 int main() {
     try {
+        configureNativeRuntimeTest();
         CudaRuntime runtime; RuntimeConfig cfg;
         cfg.linear_enabled=cfg.norm_enabled=cfg.conv_enabled=cfg.attention_enabled=true;
         cfg.linear_min_ops=cfg.norm_min_elements=cfg.conv_min_ops=cfg.attention_min_ops=0;

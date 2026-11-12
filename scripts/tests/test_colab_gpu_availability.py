@@ -16,6 +16,9 @@ class Availability(unittest.TestCase):
             source=source.replace("GPU_REQUIRE_ALL = globals().get('GPU_REQUIRE_ALL', False)", '')
         shader_steps=[]
         def run(command,**kwargs):
+            if 'CudaNativeOps' in str(command[0]):
+                self.assertEqual(kwargs['env']['MIMIR_RUNTIME_AUTOTUNE'],'0')
+                self.assertEqual(kwargs['env']['MIMIR_PLANNER_MODE'],'static')
             if backend=='cpu' and ('PortableNativeOps' in str(command[0]) or
                     'CudaNativeOps' in str(command[0]) or command[-1] in ('CUDA','VULKAN','OPENCL','TPU')):
                 self.fail('CPU validation attempted a GPU/TPU test: '+str(command))
@@ -82,6 +85,13 @@ class Availability(unittest.TestCase):
                     self.assertEqual(env['CUDA_VISIBLE_DEVICES'],'')
                     for runtime in ('CUDA','ROCM','VULKAN','OPENCL'):
                         self.assertEqual(env['MIMIR_DISABLE_'+runtime],'1')
+
+    def test_native_cuda_validation_keeps_benchmark_autotuning(self):
+        for filename in ('Colab-test.ipynb','Colab-bench-multi-framework.ipynb'):
+            result=self.validate(filename,['cuda'],'unused',
+                initial_env={'MIMIR_RUNTIME_AUTOTUNE':'1','MIMIR_PLANNER_MODE':'cost'})
+            self.assertEqual(result['RUNTIME_ENV']['MIMIR_RUNTIME_AUTOTUNE'],'1')
+            self.assertEqual(result['RUNTIME_ENV']['MIMIR_PLANNER_MODE'],'cost')
 
     def test_missing_flag_in_resumed_session(self):
         for filename in ('Colab-test.ipynb','Colab-bench-multi-framework.ipynb'):

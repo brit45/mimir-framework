@@ -27,8 +27,12 @@ public:
         for(auto& v:y[0]){v*=bad?3:2;v+=shift;}
         return true;
     }
-    bool backwardLayer(const std::vector<const std::vector<float>*>&,const std::vector<const std::vector<float>*>& g,std::vector<std::vector<float>>& dx,Layer& l,bool)override{
+    bool backwardLayer(const std::vector<const std::vector<float>*>& inputs,const std::vector<const std::vector<float>*>& g,std::vector<std::vector<float>>& dx,Layer& l,bool)override{
         ++backward_calls;if(delay)std::this_thread::sleep_for(std::chrono::microseconds(delay));
+        if(l.type_enum==LayerType::NMS) {
+            dx.clear();for(const auto* input:inputs)dx.emplace_back(input->size(),0.f);
+            return !fail;
+        }
         if(fail){l.grad_weights[0]=900;return false;}
         dx={*g[0]};for(auto& v:dx[0])v*=2;
         l.grad_weights[0]+=.5f;l.grad_bias[0]+=.25f;return true;
@@ -116,6 +120,25 @@ int main(){try{
     check(Calibration::enabled(),"runtime tuning override ignored");
     setTestEnvironment("MIMIR_RUNTIME_AUTOTUNE","0");
     check(!Calibration::enabled(),"runtime tuning disable ignored");
+    // Reproduce CUDA native parity's NMS routing assertion without requiring a
+    // GPU: the measured production winner and forced native validation differ.
+    Timed cuda("CUDA"),nms_cpu("CPU");cuda.delay=2000;
+    router.setRuntimes(nullptr,&cuda,nullptr,nullptr,&nms_cpu);
+    Layer nms("native_nms","NMS",0);
+    std::vector<float> boxes{0,0,1,1,2,2,3,3},scores{.9f,.8f},nms_grad{1,1};
+    setTestEnvironment("MIMIR_PLANNER_MODE","static");
+    setTestEnvironment("MIMIR_RUNTIME_AUTOTUNE","1");
+    check(router.dispatchBackwardLayer({&boxes,&scores},{&nms_grad},out,nms,true,&selected) && selected==&nms_cpu,
+          "NMS placement did not select the measured CPU winner");
+    const auto expected=out;const int cpu_calls=nms_cpu.backward_calls,cuda_calls=cuda.backward_calls;
+    configureNativeRuntimeTest();
+    check(!Calibration::enabled(),"native test inherited runtime autotuning");
+    check(router.dispatchBackwardLayer({&boxes,&scores},{&nms_grad},out,nms,true,&selected) && selected==&cuda,
+          "native NMS validation did not select CUDA");
+    check(out==expected && out==std::vector<std::vector<float>>({std::vector<float>(8,0.f),std::vector<float>(2,0.f)}),
+          "native NMS validation changed the stop-gradient result");
+    check(nms_cpu.backward_calls==cpu_calls && cuda.backward_calls==cuda_calls+1,
+          "native NMS validation replayed or executed the CPU path");
     unsetTestEnvironment("MIMIR_RUNTIME_AUTOTUNE");
     unsetTestEnvironment("MIMIR_PLANNER_AUTOTUNE");
     router.setRuntimes(nullptr,nullptr,nullptr,nullptr,nullptr);
